@@ -1,0 +1,66 @@
+{
+  "json_version": "1.0",
+  "cluster_name": "eqn-t9da",
+  "log_level": "debug",
+  "update_date": "2024-07-29 13:26:29GMT",
+  "pgedge": {
+    "pg_version": 16,
+    "auto_start": "off",
+    "spock": {
+      "spock_version": "4.0",
+      "auto_ddl": "off"
+    },
+    "databases": [
+      {
+        "db_name": "demo",
+        "db_user": "admin",
+        "db_password": ""
+      }
+    ]
+  },
+  "backrest": {
+    "stanza": "demo_stanza",
+    "repo1-path": "/var/lib/pgbackrest",
+    "repo1-retention-full": "7",
+    "log-level-console": "info",
+    "repo1-cipher-type": "aes-256-cbc"
+  },
+  "node_groups": [
+    {
+      "ssh": {
+        "os_user": "test",
+        "private_key": ""
+      },
+      "name": "n1",
+      "is_active": "on",
+      "public_ip": "localhost",
+      "private_ip": "127.0.0.1",
+      "port": "5432",
+      "path": "/home/test/eqn-t9da/n1"
+    },
+    {
+      "ssh": {
+        "os_user": "test",
+        "private_key": ""
+      },
+      "name": "n2",
+      "is_active": "on",
+      "public_ip": "n2",
+      "private_ip": "",
+      "port": "5432",
+      "path": "/home/test/eqn-t9da/n2"
+    },
+    {
+      "ssh": {
+        "os_user": "test",
+        "private_key": ""
+      },
+      "name": "n3",
+      "is_active": "on",
+      "public_ip": "n3",
+      "private_ip": "",
+      "port": "5432",
+      "path": "/home/test/eqn-t9da/n3"
+    }
+  ]
+}

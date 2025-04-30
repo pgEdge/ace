@@ -1,0 +1,41 @@
+postgres:
+  statement_timeout: 0       # milliseconds
+  connection_timeout: 10     # seconds
+
+table_diff:
+  concurrency_factor: 2
+  max_diff_rows: 1000000
+  min_diff_block_size: 1000
+  max_diff_block_size: 100000
+  diff_block_size: 10000
+  max_cpu_ratio: 0.6
+  diff_batch_size: 1
+  max_diff_batch_size: 1000
+
+mtree_diff:
+  min_block_size: 1000
+  block_size: 100000
+  max_block_size: 1000000
+
+server:
+  listen_address: "0.0.0.0"
+  listen_port: 5000
+
+schedule_jobs: []
+schedule_config: []
+
+auto_repair_config:
+  enabled: false
+  cluster_name: ""
+  dbname: ""
+  poll_frequency: "10m"
+  repair_frequency: "15m"
+
+cert_auth:
+  use_cert_auth: true
+  user_cert_file: "data/pg16/pki/admin-cert/admin.crt"
+  user_key_file:  "data/pg16/pki/admin-cert/admin.key"
+  ca_cert_file:   "data/pg16/pki/ca.crt"
+  use_naive_datetime: false
+
+debug_mode: false
