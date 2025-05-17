@@ -3,14 +3,14 @@ postgres:
   connection_timeout: 10     # seconds
 
 table_diff:
-  concurrency_factor: 2
+  concurrency_factor: 1
   max_diff_rows: 1000000
-  min_diff_block_size: 1000
-  max_diff_block_size: 100000
-  diff_block_size: 10000
-  max_cpu_ratio: 0.6
+  min_diff_block_size: 1
+  max_diff_block_size: 1000000
+  diff_block_size: 1000
   diff_batch_size: 1
   max_diff_batch_size: 1000
+  compare_unit_size: 10000
 
 mtree_diff:
   min_block_size: 1000

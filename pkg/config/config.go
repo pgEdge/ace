@@ -35,6 +35,7 @@ type DiffConfig struct {
 	MaxCPURatio       float64 `yaml:"max_cpu_ratio"`
 	BatchSize         int     `yaml:"diff_batch_size"`
 	MaxBatchSize      int     `yaml:"max_diff_batch_size"`
+	CompareUnitSize   int     `yaml:"compare_unit_size"`
 }
 
 type MTreeConfig struct {

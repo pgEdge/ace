@@ -8,7 +8,7 @@ import (
 	"github.com/jackc/pgx/v4/pgxpool"
 )
 
-func GetClusterNodeConnection(nodeInfo map[string]interface{}, clientRole string) (*pgxpool.Pool, error) {
+func GetClusterNodeConnection(nodeInfo map[string]any, clientRole string) (*pgxpool.Pool, error) {
 	user, _ := nodeInfo["DBUser"].(string)
 	password, _ := nodeInfo["DBPassword"].(string)
 	host, _ := nodeInfo["PublicIP"].(string)

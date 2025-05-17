@@ -224,3 +224,34 @@ func GeneratePkeyOffsetsQuery(
 	}
 	return buf.String(), nil
 }
+
+// BlockHashSQL returns the SQL string for hashing a block of rows using the given schema, table, columns, and primary key.
+func BlockHashSQL(schema, table string, cols []string, primaryKey string) (string, error) {
+	if err := SanitiseIdentifier(schema); err != nil {
+		return "", err
+	}
+	if err := SanitiseIdentifier(table); err != nil {
+		return "", err
+	}
+	if err := SanitiseIdentifier(primaryKey); err != nil {
+		return "", err
+	}
+	for _, col := range cols {
+		if err := SanitiseIdentifier(col); err != nil {
+			return "", err
+		}
+	}
+	schemaIdent := fmt.Sprintf("\"%s\"", schema)
+	tableIdent := fmt.Sprintf("\"%s\"", table)
+	primaryIdent := fmt.Sprintf("\"%s\"", primaryKey)
+	var colIdents []string
+	for _, col := range cols {
+		colIdents = append(colIdents, fmt.Sprintf("\"%s\"", col))
+	}
+	colsList := strings.Join(colIdents, ", ")
+	query := fmt.Sprintf(
+		`SELECT encode(digest(COALESCE(string_agg(concat_ws('|', %s),'|' ORDER BY %s),'EMPTY_BLOCK'),'sha256'),'hex') FROM %s.%s WHERE %s >= $1 AND %s < $2`,
+		colsList, primaryIdent, schemaIdent, tableIdent, primaryIdent, primaryIdent,
+	)
+	return query, nil
+}
