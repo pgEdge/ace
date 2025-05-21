@@ -864,32 +864,53 @@ func (t *TableDiffTask) ExecuteTask(debugMode bool) error {
 	default:
 		samplePercent = 100
 	}
-	ntileCount := int(math.Ceil(float64(maxCount) / float64(t.BlockSize)))
-	if ntileCount == 0 && maxCount > 0 {
-		ntileCount = 1
-	}
-
-	querySQL, err := helpers.GeneratePkeyOffsetsQuery(t.Schema, t.Table, t.Key, sampleMethod, samplePercent, ntileCount)
-	if err != nil {
-		return fmt.Errorf("failed to generate offsets query: %w", err)
-	}
-	pkRangesRows, err := pools[maxNode].Query(ctx, querySQL)
-	if err != nil {
-		return fmt.Errorf("offsets query execution failed on %s: %w", maxNode, err)
-	}
-	defer pkRangesRows.Close()
 
 	var ranges []Range
-	for pkRangesRows.Next() {
-		var startVal, endVal any
-		if err := pkRangesRows.Scan(&startVal, &endVal); err != nil {
-			return fmt.Errorf("scanning offset row failed: %w", err)
+	// Determine if we should use direct PKey offset generation
+	if (maxCount > 0 && maxCount <= 10000) || t.TableFilter != "" {
+		logger.Info("Using direct primary key offset generation for table %s.%s (maxCount: %d, tableFilter: '%s')",
+			t.Schema, t.Table, maxCount, t.TableFilter)
+		r, err := t.getPkeyOffsets(ctx, pools[maxNode])
+		if err != nil {
+			return fmt.Errorf("failed to get pkey offsets directly: %w", err)
 		}
-		ranges = append(ranges, Range{Start: startVal, End: endVal})
+		ranges = r
+	} else {
+		ntileCount := int(math.Ceil(float64(maxCount) / float64(t.BlockSize)))
+		if ntileCount == 0 && maxCount > 0 {
+			ntileCount = 1
+		}
+
+		querySQL, err := helpers.GeneratePkeyOffsetsQuery(t.Schema, t.Table, t.Key, sampleMethod, samplePercent, ntileCount)
+		logger.Debug("Generated offsets query: %s", querySQL)
+		if err != nil {
+			return fmt.Errorf("failed to generate offsets query: %w", err)
+		}
+		pkRangesRows, err := pools[maxNode].Query(ctx, querySQL)
+		if err != nil {
+			return fmt.Errorf("offsets query execution failed on %s: %w", maxNode, err)
+		}
+		defer pkRangesRows.Close()
+
+		for pkRangesRows.Next() {
+			var startVal, endVal any
+			if err := pkRangesRows.Scan(&startVal, &endVal); err != nil {
+				return fmt.Errorf("scanning offset row failed: %w", err)
+			}
+			ranges = append(ranges, Range{Start: startVal, End: endVal})
+		}
+		if err := pkRangesRows.Err(); err != nil {
+			return fmt.Errorf("offset rows iteration error: %w", err)
+		}
+
+		// Prepend (nil, first_original_start) only if ranges were actually generated and the first doesn't already start with nil.
+		if len(ranges) > 0 && ranges[0].Start != nil {
+			firstOriginalStart := ranges[0].Start
+			newInitialRange := Range{Start: nil, End: firstOriginalStart}
+			ranges = append([]Range{newInitialRange}, ranges...)
+		}
 	}
-	if err := pkRangesRows.Err(); err != nil {
-		return fmt.Errorf("offset rows iteration error: %w", err)
-	}
+
 	logger.Info("Created %d initial ranges to compare", len(ranges))
 	logger.Debug("Ranges: %v", ranges)
 	t.DiffResult.Summary.InitialRangesCount = len(ranges)
@@ -1041,10 +1062,19 @@ func (t *TableDiffTask) hashRange(
 	}
 	startTime := time.Now()
 	var hash string
+	var skipMinCheck bool
+	var skipMaxCheck bool
+
+	if r.Start == nil {
+		skipMinCheck = true
+	}
+	if r.End == nil {
+		skipMaxCheck = true
+	}
 
 	logger.Debug("[%s] Hashing range: Start=%v, End=%v", node, r.Start, r.End)
 
-	err := pool.QueryRow(ctx, t.BlockHashSQL, r.Start, r.End).Scan(&hash)
+	err := pool.QueryRow(ctx, t.BlockHashSQL, skipMinCheck, r.Start, skipMaxCheck, r.End).Scan(&hash)
 
 	if err != nil {
 		duration := time.Since(startTime)
@@ -1323,4 +1353,67 @@ func safeCut(s string, n int) string {
 		return s
 	}
 	return s[:n]
+}
+
+func (t *TableDiffTask) getPkeyOffsets(ctx context.Context, pool *pgxpool.Pool) ([]Range, error) {
+	// TODO: Add support for composite keys.
+	if len(t.Key) == 0 {
+		return nil, fmt.Errorf("primary key not defined for table %s.%s", t.Schema, t.Table)
+	}
+	primaryKeyColumn := t.Key[0]
+
+	schemaIdent := sanitise(t.Schema)
+	tableIdent := sanitise(t.Table)
+	pkIdent := sanitise(primaryKeyColumn)
+
+	querySQL := fmt.Sprintf("SELECT %s FROM %s.%s ORDER BY %s", pkIdent, schemaIdent, tableIdent, pkIdent)
+
+	pgRows, err := pool.Query(ctx, querySQL)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query primary keys for direct offset generation from %s.%s: %w", t.Schema, t.Table, err)
+	}
+	defer pgRows.Close()
+
+	var allPks []any
+	for pgRows.Next() {
+		var pkVal any
+		if err := pgRows.Scan(&pkVal); err != nil {
+			return nil, fmt.Errorf("failed to scan primary key value from %s.%s: %w", t.Schema, t.Table, err)
+		}
+		allPks = append(allPks, pkVal)
+	}
+
+	if err := pgRows.Err(); err != nil {
+		return nil, fmt.Errorf("error iterating over primary key rows from %s.%s: %w", t.Schema, t.Table, err)
+	}
+
+	if len(allPks) == 0 {
+		logger.Info("[%s.%s] No primary key values found, returning empty ranges for direct generation.", t.Schema, t.Table)
+		return []Range{}, nil
+	}
+
+	var ranges []Range
+	// As always the case, our first range needs to be (NULL, first_pkey)
+	ranges = append(ranges, Range{Start: nil, End: allPks[0]})
+
+	currentPkIndex := 0
+	for currentPkIndex < len(allPks) {
+		currentBlockStartPkey := allPks[currentPkIndex]
+
+		nextPKeyIndexForRangeEnd := currentPkIndex + t.BlockSize
+
+		if nextPKeyIndexForRangeEnd < len(allPks) {
+			rangeEndValue := allPks[nextPKeyIndexForRangeEnd]
+			ranges = append(ranges, Range{Start: currentBlockStartPkey, End: rangeEndValue})
+			currentPkIndex = nextPKeyIndexForRangeEnd
+		} else {
+			if !(currentPkIndex == 0 && len(allPks) <= t.BlockSize && len(allPks) == 1) {
+				ranges = append(ranges, Range{Start: currentBlockStartPkey, End: nil})
+			}
+			break
+		}
+	}
+
+	logger.Debug("[%s.%s] Generated %d ranges without sampling from %d pkeys with block_size %d.", t.Schema, t.Table, len(ranges), len(allPks), t.BlockSize)
+	return ranges, nil
 }

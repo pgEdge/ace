@@ -67,9 +67,10 @@ func SetupCLI() *cli.App {
 			Value: false,
 		},
 		&cli.BoolFlag{
-			Name:  "debug",
-			Usage: "Enable debug logging",
-			Value: false,
+			Name:    "debug",
+			Aliases: []string{"v"},
+			Usage:   "Enable debug logging",
+			Value:   false,
 		},
 	}
 	app := &cli.App{
