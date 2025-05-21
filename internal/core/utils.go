@@ -259,6 +259,13 @@ func readClusterInfo(t *TableDiffTask) error {
 	if t.DBName == "" && len(config.PGEdge.Databases) > 0 {
 		t.DBName = config.PGEdge.Databases[0].DBName
 		t.Database = config.PGEdge.Databases[0]
+	} else if t.DBName != "" {
+		for _, db := range config.PGEdge.Databases {
+			if db.DBName == t.DBName {
+				t.Database = db
+				break
+			}
+		}
 	}
 
 	t.ClusterNodes = []map[string]any{}
