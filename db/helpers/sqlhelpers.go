@@ -8,7 +8,7 @@ import (
 	"strings"
 	"text/template"
 
-	"github.com/jackc/pgx/v4/pgxpool"
+	"github.com/jackc/pgx/v4"
 )
 
 /*
@@ -87,6 +87,11 @@ FROM ranges
 ORDER BY seq;
 `))
 
+// For mocking
+type DBQuerier interface {
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+}
+
 func SanitiseIdentifier(input string) error {
 	if !validIdentifierRegex.MatchString(input) {
 		return fmt.Errorf("invalid identifier: %s", input)
@@ -94,7 +99,7 @@ func SanitiseIdentifier(input string) error {
 	return nil
 }
 
-func AvgColumnSize(ctx context.Context, pool *pgxpool.Pool, schema, table, column string) (int64, error) {
+func AvgColumnSize(ctx context.Context, db DBQuerier, schema, table, column string) (int64, error) {
 	if err := SanitiseIdentifier(schema); err != nil {
 		return 0, err
 	}
@@ -115,7 +120,7 @@ func AvgColumnSize(ctx context.Context, pool *pgxpool.Pool, schema, table, colum
 	)
 
 	var avgSize int64
-	if err := pool.QueryRow(ctx, query).Scan(&avgSize); err != nil {
+	if err := db.QueryRow(ctx, query).Scan(&avgSize); err != nil {
 		return 0, fmt.Errorf("AvgColumnSize query failed for %s.%s.%s: %w", schema, table, column, err)
 	}
 
@@ -129,6 +134,9 @@ func GeneratePkeyOffsetsQuery(
 	samplePercent float64,
 	ntileCount int,
 ) (string, error) {
+	if len(keyColumns) == 0 {
+		return "", fmt.Errorf("keyColumns cannot be empty")
+	}
 	for _, ident := range append([]string{schema, table}, keyColumns...) {
 		if err := SanitiseIdentifier(ident); err != nil {
 			return "", fmt.Errorf("invalid identifier %q: %w", ident, err)
@@ -215,7 +223,10 @@ func GeneratePkeyOffsetsQuery(
 	return buf.String(), nil
 }
 
-func BlockHashSQL(schema, table string, cols []string, primaryKeyCols []string) (string, error) {
+func BlockHashSQL(schema, table string, primaryKeyCols []string) (string, error) {
+	if len(primaryKeyCols) == 0 {
+		return "", fmt.Errorf("primaryKeyCols cannot be empty")
+	}
 	if err := SanitiseIdentifier(schema); err != nil {
 		return "", err
 	}
