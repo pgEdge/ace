@@ -26,12 +26,12 @@ func SetupCLI() *cli.App {
 			Name:    "concurrency-factor",
 			Aliases: []string{"c"},
 			Usage:   "Concurrency factor",
-			Value:   2,
+			Value:   1,
 		},
 		&cli.IntFlag{
 			Name:    "compare-unit-size",
 			Aliases: []string{"s"},
-			Usage:   "Compare unit size",
+			Usage:   "Max size of the smallest block to use when diffs are present",
 			Value:   10000,
 		},
 		&cli.StringFlag{
@@ -43,17 +43,12 @@ func SetupCLI() *cli.App {
 		&cli.StringFlag{
 			Name:    "nodes",
 			Aliases: []string{"n"},
-			Usage:   "Nodes to include in the diff",
+			Usage:   "Nodes to include in the diff (default: all)",
 			Value:   "all",
 		},
 		&cli.StringFlag{
-			Name:  "batch-size",
-			Usage: "Size of each batch",
-			Value: "10",
-		},
-		&cli.StringFlag{
 			Name:  "table-filter",
-			Usage: "Filter expression for tables",
+			Usage: "Where clause expression to use while diffing tables",
 			Value: "",
 		},
 		&cli.BoolFlag{
@@ -73,6 +68,69 @@ func SetupCLI() *cli.App {
 			Value:   false,
 		},
 	}
+
+	tr_flags := []cli.Flag{
+		&cli.StringFlag{
+			Name:    "dbname",
+			Aliases: []string{"d"},
+			Usage:   "Name of the database",
+			Value:   "",
+		},
+		&cli.StringFlag{
+			Name:     "diff-file",
+			Aliases:  []string{"f"},
+			Usage:    "Path to the diff file (required)",
+			Required: true,
+		},
+		&cli.StringFlag{
+			Name:    "source-of-truth",
+			Aliases: []string{"s"},
+			Usage:   "Name of the node to be considered the source of truth",
+		},
+		&cli.StringFlag{
+			Name:    "nodes",
+			Aliases: []string{"n"},
+			Usage:   "Nodes to include for cluster info (default: all)",
+			Value:   "all",
+		},
+		&cli.BoolFlag{
+			Name:  "quiet",
+			Usage: "Whether to suppress output",
+			Value: false,
+		},
+		&cli.BoolFlag{
+			Name:    "debug",
+			Aliases: []string{"v"},
+			Usage:   "Enable debug logging",
+			Value:   false,
+		},
+		&cli.BoolFlag{
+			Name:  "dry-run",
+			Usage: "Show what would be done without executing",
+			Value: false,
+		},
+		&cli.BoolFlag{
+			Name:  "insert-only",
+			Usage: "Only perform inserts, no updates or deletes",
+			Value: false,
+		},
+		&cli.BoolFlag{
+			Name:  "upsert-only",
+			Usage: "Only perform upserts (insert or update), no deletes",
+			Value: false,
+		},
+		&cli.BoolFlag{
+			Name:  "fire-triggers",
+			Usage: "Whether to fire triggers during repairs",
+			Value: false,
+		},
+		&cli.BoolFlag{
+			Name:  "bidirectional",
+			Usage: "Whether to perform repairs in both directions. Can be used only with the insert-only option",
+			Value: false,
+		},
+	}
+
 	app := &cli.App{
 		Name:  "ace",
 		Usage: "Advanced Command-line Executor for database operations",
@@ -85,11 +143,23 @@ func SetupCLI() *cli.App {
 					"and detecting data inconsistencies",
 				Action: func(ctx *cli.Context) error {
 					if ctx.Args().Len() < 2 {
-						return fmt.Errorf("missing required arguments: needs <cluster> and <table>")
+						return fmt.Errorf("missing required arguments for table-diff: needs <cluster> and <table>")
 					}
 					return TableDiffCLI(ctx)
 				},
 				Flags: td_flags,
+			},
+			{
+				Name:      "table-repair",
+				Usage:     "Repair table inconsistencies based on a diff file",
+				ArgsUsage: "<cluster> <table>",
+				Flags:     tr_flags,
+				Action: func(ctx *cli.Context) error {
+					if ctx.Args().Len() < 2 {
+						return fmt.Errorf("missing required arguments for table-repair: needs <cluster> and <table>")
+					}
+					return TableRepairCLI(ctx)
+				},
 			},
 		},
 	}
@@ -98,49 +168,32 @@ func SetupCLI() *cli.App {
 }
 
 func TableDiffCLI(ctx *cli.Context) error {
-	clusterName := ctx.Args().Get(0)
-	tableName := ctx.Args().Get(1)
-	dbName := ctx.String("dbname")
 	blockSizeStr := ctx.String("block-size")
-	compareUnitSize := ctx.Int("compare-unit-size")
-	debugMode := ctx.Bool("debug")
-	concurrencyFactor := ctx.Int("concurrency-factor")
-	outputFormat := ctx.String("output")
-	nodesParam := ctx.String("nodes")
-	batchSizeStr := ctx.String("batch-size")
-	tableFilter := ctx.String("table-filter")
-	quietMode := ctx.Bool("quiet")
-	overrideBlockSize := ctx.Bool("override-block-size")
-
 	blockSizeInt, err := strconv.ParseInt(blockSizeStr, 10, 64)
 	if err != nil {
 		return fmt.Errorf("invalid block size '%s': %v", blockSizeStr, err)
 	}
 
-	batchSizeInt, err := strconv.ParseInt(batchSizeStr, 10, 64)
-	if err != nil {
-		return fmt.Errorf("invalid batch size '%s': %v", batchSizeStr, err)
-	}
+	debugMode := ctx.Bool("debug")
 
 	task := core.NewTableDiffTask()
-	task.ClusterName = clusterName
-	task.TableName = tableName
-	task.DBName = dbName
+	task.ClusterName = ctx.Args().Get(0)
+	task.QualifiedTableName = ctx.Args().Get(1)
+	task.DBName = ctx.String("dbname")
 	task.BlockSize = int(blockSizeInt)
-	task.ConcurrencyFactor = concurrencyFactor
-	task.CompareUnitSize = compareUnitSize
-	task.Output = outputFormat
-	task.Nodes = nodesParam
-	task.BatchSize = int(batchSizeInt)
-	task.TableFilter = tableFilter
-	task.QuietMode = quietMode
-	task.OverrideBlockSize = overrideBlockSize
+	task.ConcurrencyFactor = ctx.Int("concurrency-factor")
+	task.CompareUnitSize = ctx.Int("compare-unit-size")
+	task.Output = ctx.String("output")
+	task.Nodes = ctx.String("nodes")
+	task.TableFilter = ctx.String("table-filter")
+	task.QuietMode = ctx.Bool("quiet")
+	task.OverrideBlockSize = ctx.Bool("override-block-size")
 
 	if err := task.Validate(); err != nil {
 		return fmt.Errorf("validation failed: %v", err)
 	}
 
-	if err := task.RunChecks(true); err != nil {
+	if err := task.RunChecks(true); err != nil { // Pass true to skip inner validation if Validate() was just called
 		return fmt.Errorf("checks failed: %v", err)
 	}
 
@@ -149,5 +202,40 @@ func TableDiffCLI(ctx *cli.Context) error {
 	}
 
 	fmt.Println("Table diff completed")
+	return nil
+}
+
+func TableRepairCLI(ctx *cli.Context) error {
+	task := core.NewTableRepairTask()
+	task.ClusterName = ctx.Args().Get(0)
+	task.QualifiedTableName = ctx.Args().Get(1)
+	task.DiffFilePath = ctx.String("diff-file")
+	task.DBName = ctx.String("dbname")
+	task.Nodes = ctx.String("nodes")
+	task.SourceOfTruth = ctx.String("source-of-truth")
+	task.QuietMode = ctx.Bool("quiet")
+
+	if ctx.Bool("debug") {
+		core.SetGlobalLogLevel(core.LevelDebug)
+	} else {
+		core.SetGlobalLogLevel(core.LevelInfo)
+	}
+
+	task.DryRun = ctx.Bool("dry-run")
+	task.InsertOnly = ctx.Bool("insert-only")
+	task.UpsertOnly = ctx.Bool("upsert-only")
+	task.FireTriggers = ctx.Bool("fire-triggers")
+	task.FixNulls = ctx.Bool("fix-nulls")
+	task.Bidirectional = ctx.Bool("bidirectional")
+
+	if err := task.ValidateAndPrepare(); err != nil {
+		return fmt.Errorf("validation failed: %v", err)
+	}
+
+	if err := task.Run(true); err != nil {
+		return fmt.Errorf("error during table repair: %v", err)
+	}
+
+	fmt.Println("Table repair process initiated.")
 	return nil
 }
