@@ -47,14 +47,13 @@ type Range struct {
 type TableDiffTask struct {
 	types.Task
 	types.DerivedFields
-	TableName string
-	DBName    string
-	Nodes     string
+	QualifiedTableName string
+	DBName             string
+	Nodes              string
 
 	BlockSize         int
 	ConcurrencyFactor int
 	Output            string
-	BatchSize         int
 	TableFilter       string
 	QuietMode         bool
 
@@ -76,37 +75,22 @@ type TableDiffTask struct {
 
 	CompareUnitSize int
 
-	DiffResult DiffOutput
+	DiffResult types.DiffOutput
 	diffMutex  sync.Mutex
 }
 
-type DiffOutput struct {
-	NodeDiffs map[string]DiffByNodePair `json:"diffs"` // Key: "nodeA/nodeB" (sorted names)
-	Summary   DiffSummary               `json:"summary"`
+// Implement ClusterConfigProvider interface for TableDiffTask
+func (t *TableDiffTask) GetClusterName() string        { return t.ClusterName }
+func (t *TableDiffTask) GetDBName() string             { return t.DBName }
+func (t *TableDiffTask) SetDBName(name string)         { t.DBName = name }
+func (t *TableDiffTask) GetNodes() string              { return t.Nodes }
+func (t *TableDiffTask) GetNodeList() []string         { return t.NodeList }
+func (t *TableDiffTask) SetNodeList(nl []string)       { t.NodeList = nl }
+func (t *TableDiffTask) SetDatabase(db types.Database) { t.Database = db }
+func (t *TableDiffTask) GetClusterNodes() []map[string]any {
+	return t.ClusterNodes
 }
-
-// DiffByNodePair holds the differing rows for a pair of nodes.
-// The keys in the DiffOutput.Diffs map will be "nodeX/nodeY",
-// and the Node1/Node2 fields here will store rows corresponding to nodeX and nodeY respectively.
-type DiffByNodePair struct {
-	Rows map[string][]map[string]any `json:"rows"` // Keyed by actual node name e.g. "n1", "n2"
-}
-
-type DiffSummary struct {
-	Schema                string         `json:"schema"`
-	Table                 string         `json:"table"`
-	Nodes                 []string       `json:"nodes"`
-	BlockSize             int            `json:"block_size"`
-	CompareUnitSize       int            `json:"compare_unit_size"`
-	ConcurrencyFactor     int            `json:"concurrency_factor"`
-	StartTime             string         `json:"start_time"`
-	EndTime               string         `json:"end_time"`
-	TimeTaken             string         `json:"time_taken"`
-	DiffRowsCount         map[string]int `json:"diff_rows_count"`    // Key: "nodeA/nodeB", Value: count of differing rows
-	TotalRowsChecked      int64          `json:"total_rows_checked"` // Estimated
-	InitialRangesCount    int            `json:"initial_ranges_count"`
-	MismatchedRangesCount int            `json:"mismatched_ranges_count"`
-}
+func (t *TableDiffTask) SetClusterNodes(cn []map[string]any) { t.ClusterNodes = cn }
 
 type NodePairDiff struct {
 	Node1OnlyRows []map[string]any
@@ -470,7 +454,7 @@ func (t *TableDiffTask) compareBlocks(
 }
 
 func (t *TableDiffTask) Validate() error {
-	if t.ClusterName == "" || t.TableName == "" {
+	if t.ClusterName == "" || t.QualifiedTableName == "" {
 		return fmt.Errorf("cluster_name and table_name are required arguments")
 	}
 
@@ -511,9 +495,9 @@ func (t *TableDiffTask) Validate() error {
 
 	logger.Info("Cluster %s exists", t.ClusterName)
 
-	parts := strings.Split(t.TableName, ".")
+	parts := strings.Split(t.QualifiedTableName, ".")
 	if len(parts) != 2 {
-		return fmt.Errorf("tableName %s must be of form 'schema.table_name'", t.TableName)
+		return fmt.Errorf("tableName %s must be of form 'schema.table_name'", t.QualifiedTableName)
 	}
 	schema, table := parts[0], parts[1]
 
@@ -735,7 +719,7 @@ func (t *TableDiffTask) RunChecks(skipValidation bool) error {
 		}
 	}
 
-	logger.Info("Table %s is comparable across nodes", t.TableName)
+	logger.Info("Table %s is comparable across nodes", t.QualifiedTableName)
 
 	// // TODO: add this back later
 	// if err := t.CheckColumnSize(); err != nil {
@@ -877,9 +861,9 @@ func (t *TableDiffTask) ExecuteTask(debugMode bool) error {
 		return fmt.Errorf("Unable to determine node with highest row count (or any row counts)")
 	}
 
-	t.DiffResult = DiffOutput{
-		NodeDiffs: make(map[string]DiffByNodePair),
-		Summary: DiffSummary{
+	t.DiffResult = types.DiffOutput{
+		NodeDiffs: make(map[string]types.DiffByNodePair),
+		Summary: types.DiffSummary{
 			Schema:            t.Schema,
 			Table:             t.Table,
 			Nodes:             t.NodeList,
@@ -1092,7 +1076,7 @@ func (t *TableDiffTask) ExecuteTask(debugMode bool) error {
 	diffWg.Wait()
 	// t.DiffResult.Summary.MismatchedRangesCount = int(mismatchedRangesCountAtomic)
 
-	logger.Info("Table diff comparison completed for %s", t.TableName)
+	logger.Info("Table diff comparison completed for %s", t.QualifiedTableName)
 
 	endTime := time.Now()
 	t.DiffResult.Summary.EndTime = endTime.Format(time.RFC3339)
@@ -1338,7 +1322,7 @@ func (t *TableDiffTask) recursiveDiff(
 			t.diffMutex.Lock()
 
 			if _, ok := t.DiffResult.NodeDiffs[pairKey]; !ok {
-				t.DiffResult.NodeDiffs[pairKey] = DiffByNodePair{
+				t.DiffResult.NodeDiffs[pairKey] = types.DiffByNodePair{
 					Rows: make(map[string][]map[string]any),
 				}
 			}

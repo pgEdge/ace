@@ -67,3 +67,44 @@ type DerivedFields struct {
 	ColTypes         map[string]map[string]string
 	SimplePrimaryKey bool
 }
+
+// DiffOutput holds the structured diff data.
+type DiffOutput struct {
+	NodeDiffs map[string]DiffByNodePair `json:"diffs"` // Key: "nodeA/nodeB" (sorted names)
+	Summary   DiffSummary               `json:"summary"`
+}
+
+// DiffByNodePair holds the differing rows for a pair of nodes.
+// The keys in the DiffOutput.Diffs map will be "nodeX/nodeY",
+// and the Node1/Node2 fields here will store rows corresponding to nodeX and nodeY respectively.
+type DiffByNodePair struct {
+	Rows map[string][]map[string]any `json:"rows"` // Keyed by actual node name e.g. "n1", "n2"
+}
+
+// DiffSummary provides metadata about the diff operation.
+type DiffSummary struct {
+	Schema                string         `json:"schema"`
+	Table                 string         `json:"table"`
+	Nodes                 []string       `json:"nodes"`
+	BlockSize             int            `json:"block_size"`
+	CompareUnitSize       int            `json:"compare_unit_size"`
+	ConcurrencyFactor     int            `json:"concurrency_factor"`
+	StartTime             string         `json:"start_time"`
+	EndTime               string         `json:"end_time"`
+	TimeTaken             string         `json:"time_taken"`
+	DiffRowsCount         map[string]int `json:"diff_rows_count"`    // Key: "nodeA/nodeB", Value: count of differing rows
+	TotalRowsChecked      int64          `json:"total_rows_checked"` // Estimated
+	InitialRangesCount    int            `json:"initial_ranges_count"`
+	MismatchedRangesCount int            `json:"mismatched_ranges_count"`
+}
+
+// NodePairDiff is a more detailed breakdown of differences for a single pair, often used internally during comparison.
+type NodePairDiff struct {
+	Node1OnlyRows []map[string]any
+	Node2OnlyRows []map[string]any
+	ModifiedRows  []struct {
+		Pkey      string
+		Node1Data map[string]any
+		Node2Data map[string]any
+	}
+}
