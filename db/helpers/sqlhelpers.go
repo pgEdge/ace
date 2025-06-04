@@ -121,7 +121,13 @@ func AvgColumnSize(ctx context.Context, db DBQuerier, schema, table, column stri
 
 	var avgSize int64
 	if err := db.QueryRow(ctx, query).Scan(&avgSize); err != nil {
-		return 0, fmt.Errorf("AvgColumnSize query failed for %s.%s.%s: %w", schema, table, column, err)
+		return 0, fmt.Errorf(
+			"AvgColumnSize query failed for %s.%s.%s: %w",
+			schema,
+			table,
+			column,
+			err,
+		)
 	}
 
 	return avgSize, nil
@@ -233,7 +239,11 @@ func BlockHashSQL(schema, table string, primaryKeyCols []string) (string, error)
 	if err := SanitiseIdentifier(table); err != nil {
 		return "", err
 	}
+
 	for _, pkCol := range primaryKeyCols {
+		if pkCol == "" {
+			return "", fmt.Errorf("primary key column identifier cannot be empty")
+		}
 		if err := SanitiseIdentifier(pkCol); err != nil {
 			return "", fmt.Errorf("invalid primary key column identifier %q: %w", pkCol, err)
 		}
@@ -287,7 +297,9 @@ func BlockHashSQL(schema, table string, primaryKeyCols []string) (string, error)
 		   AND ($%d::boolean OR %s < %s)`,
 		tableAlias,
 		pkOrderByStr,
-		schemaIdent, tableIdent, tableAlias,
+		schemaIdent,
+		tableIdent,
+		tableAlias,
 		pkComparisonExpression,
 		startValueExpression,
 		skipMaxCheckPlaceholderIndex,

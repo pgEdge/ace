@@ -254,7 +254,7 @@ func (t *TableDiffTask) fetchRows(ctx context.Context, nodeName string, r Range)
 	if r.End != nil {
 		endVal := r.End
 		if len(t.Key) == 1 {
-			conditions = append(conditions, fmt.Sprintf("%s <= $%d", quotedKeyCols[0], paramIndex))
+			conditions = append(conditions, fmt.Sprintf("%s < $%d", quotedKeyCols[0], paramIndex))
 			args = append(args, endVal)
 		} else {
 			endVals, ok := endVal.([]any)
@@ -658,7 +658,7 @@ func (t *TableDiffTask) RunChecks(skipValidation bool) error {
 			sanitisedViewName := sanitise(viewName)
 			sanitisedSchema := sanitise(schema)
 			sanitisedTable := sanitise(table)
-			viewSQL := fmt.Sprintf("CREATE OR REPLACE VIEW %s AS SELECT * FROM %s.%s WHERE %s",
+			viewSQL := fmt.Sprintf("CREATE MATERIALIZED VIEW IF NOT EXISTS %s AS SELECT * FROM %s.%s WHERE %s",
 				sanitisedViewName, sanitisedSchema, sanitisedTable, t.TableFilter)
 
 			_, err = conn.Exec(context.Background(), viewSQL)
@@ -841,12 +841,27 @@ func (t *TableDiffTask) ExecuteTask(debugMode bool) error {
 
 	for name, pool := range pools {
 		q := queries.NewQuerier(pool)
-		countPtr, err := q.EstimateRowCount(ctx, schemaName, tableName)
-		if err != nil {
-			logger.Info("Error getting row count on %s: %v. This might affect range generation.", name, err)
-			continue
+		var countPtr *int
+		var count int
+		// TODO: Estimates cannot be used on views. But we can't run a count(*)
+		// on millions of rows either. Need to find a better way to do this.
+		if t.TableFilter == "" {
+			countPtr, err = q.EstimateRowCount(ctx, schemaName, tableName)
+			if err != nil {
+				logger.Info("Error getting row count on %s: %v. This might affect range generation.", name, err)
+				continue
+			}
+		} else {
+			sanitisedSchema := sanitise(t.Schema)
+			sanitisedTable := sanitise(t.Table)
+			countQuerySQL := fmt.Sprintf("SELECT COUNT(*) FROM %s.%s", sanitisedSchema, sanitisedTable)
+			logger.Debug("[%s] Executing count query for filtered table: %s", name, countQuerySQL)
+			err = pool.QueryRow(ctx, countQuerySQL).Scan(&count)
+			if err != nil {
+				return fmt.Errorf("failed to get row count for %s.%s on node %s (query: %s): %w", t.Schema, t.Table, name, countQuerySQL, err)
+			}
 		}
-		count := 0
+
 		if countPtr != nil {
 			count = int(*countPtr)
 		}
@@ -900,73 +915,73 @@ func (t *TableDiffTask) ExecuteTask(debugMode bool) error {
 
 	 * TODO: table-filter should also support probabilistic sampling.
 	 */
-	if (maxCount > 0 && maxCount <= 10000) || t.TableFilter != "" {
-		logger.Info("Using direct primary key offset generation for table %s.%s (maxCount: %d, tableFilter: '%s')",
-			t.Schema, t.Table, maxCount, t.TableFilter)
-		r, err := t.getPkeyOffsets(ctx, pools[maxNode])
-		if err != nil {
-			return fmt.Errorf("failed to get pkey offsets directly: %w", err)
-		}
-		ranges = r
-	} else {
-		ntileCount := int(math.Ceil(float64(maxCount) / float64(t.BlockSize)))
-		if ntileCount == 0 && maxCount > 0 {
-			ntileCount = 1
-		}
-
-		querySQL, err := helpers.GeneratePkeyOffsetsQuery(t.Schema, t.Table, t.Key, sampleMethod, samplePercent, ntileCount)
-		logger.Debug("Generated offsets query: %s", querySQL)
-		if err != nil {
-			return fmt.Errorf("failed to generate offsets query: %w", err)
-		}
-		pkRangesRows, err := pools[maxNode].Query(ctx, querySQL)
-		if err != nil {
-			return fmt.Errorf("offsets query execution failed on %s: %w", maxNode, err)
-		}
-		defer pkRangesRows.Close()
-
-		numPKCols := len(t.Key)
-		totalScanCols := 2 * numPKCols
-		if totalScanCols == 0 {
-			return fmt.Errorf("primary key not defined, cannot determine columns to scan for ranges")
-		}
-		scanDest := make([]any, totalScanCols)
-		scanDestPtrs := make([]any, totalScanCols)
-		for i := range scanDest {
-			scanDestPtrs[i] = &scanDest[i]
-		}
-
-		for pkRangesRows.Next() {
-			if err := pkRangesRows.Scan(scanDestPtrs...); err != nil {
-				return fmt.Errorf("scanning offset row failed (expected %d columns for %d PKs): %w", totalScanCols, numPKCols, err)
-			}
-
-			var rStart, rEnd any
-
-			if numPKCols == 1 {
-				rStart = scanDest[0]
-				rEnd = scanDest[1]
-			} else {
-				startKeyParts := make([]any, numPKCols)
-				copy(startKeyParts, scanDest[0:numPKCols])
-				rStart = startKeyParts
-
-				endKeyParts := make([]any, numPKCols)
-				copy(endKeyParts, scanDest[numPKCols:2*numPKCols])
-				rEnd = endKeyParts
-			}
-			ranges = append(ranges, Range{Start: rStart, End: rEnd})
-		}
-		if err := pkRangesRows.Err(); err != nil {
-			return fmt.Errorf("offset rows iteration error: %w", err)
-		}
-
-		if len(ranges) > 0 && ranges[0].Start != nil {
-			firstOriginalStart := ranges[0].Start
-			newInitialRange := Range{Start: nil, End: firstOriginalStart}
-			ranges = append([]Range{newInitialRange}, ranges...)
-		}
+	// if (maxCount > 0 && maxCount <= 10000) || t.TableFilter != "" {
+	// 	logger.Info("Using direct primary key offset generation for table %s.%s (maxCount: %d, tableFilter: '%s')",
+	// 		t.Schema, t.Table, maxCount, t.TableFilter)
+	// 	r, err := t.getPkeyOffsets(ctx, pools[maxNode])
+	// 	if err != nil {
+	// 		return fmt.Errorf("failed to get pkey offsets directly: %w", err)
+	// 	}
+	// 	ranges = r
+	// } else {
+	ntileCount := int(math.Ceil(float64(maxCount) / float64(t.BlockSize)))
+	if ntileCount == 0 && maxCount > 0 {
+		ntileCount = 1
 	}
+
+	querySQL, err := helpers.GeneratePkeyOffsetsQuery(t.Schema, t.Table, t.Key, sampleMethod, samplePercent, ntileCount)
+	logger.Debug("Generated offsets query: %s", querySQL)
+	if err != nil {
+		return fmt.Errorf("failed to generate offsets query: %w", err)
+	}
+	pkRangesRows, err := pools[maxNode].Query(ctx, querySQL)
+	if err != nil {
+		return fmt.Errorf("offsets query execution failed on %s: %w", maxNode, err)
+	}
+	defer pkRangesRows.Close()
+
+	numPKCols := len(t.Key)
+	totalScanCols := 2 * numPKCols
+	if totalScanCols == 0 {
+		return fmt.Errorf("primary key not defined, cannot determine columns to scan for ranges")
+	}
+	scanDest := make([]any, totalScanCols)
+	scanDestPtrs := make([]any, totalScanCols)
+	for i := range scanDest {
+		scanDestPtrs[i] = &scanDest[i]
+	}
+
+	for pkRangesRows.Next() {
+		if err := pkRangesRows.Scan(scanDestPtrs...); err != nil {
+			return fmt.Errorf("scanning offset row failed (expected %d columns for %d PKs): %w", totalScanCols, numPKCols, err)
+		}
+
+		var rStart, rEnd any
+
+		if numPKCols == 1 {
+			rStart = scanDest[0]
+			rEnd = scanDest[1]
+		} else {
+			startKeyParts := make([]any, numPKCols)
+			copy(startKeyParts, scanDest[0:numPKCols])
+			rStart = startKeyParts
+
+			endKeyParts := make([]any, numPKCols)
+			copy(endKeyParts, scanDest[numPKCols:2*numPKCols])
+			rEnd = endKeyParts
+		}
+		ranges = append(ranges, Range{Start: rStart, End: rEnd})
+	}
+	if err := pkRangesRows.Err(); err != nil {
+		return fmt.Errorf("offset rows iteration error: %w", err)
+	}
+
+	if len(ranges) > 0 && ranges[0].Start != nil {
+		firstOriginalStart := ranges[0].Start
+		newInitialRange := Range{Start: nil, End: firstOriginalStart}
+		ranges = append([]Range{newInitialRange}, ranges...)
+	}
+	// }
 
 	logger.Info("Created %d initial ranges to compare", len(ranges))
 	logger.Debug("Ranges: %v", ranges)
