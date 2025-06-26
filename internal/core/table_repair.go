@@ -302,6 +302,10 @@ func (t *TableRepairTask) Run(skipValidation bool) error {
 		}
 	}()
 
+	if t.Bidirectional {
+		return t.runBidirectionalRepair()
+	}
+
 	startTime := time.Now()
 	log.Printf("Starting table repair for %s on cluster %s", t.QualifiedTableName, t.ClusterName)
 
@@ -704,6 +708,173 @@ func executeUpserts(tx pgx.Tx, task *TableRepairTask, upserts map[string]map[str
 	}
 
 	return totalUpsertedCount, nil
+}
+
+// Bidirectional repair assumes insert-only.
+// TODO: Add repair options compatibility check.
+func (t *TableRepairTask) runBidirectionalRepair() error {
+	startTime := time.Now()
+	log.Printf("Starting bidirectional table repair for %s on cluster %s", t.QualifiedTableName, t.ClusterName)
+
+	totalOps := make(map[string]int)
+	var repairErrors []string
+
+	for nodePairKey, diffs := range t.rawDiffs.NodeDiffs {
+		nodes := strings.Split(nodePairKey, "/")
+		if len(nodes) != 2 {
+			log.Printf("Warning: Invalid node pair key '%s', skipping", nodePairKey)
+			continue
+		}
+		node1Name, node2Name := nodes[0], nodes[1]
+		log.Printf("Processing node pair: %s/%s", node1Name, node2Name)
+
+		node1Rows := diffs.Rows[node1Name]
+		node2Rows := diffs.Rows[node2Name]
+
+		node1RowsByPKey := make(map[string]map[string]any)
+		for _, row := range node1Rows {
+			pkeyStr, err := stringifyPKey(row, t.Key, t.SimplePrimaryKey)
+			if err != nil {
+				repairErrors = append(repairErrors, fmt.Sprintf("stringify pkey failed for %s: %v", node1Name, err))
+				continue
+			}
+			node1RowsByPKey[pkeyStr] = row
+		}
+
+		node2RowsByPKey := make(map[string]map[string]any)
+		for _, row := range node2Rows {
+			pkeyStr, err := stringifyPKey(row, t.Key, t.SimplePrimaryKey)
+			if err != nil {
+				repairErrors = append(repairErrors, fmt.Sprintf("stringify pkey failed for %s: %v", node2Name, err))
+				continue
+			}
+			node2RowsByPKey[pkeyStr] = row
+		}
+
+		insertsForNode1 := make(map[string]map[string]any)
+		for pkey, row := range node2RowsByPKey {
+			if _, exists := node1RowsByPKey[pkey]; !exists {
+				insertsForNode1[pkey] = row
+			}
+		}
+
+		insertsForNode2 := make(map[string]map[string]any)
+		for pkey, row := range node1RowsByPKey {
+			if _, exists := node2RowsByPKey[pkey]; !exists {
+				insertsForNode2[pkey] = row
+			}
+		}
+
+		if len(insertsForNode1) > 0 {
+			count, err := t.performBirectionalInserts(node1Name, insertsForNode1)
+			if err != nil {
+				repairErrors = append(repairErrors, fmt.Sprintf("inserts failed for %s: %v", node1Name, err))
+			} else {
+				totalOps[node1Name] += count
+			}
+		}
+		if len(insertsForNode2) > 0 {
+			count, err := t.performBirectionalInserts(node2Name, insertsForNode2)
+			if err != nil {
+				repairErrors = append(repairErrors, fmt.Sprintf("inserts failed for %s: %v", node2Name, err))
+			} else {
+				totalOps[node2Name] += count
+			}
+		}
+	}
+
+	if len(repairErrors) > 0 {
+		log.Printf("Bidirectional table repair for %s finished with errors: %s", t.QualifiedTableName, strings.Join(repairErrors, "; "))
+		t.TaskStatus = "FAILED"
+		t.TaskContext = strings.Join(repairErrors, "; ")
+	} else {
+		log.Printf("Bidirectional table repair for %s completed successfully.", t.QualifiedTableName)
+		t.TaskStatus = "COMPLETED"
+		summary := strings.Builder{}
+		for node, count := range totalOps {
+			summary.WriteString(fmt.Sprintf("Node %s: %d inserted. ", node, count))
+		}
+		t.TaskContext = strings.TrimSpace(summary.String())
+	}
+
+	log.Println("*** SUMMARY ***")
+	for nodeName, count := range totalOps {
+		log.Printf("%s INSERTED = %d rows", nodeName, count)
+	}
+
+	t.FinishedAt = time.Now()
+	t.TimeTaken = t.FinishedAt.Sub(startTime).Seconds()
+	log.Printf("RUN TIME = %.2f seconds", t.TimeTaken)
+
+	return nil
+}
+
+func (t *TableRepairTask) performBirectionalInserts(nodeName string, inserts map[string]map[string]any) (int, error) {
+	pool, ok := t.Pools[nodeName]
+	if !ok || pool == nil {
+		return 0, fmt.Errorf("no connection pool for node %s", nodeName)
+	}
+
+	tx, err := pool.Begin(context.Background())
+	if err != nil {
+		return 0, fmt.Errorf("failed to begin transaction on %s: %w", nodeName, err)
+	}
+	defer tx.Rollback(context.Background())
+
+	_, err = tx.Exec(context.Background(), "SELECT spock.repair_mode(true)")
+	if err != nil {
+		return 0, fmt.Errorf("failed to enable spock.repair_mode(true) on %s: %w", nodeName, err)
+	}
+	log.Printf("spock.repair_mode(true) set on %s", nodeName)
+
+	if t.FireTriggers {
+		_, err = tx.Exec(context.Background(), "SET session_replication_role = 'local'")
+	} else {
+		_, err = tx.Exec(context.Background(), "SET session_replication_role = 'replica'")
+	}
+	if err != nil {
+		return 0, fmt.Errorf("failed to set session_replication_role on %s: %w", nodeName, err)
+	}
+	log.Printf("session_replication_role set on %s (fire_triggers: %v)", nodeName, t.FireTriggers)
+
+	targetNodeHostPortKey := ""
+	for hostPort, mappedName := range t.HostMap {
+		if mappedName == nodeName {
+			targetNodeHostPortKey = hostPort
+			break
+		}
+	}
+	if targetNodeHostPortKey == "" {
+		return 0, fmt.Errorf("could not find host:port key for target node %s", nodeName)
+	}
+	targetNodeColTypes, ok := t.ColTypes[targetNodeHostPortKey]
+	if !ok {
+		return 0, fmt.Errorf("column types for target node '%s' (key: %s) not found", nodeName, targetNodeHostPortKey)
+	}
+
+	// Bidirectional is always insert only
+	originalInsertOnly := t.InsertOnly
+	t.InsertOnly = true
+	insertedCount, err := executeUpserts(tx, t, inserts, targetNodeColTypes)
+	t.InsertOnly = originalInsertOnly
+
+	if err != nil {
+		return 0, fmt.Errorf("failed to execute inserts on %s: %w", nodeName, err)
+	}
+	log.Printf("Executed %d insert operations on %s", insertedCount, nodeName)
+
+	_, err = tx.Exec(context.Background(), "SELECT spock.repair_mode(false)")
+	if err != nil {
+		return 0, fmt.Errorf("failed to disable spock.repair_mode(false) on %s: %w", nodeName, err)
+	}
+	log.Printf("spock.repair_mode(false) set on %s", nodeName)
+
+	if err := tx.Commit(context.Background()); err != nil {
+		return 0, fmt.Errorf("failed to commit transaction on %s: %w", nodeName, err)
+	}
+	log.Printf("Transaction committed successfully on %s", nodeName)
+
+	return insertedCount, nil
 }
 
 // getDryRunOutput generates the dry run message string.
