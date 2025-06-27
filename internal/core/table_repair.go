@@ -7,6 +7,7 @@ import (
 	"log"
 	"maps"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -16,6 +17,16 @@ import (
 	"github.com/pgedge/ace/internal/auth"
 	"github.com/pgedge/ace/pkg/types"
 )
+
+type RepairReport struct {
+	OperationType           string         `json:"operation_type"`
+	Mode                    string         `json:"mode"`
+	Timestamp               string         `json:"time_stamp"`
+	SuppliedArgs            map[string]any `json:"supplied_args"`
+	DatabaseCredentialsUsed types.Database `json:"database_credentials_used"`
+	Changes                 map[string]any `json:"changes"`
+	RunTimeSeconds          float64        `json:"run_time,omitempty"`
+}
 
 type TableRepairTask struct {
 	types.Task
@@ -44,6 +55,7 @@ type TableRepairTask struct {
 
 	rawDiffs types.DiffOutput
 	mu       sync.Mutex
+	report   *RepairReport
 }
 
 // Defining these getters and setters to satisfy ClusterConfigProvider interface
@@ -286,11 +298,103 @@ func (t *TableRepairTask) ValidateAndPrepare() error {
 	return nil
 }
 
+func (t *TableRepairTask) initialiseReport() *RepairReport {
+	report := &RepairReport{
+		Changes: make(map[string]any),
+	}
+
+	if t.DryRun {
+		report.OperationType = "DRY_RUN"
+		report.Mode = "DRY_RUN"
+	} else {
+		report.OperationType = "table-repair"
+		report.Mode = "LIVE_RUN"
+	}
+	now := time.Now()
+	report.Timestamp = now.Format("2006-01-02 15:04:05") + fmt.Sprintf(".%03d", now.Nanosecond()/1e6)
+
+	report.SuppliedArgs = map[string]any{
+		"cluster_name":    t.ClusterName,
+		"diff_file_path":  t.DiffFilePath,
+		"source_of_truth": t.SourceOfTruth,
+		"table_name":      t.QualifiedTableName,
+		"dbname":          t.DBName,
+		"dry_run":         t.DryRun,
+		"quiet":           t.QuietMode,
+		"insert_only":     t.InsertOnly,
+		"upsert_only":     t.UpsertOnly,
+		"fire_triggers":   t.FireTriggers,
+		"generate_report": t.GenerateReport,
+		"bidirectional":   t.Bidirectional,
+	}
+
+	dbInfoForReport := t.Database
+	dbInfoForReport.DBPassword = ""
+	report.DatabaseCredentialsUsed = dbInfoForReport
+	return report
+}
+
+func writeReportToFile(report *RepairReport) error {
+	now := time.Now()
+	reportFolder := "reports"
+	dateFolderName := now.Format("2006-01-02")
+	reportDir := filepath.Join(reportFolder, dateFolderName)
+
+	if err := os.MkdirAll(reportDir, 0755); err != nil {
+		return fmt.Errorf("failed to create report directory %s: %w", reportDir, err)
+	}
+
+	var fileNamePrefix string
+	if report.Mode == "DRY_RUN" {
+		fileNamePrefix = "dry_run_report_"
+	} else {
+		fileNamePrefix = "repair_report_"
+	}
+	fileNameSuffix := now.Format("150405") + fmt.Sprintf(".%03d", now.Nanosecond()/1e6)
+	fileName := fmt.Sprintf("%s%s.json", fileNamePrefix, fileNameSuffix)
+	filePath := filepath.Join(reportDir, fileName)
+
+	reportData, err := json.MarshalIndent(report, "", "  ")
+	if err != nil {
+		return fmt.Errorf("failed to marshal report to JSON: %w", err)
+	}
+
+	if err := os.WriteFile(filePath, reportData, 0644); err != nil {
+		return fmt.Errorf("failed to write report to file %s: %w", filePath, err)
+	}
+
+	log.Printf("Wrote report to %s", filePath)
+	return nil
+}
+
 func (t *TableRepairTask) Run(skipValidation bool) error {
 	if !skipValidation {
 		if err := t.ValidateAndPrepare(); err != nil {
 			return fmt.Errorf("task validation and preparation failed: %w", err)
 		}
+	}
+
+	startTime := time.Now()
+	if t.GenerateReport {
+		t.report = t.initialiseReport()
+	}
+
+	defer func() {
+		if t.GenerateReport && t.report != nil {
+			t.report.RunTimeSeconds = time.Since(startTime).Seconds()
+			if err := writeReportToFile(t.report); err != nil {
+				log.Printf("Warning: failed to write repair report: %v", err)
+			}
+		}
+	}()
+
+	if t.DryRun {
+		output, err := getDryRunOutput(t)
+		if err != nil {
+			return fmt.Errorf("failed to generate dry run output: %w", err)
+		}
+		fmt.Print(output)
+		return nil
 	}
 
 	defer func() {
@@ -306,7 +410,10 @@ func (t *TableRepairTask) Run(skipValidation bool) error {
 		return t.runBidirectionalRepair()
 	}
 
-	startTime := time.Now()
+	return t.runUnidirectionalRepair(startTime)
+}
+
+func (t *TableRepairTask) runUnidirectionalRepair(startTime time.Time) error {
 	log.Printf("Starting table repair for %s on cluster %s", t.QualifiedTableName, t.ClusterName)
 
 	// Core repair logic begins here
@@ -388,6 +495,17 @@ func (t *TableRepairTask) Run(skipValidation bool) error {
 				}
 				totalOps[nodeName]["deleted"] = deletedCount
 				log.Printf("Executed %d delete operations on %s", deletedCount, nodeName)
+
+				if t.report != nil {
+					if _, ok := t.report.Changes[nodeName]; !ok {
+						t.report.Changes[nodeName] = make(map[string]any)
+					}
+					rows := make([]map[string]any, 0, len(nodeDeletes))
+					for _, row := range nodeDeletes {
+						rows = append(rows, row)
+					}
+					t.report.Changes[nodeName].(map[string]any)["deleted_rows"] = rows
+				}
 			}
 		}
 
@@ -426,6 +544,21 @@ func (t *TableRepairTask) Run(skipValidation bool) error {
 			}
 			totalOps[nodeName]["upserted"] = upsertedCount
 			log.Printf("Executed %d upsert operations on %s", upsertedCount, nodeName)
+
+			if t.report != nil {
+				if _, ok := t.report.Changes[nodeName]; !ok {
+					t.report.Changes[nodeName] = make(map[string]any)
+				}
+				rows := make([]map[string]any, 0, len(nodeUpserts))
+				for _, row := range nodeUpserts {
+					rows = append(rows, row)
+				}
+				changeType := "upserted_rows"
+				if t.InsertOnly {
+					changeType = "inserted_rows"
+				}
+				t.report.Changes[nodeName].(map[string]any)[changeType] = rows
+			}
 		}
 
 		if spockRepairModeActive {
@@ -489,6 +622,199 @@ func (t *TableRepairTask) Run(skipValidation bool) error {
 
 	// TODO: Update task metrics in a local DB
 	return nil
+}
+
+func (t *TableRepairTask) runBidirectionalRepair() error {
+	startTime := time.Now()
+	log.Printf("Starting bidirectional table repair for %s on cluster %s", t.QualifiedTableName, t.ClusterName)
+
+	totalOps := make(map[string]int)
+	var repairErrors []string
+
+	for nodePairKey, diffs := range t.rawDiffs.NodeDiffs {
+		nodes := strings.Split(nodePairKey, "/")
+		if len(nodes) != 2 {
+			log.Printf("Warning: Invalid node pair key '%s', skipping", nodePairKey)
+			continue
+		}
+		node1Name, node2Name := nodes[0], nodes[1]
+		log.Printf("Processing node pair: %s/%s", node1Name, node2Name)
+
+		node1Rows := diffs.Rows[node1Name]
+		node2Rows := diffs.Rows[node2Name]
+
+		node1RowsByPKey := make(map[string]map[string]any)
+		for _, row := range node1Rows {
+			pkeyStr, err := stringifyPKey(row, t.Key, t.SimplePrimaryKey)
+			if err != nil {
+				repairErrors = append(repairErrors, fmt.Sprintf("stringify pkey failed for %s: %v", node1Name, err))
+				continue
+			}
+			node1RowsByPKey[pkeyStr] = row
+		}
+
+		node2RowsByPKey := make(map[string]map[string]any)
+		for _, row := range node2Rows {
+			pkeyStr, err := stringifyPKey(row, t.Key, t.SimplePrimaryKey)
+			if err != nil {
+				repairErrors = append(repairErrors, fmt.Sprintf("stringify pkey failed for %s: %v", node2Name, err))
+				continue
+			}
+			node2RowsByPKey[pkeyStr] = row
+		}
+
+		insertsForNode1 := make(map[string]map[string]any)
+		for pkey, row := range node2RowsByPKey {
+			if _, exists := node1RowsByPKey[pkey]; !exists {
+				insertsForNode1[pkey] = row
+			}
+		}
+
+		insertsForNode2 := make(map[string]map[string]any)
+		for pkey, row := range node1RowsByPKey {
+			if _, exists := node2RowsByPKey[pkey]; !exists {
+				insertsForNode2[pkey] = row
+			}
+		}
+
+		if len(insertsForNode1) > 0 {
+			count, err := t.performBirectionalInserts(node1Name, insertsForNode1)
+			if err != nil {
+				repairErrors = append(repairErrors, fmt.Sprintf("inserts failed for %s: %v", node1Name, err))
+			} else {
+				totalOps[node1Name] += count
+				if t.report != nil {
+					if _, ok := t.report.Changes[nodePairKey]; !ok {
+						t.report.Changes[nodePairKey] = make(map[string]any)
+					}
+					changeMap := t.report.Changes[nodePairKey].(map[string]any)
+					if _, ok := changeMap[node1Name]; !ok {
+						changeMap[node1Name] = make(map[string]any)
+					}
+					rows := make([]map[string]any, 0, len(insertsForNode1))
+					for _, row := range insertsForNode1 {
+						rows = append(rows, row)
+					}
+					changeMap[node1Name].(map[string]any)["inserted_rows"] = rows
+				}
+			}
+		}
+		if len(insertsForNode2) > 0 {
+			count, err := t.performBirectionalInserts(node2Name, insertsForNode2)
+			if err != nil {
+				repairErrors = append(repairErrors, fmt.Sprintf("inserts failed for %s: %v", node2Name, err))
+			} else {
+				totalOps[node2Name] += count
+				if t.report != nil {
+					if _, ok := t.report.Changes[nodePairKey]; !ok {
+						t.report.Changes[nodePairKey] = make(map[string]any)
+					}
+					changeMap := t.report.Changes[nodePairKey].(map[string]any)
+					if _, ok := changeMap[node2Name]; !ok {
+						changeMap[node2Name] = make(map[string]any)
+					}
+					rows := make([]map[string]any, 0, len(insertsForNode2))
+					for _, row := range insertsForNode2 {
+						rows = append(rows, row)
+					}
+					changeMap[node2Name].(map[string]any)["inserted_rows"] = rows
+				}
+			}
+		}
+	}
+
+	if len(repairErrors) > 0 {
+		log.Printf("Bidirectional table repair for %s finished with errors: %s", t.QualifiedTableName, strings.Join(repairErrors, "; "))
+		t.TaskStatus = "FAILED"
+		t.TaskContext = strings.Join(repairErrors, "; ")
+	} else {
+		log.Printf("Bidirectional table repair for %s completed successfully.", t.QualifiedTableName)
+		t.TaskStatus = "COMPLETED"
+		summary := strings.Builder{}
+		for node, count := range totalOps {
+			summary.WriteString(fmt.Sprintf("Node %s: %d inserted. ", node, count))
+		}
+		t.TaskContext = strings.TrimSpace(summary.String())
+	}
+
+	log.Println("*** SUMMARY ***")
+	for nodeName, count := range totalOps {
+		log.Printf("%s INSERTED = %d rows", nodeName, count)
+	}
+
+	t.FinishedAt = time.Now()
+	t.TimeTaken = t.FinishedAt.Sub(startTime).Seconds()
+	log.Printf("RUN TIME = %.2f seconds", t.TimeTaken)
+
+	return nil
+}
+
+func (t *TableRepairTask) performBirectionalInserts(nodeName string, inserts map[string]map[string]any) (int, error) {
+	pool, ok := t.Pools[nodeName]
+	if !ok || pool == nil {
+		return 0, fmt.Errorf("no connection pool for node %s", nodeName)
+	}
+
+	tx, err := pool.Begin(context.Background())
+	if err != nil {
+		return 0, fmt.Errorf("failed to begin transaction on %s: %w", nodeName, err)
+	}
+	defer tx.Rollback(context.Background())
+
+	_, err = tx.Exec(context.Background(), "SELECT spock.repair_mode(true)")
+	if err != nil {
+		return 0, fmt.Errorf("failed to enable spock.repair_mode(true) on %s: %w", nodeName, err)
+	}
+	log.Printf("spock.repair_mode(true) set on %s", nodeName)
+
+	if t.FireTriggers {
+		_, err = tx.Exec(context.Background(), "SET session_replication_role = 'local'")
+	} else {
+		_, err = tx.Exec(context.Background(), "SET session_replication_role = 'replica'")
+	}
+	if err != nil {
+		return 0, fmt.Errorf("failed to set session_replication_role on %s: %w", nodeName, err)
+	}
+	log.Printf("session_replication_role set on %s (fire_triggers: %v)", nodeName, t.FireTriggers)
+
+	targetNodeHostPortKey := ""
+	for hostPort, mappedName := range t.HostMap {
+		if mappedName == nodeName {
+			targetNodeHostPortKey = hostPort
+			break
+		}
+	}
+	if targetNodeHostPortKey == "" {
+		return 0, fmt.Errorf("could not find host:port key for target node %s", nodeName)
+	}
+	targetNodeColTypes, ok := t.ColTypes[targetNodeHostPortKey]
+	if !ok {
+		return 0, fmt.Errorf("column types for target node '%s' (key: %s) not found", nodeName, targetNodeHostPortKey)
+	}
+
+	// Bidirectional is always insert only
+	originalInsertOnly := t.InsertOnly
+	t.InsertOnly = true
+	insertedCount, err := executeUpserts(tx, t, inserts, targetNodeColTypes)
+	t.InsertOnly = originalInsertOnly
+
+	if err != nil {
+		return 0, fmt.Errorf("failed to execute inserts on %s: %w", nodeName, err)
+	}
+	log.Printf("Executed %d insert operations on %s", insertedCount, nodeName)
+
+	_, err = tx.Exec(context.Background(), "SELECT spock.repair_mode(false)")
+	if err != nil {
+		return 0, fmt.Errorf("failed to disable spock.repair_mode(false) on %s: %w", nodeName, err)
+	}
+	log.Printf("spock.repair_mode(false) set on %s", nodeName)
+
+	if err := tx.Commit(context.Background()); err != nil {
+		return 0, fmt.Errorf("failed to commit transaction on %s: %w", nodeName, err)
+	}
+	log.Printf("Transaction committed successfully on %s", nodeName)
+
+	return insertedCount, nil
 }
 
 // executeDeletes handles deleting rows in batches.
@@ -710,202 +1036,163 @@ func executeUpserts(tx pgx.Tx, task *TableRepairTask, upserts map[string]map[str
 	return totalUpsertedCount, nil
 }
 
-// Bidirectional repair assumes insert-only.
-// TODO: Add repair options compatibility check.
-func (t *TableRepairTask) runBidirectionalRepair() error {
-	startTime := time.Now()
-	log.Printf("Starting bidirectional table repair for %s on cluster %s", t.QualifiedTableName, t.ClusterName)
-
-	totalOps := make(map[string]int)
-	var repairErrors []string
-
-	for nodePairKey, diffs := range t.rawDiffs.NodeDiffs {
-		nodes := strings.Split(nodePairKey, "/")
-		if len(nodes) != 2 {
-			log.Printf("Warning: Invalid node pair key '%s', skipping", nodePairKey)
-			continue
-		}
-		node1Name, node2Name := nodes[0], nodes[1]
-		log.Printf("Processing node pair: %s/%s", node1Name, node2Name)
-
-		node1Rows := diffs.Rows[node1Name]
-		node2Rows := diffs.Rows[node2Name]
-
-		node1RowsByPKey := make(map[string]map[string]any)
-		for _, row := range node1Rows {
-			pkeyStr, err := stringifyPKey(row, t.Key, t.SimplePrimaryKey)
-			if err != nil {
-				repairErrors = append(repairErrors, fmt.Sprintf("stringify pkey failed for %s: %v", node1Name, err))
-				continue
-			}
-			node1RowsByPKey[pkeyStr] = row
-		}
-
-		node2RowsByPKey := make(map[string]map[string]any)
-		for _, row := range node2Rows {
-			pkeyStr, err := stringifyPKey(row, t.Key, t.SimplePrimaryKey)
-			if err != nil {
-				repairErrors = append(repairErrors, fmt.Sprintf("stringify pkey failed for %s: %v", node2Name, err))
-				continue
-			}
-			node2RowsByPKey[pkeyStr] = row
-		}
-
-		insertsForNode1 := make(map[string]map[string]any)
-		for pkey, row := range node2RowsByPKey {
-			if _, exists := node1RowsByPKey[pkey]; !exists {
-				insertsForNode1[pkey] = row
-			}
-		}
-
-		insertsForNode2 := make(map[string]map[string]any)
-		for pkey, row := range node1RowsByPKey {
-			if _, exists := node2RowsByPKey[pkey]; !exists {
-				insertsForNode2[pkey] = row
-			}
-		}
-
-		if len(insertsForNode1) > 0 {
-			count, err := t.performBirectionalInserts(node1Name, insertsForNode1)
-			if err != nil {
-				repairErrors = append(repairErrors, fmt.Sprintf("inserts failed for %s: %v", node1Name, err))
-			} else {
-				totalOps[node1Name] += count
-			}
-		}
-		if len(insertsForNode2) > 0 {
-			count, err := t.performBirectionalInserts(node2Name, insertsForNode2)
-			if err != nil {
-				repairErrors = append(repairErrors, fmt.Sprintf("inserts failed for %s: %v", node2Name, err))
-			} else {
-				totalOps[node2Name] += count
-			}
-		}
-	}
-
-	if len(repairErrors) > 0 {
-		log.Printf("Bidirectional table repair for %s finished with errors: %s", t.QualifiedTableName, strings.Join(repairErrors, "; "))
-		t.TaskStatus = "FAILED"
-		t.TaskContext = strings.Join(repairErrors, "; ")
-	} else {
-		log.Printf("Bidirectional table repair for %s completed successfully.", t.QualifiedTableName)
-		t.TaskStatus = "COMPLETED"
-		summary := strings.Builder{}
-		for node, count := range totalOps {
-			summary.WriteString(fmt.Sprintf("Node %s: %d inserted. ", node, count))
-		}
-		t.TaskContext = strings.TrimSpace(summary.String())
-	}
-
-	log.Println("*** SUMMARY ***")
-	for nodeName, count := range totalOps {
-		log.Printf("%s INSERTED = %d rows", nodeName, count)
-	}
-
-	t.FinishedAt = time.Now()
-	t.TimeTaken = t.FinishedAt.Sub(startTime).Seconds()
-	log.Printf("RUN TIME = %.2f seconds", t.TimeTaken)
-
-	return nil
-}
-
-func (t *TableRepairTask) performBirectionalInserts(nodeName string, inserts map[string]map[string]any) (int, error) {
-	pool, ok := t.Pools[nodeName]
-	if !ok || pool == nil {
-		return 0, fmt.Errorf("no connection pool for node %s", nodeName)
-	}
-
-	tx, err := pool.Begin(context.Background())
-	if err != nil {
-		return 0, fmt.Errorf("failed to begin transaction on %s: %w", nodeName, err)
-	}
-	defer tx.Rollback(context.Background())
-
-	_, err = tx.Exec(context.Background(), "SELECT spock.repair_mode(true)")
-	if err != nil {
-		return 0, fmt.Errorf("failed to enable spock.repair_mode(true) on %s: %w", nodeName, err)
-	}
-	log.Printf("spock.repair_mode(true) set on %s", nodeName)
-
-	if t.FireTriggers {
-		_, err = tx.Exec(context.Background(), "SET session_replication_role = 'local'")
-	} else {
-		_, err = tx.Exec(context.Background(), "SET session_replication_role = 'replica'")
-	}
-	if err != nil {
-		return 0, fmt.Errorf("failed to set session_replication_role on %s: %w", nodeName, err)
-	}
-	log.Printf("session_replication_role set on %s (fire_triggers: %v)", nodeName, t.FireTriggers)
-
-	targetNodeHostPortKey := ""
-	for hostPort, mappedName := range t.HostMap {
-		if mappedName == nodeName {
-			targetNodeHostPortKey = hostPort
-			break
-		}
-	}
-	if targetNodeHostPortKey == "" {
-		return 0, fmt.Errorf("could not find host:port key for target node %s", nodeName)
-	}
-	targetNodeColTypes, ok := t.ColTypes[targetNodeHostPortKey]
-	if !ok {
-		return 0, fmt.Errorf("column types for target node '%s' (key: %s) not found", nodeName, targetNodeHostPortKey)
-	}
-
-	// Bidirectional is always insert only
-	originalInsertOnly := t.InsertOnly
-	t.InsertOnly = true
-	insertedCount, err := executeUpserts(tx, t, inserts, targetNodeColTypes)
-	t.InsertOnly = originalInsertOnly
-
-	if err != nil {
-		return 0, fmt.Errorf("failed to execute inserts on %s: %w", nodeName, err)
-	}
-	log.Printf("Executed %d insert operations on %s", insertedCount, nodeName)
-
-	_, err = tx.Exec(context.Background(), "SELECT spock.repair_mode(false)")
-	if err != nil {
-		return 0, fmt.Errorf("failed to disable spock.repair_mode(false) on %s: %w", nodeName, err)
-	}
-	log.Printf("spock.repair_mode(false) set on %s", nodeName)
-
-	if err := tx.Commit(context.Background()); err != nil {
-		return 0, fmt.Errorf("failed to commit transaction on %s: %w", nodeName, err)
-	}
-	log.Printf("Transaction committed successfully on %s", nodeName)
-
-	return insertedCount, nil
-}
-
 // getDryRunOutput generates the dry run message string.
-// TODO: This is not fully implemented yet.
 func getDryRunOutput(task *TableRepairTask) (string, error) {
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("Dry run for table %s:\n", task.QualifiedTableName))
+	sb.WriteString(fmt.Sprintf("\n######## DRY RUN for table %s ########\n\n", task.QualifiedTableName))
 
-	fullUpserts, fullDeletes, err := calculateRepairSets(task)
-	if err != nil {
-		sb.WriteString(fmt.Sprintf("Error calculating changes for dry run: %v\n", err))
-		return sb.String(), err
-	}
-
-	for nodeName, upserts := range fullUpserts {
-		deletes := fullDeletes[nodeName]
-		if !task.UpsertOnly && !task.InsertOnly {
-			sb.WriteString(fmt.Sprintf("  Node %s: Would attempt to upsert %d rows and delete %d rows.\n", nodeName, len(upserts), len(deletes)))
-		} else if task.InsertOnly {
-			sb.WriteString(fmt.Sprintf("  Node %s: Would attempt to insert %d rows.\n", nodeName, len(upserts)))
-			if len(deletes) > 0 {
-				sb.WriteString(fmt.Sprintf("    Additionally, %d rows exist on %s not present on %s (deletes skipped).\n", len(deletes), nodeName, task.SourceOfTruth))
+	if task.Bidirectional {
+		// TODO: Need to ensure that no more than 2 nodes are specified for bidirectional repair
+		anyInserts := false
+		for nodePairKey, diffs := range task.rawDiffs.NodeDiffs {
+			nodes := strings.Split(nodePairKey, "/")
+			if len(nodes) != 2 {
+				continue
 			}
-		} else { // UpsertOnly
-			sb.WriteString(fmt.Sprintf("  Node %s: Would attempt to upsert %d rows.\n", nodeName, len(upserts)))
-			if len(deletes) > 0 {
-				sb.WriteString(fmt.Sprintf("    Additionally, %d rows exist on %s not present on %s (deletes skipped).\n", len(deletes), nodeName, task.SourceOfTruth))
+			node1Name, node2Name := nodes[0], nodes[1]
+
+			node1Rows := diffs.Rows[node1Name]
+			node2Rows := diffs.Rows[node2Name]
+
+			node1RowsByPKey := make(map[string]map[string]any)
+			for _, row := range node1Rows {
+				pkeyStr, err := stringifyPKey(row, task.Key, task.SimplePrimaryKey)
+				if err != nil {
+					return "", fmt.Errorf("error stringifying pkey for row on %s: %w", node1Name, err)
+				}
+				node1RowsByPKey[pkeyStr] = row
+			}
+
+			node2RowsByPKey := make(map[string]map[string]any)
+			for _, row := range node2Rows {
+				pkeyStr, err := stringifyPKey(row, task.Key, task.SimplePrimaryKey)
+				if err != nil {
+					return "", fmt.Errorf("error stringifying pkey for row on %s: %w", node2Name, err)
+				}
+				node2RowsByPKey[pkeyStr] = row
+			}
+
+			insertsForNode1 := make(map[string]map[string]any)
+			for pkey, row := range node2RowsByPKey {
+				if _, exists := node1RowsByPKey[pkey]; !exists {
+					insertsForNode1[pkey] = row
+				}
+			}
+
+			insertsForNode2 := make(map[string]map[string]any)
+			for pkey, row := range node1RowsByPKey {
+				if _, exists := node2RowsByPKey[pkey]; !exists {
+					insertsForNode2[pkey] = row
+				}
+			}
+
+			if len(insertsForNode1) > 0 || len(insertsForNode2) > 0 {
+				anyInserts = true
+				sb.WriteString(fmt.Sprintf("  Node Pair '%s/%s':\n", node1Name, node2Name))
+				if len(insertsForNode2) > 0 {
+					sb.WriteString(fmt.Sprintf("    - Would INSERT %d rows from %s into %s.\n", len(insertsForNode2), node1Name, node2Name))
+				}
+				if len(insertsForNode1) > 0 {
+					sb.WriteString(fmt.Sprintf("    - Would INSERT %d rows from %s into %s.\n", len(insertsForNode1), node2Name, node1Name))
+				}
+
+				if task.report != nil {
+					reportChanges := make(map[string]any)
+					if len(insertsForNode2) > 0 {
+						rows := make([]map[string]any, 0, len(insertsForNode2))
+						for _, row := range insertsForNode2 {
+							rows = append(rows, row)
+						}
+						reportChanges[fmt.Sprintf("would_insert_into_%s", node2Name)] = rows
+					}
+					if len(insertsForNode1) > 0 {
+						rows := make([]map[string]any, 0, len(insertsForNode1))
+						for _, row := range insertsForNode1 {
+							rows = append(rows, row)
+						}
+						reportChanges[fmt.Sprintf("would_insert_into_%s", node1Name)] = rows
+					}
+					task.report.Changes[nodePairKey] = reportChanges
+				}
+			}
+		}
+
+		if !anyInserts {
+			sb.WriteString("  All nodes are in sync. No repairs needed.\n")
+		}
+
+	} else {
+		fullUpserts, fullDeletes, err := calculateRepairSets(task)
+		if err != nil {
+			sb.WriteString(fmt.Sprintf("Error calculating changes for dry run: %v\n", err))
+			return sb.String(), err
+		}
+
+		if len(fullUpserts) == 0 && len(fullDeletes) == 0 {
+			sb.WriteString("  All nodes are in sync with the source of truth. No repairs needed.\n")
+		} else {
+			// To ensure a consistent output order for nodes
+			var nodeNames []string
+			for nodeName := range fullUpserts {
+				nodeNames = append(nodeNames, nodeName)
+			}
+			for nodeName := range fullDeletes {
+				if _, exists := fullUpserts[nodeName]; !exists {
+					nodeNames = append(nodeNames, nodeName)
+				}
+			}
+
+			for _, nodeName := range nodeNames {
+				upserts := fullUpserts[nodeName]
+				deletes := fullDeletes[nodeName]
+				if len(upserts) == 0 && len(deletes) == 0 {
+					continue
+				}
+
+				if task.report != nil {
+					nodeChanges := make(map[string]any)
+					if len(upserts) > 0 {
+						rows := make([]map[string]any, 0, len(upserts))
+						for _, row := range upserts {
+							rows = append(rows, row)
+						}
+						if task.InsertOnly {
+							nodeChanges["would_insert"] = rows
+						} else {
+							nodeChanges["would_upsert"] = rows
+						}
+					}
+					if len(deletes) > 0 {
+						rows := make([]map[string]any, 0, len(deletes))
+						for _, row := range deletes {
+							rows = append(rows, row)
+						}
+						if !task.UpsertOnly && !task.InsertOnly {
+							nodeChanges["would_delete"] = rows
+						} else {
+							nodeChanges["skipped_deletes"] = rows
+						}
+					}
+					task.report.Changes[nodeName] = nodeChanges
+				}
+
+				if !task.UpsertOnly && !task.InsertOnly {
+					sb.WriteString(fmt.Sprintf("  Node %s: Would attempt to UPSERT %d rows and DELETE %d rows.\n", nodeName, len(upserts), len(deletes)))
+				} else if task.InsertOnly {
+					sb.WriteString(fmt.Sprintf("  Node %s: Would attempt to INSERT %d rows.\n", nodeName, len(upserts)))
+					if len(deletes) > 0 {
+						sb.WriteString(fmt.Sprintf("    Additionally, %d rows exist on %s that are not on %s (deletes skipped).\n", len(deletes), nodeName, task.SourceOfTruth))
+					}
+				} else { // UpsertOnly
+					sb.WriteString(fmt.Sprintf("  Node %s: Would attempt to UPSERT %d rows.\n", nodeName, len(upserts)))
+					if len(deletes) > 0 {
+						sb.WriteString(fmt.Sprintf("    Additionally, %d rows exist on %s that are not on %s (deletes skipped).\n", len(deletes), nodeName, task.SourceOfTruth))
+					}
+				}
 			}
 		}
 	}
-
+	sb.WriteString("\n######## END DRY RUN ########\n")
 	return sb.String(), nil
 }
 
