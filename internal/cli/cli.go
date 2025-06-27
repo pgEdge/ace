@@ -110,6 +110,11 @@ func SetupCLI() *cli.App {
 			Value: false,
 		},
 		&cli.BoolFlag{
+			Name:  "generate-report",
+			Usage: "Generate a report of the repair operation",
+			Value: false,
+		},
+		&cli.BoolFlag{
 			Name:  "insert-only",
 			Usage: "Only perform inserts, no updates or deletes",
 			Value: false,
@@ -227,6 +232,7 @@ func TableRepairCLI(ctx *cli.Context) error {
 	task.FireTriggers = ctx.Bool("fire-triggers")
 	task.FixNulls = ctx.Bool("fix-nulls")
 	task.Bidirectional = ctx.Bool("bidirectional")
+	task.GenerateReport = ctx.Bool("generate-report")
 
 	if err := task.ValidateAndPrepare(); err != nil {
 		return fmt.Errorf("validation failed: %v", err)
@@ -236,6 +242,6 @@ func TableRepairCLI(ctx *cli.Context) error {
 		return fmt.Errorf("error during table repair: %v", err)
 	}
 
-	fmt.Println("Table repair process initiated.")
+	fmt.Println("Table repair complete")
 	return nil
 }
