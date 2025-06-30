@@ -247,6 +247,12 @@ func TestMain(m *testing.M) {
 	}
 	log.Println("PostgreSQL cluster setup complete.")
 
+	log.Println("Creating and loading shared customers table...")
+	if err := setupSharedCustomersTable(&testing.T{}); err != nil {
+		log.Fatalf("Failed to setup shared customers table: %v", err)
+	}
+	log.Println("Shared customers table setup complete.")
+
 	exitCode := m.Run()
 
 	log.Println("Tearing down PostgreSQL cluster...")
@@ -286,4 +292,34 @@ func connectToNode(host, port, user, password, dbname string) (*pgxpool.Pool, er
 		port,
 		err,
 	)
+}
+
+func setupSharedCustomersTable(t *testing.T) error {
+	ctx := context.Background()
+	tableName := "customers"
+	qualifiedTableName := fmt.Sprintf("%s.%s", testSchema, tableName)
+
+	for _, pool := range []*pgxpool.Pool{pgCluster.Node1Pool, pgCluster.Node2Pool} {
+		if err := createTestTable(ctx, pool, testSchema, tableName); err != nil {
+			return fmt.Errorf("failed to create shared table %s: %w", qualifiedTableName, err)
+		}
+	}
+
+	csvPath, err := filepath.Abs(defaultCsvFile)
+	if err != nil {
+		return fmt.Errorf("failed to get absolute path for CSV file %s: %w", defaultCsvFile, err)
+	}
+
+	for i, pool := range []*pgxpool.Pool{pgCluster.Node1Pool, pgCluster.Node2Pool} {
+		nodeName := pgCluster.ClusterNodes[i]["Name"].(string)
+		if err := loadDataFromCSV(ctx, pool, testSchema, tableName, csvPath); err != nil {
+			return fmt.Errorf(
+				"failed to load CSV data into %s on node %s: %w",
+				qualifiedTableName,
+				nodeName,
+				err,
+			)
+		}
+	}
+	return nil
 }

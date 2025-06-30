@@ -687,7 +687,7 @@ func (t *TableDiffTask) RunChecks(skipValidation bool) error {
 	t.Key = key
 	t.SimplePrimaryKey = len(key) == 1
 
-	if t.ColTypes != nil && len(t.ColTypes) > 1 {
+	if len(t.ColTypes) > 1 {
 		var refNode string
 		var refTypes map[string]string
 		for node, types := range t.ColTypes {
@@ -868,7 +868,7 @@ func (t *TableDiffTask) ExecuteTask(debugMode bool) error {
 		}
 	}
 	if maxNode == "" {
-		return fmt.Errorf("Unable to determine node with highest row count (or any row counts)")
+		return fmt.Errorf("unable to determine node with highest row count (or any row counts)")
 	}
 
 	t.DiffResult = types.DiffOutput{
@@ -1006,11 +1006,11 @@ func (t *TableDiffTask) ExecuteTask(debugMode bool) error {
 	)
 
 	/*
-		So, here's the approach I'm using:
+		We use the following approach:
 		1. Generate a list of ranges to hash, and create a HashTask for each range.
 		2. Each HashTask is independent of the others, and can be executed in parallel.
-		3. I don't immediately perform the comparisons, but instead store the results in a map.
-		4. Once they're ready, I use a binary search approach to narrow down the ranges that have mismatches.
+		3. We don't immediately perform the comparisons, but instead store the results in a map.
+		4. Once they're ready, we use a binary search approach to narrow down the ranges that have mismatches.
 	*/
 	hashTaskQueue := make(chan HashTask, totalHashTasks)
 	var initialHashWg sync.WaitGroup
