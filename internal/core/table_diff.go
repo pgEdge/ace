@@ -123,12 +123,6 @@ type HashResult struct {
 
 type RangeResults map[string]HashResult
 
-type PairKey struct {
-	rangeIndex int
-	node1      string
-	node2      string
-}
-
 func NewLogger(out *os.File, level LogLevel) *Logger {
 	return &Logger{
 		level:  level,
@@ -578,8 +572,17 @@ func (t *TableDiffTask) RunChecks(skipValidation bool) error {
 		hostname, _ := nodeInfo["Name"].(string)
 		hostIP, _ := nodeInfo["PublicIP"].(string)
 		user, _ := nodeInfo["DBUser"].(string)
-		port, _ := nodeInfo["Port"].(float64)
-		if port == 0 {
+
+		var port float64
+		portVal, ok := nodeInfo["Port"]
+		if ok {
+			switch v := portVal.(type) {
+			case string:
+				port, _ = strconv.ParseFloat(v, 64)
+			case float64:
+				port = v
+			}
+		} else {
 			port = 5432
 		}
 

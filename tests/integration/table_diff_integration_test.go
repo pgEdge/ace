@@ -22,44 +22,18 @@ func newTestTableDiffTask(
 	nodes []string,
 ) *core.TableDiffTask {
 	task := core.NewTableDiffTask()
-	task.ClusterName = pgCluster.ClusterName
+	task.ClusterName = "test_cluster"
 	task.DBName = dbName
 	task.QualifiedTableName = qualifiedTableName
 	task.Nodes = strings.Join(nodes, ",")
-	task.NodeList = nodes
 	task.Output = "json"
 	task.BlockSize = 1000
 	task.CompareUnitSize = 100
 	task.ConcurrencyFactor = 1
 
-	task.SetDBName(dbName)
-	task.SetClusterNodes(pgCluster.ClusterNodes)
-	task.DerivedFields.HostMap = make(map[string]string)
-	if pgCluster.ClusterNodes != nil {
-		for _, cn := range pgCluster.ClusterNodes {
-			name, _ := cn["Name"].(string)
-			publicIP, _ := cn["PublicIP"].(string)
-			portF, _ := cn["Port"].(float64)
-			port := int(portF)
-			task.DerivedFields.HostMap[fmt.Sprintf("%s:%d", publicIP, port)] = name
-		}
-	}
-
-	schemaParts := strings.SplitN(qualifiedTableName, ".", 2)
-	if len(schemaParts) == 2 {
-		task.Schema = schemaParts[0]
-		task.Table = strings.Trim(schemaParts[1], "\"")
-	} else {
-		log.Printf("Warning: qualifiedTableName '%s' did not split into schema and table as expected. Using defaults.", qualifiedTableName)
-		task.Schema = testSchema
-		task.Table = qualifiedTableName
-	}
-
 	task.DiffResult = types.DiffOutput{
 		NodeDiffs: make(map[string]types.DiffByNodePair),
 		Summary: types.DiffSummary{
-			Schema:            task.Schema,
-			Table:             task.Table,
 			Nodes:             nodes,
 			BlockSize:         task.BlockSize,
 			CompareUnitSize:   task.CompareUnitSize,
@@ -68,44 +42,21 @@ func newTestTableDiffTask(
 		},
 	}
 
-	task.Key = []string{"index"}
-	task.SimplePrimaryKey = true
-	task.Cols = []string{
-		"index", "customer_id", "first_name", "last_name", "company",
-		"city", "country", "phone_1", "phone_2", "email",
-		"subscription_date", "website",
-	}
-
-	if task.Table == "CustomersMixedCase" {
-		task.Key = []string{"ID"}
-		task.Cols = []string{"ID", "FirstName", "LastName", "EmailAddress"}
-		task.SimplePrimaryKey = true
-	} else if task.Table == "data_type_test_table" {
-		task.Key = []string{"id"}
-		task.SimplePrimaryKey = true
-		task.Cols = []string{
-			"id", "col_smallint", "col_integer", "col_bigint", "col_numeric", "col_real", "col_double",
-			"col_varchar", "col_text", "col_char", "col_boolean", "col_date", "col_timestamp",
-			"col_timestamptz", "col_jsonb", "col_json", "col_bytea", "col_int_array",
-		}
-	} else if task.Table == "composite_key_table" {
-		task.Key = []string{"org_id", "user_id"}
-		task.SimplePrimaryKey = false
-		task.Cols = []string{"org_id", "user_id", "data_col_1", "data_col_2"}
-	} else if strings.HasSuffix(task.Table, "_filtered") {
-		task.Key = []string{"index"}
-		task.SimplePrimaryKey = true
-		task.Cols = []string{
-			"index", "customer_id", "first_name", "last_name", "company",
-			"city", "country", "phone_1", "phone_2", "email",
-			"subscription_date", "website",
-		}
-	}
-
 	return task
 }
 
-func repairTable(t *testing.T, sourceOfTruthNode string) {
+func newTestTableRepairTask(t *testing.T, sourceOfTruthNode, qualifiedTableName, diffFilePath string) *core.TableRepairTask {
+	task := core.NewTableRepairTask()
+	task.ClusterName = "test_cluster"
+	task.DBName = dbName
+	task.SourceOfTruth = sourceOfTruthNode
+	task.QualifiedTableName = qualifiedTableName
+	task.DiffFilePath = diffFilePath
+	task.Nodes = "all"
+	return task
+}
+
+func repairTable(t *testing.T, qualifiedTableName, sourceOfTruthNode string) {
 	t.Helper()
 
 	files, err := filepath.Glob("*_diffs-*.json")
@@ -134,24 +85,13 @@ func repairTable(t *testing.T, sourceOfTruthNode string) {
 	latestDiffFile := files[0]
 	log.Printf("Using latest diff file for repair: %s", latestDiffFile)
 
-	repairTask := core.NewTableRepairTask()
-	repairTask.ClusterName = pgCluster.ClusterName
-	repairTask.DBName = dbName
-	repairTask.SourceOfTruth = sourceOfTruthNode
-	repairTask.QualifiedTableName = "public.customers"
-	repairTask.DiffFilePath = latestDiffFile
-	repairTask.SetDBName(dbName)
-	repairTask.SetClusterNodes(pgCluster.ClusterNodes)
+	repairTask := newTestTableRepairTask(t, sourceOfTruthNode, qualifiedTableName, latestDiffFile)
 
-	if err := repairTask.ValidateAndPrepare(); err != nil {
-		t.Fatalf("Failed to validate and prepare repair task: %v", err)
-	}
-
-	if err := repairTask.Run(true); err != nil {
+	if err := repairTask.Run(false); err != nil {
 		t.Fatalf("Failed to repair table: %v", err)
 	}
 
-	log.Printf("Table 'public.customers' repaired successfully using %s as source of truth.", sourceOfTruthNode)
+	log.Printf("Table '%s' repaired successfully using %s as source of truth.", qualifiedTableName, sourceOfTruthNode)
 }
 
 func TestTableDiff_NoDifferences(t *testing.T) {
@@ -159,6 +99,11 @@ func TestTableDiff_NoDifferences(t *testing.T) {
 	qualifiedTableName := fmt.Sprintf("%s.%s", testSchema, tableName)
 	nodesToCompare := []string{serviceN1, serviceN2}
 	tdTask := newTestTableDiffTask(t, qualifiedTableName, nodesToCompare)
+
+	err := tdTask.RunChecks(false)
+	if err != nil {
+		t.Fatalf("table-diff validations and checks failed: %v", err)
+	}
 
 	if err := tdTask.ExecuteTask(false); err != nil {
 		t.Fatalf("ExecuteTask failed: %v", err)
@@ -193,7 +138,7 @@ func TestTableDiff_DataOnlyOnNode1(t *testing.T) {
 	qualifiedTableName := fmt.Sprintf("%s.%s", testSchema, tableName)
 
 	t.Cleanup(func() {
-		repairTable(t, serviceN1)
+		repairTable(t, qualifiedTableName, serviceN1)
 	})
 
 	// Truncate the table on the second node to create the diff
@@ -206,6 +151,11 @@ func TestTableDiff_DataOnlyOnNode1(t *testing.T) {
 
 	nodesToCompare := []string{serviceN1, serviceN2}
 	tdTask := newTestTableDiffTask(t, qualifiedTableName, nodesToCompare)
+
+	err = tdTask.RunChecks(false)
+	if err != nil {
+		t.Fatalf("table-diff validations and checks failed: %v", err)
+	}
 
 	if err := tdTask.ExecuteTask(false); err != nil {
 		t.Fatalf("ExecuteTask failed: %v", err)
@@ -262,13 +212,30 @@ func TestTableDiff_DataOnlyOnNode1(t *testing.T) {
 	log.Println("TestTableDiff_DataOnlyOnNode1 completed.")
 }
 
+func TestIntermediateStep(t *testing.T) {
+	var rowCount int
+	err := pgCluster.Node2Pool.QueryRow(context.Background(), "select count(*) from customers").Scan(&rowCount)
+
+	if err != nil {
+		t.Fatalf("Failed to count rows in customers on node2: %v", err)
+	}
+
+	if rowCount != 10000 {
+		t.Fatalf("Expected 10000 rows in customers on node2, got %d", rowCount)
+	}
+
+	log.Printf("Row count in customers on node2: %d", rowCount)
+
+	log.Println("TestIntermediateStep completed.")
+}
+
 func TestTableDiff_DataOnlyOnNode2(t *testing.T) {
 	ctx := context.Background()
 	tableName := "customers"
 	qualifiedTableName := fmt.Sprintf("%s.%s", testSchema, tableName)
 
 	t.Cleanup(func() {
-		repairTable(t, serviceN2)
+		repairTable(t, qualifiedTableName, serviceN2)
 	})
 
 	_, err := pgCluster.Node1Pool.Exec(ctx, fmt.Sprintf("TRUNCATE TABLE %s.%s CASCADE", testSchema, tableName))
@@ -280,6 +247,11 @@ func TestTableDiff_DataOnlyOnNode2(t *testing.T) {
 
 	nodesToCompare := []string{serviceN1, serviceN2}
 	tdTask := newTestTableDiffTask(t, qualifiedTableName, nodesToCompare)
+
+	err = tdTask.RunChecks(false)
+	if err != nil {
+		t.Fatalf("table-diff validations and checks failed: %v", err)
+	}
 
 	if err := tdTask.ExecuteTask(false); err != nil {
 		t.Fatalf("ExecuteTask failed: %v", err)
@@ -342,7 +314,7 @@ func TestTableDiff_ModifiedRows(t *testing.T) {
 	qualifiedTableName := fmt.Sprintf("%s.%s", testSchema, tableName)
 
 	t.Cleanup(func() {
-		repairTable(t, serviceN1)
+		repairTable(t, qualifiedTableName, serviceN1)
 	})
 
 	modifications := []struct {
@@ -389,7 +361,12 @@ func TestTableDiff_ModifiedRows(t *testing.T) {
 	nodesToCompare := []string{serviceN1, serviceN2}
 	tdTask := newTestTableDiffTask(t, qualifiedTableName, nodesToCompare)
 
-	if err := tdTask.ExecuteTask(false); err != nil {
+	err := tdTask.RunChecks(false)
+	if err != nil {
+		t.Fatalf("table-diff validations and checks failed: %v", err)
+	}
+
+	if err = tdTask.ExecuteTask(false); err != nil {
 		t.Fatalf("ExecuteTask failed: %v", err)
 	}
 
@@ -552,11 +529,12 @@ CREATE TABLE IF NOT EXISTS %s (
 		nodesToCompare,
 	)
 
-	tdTask.Cols = []string{"ID", "FirstName", "LastName", "EmailAddress"}
-	tdTask.Key = []string{"ID"}
-	tdTask.SimplePrimaryKey = true
+	err := tdTask.RunChecks(false)
+	if err != nil {
+		t.Fatalf("table-diff validations and checks failed: %v", err)
+	}
 
-	if err := tdTask.ExecuteTask(false); err != nil {
+	if err = tdTask.ExecuteTask(false); err != nil {
 		t.Fatalf("ExecuteTask failed for mixed-case table: %v", err)
 	}
 
@@ -698,28 +676,11 @@ CREATE TABLE IF NOT EXISTS %s.%s (
 
 	nodesToCompare := []string{serviceN1, serviceN2}
 	tdTask := newTestTableDiffTask(t, qualifiedTableName, nodesToCompare)
-	tdTask.Cols = []string{
-		"id",
-		"col_smallint",
-		"col_integer",
-		"col_bigint",
-		"col_numeric",
-		"col_real",
-		"col_double",
-		"col_varchar",
-		"col_text",
-		"col_char",
-		"col_boolean",
-		"col_date",
-		"col_timestamp",
-		"col_timestamptz",
-		"col_jsonb",
-		"col_json",
-		"col_bytea",
-		"col_int_array",
+
+	err := tdTask.RunChecks(false)
+	if err != nil {
+		t.Fatalf("table-diff validations and checks failed: %v", err)
 	}
-	tdTask.Key = []string{"id"}
-	tdTask.SimplePrimaryKey = true
 
 	if err := tdTask.ExecuteTask(false); err != nil {
 		t.Fatalf("ExecuteTask failed for data type table: %v", err)
@@ -817,7 +778,7 @@ func TestTableDiff_TableFiltering(t *testing.T) {
 	qualifiedTableName := fmt.Sprintf("%s.%s", testSchema, tableName)
 
 	t.Cleanup(func() {
-		repairTable(t, serviceN1)
+		repairTable(t, qualifiedTableName, serviceN1)
 	})
 
 	updatesNode2 := []struct {
@@ -867,36 +828,19 @@ func TestTableDiff_TableFiltering(t *testing.T) {
 			t.Fatalf("Failed to disable spock repair mode on node %s: %v", serviceN2, err)
 		}
 	}
-	log.Printf("Data modified on %s for filter test (country = 'China')", serviceN2)
+	log.Printf("Data modified on %s for filter test", serviceN2)
 
 	nodesToCompare := []string{serviceN1, serviceN2}
 	tdTask := newTestTableDiffTask(t, qualifiedTableName, nodesToCompare)
 	tdTask.TableFilter = "index <= 100"
 	tdTask.TaskID = fmt.Sprintf("filter_test_%d", time.Now().UnixNano())
 
-	viewName := fmt.Sprintf("%s_%s_filtered", tdTask.TaskID, tableName)
-	createViewSQLCmd := func(schema, viewBase, tableBase, filter string) string {
-		return fmt.Sprintf("CREATE MATERIALIZED VIEW IF NOT EXISTS %s.\"%s\" AS SELECT * FROM %s.%s WHERE %s",
-			schema, viewBase, schema, tableBase, filter)
-	}
-	_, err := pgCluster.Node1Pool.Exec(
-		ctx,
-		createViewSQLCmd(testSchema, viewName, tableName, tdTask.TableFilter),
-	)
+	err := tdTask.RunChecks(false)
 	if err != nil {
-		t.Fatalf("Failed to create filtered view on Node1: %v", err)
+		t.Fatalf("table-diff validations and checks failed: %v", err)
 	}
-	_, err = pgCluster.Node2Pool.Exec(
-		ctx,
-		createViewSQLCmd(testSchema, viewName, tableName, tdTask.TableFilter),
-	)
-	if err != nil {
-		t.Fatalf("Failed to create filtered view on Node2: %v", err)
-	}
-	tdTask.Table = viewName
-	tdTask.QualifiedTableName = fmt.Sprintf("%s.%s", testSchema, viewName)
 
-	if err := tdTask.ExecuteTask(false); err != nil {
+	if err = tdTask.ExecuteTask(false); err != nil {
 		t.Fatalf("ExecuteTask failed for table filtering test: %v", err)
 	}
 
@@ -962,13 +906,13 @@ func TestTableDiff_TableFiltering(t *testing.T) {
 		}
 	}
 	if !foundIndex1 {
-		t.Errorf("Expected modified row index 1 (Indonesia) not found in filtered diffs")
+		t.Errorf("Expected modified row index 1 not found in filtered diffs")
 	}
 	if !foundIndex2 {
-		t.Errorf("Expected modified row index 2 (China) not found in filtered diffs")
+		t.Errorf("Expected modified row index 2 not found in filtered diffs")
 	}
 	if !foundIndex3 {
-		t.Errorf("Expected modified row index 3 (China) not found in filtered diffs")
+		t.Errorf("Expected modified row index 3 not found in filtered diffs")
 	}
 
 	log.Println("TestTableDiff_TableFiltering completed.")

@@ -30,7 +30,7 @@ type ClusterConfigProvider interface {
 	SetClusterNodes([]map[string]any)
 }
 
-func ParseNodes(nodes interface{}) ([]string, error) {
+func ParseNodes(nodes any) ([]string, error) {
 	var nodeList []string
 
 	switch v := nodes.(type) {
@@ -38,8 +38,11 @@ func ParseNodes(nodes interface{}) ([]string, error) {
 		if v == "all" {
 			return nil, nil
 		}
-		for _, s := range strings.Split(v, ",") {
-			nodeList = append(nodeList, strings.TrimSpace(s))
+		for s := range strings.SplitSeq(v, ",") {
+			trimmed := strings.TrimSpace(s)
+			if trimmed != "" {
+				nodeList = append(nodeList, trimmed)
+			}
 		}
 	case []string:
 		nodeList = v
@@ -302,7 +305,7 @@ func readClusterInfo(t ClusterConfigProvider) error {
 	if len(nodeList) == 0 && nodesFilter == "all" {
 		for i := range config.NodeGroups {
 			node := config.NodeGroups[i]
-			if node.IsActive == "on" {
+			if node.IsActive == "on" || node.IsActive == "yes" {
 				nodeMap := map[string]any{
 					"Name":     node.Name,
 					"PublicIP": node.PublicIP,
@@ -321,8 +324,16 @@ func readClusterInfo(t ClusterConfigProvider) error {
 	} else {
 		for i := range config.NodeGroups {
 			node := config.NodeGroups[i]
-			if node.IsActive == "on" {
-				if slices.Contains(nodeList, node.Name) {
+			if node.IsActive == "on" || node.IsActive == "yes" {
+				var found bool
+				for _, n := range nodeList {
+					if n == node.Name {
+						found = true
+						break
+					}
+				}
+
+				if found {
 					nodeMap := map[string]any{
 						"Name":     node.Name,
 						"PublicIP": node.PublicIP,
@@ -330,6 +341,7 @@ func readClusterInfo(t ClusterConfigProvider) error {
 						"IsActive": node.IsActive,
 					}
 					clusterNodes = append(clusterNodes, nodeMap)
+				} else {
 				}
 			}
 		}

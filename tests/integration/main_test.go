@@ -2,6 +2,7 @@ package integration
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"os"
@@ -12,6 +13,8 @@ import (
 
 	"github.com/docker/go-connections/nat"
 	"github.com/jackc/pgx/v4/pgxpool"
+	"github.com/pgedge/ace/pkg/config"
+	"github.com/pgedge/ace/pkg/types"
 	"github.com/testcontainers/testcontainers-go/modules/compose"
 	"github.com/testcontainers/testcontainers-go/wait"
 )
@@ -200,6 +203,69 @@ func setupPostgresCluster(t *testing.T) error {
 		log.Printf("Ensured pgcrypto extension exists on node %s", node.Name)
 	}
 
+	log.Println("Test data loaded into n1.")
+
+	clusterConfig := types.ClusterConfig{
+		JSONVersion: "1.0",
+		ClusterName: pgCluster.ClusterName,
+		LogLevel:    "info",
+		UpdateDate:  time.Now().Format(time.RFC3339),
+		PGEdge: struct {
+			PGVersion int               `json:"pg_version"`
+			AutoStart string            `json:"auto_start"`
+			Spock     types.SpockConfig `json:"spock"`
+			Databases []types.Database  `json:"databases"`
+		}{
+			PGVersion: 16,
+			AutoStart: "yes",
+			Spock: types.SpockConfig{
+				SpockVersion: "4.0.10",
+				AutoDDL:      "yes",
+			},
+			Databases: []types.Database{
+				{
+					DBName:     dbName,
+					DBUser:     pgEdgeUser,
+					DBPassword: pgEdgePassword,
+				},
+			},
+		},
+		NodeGroups: []types.NodeGroup{
+			{
+				Name:     serviceN1,
+				IsActive: "yes",
+				PublicIP: pgCluster.Node1Host,
+				Port:     pgCluster.Node1Port,
+				Path:     "/usr/local/bin",
+				SSH: struct {
+					OSUser     string `json:"os_user"`
+					PrivateKey string `json:"private_key"`
+				}{OSUser: "pgedge"},
+			},
+			{
+				Name:     serviceN2,
+				IsActive: "yes",
+				PublicIP: pgCluster.Node2Host,
+				Port:     pgCluster.Node2Port,
+				Path:     "/usr/local/bin",
+				SSH: struct {
+					OSUser     string `json:"os_user"`
+					PrivateKey string `json:"private_key"`
+				}{OSUser: "pgedge"},
+			},
+		},
+	}
+
+	jsonData, err := json.MarshalIndent(clusterConfig, "", "  ")
+	if err != nil {
+		return fmt.Errorf("failed to marshal cluster info: %w", err)
+	}
+
+	if err := os.WriteFile("test_cluster.json", jsonData, 0644); err != nil {
+		return fmt.Errorf("failed to write cluster info to test_cluster.json: %w", err)
+	}
+
+	log.Println("Postgres cluster setup complete.")
 	return nil
 }
 
@@ -220,7 +286,7 @@ func teardownPostgresCluster(t *testing.T) {
 			t.Logf("Failed to tear down Docker Compose: %v", execError)
 		}
 	}
-	log.Println("Cleaning up diff files...")
+	log.Printf("Cleaning up diff files...")
 	files, err := filepath.Glob("*_diffs-*.json")
 	if err != nil {
 		t.Logf("Error finding diff files: %v", err)
@@ -233,6 +299,9 @@ func teardownPostgresCluster(t *testing.T) {
 			log.Printf("Removed diff file: %s", f)
 		}
 	}
+	// if err := os.Remove("test_cluster.json"); err != nil && !os.IsNotExist(err) {
+	// 	t.Logf("failed to remove test_cluster.json: %v", err)
+	// }
 }
 
 func TestMain(m *testing.M) {
@@ -240,6 +309,10 @@ func TestMain(m *testing.M) {
 		"TESTCONTAINERS_RYUK_DISABLED",
 		"true",
 	)
+
+	if err := config.Init("../../ace.yaml"); err != nil {
+		log.Fatalf("Failed to load config: %v", err)
+	}
 
 	log.Println("Setting up PostgreSQL cluster for integration tests...")
 	if err := setupPostgresCluster(&testing.T{}); err != nil {
