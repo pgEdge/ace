@@ -2,233 +2,19 @@ package integration
 
 import (
 	"context"
-	"encoding/csv"
 	"fmt"
-	"io"
 	"log"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/jackc/pgx/v4"
 	"github.com/jackc/pgx/v4/pgxpool"
 	"github.com/pgedge/ace/internal/core"
 	"github.com/pgedge/ace/pkg/types"
 )
-
-func createTestTable(ctx context.Context, pool *pgxpool.Pool, schemaName, tableName string) error {
-	createTableSQL := fmt.Sprintf(`
-CREATE SCHEMA IF NOT EXISTS "%s";
-CREATE TABLE IF NOT EXISTS "%s"."%s" (
-    index INT PRIMARY KEY,
-    customer_id TEXT,
-    first_name TEXT,
-    last_name TEXT,
-    company TEXT,
-    city TEXT,
-    country TEXT,
-    phone_1 TEXT,
-    phone_2 TEXT,
-    email TEXT,
-    subscription_date TIMESTAMP,
-    website TEXT
-);`, schemaName, schemaName, tableName)
-
-	_, err := pool.Exec(ctx, createTableSQL)
-	if err != nil {
-		return fmt.Errorf("failed to create table %s.%s: %w", schemaName, tableName, err)
-	}
-	log.Printf("Table %s.%s created successfully or already exists.", schemaName, tableName)
-	return nil
-}
-
-func loadDataFromCSV(
-	ctx context.Context,
-	pool *pgxpool.Pool,
-	schemaName, tableName, csvFilePath string,
-) error {
-	file, err := os.Open(csvFilePath)
-	if err != nil {
-		return fmt.Errorf("failed to open CSV file %s: %w", csvFilePath, err)
-	}
-	defer file.Close()
-
-	reader := csv.NewReader(file)
-	headers, err := reader.Read()
-	if err != nil {
-		if err == io.EOF {
-			return fmt.Errorf("CSV file %s is empty or has no header row", csvFilePath)
-		}
-		return fmt.Errorf("failed to read header from CSV %s: %w", csvFilePath, err)
-	}
-
-	mappedDBHeaders := make([]string, 0, len(headers))
-	originalHeaderIndices := make([]int, 0, len(headers))
-
-	headerToDBMap := map[string]string{
-		"index":             "index",
-		"customer id":       "customer_id",
-		"first name":        "first_name",
-		"last name":         "last_name",
-		"company":           "company",
-		"city":              "city",
-		"country":           "country",
-		"phone 1":           "phone_1",
-		"phone_1":           "phone_1",
-		"phone 2":           "phone_2",
-		"phone_2":           "phone_2",
-		"email":             "email",
-		"subscription date": "subscription_date",
-		"website":           "website",
-	}
-
-	for i, h := range headers {
-		csvHeaderKey := strings.ToLower(strings.ReplaceAll(strings.TrimSpace(h), "_", " "))
-
-		dbColName, known := headerToDBMap[csvHeaderKey]
-		if known {
-			mappedDBHeaders = append(mappedDBHeaders, dbColName)
-			originalHeaderIndices = append(originalHeaderIndices, i)
-		} else {
-			log.Printf("Warning: CSV header '%s' (normalized to '%s') in %s is not mapped and will be skipped.", h, csvHeaderKey, csvFilePath)
-		}
-	}
-
-	if len(mappedDBHeaders) == 0 {
-		return fmt.Errorf(
-			"no usable CSV headers found in %s after mapping. Original headers: %v",
-			csvFilePath,
-			headers,
-		)
-	}
-	log.Printf("Using mapped DB headers for %s.%s: %v", schemaName, tableName, mappedDBHeaders)
-
-	qualifiedTableName := pgx.Identifier{schemaName, tableName}
-	var rows [][]any
-	rowCount := 0
-
-	for {
-		record, err := reader.Read()
-		if err == io.EOF {
-			break
-		}
-		rowCount++
-		if err != nil {
-			return fmt.Errorf(
-				"failed to read data record %d from CSV %s: %w",
-				rowCount,
-				csvFilePath,
-				err,
-			)
-		}
-
-		rowValues := make([]any, len(mappedDBHeaders))
-		for i, dbHeaderName := range mappedDBHeaders {
-			originalCsvColIndex := originalHeaderIndices[i]
-			valueStr := record[originalCsvColIndex]
-
-			if dbHeaderName == "index" {
-				var intVal int
-				if valueStr == "" {
-					return fmt.Errorf(
-						"primary key 'index' is empty in CSV row %d, file %s",
-						rowCount,
-						csvFilePath,
-					)
-				}
-				_, errScan := fmt.Sscan(valueStr, &intVal)
-				if errScan != nil {
-					return fmt.Errorf(
-						"failed to parse 'index' value '%s' to int in CSV row %d, file %s: %w",
-						valueStr,
-						rowCount,
-						csvFilePath,
-						errScan,
-					)
-				}
-				rowValues[i] = intVal
-			} else if dbHeaderName == "subscription_date" {
-				if valueStr == "" {
-					rowValues[i] = nil
-				} else {
-					layouts := []string{
-						"2006-01-02",
-						"1/2/2006 15:04",
-						"1/2/2006",
-						time.RFC3339,
-						"2006-01-02T15:04:05Z07:00",
-					}
-					var parsedTime time.Time
-					var errTime error
-					success := false
-					for _, layout := range layouts {
-						parsedTime, errTime = time.Parse(layout, valueStr)
-						if errTime == nil {
-							success = true
-							break
-						}
-					}
-
-					if !success {
-						return fmt.Errorf(
-							"failed to parse 'subscription_date' value '%s' to time.Time with any known layout in CSV row %d, file %s: last error: %w",
-							valueStr,
-							rowCount,
-							csvFilePath,
-							errTime,
-						)
-					}
-					rowValues[i] = parsedTime
-				}
-			} else {
-				if valueStr == "" {
-					rowValues[i] = nil
-				} else {
-					rowValues[i] = valueStr
-				}
-			}
-		}
-		rows = append(rows, rowValues)
-	}
-
-	if len(rows) == 0 {
-		log.Printf(
-			"No data rows found or processed in CSV %s for table %s.%s",
-			csvFilePath,
-			schemaName,
-			tableName,
-		)
-		return nil
-	}
-
-	copyCount, err := pool.CopyFrom(
-		ctx,
-		qualifiedTableName,
-		mappedDBHeaders,
-		pgx.CopyFromRows(rows),
-	)
-	if err != nil {
-		return fmt.Errorf(
-			"failed to copy data from CSV %s to table %s (parsed as %s): %w. Used DB Headers: %v",
-			csvFilePath,
-			tableName,
-			qualifiedTableName.Sanitize(),
-			err,
-			mappedDBHeaders,
-		)
-	}
-
-	log.Printf(
-		"Successfully loaded %d rows from %s into %s.%s",
-		copyCount,
-		csvFilePath,
-		schemaName,
-		tableName,
-	)
-	return nil
-}
 
 func newTestTableDiffTask(
 	t *testing.T,
@@ -236,44 +22,18 @@ func newTestTableDiffTask(
 	nodes []string,
 ) *core.TableDiffTask {
 	task := core.NewTableDiffTask()
-	task.ClusterName = pgCluster.ClusterName
+	task.ClusterName = "test_cluster"
 	task.DBName = dbName
 	task.QualifiedTableName = qualifiedTableName
 	task.Nodes = strings.Join(nodes, ",")
-	task.NodeList = nodes
 	task.Output = "json"
 	task.BlockSize = 1000
 	task.CompareUnitSize = 100
 	task.ConcurrencyFactor = 1
 
-	task.SetDBName(dbName)
-	task.SetClusterNodes(pgCluster.ClusterNodes)
-	task.DerivedFields.HostMap = make(map[string]string)
-	if pgCluster.ClusterNodes != nil {
-		for _, cn := range pgCluster.ClusterNodes {
-			name, _ := cn["Name"].(string)
-			publicIP, _ := cn["PublicIP"].(string)
-			portF, _ := cn["Port"].(float64)
-			port := int(portF)
-			task.DerivedFields.HostMap[fmt.Sprintf("%s:%d", publicIP, port)] = name
-		}
-	}
-
-	schemaParts := strings.SplitN(qualifiedTableName, ".", 2)
-	if len(schemaParts) == 2 {
-		task.Schema = schemaParts[0]
-		task.Table = strings.Trim(schemaParts[1], "\"")
-	} else {
-		log.Printf("Warning: qualifiedTableName '%s' did not split into schema and table as expected. Using defaults.", qualifiedTableName)
-		task.Schema = testSchema
-		task.Table = qualifiedTableName
-	}
-
 	task.DiffResult = types.DiffOutput{
 		NodeDiffs: make(map[string]types.DiffByNodePair),
 		Summary: types.DiffSummary{
-			Schema:            task.Schema,
-			Table:             task.Table,
 			Nodes:             nodes,
 			BlockSize:         task.BlockSize,
 			CompareUnitSize:   task.CompareUnitSize,
@@ -282,76 +42,68 @@ func newTestTableDiffTask(
 		},
 	}
 
-	task.Key = []string{"index"}
-	task.SimplePrimaryKey = true
-	task.Cols = []string{
-		"index", "customer_id", "first_name", "last_name", "company",
-		"city", "country", "phone_1", "phone_2", "email",
-		"subscription_date", "website",
-	}
-
-	if task.Table == "CustomersMixedCase" {
-		task.Key = []string{"ID"}
-		task.Cols = []string{"ID", "FirstName", "LastName", "EmailAddress"}
-		task.SimplePrimaryKey = true
-	} else if task.Table == "data_type_test_table" {
-		task.Key = []string{"id"}
-		task.SimplePrimaryKey = true
-		task.Cols = []string{
-			"id", "col_smallint", "col_integer", "col_bigint", "col_numeric", "col_real", "col_double",
-			"col_varchar", "col_text", "col_char", "col_boolean", "col_date", "col_timestamp",
-			"col_timestamptz", "col_jsonb", "col_json", "col_bytea", "col_int_array",
-		}
-	} else if task.Table == "composite_key_table" {
-		task.Key = []string{"org_id", "user_id"}
-		task.SimplePrimaryKey = false
-		task.Cols = []string{"org_id", "user_id", "data_col_1", "data_col_2"}
-	} else if strings.HasSuffix(task.Table, "_filtered") {
-		task.Key = []string{"index"}
-		task.SimplePrimaryKey = true
-		task.Cols = []string{
-			"index", "customer_id", "first_name", "last_name", "company",
-			"city", "country", "phone_1", "phone_2", "email",
-			"subscription_date", "website",
-		}
-	}
-
 	return task
 }
 
-func TestTableDiff_NoDifferences(t *testing.T) {
-	ctx := context.Background()
-	tableName := "customers_no_diff"
-	qualifiedTableName := fmt.Sprintf("%s.%s", testSchema, tableName)
+func newTestTableRepairTask(sourceOfTruthNode, qualifiedTableName, diffFilePath string) *core.TableRepairTask {
+	task := core.NewTableRepairTask()
+	task.ClusterName = "test_cluster"
+	task.DBName = dbName
+	task.SourceOfTruth = sourceOfTruthNode
+	task.QualifiedTableName = qualifiedTableName
+	task.DiffFilePath = diffFilePath
+	task.Nodes = "all"
+	return task
+}
 
-	for _, pool := range []*pgxpool.Pool{pgCluster.Node1Pool, pgCluster.Node2Pool} {
-		if err := createTestTable(ctx, pool, testSchema, tableName); err != nil {
-			t.Fatalf("Failed to create table %s: %v", qualifiedTableName, err)
-		}
-		_, err := pool.Exec(ctx, fmt.Sprintf("TRUNCATE TABLE %s.%s CASCADE", testSchema, tableName))
-		if err != nil {
-			t.Fatalf("Failed to truncate table %s: %v", qualifiedTableName, err)
-		}
-	}
+func repairTable(t *testing.T, qualifiedTableName, sourceOfTruthNode string) {
+	t.Helper()
 
-	csvPath, err := filepath.Abs(defaultCsvFile)
+	files, err := filepath.Glob("*_diffs-*.json")
 	if err != nil {
-		t.Fatalf("Failed to get absolute path for CSV file %s: %v", defaultCsvFile, err)
+		t.Fatalf("Failed to find diff files: %v", err)
 	}
-	for i, pool := range []*pgxpool.Pool{pgCluster.Node1Pool, pgCluster.Node2Pool} {
-		nodeName := pgCluster.ClusterNodes[i]["Name"].(string)
-		if err := loadDataFromCSV(ctx, pool, testSchema, tableName, csvPath); err != nil {
-			t.Fatalf(
-				"Failed to load CSV data into %s on node %s: %v",
-				qualifiedTableName,
-				nodeName,
-				err,
-			)
-		}
+	if len(files) == 0 {
+		log.Println("No diff file found to repair from, skipping repair.")
+		return
 	}
 
+	sort.Slice(files, func(i, j int) bool {
+		fi, errI := os.Stat(files[i])
+		if errI != nil {
+			t.Logf("Warning: could not stat file %s: %v", files[i], errI)
+			return false
+		}
+		fj, errJ := os.Stat(files[j])
+		if errJ != nil {
+			t.Logf("Warning: could not stat file %s: %v", files[j], errJ)
+			return false
+		}
+		return fi.ModTime().After(fj.ModTime())
+	})
+
+	latestDiffFile := files[0]
+	log.Printf("Using latest diff file for repair: %s", latestDiffFile)
+
+	repairTask := newTestTableRepairTask(sourceOfTruthNode, qualifiedTableName, latestDiffFile)
+
+	if err := repairTask.Run(false); err != nil {
+		t.Fatalf("Failed to repair table: %v", err)
+	}
+
+	log.Printf("Table '%s' repaired successfully using %s as source of truth.", qualifiedTableName, sourceOfTruthNode)
+}
+
+func TestTableDiff_NoDifferences(t *testing.T) {
+	tableName := "customers"
+	qualifiedTableName := fmt.Sprintf("%s.%s", testSchema, tableName)
 	nodesToCompare := []string{serviceN1, serviceN2}
 	tdTask := newTestTableDiffTask(t, qualifiedTableName, nodesToCompare)
+
+	err := tdTask.RunChecks(false)
+	if err != nil {
+		t.Fatalf("table-diff validations and checks failed: %v", err)
+	}
 
 	if err := tdTask.ExecuteTask(false); err != nil {
 		t.Fatalf("ExecuteTask failed: %v", err)
@@ -382,38 +134,28 @@ func TestTableDiff_NoDifferences(t *testing.T) {
 
 func TestTableDiff_DataOnlyOnNode1(t *testing.T) {
 	ctx := context.Background()
-	tableName := "customers_node1_only"
+	tableName := "customers"
 	qualifiedTableName := fmt.Sprintf("%s.%s", testSchema, tableName)
-	csvPath, err := filepath.Abs(defaultCsvFile)
+
+	t.Cleanup(func() {
+		repairTable(t, qualifiedTableName, serviceN1)
+	})
+
+	// Truncate the table on the second node to create the diff
+	_, err := pgCluster.Node2Pool.Exec(ctx, fmt.Sprintf("TRUNCATE TABLE %s.%s CASCADE", testSchema, tableName))
 	if err != nil {
-		t.Fatalf("Failed to get absolute path for CSV file %s: %v", defaultCsvFile, err)
+		t.Fatalf("Failed to truncate table %s on node2: %v", qualifiedTableName, err)
 	}
 
-	for _, pool := range []*pgxpool.Pool{pgCluster.Node1Pool, pgCluster.Node2Pool} {
-		if err := createTestTable(ctx, pool, testSchema, tableName); err != nil {
-			t.Fatalf("Failed to create table %s: %v", qualifiedTableName, err)
-		}
-		_, err := pool.Exec(ctx, fmt.Sprintf("TRUNCATE TABLE %s.%s CASCADE", testSchema, tableName))
-		if err != nil {
-			t.Fatalf("Failed to truncate table %s: %v", qualifiedTableName, err)
-		}
-	}
-
-	if pgCluster.Node1Pool == nil {
-		t.Fatal("pgCluster.Node1Pool is nil before loading data for DataOnlyOnNode1")
-	}
-	if err := loadDataFromCSV(ctx, pgCluster.Node1Pool, testSchema, tableName, csvPath); err != nil {
-		t.Fatalf(
-			"Failed to load CSV data into %s on node %s: %v",
-			qualifiedTableName,
-			serviceN1,
-			err,
-		)
-	}
 	log.Printf("Data loaded only into %s for table %s", serviceN1, qualifiedTableName)
 
 	nodesToCompare := []string{serviceN1, serviceN2}
 	tdTask := newTestTableDiffTask(t, qualifiedTableName, nodesToCompare)
+
+	err = tdTask.RunChecks(false)
+	if err != nil {
+		t.Fatalf("table-diff validations and checks failed: %v", err)
+	}
 
 	if err := tdTask.ExecuteTask(false); err != nil {
 		t.Fatalf("ExecuteTask failed: %v", err)
@@ -433,19 +175,10 @@ func TestTableDiff_DataOnlyOnNode1(t *testing.T) {
 		)
 	}
 
-	file, _ := os.Open(csvPath)
-	defer file.Close()
-	csvReader := csv.NewReader(file)
-	_, _ = csvReader.Read()
-	expectedDiffCount := 0
-	for {
-		if _, err := csvReader.Read(); err != nil {
-			if err == io.EOF {
-				break
-			}
-			t.Fatalf("Error reading CSV for count: %v", err)
-		}
-		expectedDiffCount++
+	var expectedDiffCount int
+	err = pgCluster.Node1Pool.QueryRow(ctx, fmt.Sprintf("SELECT count(*) FROM %s", qualifiedTableName)).Scan(&expectedDiffCount)
+	if err != nil {
+		t.Fatalf("Failed to count rows in %s on node1: %v", qualifiedTableName, err)
 	}
 
 	node1OnlyRows := nodeDiffs.Rows[serviceN1]
@@ -481,38 +214,27 @@ func TestTableDiff_DataOnlyOnNode1(t *testing.T) {
 
 func TestTableDiff_DataOnlyOnNode2(t *testing.T) {
 	ctx := context.Background()
-	tableName := "customers_node2_only"
+	tableName := "customers"
 	qualifiedTableName := fmt.Sprintf("%s.%s", testSchema, tableName)
-	csvPath, err := filepath.Abs(defaultCsvFile)
+
+	t.Cleanup(func() {
+		repairTable(t, qualifiedTableName, serviceN2)
+	})
+
+	_, err := pgCluster.Node1Pool.Exec(ctx, fmt.Sprintf("TRUNCATE TABLE %s.%s CASCADE", testSchema, tableName))
 	if err != nil {
-		t.Fatalf("Failed to get absolute path for CSV file %s: %v", defaultCsvFile, err)
+		t.Fatalf("Failed to truncate table %s on node1: %v", qualifiedTableName, err)
 	}
 
-	for _, pool := range []*pgxpool.Pool{pgCluster.Node1Pool, pgCluster.Node2Pool} {
-		if err := createTestTable(ctx, pool, testSchema, tableName); err != nil {
-			t.Fatalf("Failed to create table %s: %v", qualifiedTableName, err)
-		}
-		_, err := pool.Exec(ctx, fmt.Sprintf("TRUNCATE TABLE %s.%s CASCADE", testSchema, tableName))
-		if err != nil {
-			t.Fatalf("Failed to truncate table %s: %v", qualifiedTableName, err)
-		}
-	}
-
-	if pgCluster.Node2Pool == nil {
-		t.Fatal("pgCluster.Node2Pool is nil before loading data for DataOnlyOnNode2")
-	}
-	if err := loadDataFromCSV(ctx, pgCluster.Node2Pool, testSchema, tableName, csvPath); err != nil {
-		t.Fatalf(
-			"Failed to load CSV data into %s on node %s: %v",
-			qualifiedTableName,
-			serviceN2,
-			err,
-		)
-	}
 	log.Printf("Data loaded only into %s for table %s", serviceN2, qualifiedTableName)
 
 	nodesToCompare := []string{serviceN1, serviceN2}
 	tdTask := newTestTableDiffTask(t, qualifiedTableName, nodesToCompare)
+
+	err = tdTask.RunChecks(false)
+	if err != nil {
+		t.Fatalf("table-diff validations and checks failed: %v", err)
+	}
 
 	if err := tdTask.ExecuteTask(false); err != nil {
 		t.Fatalf("ExecuteTask failed: %v", err)
@@ -532,19 +254,10 @@ func TestTableDiff_DataOnlyOnNode2(t *testing.T) {
 		)
 	}
 
-	file, _ := os.Open(csvPath)
-	defer file.Close()
-	csvReader := csv.NewReader(file)
-	_, _ = csvReader.Read()
-	expectedDiffCount := 0
-	for {
-		if _, err := csvReader.Read(); err != nil {
-			if err == io.EOF {
-				break
-			}
-			t.Fatalf("Error reading CSV for count: %v", err)
-		}
-		expectedDiffCount++
+	var expectedDiffCount int
+	err = pgCluster.Node2Pool.QueryRow(ctx, fmt.Sprintf("SELECT count(*) FROM %s", qualifiedTableName)).Scan(&expectedDiffCount)
+	if err != nil {
+		t.Fatalf("Failed to count rows in %s on node2: %v", qualifiedTableName, err)
 	}
 
 	node1OnlyRows := nodeDiffs.Rows[serviceN1]
@@ -580,37 +293,12 @@ func TestTableDiff_DataOnlyOnNode2(t *testing.T) {
 
 func TestTableDiff_ModifiedRows(t *testing.T) {
 	ctx := context.Background()
-	tableName := "customers_modified"
+	tableName := "customers"
 	qualifiedTableName := fmt.Sprintf("%s.%s", testSchema, tableName)
-	csvPath, err := filepath.Abs(defaultCsvFile)
-	if err != nil {
-		t.Fatalf("Failed to get absolute path for CSV file %s: %v", defaultCsvFile, err)
-	}
 
-	for i, pool := range []*pgxpool.Pool{pgCluster.Node1Pool, pgCluster.Node2Pool} {
-		nodeName := pgCluster.ClusterNodes[i]["Name"].(string)
-		if err := createTestTable(ctx, pool, testSchema, tableName); err != nil {
-			t.Fatalf("Failed to create table %s on node %s: %v", qualifiedTableName, nodeName, err)
-		}
-		_, err := pool.Exec(ctx, fmt.Sprintf("TRUNCATE TABLE %s.%s CASCADE", testSchema, tableName))
-		if err != nil {
-			t.Fatalf(
-				"Failed to truncate table %s on node %s: %v",
-				qualifiedTableName,
-				nodeName,
-				err,
-			)
-		}
-		if err := loadDataFromCSV(ctx, pool, testSchema, tableName, csvPath); err != nil {
-			t.Fatalf(
-				"Failed to load CSV data into %s on node %s: %v",
-				qualifiedTableName,
-				nodeName,
-				err,
-			)
-		}
-	}
-	log.Printf("Identical data loaded into %s on both nodes", qualifiedTableName)
+	t.Cleanup(func() {
+		repairTable(t, qualifiedTableName, serviceN1)
+	})
 
 	modifications := []struct {
 		indexVal int
@@ -656,7 +344,12 @@ func TestTableDiff_ModifiedRows(t *testing.T) {
 	nodesToCompare := []string{serviceN1, serviceN2}
 	tdTask := newTestTableDiffTask(t, qualifiedTableName, nodesToCompare)
 
-	if err := tdTask.ExecuteTask(false); err != nil {
+	err := tdTask.RunChecks(false)
+	if err != nil {
+		t.Fatalf("table-diff validations and checks failed: %v", err)
+	}
+
+	if err = tdTask.ExecuteTask(false); err != nil {
 		t.Fatalf("ExecuteTask failed: %v", err)
 	}
 
@@ -819,11 +512,12 @@ CREATE TABLE IF NOT EXISTS %s (
 		nodesToCompare,
 	)
 
-	tdTask.Cols = []string{"ID", "FirstName", "LastName", "EmailAddress"}
-	tdTask.Key = []string{"ID"}
-	tdTask.SimplePrimaryKey = true
+	err := tdTask.RunChecks(false)
+	if err != nil {
+		t.Fatalf("table-diff validations and checks failed: %v", err)
+	}
 
-	if err := tdTask.ExecuteTask(false); err != nil {
+	if err = tdTask.ExecuteTask(false); err != nil {
 		t.Fatalf("ExecuteTask failed for mixed-case table: %v", err)
 	}
 
@@ -965,28 +659,11 @@ CREATE TABLE IF NOT EXISTS %s.%s (
 
 	nodesToCompare := []string{serviceN1, serviceN2}
 	tdTask := newTestTableDiffTask(t, qualifiedTableName, nodesToCompare)
-	tdTask.Cols = []string{
-		"id",
-		"col_smallint",
-		"col_integer",
-		"col_bigint",
-		"col_numeric",
-		"col_real",
-		"col_double",
-		"col_varchar",
-		"col_text",
-		"col_char",
-		"col_boolean",
-		"col_date",
-		"col_timestamp",
-		"col_timestamptz",
-		"col_jsonb",
-		"col_json",
-		"col_bytea",
-		"col_int_array",
+
+	err := tdTask.RunChecks(false)
+	if err != nil {
+		t.Fatalf("table-diff validations and checks failed: %v", err)
 	}
-	tdTask.Key = []string{"id"}
-	tdTask.SimplePrimaryKey = true
 
 	if err := tdTask.ExecuteTask(false); err != nil {
 		t.Fatalf("ExecuteTask failed for data type table: %v", err)
@@ -1080,41 +757,12 @@ CREATE TABLE IF NOT EXISTS %s.%s (
 
 func TestTableDiff_TableFiltering(t *testing.T) {
 	ctx := context.Background()
-	tableName := "customers_filter_test"
+	tableName := "customers"
 	qualifiedTableName := fmt.Sprintf("%s.%s", testSchema, tableName)
-	csvPath, err := filepath.Abs(defaultCsvFile)
-	if err != nil {
-		t.Fatalf("Failed to get absolute path for CSV file %s: %v", defaultCsvFile, err)
-	}
 
-	for i, pool := range []*pgxpool.Pool{pgCluster.Node1Pool, pgCluster.Node2Pool} {
-		nodeNameForLog := pgCluster.ClusterNodes[i]["Name"].(string)
-		if err := createTestTable(ctx, pool, testSchema, tableName); err != nil {
-			t.Fatalf(
-				"Failed to create table %s on node %s: %v",
-				qualifiedTableName,
-				nodeNameForLog,
-				err,
-			)
-		}
-		_, err := pool.Exec(ctx, fmt.Sprintf("TRUNCATE TABLE %s.%s CASCADE", testSchema, tableName))
-		if err != nil {
-			t.Fatalf(
-				"Failed to truncate table %s on node %s: %v",
-				qualifiedTableName,
-				nodeNameForLog,
-				err,
-			)
-		}
-		if err := loadDataFromCSV(ctx, pool, testSchema, tableName, csvPath); err != nil {
-			t.Fatalf(
-				"Failed to load CSV data into %s on node %s: %v",
-				qualifiedTableName,
-				nodeNameForLog,
-				err,
-			)
-		}
-	}
+	t.Cleanup(func() {
+		repairTable(t, qualifiedTableName, serviceN1)
+	})
 
 	updatesNode2 := []struct {
 		indexVal int
@@ -1163,35 +811,19 @@ func TestTableDiff_TableFiltering(t *testing.T) {
 			t.Fatalf("Failed to disable spock repair mode on node %s: %v", serviceN2, err)
 		}
 	}
-	log.Printf("Data modified on %s for filter test (country = 'China')", serviceN2)
+	log.Printf("Data modified on %s for filter test", serviceN2)
 
 	nodesToCompare := []string{serviceN1, serviceN2}
 	tdTask := newTestTableDiffTask(t, qualifiedTableName, nodesToCompare)
 	tdTask.TableFilter = "index <= 100"
 	tdTask.TaskID = fmt.Sprintf("filter_test_%d", time.Now().UnixNano())
 
-	viewName := fmt.Sprintf("%s_%s_filtered", tdTask.TaskID, tableName)
-	createViewSQLCmd := func(schema, viewBase, tableBase, filter string) string {
-		return fmt.Sprintf("CREATE MATERIALIZED VIEW IF NOT EXISTS %s.\"%s\" AS SELECT * FROM %s.%s WHERE %s",
-			schema, viewBase, schema, tableBase, filter)
-	}
-	_, err = pgCluster.Node1Pool.Exec(
-		ctx,
-		createViewSQLCmd(testSchema, viewName, tableName, tdTask.TableFilter),
-	)
+	err := tdTask.RunChecks(false)
 	if err != nil {
-		t.Fatalf("Failed to create filtered view on Node1: %v", err)
+		t.Fatalf("table-diff validations and checks failed: %v", err)
 	}
-	_, err = pgCluster.Node2Pool.Exec(
-		ctx,
-		createViewSQLCmd(testSchema, viewName, tableName, tdTask.TableFilter),
-	)
-	if err != nil {
-		t.Fatalf("Failed to create filtered view on Node2: %v", err)
-	}
-	tdTask.Table = viewName
 
-	if err := tdTask.ExecuteTask(false); err != nil {
+	if err = tdTask.ExecuteTask(false); err != nil {
 		t.Fatalf("ExecuteTask failed for table filtering test: %v", err)
 	}
 
@@ -1257,13 +889,13 @@ func TestTableDiff_TableFiltering(t *testing.T) {
 		}
 	}
 	if !foundIndex1 {
-		t.Errorf("Expected modified row index 1 (Indonesia) not found in filtered diffs")
+		t.Errorf("Expected modified row index 1 not found in filtered diffs")
 	}
 	if !foundIndex2 {
-		t.Errorf("Expected modified row index 2 (China) not found in filtered diffs")
+		t.Errorf("Expected modified row index 2 not found in filtered diffs")
 	}
 	if !foundIndex3 {
-		t.Errorf("Expected modified row index 3 (China) not found in filtered diffs")
+		t.Errorf("Expected modified row index 3 not found in filtered diffs")
 	}
 
 	log.Println("TestTableDiff_TableFiltering completed.")

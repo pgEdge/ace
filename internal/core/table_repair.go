@@ -9,7 +9,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v4"
@@ -53,8 +52,7 @@ type TableRepairTask struct {
 
 	Pools map[string]*pgxpool.Pool
 
-	rawDiffs types.DiffOutput
-	mu       sync.Mutex
+	RawDiffs types.DiffOutput
 	report   *RepairReport
 }
 
@@ -147,15 +145,23 @@ func (t *TableRepairTask) ValidateAndPrepare() error {
 		return fmt.Errorf("schema and table name parts cannot be empty in %s", t.QualifiedTableName)
 	}
 
+	// Reading nodelist is unnecessary since the diff file will contain that info.
+	// TODO: Remove this once checks are handled correctly in readClusterInfo
+	nodeList, err := ParseNodes(t.Nodes)
+	if err != nil {
+		return fmt.Errorf("nodes should be a comma-separated list of nodenames. E.g., nodes=\"n1,n2\". Error: %w", err)
+	}
+	t.NodeList = nodeList
+
 	if err := readClusterInfo(t); err != nil {
 		return fmt.Errorf("failed to read cluster info: %w", err)
 	}
 
-	// TODO: Revisit to optimise
 	for _, nodeInfo := range t.ClusterNodes {
 		hostname, okHostname := nodeInfo["Name"].(string)
 		publicIP, okPublicIP := nodeInfo["PublicIP"].(string)
-		port, okPort := nodeInfo["Port"].(string) // From JSON, often float64
+		port, okPort := nodeInfo["Port"].(string)
+
 		if !okHostname || !okPublicIP || !okPort {
 			log.Printf("Warning: Skipping node with incomplete info: %+v", nodeInfo)
 			continue
@@ -180,16 +186,16 @@ func (t *TableRepairTask) ValidateAndPrepare() error {
 	if err != nil {
 		return fmt.Errorf("failed to read diff file %s: %w", t.DiffFilePath, err)
 	}
-	if err := json.Unmarshal(diffData, &t.rawDiffs); err != nil {
+	if err := json.Unmarshal(diffData, &t.RawDiffs); err != nil {
 		return fmt.Errorf("failed to unmarshal diff file %s: %w", t.DiffFilePath, err)
 	}
 
-	if t.rawDiffs.NodeDiffs == nil {
+	if t.RawDiffs.NodeDiffs == nil {
 		return fmt.Errorf("invalid diff file format: missing 'diffs' field or it's not a map")
 	}
 
 	involvedNodeNames := make(map[string]bool)
-	for nodePairKey := range t.rawDiffs.NodeDiffs {
+	for nodePairKey := range t.RawDiffs.NodeDiffs {
 		nodesInPair := strings.Split(nodePairKey, "/")
 		if len(nodesInPair) != 2 {
 			return fmt.Errorf("invalid node pair key in diff file: %s", nodePairKey)
@@ -444,9 +450,30 @@ func (t *TableRepairTask) runUnidirectionalRepair(startTime time.Time) error {
 		log.Printf("Processing repairs for divergent node: %s", nodeName)
 		divergentPool, ok := t.Pools[nodeName]
 		if !ok || divergentPool == nil {
-			log.Printf("Error: Connection pool for divergent node %s not found or not connected. Skipping repairs for this node.", nodeName)
-			repairErrors = append(repairErrors, fmt.Sprintf("no connection to %s", nodeName))
-			continue
+			log.Printf("Connection pool for divergent node %s not found, attempting to connect.", nodeName)
+			var nodeInfo map[string]any
+			for _, ni := range t.ClusterNodes {
+				if name, _ := ni["Name"].(string); name == nodeName {
+					nodeInfo = ni
+					break
+				}
+			}
+
+			if nodeInfo == nil {
+				log.Printf("Error: Could not find node info for %s. Skipping repairs for this node.", nodeName)
+				repairErrors = append(repairErrors, fmt.Sprintf("no node info for %s", nodeName))
+				continue
+			}
+
+			var err error
+			divergentPool, err = auth.GetClusterNodeConnection(nodeInfo, t.ClientRole)
+			if err != nil {
+				log.Printf("Error: Failed to connect to node %s: %v. Skipping repairs for this node.", nodeName, err)
+				repairErrors = append(repairErrors, fmt.Sprintf("connection failed for %s: %v", nodeName, err))
+				continue
+			}
+			t.Pools[nodeName] = divergentPool
+			log.Printf("Successfully connected to node %s and created a new connection pool.", nodeName)
 		}
 
 		tx, err := divergentPool.Begin(context.Background())
@@ -631,7 +658,7 @@ func (t *TableRepairTask) runBidirectionalRepair() error {
 	totalOps := make(map[string]int)
 	var repairErrors []string
 
-	for nodePairKey, diffs := range t.rawDiffs.NodeDiffs {
+	for nodePairKey, diffs := range t.RawDiffs.NodeDiffs {
 		nodes := strings.Split(nodePairKey, "/")
 		if len(nodes) != 2 {
 			log.Printf("Warning: Invalid node pair key '%s', skipping", nodePairKey)
@@ -1044,7 +1071,7 @@ func getDryRunOutput(task *TableRepairTask) (string, error) {
 	if task.Bidirectional {
 		// TODO: Need to ensure that no more than 2 nodes are specified for bidirectional repair
 		anyInserts := false
-		for nodePairKey, diffs := range task.rawDiffs.NodeDiffs {
+		for nodePairKey, diffs := range task.RawDiffs.NodeDiffs {
 			nodes := strings.Split(nodePairKey, "/")
 			if len(nodes) != 2 {
 				continue
@@ -1204,7 +1231,7 @@ func calculateRepairSets(task *TableRepairTask) (map[string]map[string]map[strin
 		return nil, nil, fmt.Errorf("source_of_truth must be set to calculate repair sets")
 	}
 
-	for nodePair, diffs := range task.rawDiffs.NodeDiffs {
+	for nodePair, diffs := range task.RawDiffs.NodeDiffs {
 		nodes := strings.Split(nodePair, "/")
 		node1Name := nodes[0]
 		node2Name := nodes[1]

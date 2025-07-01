@@ -13,21 +13,15 @@ func GetClusterNodeConnection(nodeInfo map[string]any, clientRole string) (*pgxp
 	password, _ := nodeInfo["DBPassword"].(string)
 	host, _ := nodeInfo["PublicIP"].(string)
 	database, _ := nodeInfo["DBName"].(string)
-	port, _ := nodeInfo["Port"].(float64)
-	if port == 0 {
-		port = 5432
+	port, okPort := nodeInfo["Port"].(string)
+
+	if !okPort {
+		port = "5432"
 	}
 
-	connStr := fmt.Sprintf("postgres://%s:%s@%s:%d/%s?sslmode=disable", user, password, host, int(port), database)
-	// params := map[string]interface{}{
-	// 	"host":     host,
-	// 	"user":     user,
-	// 	"password": password,
-	// 	"database": database,
-	// 	"port":     int(port),
-	// }
+	connStr := fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=disable", user, password, host, port, database)
 
-	pool, err := SetupDBPool(context.Background(), connStr, fmt.Sprintf("%s:%d", host, int(port)))
+	pool, err := SetupDBPool(context.Background(), connStr, fmt.Sprintf("%s:%s", host, port))
 	if err != nil {
 		return nil, err
 	}
