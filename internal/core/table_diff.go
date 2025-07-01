@@ -573,17 +573,9 @@ func (t *TableDiffTask) RunChecks(skipValidation bool) error {
 		hostIP, _ := nodeInfo["PublicIP"].(string)
 		user, _ := nodeInfo["DBUser"].(string)
 
-		var port float64
-		portVal, ok := nodeInfo["Port"]
-		if ok {
-			switch v := portVal.(type) {
-			case string:
-				port, _ = strconv.ParseFloat(v, 64)
-			case float64:
-				port = v
-			}
-		} else {
-			port = 5432
+		port, ok := nodeInfo["Port"].(string)
+		if !ok {
+			port = "5432"
 		}
 
 		if !Contains(t.NodeList, hostname) {
@@ -629,7 +621,7 @@ func (t *TableDiffTask) RunChecks(skipValidation bool) error {
 			return fmt.Errorf("failed to get column types for table %s on node %s: %w", table, hostname, err)
 		}
 
-		colTypesKey := fmt.Sprintf("%s:%d", hostIP, int(port))
+		colTypesKey := fmt.Sprintf("%s:%s", hostIP, port)
 
 		if t.ColTypes == nil {
 			t.ColTypes = make(map[string]map[string]string)
@@ -655,7 +647,7 @@ func (t *TableDiffTask) RunChecks(skipValidation bool) error {
 				user, strings.Join(missingPrivs, ", "), schema, table, hostname)
 		}
 
-		hostMap[hostIP+":"+fmt.Sprint(int(port))] = hostname
+		hostMap[hostIP+":"+port] = hostname
 
 		if t.TableFilter != "" {
 			viewName := fmt.Sprintf("%s_%s_filtered", t.TaskID, table)
@@ -755,18 +747,27 @@ func (t *TableDiffTask) CheckColumnSize() error {
 		var pool *pgxpool.Pool
 		for _, nodeInfo := range t.ClusterNodes {
 			nodeHost, _ := nodeInfo["PublicIP"].(string)
-			nodePort, _ := nodeInfo["Port"].(float64)
+
+			var nodePort float64
+			if nodePortVal, ok := nodeInfo["Port"]; ok {
+				switch v := nodePortVal.(type) {
+				case string:
+					nodePort, _ = strconv.ParseFloat(v, 64)
+				case float64:
+					nodePort = v
+				}
+			}
+
 			if nodePort == 0 {
 				nodePort = 5432
 			}
 
 			if nodeHost == host && int(nodePort) == port {
-				conn, err := auth.GetClusterNodeConnection(nodeInfo, t.ClientRole)
+				var err error
+				pool, err = auth.GetClusterNodeConnection(nodeInfo, t.ClientRole)
 				if err != nil {
 					return fmt.Errorf("failed to connect to node %s:%d: %w", host, port, err)
 				}
-				defer conn.Close()
-				pool = conn
 				break
 			}
 		}
@@ -780,17 +781,20 @@ func (t *TableDiffTask) CheckColumnSize() error {
 				continue
 			}
 
-			avgSize, err := helpers.AvgColumnSize(context.Background(), pool, t.Schema, t.Table, colName)
-			logger.Debug("Column %s of table %s.%s has average size %d", colName, t.Schema, t.Table, avgSize)
+			maxSize, err := helpers.MaxColumnSize(context.Background(), pool, t.Schema, t.Table, colName)
+			logger.Debug("Column %s of table %s.%s has max size %d", colName, t.Schema, t.Table, maxSize)
 			if err != nil {
+				pool.Close()
 				return fmt.Errorf("failed to check size of bytea column %s: %w", colName, err)
 			}
 
-			if avgSize > 1000000 {
+			if maxSize > 1000000 {
+				pool.Close()
 				return fmt.Errorf("refusing to perform table-diff. Data in column %s of table %s.%s is larger than 1 MB",
 					colName, t.Schema, t.Table)
 			}
 		}
+		pool.Close()
 	}
 
 	return nil

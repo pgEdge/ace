@@ -900,3 +900,94 @@ func TestTableDiff_TableFiltering(t *testing.T) {
 
 	log.Println("TestTableDiff_TableFiltering completed.")
 }
+
+func TestTableDiff_ByteaColumnSizeCheck(t *testing.T) {
+	ctx := context.Background()
+	tableName := "bytea_size_test"
+	qualifiedTableName := fmt.Sprintf("%s.%s", testSchema, tableName)
+
+	createTableSQL := fmt.Sprintf(`
+CREATE TABLE IF NOT EXISTS %s (
+    id INT PRIMARY KEY,
+    data BYTEA
+);`, qualifiedTableName)
+
+	// Create table on both nodes and add cleanup to drop it
+	for _, pool := range []*pgxpool.Pool{pgCluster.Node1Pool, pgCluster.Node2Pool} {
+		_, err := pool.Exec(ctx, createTableSQL)
+		if err != nil {
+			t.Fatalf("Failed to create test table %s: %v", qualifiedTableName, err)
+		}
+	}
+	t.Cleanup(func() {
+		for _, pool := range []*pgxpool.Pool{pgCluster.Node1Pool, pgCluster.Node2Pool} {
+			_, err := pool.Exec(ctx, fmt.Sprintf("DROP TABLE IF EXISTS %s", qualifiedTableName))
+			if err != nil {
+				t.Logf("Failed to drop test table %s: %v", qualifiedTableName, err)
+			}
+		}
+	})
+
+	// --- Test Case 1: Data < 1MB (should pass) ---
+	t.Run("DataUnder1MB", func(t *testing.T) {
+		// Truncate before run
+		for _, pool := range []*pgxpool.Pool{pgCluster.Node1Pool, pgCluster.Node2Pool} {
+			_, err := pool.Exec(ctx, fmt.Sprintf("TRUNCATE TABLE %s", qualifiedTableName))
+			if err != nil {
+				t.Fatalf("Failed to truncate table %s: %v", qualifiedTableName, err)
+			}
+		}
+
+		smallData := make([]byte, 500*1024) // 500 KB
+		_, err := pgCluster.Node1Pool.Exec(ctx, fmt.Sprintf("INSERT INTO %s (id, data) VALUES (1, $1)", qualifiedTableName), smallData)
+		if err != nil {
+			t.Fatalf("Failed to insert small data: %v", err)
+		}
+		_, err = pgCluster.Node2Pool.Exec(ctx, fmt.Sprintf("INSERT INTO %s (id, data) VALUES (1, $1)", qualifiedTableName), smallData)
+		if err != nil {
+			t.Fatalf("Failed to insert small data: %v", err)
+		}
+
+		nodesToCompare := []string{serviceN1, serviceN2}
+		tdTask := newTestTableDiffTask(t, qualifiedTableName, nodesToCompare)
+
+		err = tdTask.RunChecks(false)
+		if err != nil {
+			t.Errorf("RunChecks should succeed for bytea data < 1MB, but got error: %v", err)
+		}
+	})
+
+	// --- Test Case 2: Data > 1MB (should fail) ---
+	t.Run("DataOver1MB", func(t *testing.T) {
+		// Truncate before run
+		for _, pool := range []*pgxpool.Pool{pgCluster.Node1Pool, pgCluster.Node2Pool} {
+			_, err := pool.Exec(ctx, fmt.Sprintf("TRUNCATE TABLE %s", qualifiedTableName))
+			if err != nil {
+				t.Fatalf("Failed to truncate table %s: %v", qualifiedTableName, err)
+			}
+		}
+		largeData := make([]byte, 1024*1024+1) // > 1 MB
+		_, err := pgCluster.Node1Pool.Exec(ctx, fmt.Sprintf("INSERT INTO %s (id, data) VALUES (1, $1)", qualifiedTableName), largeData)
+		if err != nil {
+			t.Fatalf("Failed to insert large data: %v", err)
+		}
+		_, err = pgCluster.Node2Pool.Exec(ctx, fmt.Sprintf("INSERT INTO %s (id, data) VALUES (1, $1)", qualifiedTableName), largeData)
+		if err != nil {
+			t.Fatalf("Failed to insert large data: %v", err)
+		}
+
+		nodesToCompare := []string{serviceN1, serviceN2}
+		tdTask := newTestTableDiffTask(t, qualifiedTableName, nodesToCompare)
+
+		err = tdTask.RunChecks(false)
+		if err == nil {
+			t.Fatal("RunChecks should fail for bytea data > 1MB, but it succeeded")
+		}
+		if !strings.Contains(err.Error(), "refusing to perform table-diff") {
+			t.Errorf("Error message should contain 'refusing to perform table-diff', but it was: %s", err.Error())
+		}
+		if !strings.Contains(err.Error(), "is larger than 1 MB") {
+			t.Errorf("Error message should contain 'is larger than 1 MB', but it was: %s", err.Error())
+		}
+	})
+}
