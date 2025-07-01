@@ -99,7 +99,7 @@ func SanitiseIdentifier(input string) error {
 	return nil
 }
 
-func AvgColumnSize(ctx context.Context, db DBQuerier, schema, table, column string) (int64, error) {
+func MaxColumnSize(ctx context.Context, db DBQuerier, schema, table, column string) (int64, error) {
 	if err := SanitiseIdentifier(schema); err != nil {
 		return 0, err
 	}
@@ -115,14 +115,14 @@ func AvgColumnSize(ctx context.Context, db DBQuerier, schema, table, column stri
 	colIdent := fmt.Sprintf(`"%s"`, column)
 
 	query := fmt.Sprintf(
-		`SELECT COALESCE(AVG(pg_column_size(%s)), 0) FROM %s.%s`,
+		`SELECT COALESCE(MAX(octet_length(%s))::bigint, 0) FROM %s.%s`,
 		colIdent, schemaIdent, tableIdent,
 	)
 
-	var avgSize int64
-	if err := db.QueryRow(ctx, query).Scan(&avgSize); err != nil {
+	var maxSize int64
+	if err := db.QueryRow(ctx, query).Scan(&maxSize); err != nil {
 		return 0, fmt.Errorf(
-			"AvgColumnSize query failed for %s.%s.%s: %w",
+			"MaxColumnSize query failed for %s.%s.%s: %w",
 			schema,
 			table,
 			column,
@@ -130,7 +130,7 @@ func AvgColumnSize(ctx context.Context, db DBQuerier, schema, table, column stri
 		)
 	}
 
-	return avgSize, nil
+	return maxSize, nil
 }
 
 func GeneratePkeyOffsetsQuery(
