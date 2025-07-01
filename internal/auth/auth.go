@@ -3,7 +3,6 @@ package auth
 import (
 	"context"
 	"fmt"
-	"strconv"
 	"time"
 
 	"github.com/jackc/pgx/v4/pgxpool"
@@ -14,24 +13,15 @@ func GetClusterNodeConnection(nodeInfo map[string]any, clientRole string) (*pgxp
 	password, _ := nodeInfo["DBPassword"].(string)
 	host, _ := nodeInfo["PublicIP"].(string)
 	database, _ := nodeInfo["DBName"].(string)
-	var port float64
-	portVal, ok := nodeInfo["Port"]
-	if ok {
-		switch v := portVal.(type) {
-		case string:
-			port, _ = strconv.ParseFloat(v, 64)
-		case float64:
-			port = v
-		}
+	port, okPort := nodeInfo["Port"].(string)
+
+	if !okPort {
+		port = "5432"
 	}
 
-	if port == 0 {
-		port = 5432
-	}
+	connStr := fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=disable", user, password, host, port, database)
 
-	connStr := fmt.Sprintf("postgres://%s:%s@%s:%d/%s?sslmode=disable", user, password, host, int(port), database)
-
-	pool, err := SetupDBPool(context.Background(), connStr, fmt.Sprintf("%s:%d", host, int(port)))
+	pool, err := SetupDBPool(context.Background(), connStr, fmt.Sprintf("%s:%s", host, port))
 	if err != nil {
 		return nil, err
 	}

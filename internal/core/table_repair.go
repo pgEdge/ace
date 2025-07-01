@@ -8,7 +8,6 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"time"
 
@@ -161,22 +160,13 @@ func (t *TableRepairTask) ValidateAndPrepare() error {
 	for _, nodeInfo := range t.ClusterNodes {
 		hostname, okHostname := nodeInfo["Name"].(string)
 		publicIP, okPublicIP := nodeInfo["PublicIP"].(string)
+		port, okPort := nodeInfo["Port"].(string)
 
-		var port float64
-		if portVal, ok := nodeInfo["Port"]; ok {
-			switch v := portVal.(type) {
-			case string:
-				port, _ = strconv.ParseFloat(v, 64)
-			case float64:
-				port = v
-			}
-		}
-
-		if !okHostname || !okPublicIP {
+		if !okHostname || !okPublicIP || !okPort {
 			log.Printf("Warning: Skipping node with incomplete info: %+v", nodeInfo)
 			continue
 		}
-		t.HostMap[fmt.Sprintf("%s:%f", publicIP, port)] = hostname
+		t.HostMap[fmt.Sprintf("%s:%s", publicIP, port)] = hostname
 	}
 
 	foundSourceOfTruth := false

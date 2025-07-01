@@ -299,9 +299,9 @@ func teardownPostgresCluster(t *testing.T) {
 			log.Printf("Removed diff file: %s", f)
 		}
 	}
-	// if err := os.Remove("test_cluster.json"); err != nil && !os.IsNotExist(err) {
-	// 	t.Logf("failed to remove test_cluster.json: %v", err)
-	// }
+	if err := os.Remove("test_cluster.json"); err != nil && !os.IsNotExist(err) {
+		t.Logf("failed to remove test_cluster.json: %v", err)
+	}
 }
 
 func TestMain(m *testing.M) {

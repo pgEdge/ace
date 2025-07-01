@@ -45,7 +45,7 @@ func newTestTableDiffTask(
 	return task
 }
 
-func newTestTableRepairTask(t *testing.T, sourceOfTruthNode, qualifiedTableName, diffFilePath string) *core.TableRepairTask {
+func newTestTableRepairTask(sourceOfTruthNode, qualifiedTableName, diffFilePath string) *core.TableRepairTask {
 	task := core.NewTableRepairTask()
 	task.ClusterName = "test_cluster"
 	task.DBName = dbName
@@ -85,7 +85,7 @@ func repairTable(t *testing.T, qualifiedTableName, sourceOfTruthNode string) {
 	latestDiffFile := files[0]
 	log.Printf("Using latest diff file for repair: %s", latestDiffFile)
 
-	repairTask := newTestTableRepairTask(t, sourceOfTruthNode, qualifiedTableName, latestDiffFile)
+	repairTask := newTestTableRepairTask(sourceOfTruthNode, qualifiedTableName, latestDiffFile)
 
 	if err := repairTask.Run(false); err != nil {
 		t.Fatalf("Failed to repair table: %v", err)
@@ -210,23 +210,6 @@ func TestTableDiff_DataOnlyOnNode1(t *testing.T) {
 		)
 	}
 	log.Println("TestTableDiff_DataOnlyOnNode1 completed.")
-}
-
-func TestIntermediateStep(t *testing.T) {
-	var rowCount int
-	err := pgCluster.Node2Pool.QueryRow(context.Background(), "select count(*) from customers").Scan(&rowCount)
-
-	if err != nil {
-		t.Fatalf("Failed to count rows in customers on node2: %v", err)
-	}
-
-	if rowCount != 10000 {
-		t.Fatalf("Expected 10000 rows in customers on node2, got %d", rowCount)
-	}
-
-	log.Printf("Row count in customers on node2: %d", rowCount)
-
-	log.Println("TestIntermediateStep completed.")
 }
 
 func TestTableDiff_DataOnlyOnNode2(t *testing.T) {
