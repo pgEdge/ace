@@ -91,7 +91,7 @@ func (tr *TableRepairTask) checkRepairOptionsCompatibility() error {
 
 	for _, rule := range incompatibleOptions {
 		if rule.condition {
-			return fmt.Errorf(rule.message)
+			return fmt.Errorf("%s", rule.message)
 		}
 	}
 	return nil
@@ -225,7 +225,6 @@ func (t *TableRepairTask) ValidateAndPrepare() error {
 
 	t.ClusterNodes = clusterNodes
 
-	var connectedNodes []map[string]any
 	// Repair needs these privileges. Perhaps we can pare this down depending
 	// on the repair options, but for now we'll keep it as is.
 	requiredPrivileges := []string{"SELECT", "INSERT", "UPDATE", "DELETE"}
@@ -242,7 +241,6 @@ func (t *TableRepairTask) ValidateAndPrepare() error {
 				continue
 			}
 			t.Pools[nodeName] = connPool
-			connectedNodes = append(connectedNodes, nodeInfo)
 
 			cols, err := GetColumns(connPool, t.Schema, t.Table)
 			if err != nil {
@@ -693,14 +691,14 @@ func (t *TableRepairTask) runBidirectionalRepair() error {
 		insertsForNode1 := make(map[string]map[string]any)
 		for pkey, row := range node2RowsByPKey {
 			if _, exists := node1RowsByPKey[pkey]; !exists {
-				insertsForNode1[pkey] = row
+				insertsForNode1[pkey] = stripSpockMetadata(row)
 			}
 		}
 
 		insertsForNode2 := make(map[string]map[string]any)
 		for pkey, row := range node1RowsByPKey {
 			if _, exists := node2RowsByPKey[pkey]; !exists {
-				insertsForNode2[pkey] = row
+				insertsForNode2[pkey] = stripSpockMetadata(row)
 			}
 		}
 
@@ -1223,6 +1221,13 @@ func getDryRunOutput(task *TableRepairTask) (string, error) {
 	return sb.String(), nil
 }
 
+func stripSpockMetadata(row map[string]any) map[string]any {
+	if row != nil {
+		delete(row, "_spock_metadata_")
+	}
+	return row
+}
+
 func calculateRepairSets(task *TableRepairTask) (map[string]map[string]map[string]any, map[string]map[string]map[string]any, error) {
 	fullRowsToUpsert := make(map[string]map[string]map[string]any) // nodeName -> string(pkey) -> rowData
 	fullRowsToDelete := make(map[string]map[string]map[string]any) // nodeName -> string(pkey) -> rowData
@@ -1265,8 +1270,9 @@ func calculateRepairSets(task *TableRepairTask) (map[string]map[string]map[strin
 			if err != nil {
 				return nil, nil, fmt.Errorf("error stringifying pkey for source row on %s: %w", task.SourceOfTruth, err)
 			}
-			sourceRowsByPKey[pkeyStr] = row
-			fullRowsToUpsert[targetNode][pkeyStr] = row
+			cleanRow := stripSpockMetadata(row)
+			sourceRowsByPKey[pkeyStr] = cleanRow
+			fullRowsToUpsert[targetNode][pkeyStr] = cleanRow
 		}
 
 		targetRowsByPKey := make(map[string]map[string]any)
@@ -1275,9 +1281,10 @@ func calculateRepairSets(task *TableRepairTask) (map[string]map[string]map[strin
 			if err != nil {
 				return nil, nil, fmt.Errorf("error stringifying pkey for target row on %s: %w", targetNode, err)
 			}
-			targetRowsByPKey[pkeyStr] = row
+			cleanRow := stripSpockMetadata(row)
+			targetRowsByPKey[pkeyStr] = cleanRow
 			if _, existsInSource := sourceRowsByPKey[pkeyStr]; !existsInSource {
-				fullRowsToDelete[targetNode][pkeyStr] = row
+				fullRowsToDelete[targetNode][pkeyStr] = cleanRow
 			}
 		}
 	}

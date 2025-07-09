@@ -31,39 +31,59 @@ func setupDivergence(t *testing.T, ctx context.Context, qualifiedTableName strin
 	// Truncate on both nodes
 	for i, pool := range []*pgxpool.Pool{pgCluster.Node1Pool, pgCluster.Node2Pool} {
 		nodeName := pgCluster.ClusterNodes[i]["Name"].(string)
-		_, err := pool.Exec(ctx, fmt.Sprintf("TRUNCATE TABLE %s CASCADE", qualifiedTableName))
+		_, err := pool.Exec(ctx, "SELECT spock.repair_mode(true)")
+		require.NoError(t, err, "Failed to enable repair mode on %s", nodeName)
+		_, err = pool.Exec(ctx, fmt.Sprintf("TRUNCATE TABLE %s CASCADE", qualifiedTableName))
 		require.NoError(t, err, "Failed to truncate table on node %s", nodeName)
+		_, err = pool.Exec(ctx, "SELECT spock.repair_mode(false)")
+		require.NoError(t, err, "Failed to disable repair mode on %s", nodeName)
 	}
 
 	// Insert common rows
 	for i := 1; i <= 5; i++ {
 		for _, pool := range []*pgxpool.Pool{pgCluster.Node1Pool, pgCluster.Node2Pool} {
-			_, err := pool.Exec(ctx, fmt.Sprintf("INSERT INTO %s (index, first_name, last_name, email) VALUES ($1, $2, $3, $4)", qualifiedTableName),
+			_, err := pool.Exec(ctx, "SELECT spock.repair_mode(true)")
+			require.NoError(t, err)
+			_, err = pool.Exec(ctx, fmt.Sprintf("INSERT INTO %s (index, first_name, last_name, email) VALUES ($1, $2, $3, $4)", qualifiedTableName),
 				i, fmt.Sprintf("FirstName%d", i), fmt.Sprintf("LastName%d", i), fmt.Sprintf("email%d@example.com", i))
+			require.NoError(t, err)
+			_, err = pool.Exec(ctx, "SELECT spock.repair_mode(false)")
 			require.NoError(t, err)
 		}
 	}
 
 	// Insert rows only on node1
+	_, err := pgCluster.Node1Pool.Exec(ctx, "SELECT spock.repair_mode(true)")
+	require.NoError(t, err)
 	for i := 1001; i <= 1002; i++ {
 		_, err := pgCluster.Node1Pool.Exec(ctx, fmt.Sprintf("INSERT INTO %s (index, first_name, last_name, email) VALUES ($1, $2, $3, $4)", qualifiedTableName),
 			i, fmt.Sprintf("N1OnlyFirst%d", i), fmt.Sprintf("N1OnlyLast%d", i), fmt.Sprintf("n1.only%d@example.com", i))
 		require.NoError(t, err)
 	}
+	_, err = pgCluster.Node1Pool.Exec(ctx, "SELECT spock.repair_mode(false)")
+	require.NoError(t, err)
 
 	// Insert rows only on node2
+	_, err = pgCluster.Node2Pool.Exec(ctx, "SELECT spock.repair_mode(true)")
+	require.NoError(t, err)
 	for i := 2001; i <= 2002; i++ {
 		_, err := pgCluster.Node2Pool.Exec(ctx, fmt.Sprintf("INSERT INTO %s (index, first_name, last_name, email) VALUES ($1, $2, $3, $4)", qualifiedTableName),
 			i, fmt.Sprintf("N2OnlyFirst%d", i), fmt.Sprintf("N2OnlyLast%d", i), fmt.Sprintf("n2.only%d@example.com", i))
 		require.NoError(t, err)
 	}
+	_, err = pgCluster.Node2Pool.Exec(ctx, "SELECT spock.repair_mode(false)")
+	require.NoError(t, err)
 
 	// Modify rows on node2
+	_, err = pgCluster.Node2Pool.Exec(ctx, "SELECT spock.repair_mode(true)")
+	require.NoError(t, err)
 	for i := 1; i <= 2; i++ {
 		_, err := pgCluster.Node2Pool.Exec(ctx, fmt.Sprintf("UPDATE %s SET email = $1 WHERE index = $2", qualifiedTableName),
 			fmt.Sprintf("modified.email%d@example.com", i), i)
 		require.NoError(t, err)
 	}
+	_, err = pgCluster.Node2Pool.Exec(ctx, "SELECT spock.repair_mode(false)")
+	require.NoError(t, err)
 
 	log.Println("Data divergence setup complete.")
 }
@@ -166,8 +186,13 @@ func TestTableRepair_UnidirectionalDefault(t *testing.T) {
 
 	diffFile := runTableDiff(t, qualifiedTableName, []string{serviceN1, serviceN2})
 
+	// Verify that the new metadata is in the diff file before repairing.
+	diffData, err := os.ReadFile(diffFile)
+	require.NoError(t, err)
+	assert.Contains(t, string(diffData), "_spock_metadata_", "Diff file should contain spock metadata before repair")
+
 	repairTask := newTestTableRepairTask(serviceN1, qualifiedTableName, diffFile)
-	err := repairTask.Run(false)
+	err = repairTask.Run(false)
 	require.NoError(t, err, "Table repair failed")
 
 	log.Println("Verifying repair for TestTableRepair_UnidirectionalDefault")
@@ -277,22 +302,35 @@ func TestTableRepair_Bidirectional(t *testing.T) {
 	// Setup for bidirectional: N1 has some unique rows, N2 has others.
 	log.Println("Setting up data for bidirectional test")
 	for _, pool := range []*pgxpool.Pool{pgCluster.Node1Pool, pgCluster.Node2Pool} {
-		_, err := pool.Exec(ctx, fmt.Sprintf("TRUNCATE TABLE %s CASCADE", qualifiedTableName))
+		_, err := pool.Exec(ctx, "SELECT spock.repair_mode(true)")
+		require.NoError(t, err)
+		_, err = pool.Exec(ctx, fmt.Sprintf("TRUNCATE TABLE %s CASCADE", qualifiedTableName))
+		require.NoError(t, err)
+		_, err = pool.Exec(ctx, "SELECT spock.repair_mode(false)")
 		require.NoError(t, err)
 	}
+	_, err := pgCluster.Node1Pool.Exec(ctx, "SELECT spock.repair_mode(true)")
+	require.NoError(t, err)
 	for i := 3001; i <= 3003; i++ { // 3 rows on N1
 		_, err := pgCluster.Node1Pool.Exec(ctx, fmt.Sprintf("INSERT INTO %s (index, first_name) VALUES ($1, $2)", qualifiedTableName), i, fmt.Sprintf("N1-Bi-%d", i))
 		require.NoError(t, err)
 	}
+	_, err = pgCluster.Node1Pool.Exec(ctx, "SELECT spock.repair_mode(false)")
+	require.NoError(t, err)
+
+	_, err = pgCluster.Node2Pool.Exec(ctx, "SELECT spock.repair_mode(true)")
+	require.NoError(t, err)
 	for i := 4001; i <= 4002; i++ { // 2 rows on N2
 		_, err := pgCluster.Node2Pool.Exec(ctx, fmt.Sprintf("INSERT INTO %s (index, first_name) VALUES ($1, $2)", qualifiedTableName), i, fmt.Sprintf("N2-Bi-%d", i))
 		require.NoError(t, err)
 	}
+	_, err = pgCluster.Node2Pool.Exec(ctx, "SELECT spock.repair_mode(false)")
+	require.NoError(t, err)
 
 	diffFile := runTableDiff(t, qualifiedTableName, []string{serviceN1, serviceN2})
 	repairTask := newTestTableRepairTask(serviceN1, qualifiedTableName, diffFile)
 	repairTask.Bidirectional = true
-	err := repairTask.Run(false)
+	err = repairTask.Run(false)
 	require.NoError(t, err, "Table repair (bidirectional) failed")
 
 	log.Println("Verifying repair for TestTableRepair_Bidirectional")
