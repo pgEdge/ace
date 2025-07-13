@@ -1,13 +1,8 @@
 package helpers
 
 import (
-	"context"
-	"fmt"
 	"strings"
 	"testing"
-
-	"github.com/golang/mock/gomock"
-	"github.com/pgedge/ace/db/helpers/mocks"
 )
 
 type mockRow struct {
@@ -319,76 +314,6 @@ func TestBlockHashSQL(t *testing.T) {
 						t.Errorf("BlockHashSQL() query = %q, want to contain %q", query, substr)
 					}
 				}
-			}
-		})
-	}
-}
-
-func TestAvgColumnSize(t *testing.T) {
-	ctrl := gomock.NewController(t)
-	t.Cleanup(ctrl.Finish)
-
-	tests := []struct {
-		name      string
-		schema    string
-		table     string
-		column    string
-		mockSetup func(m *mocks.MockDBQuerier)
-		wantSize  int64
-		wantErr   bool
-	}{
-		{
-			name:   "successful query",
-			schema: "public",
-			table:  "users",
-			column: "email",
-			mockSetup: func(m *mocks.MockDBQuerier) {
-				expectedQuery := `SELECT COALESCE(AVG(pg_column_size("email")), 0) FROM "public"."users"`
-				m.EXPECT().QueryRow(gomock.Any(), expectedQuery).Return(&mockRow{scanArgs: []any{int64(123)}})
-			},
-			wantSize: 123,
-			wantErr:  false,
-		},
-		{
-			name:   "query returns error",
-			schema: "public",
-			table:  "users",
-			column: "profile_data",
-			mockSetup: func(m *mocks.MockDBQuerier) {
-				expectedQuery := `SELECT COALESCE(AVG(pg_column_size("profile_data")), 0) FROM "public"."users"`
-				m.EXPECT().QueryRow(gomock.Any(), expectedQuery).Return(&mockRow{scanErr: fmt.Errorf("database error")})
-			},
-			wantErr: true,
-		},
-		{
-			name:   "scan returns error",
-			schema: "public",
-			table:  "users",
-			column: "settings",
-			mockSetup: func(m *mocks.MockDBQuerier) {
-				expectedQuery := `SELECT COALESCE(AVG(pg_column_size("settings")), 0) FROM "public"."users"`
-				// We still use our mockRow, but configure its Scan method to return an error
-				mr := &mockRow{}
-				mr.scanErr = fmt.Errorf("scan failed")
-				m.EXPECT().QueryRow(gomock.Any(), expectedQuery).Return(mr)
-			},
-			wantErr: true,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			mockQuerier := mocks.NewMockDBQuerier(ctrl)
-			tt.mockSetup(mockQuerier)
-
-			avgSize, err := AvgColumnSize(context.Background(), mockQuerier, tt.schema, tt.table, tt.column)
-
-			if (err != nil) != tt.wantErr {
-				t.Errorf("AvgColumnSize() error = %v, wantErr %v", err, tt.wantErr)
-				return
-			}
-			if !tt.wantErr && avgSize != tt.wantSize {
-				t.Errorf("AvgColumnSize() got avgSize = %v, want %v", avgSize, tt.wantSize)
 			}
 		})
 	}

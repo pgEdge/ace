@@ -196,11 +196,7 @@ func (t *TableDiffTask) fetchRows(ctx context.Context, nodeName string, r Range)
 	quotedTable := sanitise(t.Table)
 	quotedSchemaTable := fmt.Sprintf("%s.%s", quotedSchema, quotedTable)
 
-	quotedSelectCols := make([]string, len(t.Cols))
-	for i, c := range t.Cols {
-		quotedSelectCols[i] = sanitise(c)
-	}
-	selectColsStr := strings.Join(quotedSelectCols, ", ")
+	selectColsStr := "pg_xact_commit_timestamp(xmin) as commit_ts, to_json(spock.xact_commit_timestamp_origin(xmin))->>'roident' as node_origin, *"
 
 	quotedKeyCols := make([]string, len(t.Key))
 	for i, k := range t.Key {
@@ -1355,6 +1351,23 @@ func (t *TableDiffTask) generateSubRanges(
 	return []Range{parentRange}, nil
 }
 
+func addSpockMetadata(row map[string]any) map[string]any {
+	if row == nil {
+		return nil
+	}
+	metadata := make(map[string]any)
+	if commitTs, ok := row["commit_ts"]; ok {
+		metadata["commit_ts"] = commitTs
+		delete(row, "commit_ts")
+	}
+	if nodeOrigin, ok := row["node_origin"]; ok {
+		metadata["node_origin"] = nodeOrigin
+		delete(row, "node_origin")
+	}
+	row["_spock_metadata_"] = metadata
+	return row
+}
+
 func (t *TableDiffTask) recursiveDiff(
 	ctx context.Context,
 	task RecursiveDiffTask,
@@ -1367,10 +1380,7 @@ func (t *TableDiffTask) recursiveDiff(
 	currentRange := task.CurrentRange
 	currentEstimatedBlockSize := task.CurrentEstimatedBlockSize
 
-	finalCompareUnitSize := t.CompareUnitSize
-	if finalCompareUnitSize < 1 {
-		finalCompareUnitSize = 1
-	}
+	finalCompareUnitSize := max(t.CompareUnitSize, 1)
 
 	isSmallEnough := currentEstimatedBlockSize <= finalCompareUnitSize
 	if !isSmallEnough && currentRange.Start != nil && currentRange.End != nil && reflect.DeepEqual(currentRange.Start, currentRange.End) {
@@ -1410,16 +1420,16 @@ func (t *TableDiffTask) recursiveDiff(
 			}
 
 			for _, row := range diffInfo.Node1OnlyRows {
-				t.DiffResult.NodeDiffs[pairKey].Rows[node1Name] = append(t.DiffResult.NodeDiffs[pairKey].Rows[node1Name], row)
+				t.DiffResult.NodeDiffs[pairKey].Rows[node1Name] = append(t.DiffResult.NodeDiffs[pairKey].Rows[node1Name], addSpockMetadata(row))
 				currentDiffRowsForPair++
 			}
 			for _, row := range diffInfo.Node2OnlyRows {
-				t.DiffResult.NodeDiffs[pairKey].Rows[node2Name] = append(t.DiffResult.NodeDiffs[pairKey].Rows[node2Name], row)
+				t.DiffResult.NodeDiffs[pairKey].Rows[node2Name] = append(t.DiffResult.NodeDiffs[pairKey].Rows[node2Name], addSpockMetadata(row))
 				currentDiffRowsForPair++
 			}
 			for _, modRow := range diffInfo.ModifiedRows {
-				t.DiffResult.NodeDiffs[pairKey].Rows[node1Name] = append(t.DiffResult.NodeDiffs[pairKey].Rows[node1Name], modRow.Node1Data)
-				t.DiffResult.NodeDiffs[pairKey].Rows[node2Name] = append(t.DiffResult.NodeDiffs[pairKey].Rows[node2Name], modRow.Node2Data)
+				t.DiffResult.NodeDiffs[pairKey].Rows[node1Name] = append(t.DiffResult.NodeDiffs[pairKey].Rows[node1Name], addSpockMetadata(modRow.Node1Data))
+				t.DiffResult.NodeDiffs[pairKey].Rows[node2Name] = append(t.DiffResult.NodeDiffs[pairKey].Rows[node2Name], addSpockMetadata(modRow.Node2Data))
 				currentDiffRowsForPair++
 			}
 
