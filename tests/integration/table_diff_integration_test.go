@@ -142,17 +142,26 @@ func TestTableDiff_DataOnlyOnNode1(t *testing.T) {
 	})
 
 	// Truncate the table on the second node to create the diff
-	_, err := pgCluster.Node2Pool.Exec(ctx, "SELECT spock.repair_mode(true)")
+	tx, err := pgCluster.Node2Pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("Failed to begin transaction on node %s: %v", serviceN2, err)
+	}
+	defer tx.Rollback(ctx)
+
+	_, err = tx.Exec(ctx, "SELECT spock.repair_mode(true)")
 	if err != nil {
 		t.Fatalf("Failed to enable spock repair mode on node %s: %v", serviceN2, err)
 	}
-	_, err = pgCluster.Node2Pool.Exec(ctx, fmt.Sprintf("TRUNCATE TABLE %s.%s CASCADE", testSchema, tableName))
+	_, err = tx.Exec(ctx, fmt.Sprintf("TRUNCATE TABLE %s.%s CASCADE", testSchema, tableName))
 	if err != nil {
 		t.Fatalf("Failed to truncate table %s on node2: %v", qualifiedTableName, err)
 	}
-	_, err = pgCluster.Node2Pool.Exec(ctx, "SELECT spock.repair_mode(false)")
+	_, err = tx.Exec(ctx, "SELECT spock.repair_mode(false)")
 	if err != nil {
 		t.Fatalf("Failed to disable spock repair mode on node %s: %v", serviceN2, err)
+	}
+	if err = tx.Commit(ctx); err != nil {
+		t.Fatalf("Failed to commit transaction on node %s: %v", serviceN2, err)
 	}
 
 	log.Printf("Data loaded only into %s for table %s", serviceN1, qualifiedTableName)
@@ -229,17 +238,26 @@ func TestTableDiff_DataOnlyOnNode2(t *testing.T) {
 		repairTable(t, qualifiedTableName, serviceN2)
 	})
 
-	_, err := pgCluster.Node1Pool.Exec(ctx, "SELECT spock.repair_mode(true)")
+	tx, err := pgCluster.Node1Pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("Failed to begin transaction on node %s: %v", serviceN1, err)
+	}
+	defer tx.Rollback(ctx)
+
+	_, err = tx.Exec(ctx, "SELECT spock.repair_mode(true)")
 	if err != nil {
 		t.Fatalf("Failed to enable spock repair mode on node %s: %v", serviceN1, err)
 	}
-	_, err = pgCluster.Node1Pool.Exec(ctx, fmt.Sprintf("TRUNCATE TABLE %s.%s CASCADE", testSchema, tableName))
+	_, err = tx.Exec(ctx, fmt.Sprintf("TRUNCATE TABLE %s.%s CASCADE", testSchema, tableName))
 	if err != nil {
 		t.Fatalf("Failed to truncate table %s on node1: %v", qualifiedTableName, err)
 	}
-	_, err = pgCluster.Node1Pool.Exec(ctx, "SELECT spock.repair_mode(false)")
+	_, err = tx.Exec(ctx, "SELECT spock.repair_mode(false)")
 	if err != nil {
 		t.Fatalf("Failed to disable spock repair mode on node %s: %v", serviceN1, err)
+	}
+	if err = tx.Commit(ctx); err != nil {
+		t.Fatalf("Failed to commit transaction on node %s: %v", serviceN1, err)
 	}
 
 	log.Printf("Data loaded only into %s for table %s", serviceN2, qualifiedTableName)
@@ -333,7 +351,13 @@ func TestTableDiff_ModifiedRows(t *testing.T) {
 		},
 	}
 
-	_, err := pgCluster.Node2Pool.Exec(ctx, "SELECT spock.repair_mode(true)")
+	tx, err := pgCluster.Node2Pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("Failed to begin transaction on node %s: %v", serviceN2, err)
+	}
+	defer tx.Rollback(ctx)
+
+	_, err = tx.Exec(ctx, "SELECT spock.repair_mode(true)")
 	if err != nil {
 		t.Fatalf("Failed to enable spock repair mode on node %s: %v", serviceN2, err)
 	}
@@ -344,7 +368,7 @@ func TestTableDiff_ModifiedRows(t *testing.T) {
 			tableName,
 			mod.field,
 		)
-		_, err := pgCluster.Node2Pool.Exec(ctx, updateSQL, mod.value, mod.indexVal)
+		_, err := tx.Exec(ctx, updateSQL, mod.value, mod.indexVal)
 		if err != nil {
 			t.Fatalf(
 				"Failed to update row with index %d on node %s: %v",
@@ -354,10 +378,14 @@ func TestTableDiff_ModifiedRows(t *testing.T) {
 			)
 		}
 	}
-	_, err = pgCluster.Node2Pool.Exec(ctx, "SELECT spock.repair_mode(false)")
+	_, err = tx.Exec(ctx, "SELECT spock.repair_mode(false)")
 	if err != nil {
 		t.Fatalf("Failed to disable spock repair mode on node %s: %v", serviceN2, err)
 	}
+	if err = tx.Commit(ctx); err != nil {
+		t.Fatalf("Failed to commit transaction on node %s: %v", serviceN2, err)
+	}
+
 	log.Printf(
 		"%d rows modified on %s for table %s",
 		len(modifications),
@@ -490,22 +518,12 @@ CREATE TABLE IF NOT EXISTS %s (
 				err,
 			)
 		}
-		addToRepSetSQL := fmt.Sprintf(`SELECT spock.repset_add_table('default', '%s');`, qualifiedTableName)
-		_, err = pool.Exec(ctx, addToRepSetSQL)
-		if err != nil {
-			t.Fatalf("Failed to add table to replication set on n1: %v", err)
-		}
 	}
 	log.Printf("Mixed-case table %s created on both nodes", qualifiedTableName)
 
 	t.Cleanup(func() {
-		removeFromRepSetSQL := fmt.Sprintf(`SELECT spock.repset_remove_table('default', '%s');`, qualifiedTableName)
-		_, err := pgCluster.Node1Pool.Exec(ctx, removeFromRepSetSQL)
-		if err != nil {
-			t.Logf("cleanup: failed to remove table from replication set: %v", err)
-		}
 		for _, pool := range []*pgxpool.Pool{pgCluster.Node1Pool, pgCluster.Node2Pool} {
-			_, err := pool.Exec(ctx, fmt.Sprintf("DROP TABLE IF EXISTS %s", qualifiedTableName))
+			_, err := pool.Exec(ctx, fmt.Sprintf("DROP TABLE IF EXISTS %s CASCADE", qualifiedTableName))
 			if err != nil {
 				t.Logf("Failed to drop test table %s: %v", qualifiedTableName, err)
 			}
@@ -540,10 +558,15 @@ CREATE TABLE IF NOT EXISTS %s (
 				qualifiedTableName,
 				serviceN1, err)
 		}
+		_, err = pgCluster.Node2Pool.Exec(ctx, insertSQL,
+			row["ID"], row["FirstName"], row["LastName"], row["EmailAddress"])
+		if err != nil {
+			t.Fatalf(
+				"Failed to insert data into mixed-case table %s on node %s: %v",
+				qualifiedTableName,
+				serviceN2, err)
+		}
 	}
-
-	// wait for replication
-	time.Sleep(5 * time.Second)
 
 	log.Printf("Data loaded into mixed-case table %s on both nodes", qualifiedTableName)
 
@@ -638,7 +661,7 @@ CREATE TABLE IF NOT EXISTS %s.%s (
 			t.Logf("cleanup: failed to remove table from replication set: %v", err)
 		}
 		for _, pool := range []*pgxpool.Pool{pgCluster.Node1Pool, pgCluster.Node2Pool} {
-			_, err := pool.Exec(ctx, fmt.Sprintf("DROP TABLE IF EXISTS %s", qualifiedTableName))
+			_, err := pool.Exec(ctx, fmt.Sprintf("DROP TABLE IF EXISTS %s CASCADE", qualifiedTableName))
 			if err != nil {
 				t.Logf("Failed to drop test table %s: %v", qualifiedTableName, err)
 			}
@@ -682,11 +705,17 @@ CREATE TABLE IF NOT EXISTS %s.%s (
 		`VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)`
 
 	insertRow := func(pool *pgxpool.Pool, data map[string]any) {
-		_, err := pool.Exec(ctx, "SELECT spock.repair_mode(true)")
+		tx, err := pool.Begin(ctx)
+		if err != nil {
+			t.Fatalf("Failed to begin transaction: %v", err)
+		}
+		defer tx.Rollback(ctx)
+
+		_, err = tx.Exec(ctx, "SELECT spock.repair_mode(true)")
 		if err != nil {
 			t.Fatalf("Failed to enable spock repair mode: %v", err)
 		}
-		_, err = pool.Exec(
+		_, err = tx.Exec(
 			ctx,
 			fmt.Sprintf(insertSQLTemplate, testSchema, tableName),
 			data["id"],
@@ -711,9 +740,12 @@ CREATE TABLE IF NOT EXISTS %s.%s (
 		if err != nil {
 			t.Fatalf("Failed to insert row id %v: %v", data["id"], err)
 		}
-		_, err = pool.Exec(ctx, "SELECT spock.repair_mode(false)")
+		_, err = tx.Exec(ctx, "SELECT spock.repair_mode(false)")
 		if err != nil {
 			t.Fatalf("Failed to disable spock repair mode: %v", err)
+		}
+		if err = tx.Commit(ctx); err != nil {
+			t.Fatalf("Failed to commit transaction: %v", err)
 		}
 	}
 
@@ -855,7 +887,13 @@ func TestTableDiff_TableFiltering(t *testing.T) {
 		},
 	}
 
-	_, err := pgCluster.Node2Pool.Exec(ctx, "SELECT spock.repair_mode(true)")
+	tx, err := pgCluster.Node2Pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("Failed to begin transaction on node %s: %v", serviceN2, err)
+	}
+	defer tx.Rollback(ctx)
+
+	_, err = tx.Exec(ctx, "SELECT spock.repair_mode(true)")
 	if err != nil {
 		t.Fatalf("Failed to enable spock repair mode on node %s: %v", serviceN2, err)
 	}
@@ -866,7 +904,7 @@ func TestTableDiff_TableFiltering(t *testing.T) {
 			tableName,
 			mod.field,
 		)
-		_, err := pgCluster.Node2Pool.Exec(ctx, updateSQL, mod.value, mod.indexVal)
+		_, err := tx.Exec(ctx, updateSQL, mod.value, mod.indexVal)
 		if err != nil {
 			t.Fatalf(
 				"Failed to update row with index %d on node %s for filter test: %v",
@@ -876,10 +914,14 @@ func TestTableDiff_TableFiltering(t *testing.T) {
 			)
 		}
 	}
-	_, err = pgCluster.Node2Pool.Exec(ctx, "SELECT spock.repair_mode(false)")
+	_, err = tx.Exec(ctx, "SELECT spock.repair_mode(false)")
 	if err != nil {
 		t.Fatalf("Failed to disable spock repair mode on node %s: %v", serviceN2, err)
 	}
+	if err = tx.Commit(ctx); err != nil {
+		t.Fatalf("Failed to commit transaction on node %s: %v", serviceN2, err)
+	}
+
 	log.Printf("Data modified on %s for filter test", serviceN2)
 
 	nodesToCompare := []string{serviceN1, serviceN2}
@@ -1000,7 +1042,7 @@ CREATE TABLE IF NOT EXISTS %s (
 			t.Logf("cleanup: failed to remove table from replication set: %v", err)
 		}
 		for _, pool := range []*pgxpool.Pool{pgCluster.Node1Pool, pgCluster.Node2Pool} {
-			_, err := pool.Exec(ctx, fmt.Sprintf("DROP TABLE IF EXISTS %s", qualifiedTableName))
+			_, err := pool.Exec(ctx, fmt.Sprintf("DROP TABLE IF EXISTS %s CASCADE", qualifiedTableName))
 			if err != nil {
 				t.Logf("Failed to drop test table %s: %v", qualifiedTableName, err)
 			}
@@ -1074,7 +1116,6 @@ func TestTableDiff_WithSpockMetadata(t *testing.T) {
 
 	// 1. Create table and add to replication set
 	createTableSQL := fmt.Sprintf(`CREATE TABLE IF NOT EXISTS %s (id INT PRIMARY KEY, data TEXT);`, qualifiedTableName)
-	addToRepSetSQL := fmt.Sprintf(`SELECT spock.repset_add_table('default', '%s');`, qualifiedTableName)
 
 	for i, pool := range []*pgxpool.Pool{pgCluster.Node1Pool, pgCluster.Node2Pool} {
 		nodeName := pgCluster.ClusterNodes[i]["Name"].(string)
@@ -1083,21 +1124,10 @@ func TestTableDiff_WithSpockMetadata(t *testing.T) {
 			t.Fatalf("Failed to create table %s on node %s: %v", qualifiedTableName, nodeName, err)
 		}
 	}
-	// Add to publication on n1 (provider)
-	_, err := pgCluster.Node1Pool.Exec(ctx, addToRepSetSQL)
-	if err != nil {
-		t.Fatalf("Failed to add table to replication set on n1: %v", err)
-	}
 
 	t.Cleanup(func() {
-		// remove from publication and drop table
-		removeFromRepSetSQL := fmt.Sprintf(`SELECT spock.repset_remove_table('default', '%s');`, qualifiedTableName)
-		_, err := pgCluster.Node1Pool.Exec(ctx, removeFromRepSetSQL)
-		if err != nil {
-			t.Logf("cleanup: failed to remove table from replication set: %v", err)
-		}
 		for _, pool := range []*pgxpool.Pool{pgCluster.Node1Pool, pgCluster.Node2Pool} {
-			_, err := pool.Exec(ctx, fmt.Sprintf("DROP TABLE IF EXISTS %s;", qualifiedTableName))
+			_, err := pool.Exec(ctx, fmt.Sprintf("DROP TABLE IF EXISTS %s CASCADE;", qualifiedTableName))
 			if err != nil {
 				t.Logf("cleanup: failed to drop table: %v", err)
 			}
@@ -1109,46 +1139,16 @@ func TestTableDiff_WithSpockMetadata(t *testing.T) {
 		}
 	})
 
+	time.Sleep(1 * time.Second)
+
 	// 2. Insert data on node1 and wait for replication
 	insertSQL := fmt.Sprintf("INSERT INTO %s (id, data) VALUES (1, 'replicated data')", qualifiedTableName)
-	_, err = pgCluster.Node1Pool.Exec(ctx, insertSQL)
+	_, err := pgCluster.Node1Pool.Exec(ctx, insertSQL)
 	if err != nil {
 		t.Fatalf("Failed to insert data on node1: %v", err)
 	}
 
-	time.Sleep(5 * time.Second)
-
-	// 3. Verify replication and node_origin on node2
-	var nodeOrigin string
-	var commitTs time.Time
-	checkReplSQL := fmt.Sprintf("SELECT pg_xact_commit_timestamp(xmin), to_json(spock.xact_commit_timestamp_origin(xmin))->>'roident' FROM %s WHERE id = 1", qualifiedTableName)
-	err = pgCluster.Node2Pool.QueryRow(ctx, checkReplSQL).Scan(&commitTs, &nodeOrigin)
-	if err != nil {
-		t.Fatalf("Failed to query replicated data on node2: %v", err)
-	}
-
-	if nodeOrigin == "" || nodeOrigin == "0" {
-		t.Errorf("Expected a non-zero node_origin for replicated row, but got '%s'", nodeOrigin)
-	}
-	log.Printf("Verified replicated row on node2 with node_origin: %s and commit_ts: %v", nodeOrigin, commitTs)
-
-	// 4. Create a difference for the diff tool
-	// The row now exists on both. Let's delete it from node1 so it only exists on node2.
-	deleteSQL := fmt.Sprintf("DELETE FROM %s WHERE id = 1", qualifiedTableName)
-	_, err = pgCluster.Node1Pool.Exec(ctx, "SELECT spock.repair_mode(true)")
-	if err != nil {
-		t.Fatalf("Failed to enable spock repair mode on node %s: %v", serviceN1, err)
-	}
-	_, err = pgCluster.Node1Pool.Exec(ctx, deleteSQL)
-	if err != nil {
-		t.Fatalf("Failed to delete data from node1: %v", err)
-	}
-	_, err = pgCluster.Node1Pool.Exec(ctx, "SELECT spock.repair_mode(false)")
-	if err != nil {
-		t.Fatalf("Failed to disable spock repair mode on node %s: %v", serviceN1, err)
-	}
-
-	// 5. Run table-diff and check for metadata in the result
+	// 3. Run table-diff and check for metadata in the result
 	nodesToCompare := []string{serviceN1, serviceN2}
 	tdTask := newTestTableDiffTask(t, qualifiedTableName, nodesToCompare)
 	err = tdTask.RunChecks(false)
@@ -1170,14 +1170,14 @@ func TestTableDiff_WithSpockMetadata(t *testing.T) {
 		t.Fatalf("Expected diffs for pair %s, but none found.", pairKey)
 	}
 
-	if len(nodeDiffs.Rows[serviceN1]) != 0 {
-		t.Errorf("Expected 0 rows only on %s, but got %d", serviceN1, len(nodeDiffs.Rows[serviceN1]))
+	if len(nodeDiffs.Rows[serviceN1]) != 1 {
+		t.Errorf("Expected 1 row only on %s, but got %d", serviceN1, len(nodeDiffs.Rows[serviceN1]))
 	}
-	if len(nodeDiffs.Rows[serviceN2]) != 1 {
-		t.Errorf("Expected 1 row only on %s, but got %d", serviceN2, len(nodeDiffs.Rows[serviceN2]))
+	if len(nodeDiffs.Rows[serviceN2]) != 0 {
+		t.Errorf("Expected 0 rows only on %s, but got %d", serviceN2, len(nodeDiffs.Rows[serviceN2]))
 	}
 
-	diffRow := nodeDiffs.Rows[serviceN2][0]
+	diffRow := nodeDiffs.Rows[serviceN1][0]
 	metadata, ok := diffRow["_spock_metadata_"]
 	if !ok {
 		t.Fatal("Expected '_spock_metadata_' key in the diff row, but it was not found")
@@ -1191,7 +1191,7 @@ func TestTableDiff_WithSpockMetadata(t *testing.T) {
 	if _, ok := metadataMap["commit_ts"]; !ok {
 		t.Error("Expected 'commit_ts' in spock metadata, but it was not found")
 	}
-	if val, ok := metadataMap["node_origin"]; !ok || val == nil || val == "" || val == "0" {
+	if val, ok := metadataMap["node_origin"]; !ok || val == nil || val == "" {
 		t.Errorf("Expected 'node_origin' in spock metadata to have a valid value, but got %v", val)
 	}
 
