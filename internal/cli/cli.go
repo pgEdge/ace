@@ -163,6 +163,68 @@ func SetupCLI() *cli.App {
 		},
 	}
 
+	sc_flags := []cli.Flag{
+		&cli.StringFlag{
+			Name:    "dbname",
+			Aliases: []string{"d"},
+			Usage:   "Name of the database",
+			Value:   "",
+		},
+		&cli.StringFlag{
+			Name:    "nodes",
+			Aliases: []string{"n"},
+			Usage:   "Nodes to include in the diff (default: all)",
+			Value:   "all",
+		},
+		&cli.StringFlag{
+			Name:  "skip-tables",
+			Usage: "Comma-separated list of tables to skip",
+		},
+		&cli.StringFlag{
+			Name:  "skip-file",
+			Usage: "Path to a file with a list of tables to skip",
+		},
+		&cli.BoolFlag{
+			Name:  "quiet",
+			Usage: "Whether to suppress output",
+			Value: false,
+		},
+		&cli.StringFlag{
+			Name:    "block-size",
+			Aliases: []string{"b"},
+			Usage:   "Number of rows to hash per block",
+			Value:   "10000",
+		},
+		&cli.IntFlag{
+			Name:    "concurrency-factor",
+			Aliases: []string{"c"},
+			Usage:   "Multiplier for parallel workers (num_cpus * factor)",
+			Value:   4,
+		},
+		&cli.IntFlag{
+			Name:  "compare-unit-size",
+			Usage: "Smallest unit of comparison when a mismatch is found",
+			Value: 100,
+		},
+		&cli.StringFlag{
+			Name:    "output",
+			Aliases: []string{"o"},
+			Usage:   "Output format",
+			Value:   "json",
+		},
+		&cli.BoolFlag{
+			Name:  "override-block-size",
+			Usage: "Override the default block size limits",
+			Value: false,
+		},
+		&cli.BoolFlag{
+			Name:    "debug",
+			Aliases: []string{"v"},
+			Usage:   "Enable debug logging",
+			Value:   false,
+		},
+	}
+
 	app := &cli.App{
 		Name:  "ace",
 		Usage: "Advanced Command-line Executor for database operations",
@@ -203,6 +265,18 @@ func SetupCLI() *cli.App {
 						return fmt.Errorf("missing required argument for spock-diff: needs <cluster>")
 					}
 					return SpockDiffCLI(ctx)
+				},
+			},
+			{
+				Name:      "schema-diff",
+				Usage:     "Compare schemas across cluster nodes",
+				ArgsUsage: "<cluster> <schema>",
+				Flags:     sc_flags,
+				Action: func(ctx *cli.Context) error {
+					if ctx.Args().Len() < 2 {
+						return fmt.Errorf("missing required arguments for schema-diff: needs <cluster> and <schema>")
+					}
+					return SchemaDiffCLI(ctx)
 				},
 			},
 		},
@@ -307,5 +381,42 @@ func SpockDiffCLI(ctx *cli.Context) error {
 	}
 
 	fmt.Println("Spock diff completed")
+	return nil
+}
+
+func SchemaDiffCLI(ctx *cli.Context) error {
+	debugMode := ctx.Bool("debug")
+
+	blockSizeStr := ctx.String("block-size")
+	blockSizeInt, err := strconv.ParseInt(blockSizeStr, 10, 64)
+	if err != nil {
+		return fmt.Errorf("invalid block size '%s': %v", blockSizeStr, err)
+	}
+
+	task := &core.SchemaDiffCmd{
+		ClusterName: ctx.Args().Get(0),
+		SchemaName:  ctx.Args().Get(1),
+		DBName:      ctx.String("dbname"),
+		Nodes:       ctx.String("nodes"),
+		SkipTables:  ctx.String("skip-tables"),
+		SkipFile:    ctx.String("skip-file"),
+		Quiet:       ctx.Bool("quiet"),
+	}
+
+	task.BlockSize = int(blockSizeInt)
+	task.ConcurrencyFactor = ctx.Int("concurrency-factor")
+	task.CompareUnitSize = ctx.Int("compare-unit-size")
+	task.Output = ctx.String("output")
+	task.OverrideBlockSize = ctx.Bool("override-block-size")
+
+	if debugMode {
+		core.SetGlobalLogLevel(core.LevelDebug)
+	}
+
+	if err := core.SchemaDiff(task); err != nil {
+		return fmt.Errorf("error during schema diff: %v", err)
+	}
+
+	fmt.Println("Schema diff completed")
 	return nil
 }
