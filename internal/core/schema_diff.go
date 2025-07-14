@@ -7,7 +7,9 @@ import (
 	"maps"
 	"strconv"
 
+	"github.com/jackc/pgtype"
 	"github.com/jackc/pgx/v4/pgxpool"
+	"github.com/pgedge/ace/db/queries"
 	"github.com/pgedge/ace/internal/auth"
 	"github.com/pgedge/ace/pkg/types"
 )
@@ -95,14 +97,15 @@ func (c *SchemaDiffCmd) RunChecks(skipValidation bool) error {
 		}
 	}
 
-	db, err := auth.GetClusterNodeConnection(nodeWithDBInfo, "")
+	pool, err := auth.GetClusterNodeConnection(nodeWithDBInfo, "")
 	if err != nil {
 		return fmt.Errorf("could not connect to database: %w", err)
 	}
-	defer db.Close()
+	defer pool.Close()
 
-	schemaExists := false
-	err = db.QueryRow(context.Background(), "SELECT EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = $1)", c.SchemaName).Scan(&schemaExists)
+	db := queries.NewQuerier(pool)
+
+	schemaExists, err := db.CheckSchemaExists(context.Background(), pgtype.Name{String: c.SchemaName, Status: pgtype.Present})
 	if err != nil {
 		return fmt.Errorf("could not check if schema exists: %w", err)
 	}
@@ -110,8 +113,14 @@ func (c *SchemaDiffCmd) RunChecks(skipValidation bool) error {
 		return fmt.Errorf("schema %s not found", c.SchemaName)
 	}
 
-	if err := c.getTablesInSchema(db); err != nil {
-		return err
+	tables, err := db.GetTablesInSchema(context.Background(), pgtype.Name{String: c.SchemaName, Status: pgtype.Present})
+	if err != nil {
+		return fmt.Errorf("could not get tables in schema: %w", err)
+	}
+
+	c.tableList = []string{}
+	for _, table := range tables {
+		c.tableList = append(c.tableList, table.String)
 	}
 
 	if len(c.tableList) == 0 {

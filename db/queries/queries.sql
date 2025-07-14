@@ -252,3 +252,16 @@ FROM (
 GROUP BY set_name
 ORDER BY set_name;
 
+--name: CheckSchemaExists :one
+SELECT EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = pggen.arg('schema_name'));
+
+--name: GetTablesInSchema :many
+SELECT table_name FROM information_schema.tables WHERE table_schema = pggen.arg('schema_name') AND table_type = 'BASE TABLE';
+
+--name: CheckRepSetExists :one
+SELECT set_name FROM spock.replication_set WHERE set_name = pggen.arg('set_name');
+
+--name: GetTablesInRepSet :many
+SELECT concat_ws('.', nspname, relname) FROM spock.tables where set_name = pggen.arg('set_name');
+
+

@@ -9,13 +9,33 @@ import (
 )
 
 func SetupCLI() *cli.App {
-	td_flags := []cli.Flag{
+	commonFlags := []cli.Flag{
 		&cli.StringFlag{
 			Name:    "dbname",
 			Aliases: []string{"d"},
 			Usage:   "Name of the database",
 			Value:   "",
 		},
+		&cli.StringFlag{
+			Name:    "nodes",
+			Aliases: []string{"n"},
+			Usage:   "Nodes to include in the diff (default: all)",
+			Value:   "all",
+		},
+		&cli.BoolFlag{
+			Name:  "quiet",
+			Usage: "Whether to suppress output",
+			Value: false,
+		},
+		&cli.BoolFlag{
+			Name:    "debug",
+			Aliases: []string{"v"},
+			Usage:   "Enable debug logging",
+			Value:   false,
+		},
+	}
+
+	diffFlags := []cli.Flag{
 		&cli.StringFlag{
 			Name:    "block-size",
 			Aliases: []string{"b"},
@@ -40,34 +60,30 @@ func SetupCLI() *cli.App {
 			Usage:   "Output format",
 			Value:   "json",
 		},
-		&cli.StringFlag{
-			Name:    "nodes",
-			Aliases: []string{"n"},
-			Usage:   "Nodes to include in the diff (default: all)",
-			Value:   "all",
-		},
-		&cli.StringFlag{
-			Name:  "table-filter",
-			Usage: "Where clause expression to use while diffing tables",
-			Value: "",
-		},
-		&cli.BoolFlag{
-			Name:  "quiet",
-			Usage: "Whether to suppress output",
-			Value: false,
-		},
 		&cli.BoolFlag{
 			Name:  "override-block-size",
 			Usage: "Override block size",
 			Value: false,
 		},
-		&cli.BoolFlag{
-			Name:    "debug",
-			Aliases: []string{"v"},
-			Usage:   "Enable debug logging",
-			Value:   false,
+	}
+
+	skipFlags := []cli.Flag{
+		&cli.StringFlag{
+			Name:  "skip-tables",
+			Usage: "Comma-separated list of tables to skip",
+		},
+		&cli.StringFlag{
+			Name:  "skip-file",
+			Usage: "Path to a file with a list of tables to skip",
 		},
 	}
+
+	td_flags := append(commonFlags, diffFlags...)
+	td_flags = append(td_flags, &cli.StringFlag{
+		Name:  "table-filter",
+		Usage: "Where clause expression to use while diffing tables",
+		Value: "",
+	})
 
 	tr_flags := []cli.Flag{
 		&cli.StringFlag{
@@ -136,94 +152,18 @@ func SetupCLI() *cli.App {
 		},
 	}
 
-	sd_flags := []cli.Flag{
-		&cli.StringFlag{
-			Name:    "dbname",
-			Aliases: []string{"d"},
-			Usage:   "Name of the database",
-			Value:   "",
-		},
-		&cli.StringFlag{
-			Name:    "nodes",
-			Aliases: []string{"n"},
-			Usage:   "Nodes to include in the diff (default: all)",
-			Value:   "all",
-		},
-		&cli.StringFlag{
-			Name:    "output",
-			Aliases: []string{"o"},
-			Usage:   "Output format",
-			Value:   "json",
-		},
-		&cli.BoolFlag{
-			Name:    "debug",
-			Aliases: []string{"v"},
-			Usage:   "Enable debug logging",
-			Value:   false,
-		},
-	}
+	sd_flags := append(commonFlags, &cli.StringFlag{
+		Name:    "output",
+		Aliases: []string{"o"},
+		Usage:   "Output format",
+		Value:   "json",
+	})
 
-	sc_flags := []cli.Flag{
-		&cli.StringFlag{
-			Name:    "dbname",
-			Aliases: []string{"d"},
-			Usage:   "Name of the database",
-			Value:   "",
-		},
-		&cli.StringFlag{
-			Name:    "nodes",
-			Aliases: []string{"n"},
-			Usage:   "Nodes to include in the diff (default: all)",
-			Value:   "all",
-		},
-		&cli.StringFlag{
-			Name:  "skip-tables",
-			Usage: "Comma-separated list of tables to skip",
-		},
-		&cli.StringFlag{
-			Name:  "skip-file",
-			Usage: "Path to a file with a list of tables to skip",
-		},
-		&cli.BoolFlag{
-			Name:  "quiet",
-			Usage: "Whether to suppress output",
-			Value: false,
-		},
-		&cli.StringFlag{
-			Name:    "block-size",
-			Aliases: []string{"b"},
-			Usage:   "Number of rows to hash per block",
-			Value:   "10000",
-		},
-		&cli.IntFlag{
-			Name:    "concurrency-factor",
-			Aliases: []string{"c"},
-			Usage:   "Multiplier for parallel workers (num_cpus * factor)",
-			Value:   4,
-		},
-		&cli.IntFlag{
-			Name:  "compare-unit-size",
-			Usage: "Smallest unit of comparison when a mismatch is found",
-			Value: 100,
-		},
-		&cli.StringFlag{
-			Name:    "output",
-			Aliases: []string{"o"},
-			Usage:   "Output format",
-			Value:   "json",
-		},
-		&cli.BoolFlag{
-			Name:  "override-block-size",
-			Usage: "Override the default block size limits",
-			Value: false,
-		},
-		&cli.BoolFlag{
-			Name:    "debug",
-			Aliases: []string{"v"},
-			Usage:   "Enable debug logging",
-			Value:   false,
-		},
-	}
+	rd_flags := append(commonFlags, diffFlags...)
+	rd_flags = append(rd_flags, skipFlags...)
+
+	sc_flags := append(commonFlags, diffFlags...)
+	sc_flags = append(sc_flags, skipFlags...)
 
 	app := &cli.App{
 		Name:  "ace",
@@ -277,6 +217,18 @@ func SetupCLI() *cli.App {
 						return fmt.Errorf("missing required arguments for schema-diff: needs <cluster> and <schema>")
 					}
 					return SchemaDiffCLI(ctx)
+				},
+			},
+			{
+				Name:      "repset-diff",
+				Usage:     "Compare replication sets across cluster nodes",
+				ArgsUsage: "<cluster> <repset>",
+				Flags:     rd_flags,
+				Action: func(ctx *cli.Context) error {
+					if ctx.Args().Len() < 2 {
+						return fmt.Errorf("missing required arguments for repset-diff: needs <cluster> and <repset>")
+					}
+					return RepsetDiffCLI(ctx)
 				},
 			},
 		},
@@ -418,5 +370,42 @@ func SchemaDiffCLI(ctx *cli.Context) error {
 	}
 
 	fmt.Println("Schema diff completed")
+	return nil
+}
+
+func RepsetDiffCLI(ctx *cli.Context) error {
+	debugMode := ctx.Bool("debug")
+
+	blockSizeStr := ctx.String("block-size")
+	blockSizeInt, err := strconv.ParseInt(blockSizeStr, 10, 64)
+	if err != nil {
+		return fmt.Errorf("invalid block size '%s': %v", blockSizeStr, err)
+	}
+
+	task := &core.RepsetDiffCmd{
+		ClusterName: ctx.Args().Get(0),
+		RepsetName:  ctx.Args().Get(1),
+		DBName:      ctx.String("dbname"),
+		Nodes:       ctx.String("nodes"),
+		SkipTables:  ctx.String("skip-tables"),
+		SkipFile:    ctx.String("skip-file"),
+		Quiet:       ctx.Bool("quiet"),
+	}
+
+	task.BlockSize = int(blockSizeInt)
+	task.ConcurrencyFactor = ctx.Int("concurrency-factor")
+	task.CompareUnitSize = ctx.Int("compare-unit-size")
+	task.Output = ctx.String("output")
+	task.OverrideBlockSize = ctx.Bool("override-block-size")
+
+	if debugMode {
+		core.SetGlobalLogLevel(core.LevelDebug)
+	}
+
+	if err := core.RepsetDiff(task); err != nil {
+		return fmt.Errorf("error during repset diff: %v", err)
+	}
+
+	fmt.Println("Repset diff completed")
 	return nil
 }
