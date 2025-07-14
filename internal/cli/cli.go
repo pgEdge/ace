@@ -136,6 +136,33 @@ func SetupCLI() *cli.App {
 		},
 	}
 
+	sd_flags := []cli.Flag{
+		&cli.StringFlag{
+			Name:    "dbname",
+			Aliases: []string{"d"},
+			Usage:   "Name of the database",
+			Value:   "",
+		},
+		&cli.StringFlag{
+			Name:    "nodes",
+			Aliases: []string{"n"},
+			Usage:   "Nodes to include in the diff (default: all)",
+			Value:   "all",
+		},
+		&cli.StringFlag{
+			Name:    "output",
+			Aliases: []string{"o"},
+			Usage:   "Output format",
+			Value:   "json",
+		},
+		&cli.BoolFlag{
+			Name:    "debug",
+			Aliases: []string{"v"},
+			Usage:   "Enable debug logging",
+			Value:   false,
+		},
+	}
+
 	app := &cli.App{
 		Name:  "ace",
 		Usage: "Advanced Command-line Executor for database operations",
@@ -164,6 +191,18 @@ func SetupCLI() *cli.App {
 						return fmt.Errorf("missing required arguments for table-repair: needs <cluster> and <table>")
 					}
 					return TableRepairCLI(ctx)
+				},
+			},
+			{
+				Name:      "spock-diff",
+				Usage:     "Compare spock metadata across cluster nodes",
+				ArgsUsage: "<cluster>",
+				Flags:     sd_flags,
+				Action: func(ctx *cli.Context) error {
+					if ctx.Args().Len() < 1 {
+						return fmt.Errorf("missing required argument for spock-diff: needs <cluster>")
+					}
+					return SpockDiffCLI(ctx)
 				},
 			},
 		},
@@ -243,5 +282,30 @@ func TableRepairCLI(ctx *cli.Context) error {
 	}
 
 	fmt.Println("Table repair complete")
+	return nil
+}
+
+func SpockDiffCLI(ctx *cli.Context) error {
+	debugMode := ctx.Bool("debug")
+
+	task := core.NewSpockDiffTask()
+	task.ClusterName = ctx.Args().Get(0)
+	task.DBName = ctx.String("dbname")
+	task.Nodes = ctx.String("nodes")
+	task.Output = ctx.String("output")
+
+	if err := task.Validate(); err != nil {
+		return fmt.Errorf("validation failed: %v", err)
+	}
+
+	if err := task.RunChecks(true); err != nil { // Pass true to skip inner validation
+		return fmt.Errorf("checks failed: %v", err)
+	}
+
+	if err := task.ExecuteTask(debugMode); err != nil {
+		return fmt.Errorf("error during spock diff: %v", err)
+	}
+
+	fmt.Println("Spock diff completed")
 	return nil
 }

@@ -50,6 +50,20 @@ type Querier interface {
 	CheckUserPrivilegesBatch(batch genericBatch, params CheckUserPrivilegesParams)
 	// CheckUserPrivilegesScan scans the result of an executed CheckUserPrivilegesBatch query.
 	CheckUserPrivilegesScan(results pgx.BatchResults) (CheckUserPrivilegesRow, error)
+
+	SpockNodeAndSubInfo(ctx context.Context) ([]SpockNodeAndSubInfoRow, error)
+	// SpockNodeAndSubInfoBatch enqueues a SpockNodeAndSubInfo query into batch to be executed
+	// later by the batch.
+	SpockNodeAndSubInfoBatch(batch genericBatch)
+	// SpockNodeAndSubInfoScan scans the result of an executed SpockNodeAndSubInfoBatch query.
+	SpockNodeAndSubInfoScan(results pgx.BatchResults) ([]SpockNodeAndSubInfoRow, error)
+
+	SpockRepSetInfo(ctx context.Context) ([]SpockRepSetInfoRow, error)
+	// SpockRepSetInfoBatch enqueues a SpockRepSetInfo query into batch to be executed
+	// later by the batch.
+	SpockRepSetInfoBatch(batch genericBatch)
+	// SpockRepSetInfoScan scans the result of an executed SpockRepSetInfoBatch query.
+	SpockRepSetInfoScan(results pgx.BatchResults) ([]SpockRepSetInfoRow, error)
 }
 
 type DBQuerier struct {
@@ -141,6 +155,12 @@ func PrepareAllQueries(ctx context.Context, p preparer) error {
 	}
 	if _, err := p.Prepare(ctx, checkUserPrivilegesSQL, checkUserPrivilegesSQL); err != nil {
 		return fmt.Errorf("prepare query 'CheckUserPrivileges': %w", err)
+	}
+	if _, err := p.Prepare(ctx, spockNodeAndSubInfoSQL, spockNodeAndSubInfoSQL); err != nil {
+		return fmt.Errorf("prepare query 'SpockNodeAndSubInfo': %w", err)
+	}
+	if _, err := p.Prepare(ctx, spockRepSetInfoSQL, spockRepSetInfoSQL); err != nil {
+		return fmt.Errorf("prepare query 'SpockRepSetInfo': %w", err)
 	}
 	return nil
 }
@@ -613,6 +633,146 @@ func (q *DBQuerier) CheckUserPrivilegesScan(results pgx.BatchResults) (CheckUser
 		return item, fmt.Errorf("scan CheckUserPrivilegesBatch row: %w", err)
 	}
 	return item, nil
+}
+
+const spockNodeAndSubInfoSQL = `SELECT
+		n.node_id,
+		n.node_name,
+		n.location,
+		n.country,
+		s.sub_id,
+		s.sub_name,
+		s.sub_enabled,
+		s.sub_replication_sets
+	FROM spock.node n
+	LEFT OUTER JOIN spock.subscription s
+	ON s.sub_target = n.node_id
+	WHERE s.sub_name IS NOT NULL;`
+
+type SpockNodeAndSubInfoRow struct {
+	NodeID             pgtype.OID  `json:"node_id"`
+	NodeName           pgtype.Name `json:"node_name"`
+	Location           *string     `json:"location"`
+	Country            *string     `json:"country"`
+	SubID              pgtype.OID  `json:"sub_id"`
+	SubName            pgtype.Name `json:"sub_name"`
+	SubEnabled         *bool       `json:"sub_enabled"`
+	SubReplicationSets []string    `json:"sub_replication_sets"`
+}
+
+// SpockNodeAndSubInfo implements Querier.SpockNodeAndSubInfo.
+func (q *DBQuerier) SpockNodeAndSubInfo(ctx context.Context) ([]SpockNodeAndSubInfoRow, error) {
+	ctx = context.WithValue(ctx, "pggen_query_name", "SpockNodeAndSubInfo")
+	rows, err := q.conn.Query(ctx, spockNodeAndSubInfoSQL)
+	if err != nil {
+		return nil, fmt.Errorf("query SpockNodeAndSubInfo: %w", err)
+	}
+	defer rows.Close()
+	items := []SpockNodeAndSubInfoRow{}
+	for rows.Next() {
+		var item SpockNodeAndSubInfoRow
+		if err := rows.Scan(&item.NodeID, &item.NodeName, &item.Location, &item.Country, &item.SubID, &item.SubName, &item.SubEnabled, &item.SubReplicationSets); err != nil {
+			return nil, fmt.Errorf("scan SpockNodeAndSubInfo row: %w", err)
+		}
+		items = append(items, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("close SpockNodeAndSubInfo rows: %w", err)
+	}
+	return items, err
+}
+
+// SpockNodeAndSubInfoBatch implements Querier.SpockNodeAndSubInfoBatch.
+func (q *DBQuerier) SpockNodeAndSubInfoBatch(batch genericBatch) {
+	batch.Queue(spockNodeAndSubInfoSQL)
+}
+
+// SpockNodeAndSubInfoScan implements Querier.SpockNodeAndSubInfoScan.
+func (q *DBQuerier) SpockNodeAndSubInfoScan(results pgx.BatchResults) ([]SpockNodeAndSubInfoRow, error) {
+	rows, err := results.Query()
+	if err != nil {
+		return nil, fmt.Errorf("query SpockNodeAndSubInfoBatch: %w", err)
+	}
+	defer rows.Close()
+	items := []SpockNodeAndSubInfoRow{}
+	for rows.Next() {
+		var item SpockNodeAndSubInfoRow
+		if err := rows.Scan(&item.NodeID, &item.NodeName, &item.Location, &item.Country, &item.SubID, &item.SubName, &item.SubEnabled, &item.SubReplicationSets); err != nil {
+			return nil, fmt.Errorf("scan SpockNodeAndSubInfoBatch row: %w", err)
+		}
+		items = append(items, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("close SpockNodeAndSubInfoBatch rows: %w", err)
+	}
+	return items, err
+}
+
+const spockRepSetInfoSQL = `SELECT
+set_name,
+array_agg(nspname || '.' || relname ORDER BY nspname, relname) as relname
+FROM (
+	SELECT
+		set_name,
+		nspname,
+		relname
+	FROM spock.tables
+	ORDER BY set_name, nspname, relname
+) subquery
+GROUP BY set_name
+ORDER BY set_name;`
+
+type SpockRepSetInfoRow struct {
+	SetName pgtype.Name `json:"set_name"`
+	Relname []string    `json:"relname"`
+}
+
+// SpockRepSetInfo implements Querier.SpockRepSetInfo.
+func (q *DBQuerier) SpockRepSetInfo(ctx context.Context) ([]SpockRepSetInfoRow, error) {
+	ctx = context.WithValue(ctx, "pggen_query_name", "SpockRepSetInfo")
+	rows, err := q.conn.Query(ctx, spockRepSetInfoSQL)
+	if err != nil {
+		return nil, fmt.Errorf("query SpockRepSetInfo: %w", err)
+	}
+	defer rows.Close()
+	items := []SpockRepSetInfoRow{}
+	for rows.Next() {
+		var item SpockRepSetInfoRow
+		if err := rows.Scan(&item.SetName, &item.Relname); err != nil {
+			return nil, fmt.Errorf("scan SpockRepSetInfo row: %w", err)
+		}
+		items = append(items, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("close SpockRepSetInfo rows: %w", err)
+	}
+	return items, err
+}
+
+// SpockRepSetInfoBatch implements Querier.SpockRepSetInfoBatch.
+func (q *DBQuerier) SpockRepSetInfoBatch(batch genericBatch) {
+	batch.Queue(spockRepSetInfoSQL)
+}
+
+// SpockRepSetInfoScan implements Querier.SpockRepSetInfoScan.
+func (q *DBQuerier) SpockRepSetInfoScan(results pgx.BatchResults) ([]SpockRepSetInfoRow, error) {
+	rows, err := results.Query()
+	if err != nil {
+		return nil, fmt.Errorf("query SpockRepSetInfoBatch: %w", err)
+	}
+	defer rows.Close()
+	items := []SpockRepSetInfoRow{}
+	for rows.Next() {
+		var item SpockRepSetInfoRow
+		if err := rows.Scan(&item.SetName, &item.Relname); err != nil {
+			return nil, fmt.Errorf("scan SpockRepSetInfoBatch row: %w", err)
+		}
+		items = append(items, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("close SpockRepSetInfoBatch rows: %w", err)
+	}
+	return items, err
 }
 
 // textPreferrer wraps a pgtype.ValueTranscoder and sets the preferred encoding
