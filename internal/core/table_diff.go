@@ -182,6 +182,25 @@ func stringifyKey(pkValues map[string]any, pkCols []string) string {
 	return strings.Join(parts, "||")
 }
 
+func isKnownScalarType(colType string) bool {
+	knownPrefixes := []string{
+		"character", "text",
+		"integer", "bigint", "smallint",
+		"numeric", "decimal", "real", "double precision",
+		"boolean",
+		"bytea",
+		"json", "jsonb",
+		"uuid",
+		"timestamp", "date", "time",
+	}
+	for _, prefix := range knownPrefixes {
+		if strings.HasPrefix(colType, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
 func (t *TableDiffTask) fetchRows(ctx context.Context, nodeName string, r Range) ([]map[string]any, error) {
 	pool, ok := t.Pools[nodeName]
 	if !ok {
@@ -196,7 +215,47 @@ func (t *TableDiffTask) fetchRows(ctx context.Context, nodeName string, r Range)
 	quotedTable := sanitise(t.Table)
 	quotedSchemaTable := fmt.Sprintf("%s.%s", quotedSchema, quotedTable)
 
-	selectColsStr := "pg_xact_commit_timestamp(xmin) as commit_ts, to_json(spock.xact_commit_timestamp_origin(xmin))->>'roident' as node_origin, *"
+	var colTypes map[string]string
+	var colTypesKey string
+	for _, nodeInfo := range t.ClusterNodes {
+		if name, ok := nodeInfo["Name"].(string); ok && name == nodeName {
+			publicIP, _ := nodeInfo["PublicIP"].(string)
+
+			var portStr string
+			switch v := nodeInfo["Port"].(type) {
+			case string:
+				portStr = v
+			case float64:
+				portStr = fmt.Sprintf("%.f", v)
+			default:
+				portStr = "5432"
+			}
+			colTypesKey = fmt.Sprintf("%s:%s", publicIP, portStr)
+			colTypes = t.ColTypes[colTypesKey]
+			break
+		}
+	}
+
+	if colTypes == nil {
+		return nil, fmt.Errorf("could not find column types for node %s using key %s", nodeName, colTypesKey)
+	}
+
+	selectCols := make([]string, 0, len(t.Cols)+2)
+	selectCols = append(selectCols, "pg_xact_commit_timestamp(xmin) as commit_ts", "to_json(spock.xact_commit_timestamp_origin(xmin))->>'roident' as node_origin")
+
+	for _, colName := range t.Cols {
+		colType := colTypes[colName]
+		quotedColName := sanitise(colName)
+
+		// We cast user defined types and arrays to TEXT to avoid scan errors with unknown OIDs
+		if strings.HasSuffix(colType, "[]") || !isKnownScalarType(colType) {
+			selectCols = append(selectCols, fmt.Sprintf("%s::TEXT AS %s", quotedColName, quotedColName))
+		} else {
+			selectCols = append(selectCols, quotedColName)
+		}
+	}
+
+	selectColsStr := strings.Join(selectCols, ", ")
 
 	quotedKeyCols := make([]string, len(t.Key))
 	for i, k := range t.Key {
@@ -331,6 +390,10 @@ func (t *TableDiffTask) fetchRows(ctx context.Context, nodeName string, r Range)
 				} else {
 					rowData[string(colD.Name)] = nil
 				}
+			case string:
+				// This case handles the TEXT columns we casted earlier.
+				// The original type info is lost, but the string representation is sufficient for diffing.
+				rowData[string(colD.Name)] = v
 			case pgtype.JSON, pgtype.JSONB:
 				if v == nil || v.(interface{ GetStatus() pgtype.Status }).GetStatus() != pgtype.Present {
 					rowData[string(colD.Name)] = nil
@@ -789,6 +852,7 @@ func (t *TableDiffTask) CheckColumnSize() error {
 				return fmt.Errorf("refusing to perform table-diff. Data in column %s of table %s.%s is larger than 1 MB",
 					colName, t.Schema, t.Table)
 			}
+
 		}
 		pool.Close()
 	}
