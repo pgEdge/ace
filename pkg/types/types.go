@@ -108,3 +108,68 @@ type NodePairDiff struct {
 		Node2Data map[string]any
 	}
 }
+
+// SpockSubscription holds information about a spock subscription.
+type SpockSubscription struct {
+	SubName         string   `json:"sub_name"`
+	SubEnabled      bool     `json:"sub_enabled"`
+	ReplicationSets []string `json:"replication_sets"`
+}
+
+// SpockDiffOutput represents the result of a spock-diff operation.
+type SpockDiffOutput struct {
+	SpockConfigs map[string]any           `json:"spock_config"`
+	Diffs        map[string]SpockPairDiff `json:"diffs"`
+}
+
+// SpockPairDiff represents the diff result for a pair of nodes.
+type SpockPairDiff struct {
+	Mismatch bool            `json:"mismatch"`
+	Message  string          `json:"message"`
+	Details  SpockDiffDetail `json:"details,omitempty"`
+}
+
+// SpockDiffDetail holds the detailed differences between two nodes' spock configurations.
+type SpockDiffDetail struct {
+	Subscriptions   SubscriptionDiff   `json:"subscriptions"`
+	ReplicationSets ReplicationSetDiff `json:"replication_sets"`
+}
+
+// SubscriptionDiff highlights differences in subscriptions between two nodes.
+type SubscriptionDiff struct {
+	MissingOnNode1 []string           `json:"missing_on_node1"`
+	MissingOnNode2 []string           `json:"missing_on_node2"`
+	Different      []SubscriptionPair `json:"different"`
+}
+
+// SubscriptionPair shows a subscription that exists on both nodes but has different properties.
+type SubscriptionPair struct {
+	Name  string            `json:"name"`
+	Node1 SpockSubscription `json:"node1"`
+	Node2 SpockSubscription `json:"node2"`
+}
+
+// RepSetInfo holds information about a replication set.
+type RepSetInfo struct {
+	SetName string   `json:"set_name"`
+	Tables  []string `json:"tables"`
+}
+
+// ReplicationSetDiff highlights differences in replication sets.
+type ReplicationSetDiff struct {
+	TablePlacementDiffs []TableRepSetDiff `json:"table_placement_differences"`
+}
+
+// TableRepSetDiff details which replication set a table belongs to on each node if they differ.
+type TableRepSetDiff struct {
+	TableName   string `json:"table_name"`
+	Node1RepSet string `json:"node1_repset"`
+	Node2RepSet string `json:"node2_repset"`
+}
+
+// ReplicationSetPair shows a replication set that exists on both nodes but has different tables.
+type ReplicationSetPair struct {
+	Name  string     `json:"name"`
+	Node1 RepSetInfo `json:"node1"`
+	Node2 RepSetInfo `json:"node2"`
+}

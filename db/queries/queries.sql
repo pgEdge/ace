@@ -221,11 +221,34 @@ SELECT
         'SELECT'
     ) AS key_column_usage_select;
 
---name: CheckColumnSize :one
--- SELECT
---     COALESCE(AVG(pg_column_size(column_value)), 0) AS avg_size_in_bytes
--- FROM
---     $1
--- WHERE
---     column_name = $2;
+
+--name: SpockNodeAndSubInfo :many
+SELECT
+		n.node_id,
+		n.node_name,
+		n.location,
+		n.country,
+		s.sub_id,
+		s.sub_name,
+		s.sub_enabled,
+		s.sub_replication_sets
+	FROM spock.node n
+	LEFT OUTER JOIN spock.subscription s
+	ON s.sub_target = n.node_id
+	WHERE s.sub_name IS NOT NULL;
+
+--name: SpockRepSetInfo :many
+SELECT
+set_name,
+array_agg(nspname || '.' || relname ORDER BY nspname, relname) as relname
+FROM (
+	SELECT
+		set_name,
+		nspname,
+		relname
+	FROM spock.tables
+	ORDER BY set_name, nspname, relname
+) subquery
+GROUP BY set_name
+ORDER BY set_name;
 
