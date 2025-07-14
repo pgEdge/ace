@@ -64,6 +64,34 @@ type Querier interface {
 	SpockRepSetInfoBatch(batch genericBatch)
 	// SpockRepSetInfoScan scans the result of an executed SpockRepSetInfoBatch query.
 	SpockRepSetInfoScan(results pgx.BatchResults) ([]SpockRepSetInfoRow, error)
+
+	CheckSchemaExists(ctx context.Context, schemaName pgtype.Name) (bool, error)
+	// CheckSchemaExistsBatch enqueues a CheckSchemaExists query into batch to be executed
+	// later by the batch.
+	CheckSchemaExistsBatch(batch genericBatch, schemaName pgtype.Name)
+	// CheckSchemaExistsScan scans the result of an executed CheckSchemaExistsBatch query.
+	CheckSchemaExistsScan(results pgx.BatchResults) (bool, error)
+
+	GetTablesInSchema(ctx context.Context, schemaName pgtype.Name) ([]pgtype.Name, error)
+	// GetTablesInSchemaBatch enqueues a GetTablesInSchema query into batch to be executed
+	// later by the batch.
+	GetTablesInSchemaBatch(batch genericBatch, schemaName pgtype.Name)
+	// GetTablesInSchemaScan scans the result of an executed GetTablesInSchemaBatch query.
+	GetTablesInSchemaScan(results pgx.BatchResults) ([]pgtype.Name, error)
+
+	CheckRepSetExists(ctx context.Context, setName pgtype.Name) (pgtype.Name, error)
+	// CheckRepSetExistsBatch enqueues a CheckRepSetExists query into batch to be executed
+	// later by the batch.
+	CheckRepSetExistsBatch(batch genericBatch, setName pgtype.Name)
+	// CheckRepSetExistsScan scans the result of an executed CheckRepSetExistsBatch query.
+	CheckRepSetExistsScan(results pgx.BatchResults) (pgtype.Name, error)
+
+	GetTablesInRepSet(ctx context.Context, setName pgtype.Name) ([]string, error)
+	// GetTablesInRepSetBatch enqueues a GetTablesInRepSet query into batch to be executed
+	// later by the batch.
+	GetTablesInRepSetBatch(batch genericBatch, setName pgtype.Name)
+	// GetTablesInRepSetScan scans the result of an executed GetTablesInRepSetBatch query.
+	GetTablesInRepSetScan(results pgx.BatchResults) ([]string, error)
 }
 
 type DBQuerier struct {
@@ -161,6 +189,18 @@ func PrepareAllQueries(ctx context.Context, p preparer) error {
 	}
 	if _, err := p.Prepare(ctx, spockRepSetInfoSQL, spockRepSetInfoSQL); err != nil {
 		return fmt.Errorf("prepare query 'SpockRepSetInfo': %w", err)
+	}
+	if _, err := p.Prepare(ctx, checkSchemaExistsSQL, checkSchemaExistsSQL); err != nil {
+		return fmt.Errorf("prepare query 'CheckSchemaExists': %w", err)
+	}
+	if _, err := p.Prepare(ctx, getTablesInSchemaSQL, getTablesInSchemaSQL); err != nil {
+		return fmt.Errorf("prepare query 'GetTablesInSchema': %w", err)
+	}
+	if _, err := p.Prepare(ctx, checkRepSetExistsSQL, checkRepSetExistsSQL); err != nil {
+		return fmt.Errorf("prepare query 'CheckRepSetExists': %w", err)
+	}
+	if _, err := p.Prepare(ctx, getTablesInRepSetSQL, getTablesInRepSetSQL); err != nil {
+		return fmt.Errorf("prepare query 'GetTablesInRepSet': %w", err)
 	}
 	return nil
 }
@@ -771,6 +811,162 @@ func (q *DBQuerier) SpockRepSetInfoScan(results pgx.BatchResults) ([]SpockRepSet
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("close SpockRepSetInfoBatch rows: %w", err)
+	}
+	return items, err
+}
+
+const checkSchemaExistsSQL = `SELECT EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = $1);`
+
+// CheckSchemaExists implements Querier.CheckSchemaExists.
+func (q *DBQuerier) CheckSchemaExists(ctx context.Context, schemaName pgtype.Name) (bool, error) {
+	ctx = context.WithValue(ctx, "pggen_query_name", "CheckSchemaExists")
+	row := q.conn.QueryRow(ctx, checkSchemaExistsSQL, schemaName)
+	var item bool
+	if err := row.Scan(&item); err != nil {
+		return item, fmt.Errorf("query CheckSchemaExists: %w", err)
+	}
+	return item, nil
+}
+
+// CheckSchemaExistsBatch implements Querier.CheckSchemaExistsBatch.
+func (q *DBQuerier) CheckSchemaExistsBatch(batch genericBatch, schemaName pgtype.Name) {
+	batch.Queue(checkSchemaExistsSQL, schemaName)
+}
+
+// CheckSchemaExistsScan implements Querier.CheckSchemaExistsScan.
+func (q *DBQuerier) CheckSchemaExistsScan(results pgx.BatchResults) (bool, error) {
+	row := results.QueryRow()
+	var item bool
+	if err := row.Scan(&item); err != nil {
+		return item, fmt.Errorf("scan CheckSchemaExistsBatch row: %w", err)
+	}
+	return item, nil
+}
+
+const getTablesInSchemaSQL = `SELECT table_name FROM information_schema.tables WHERE table_schema = $1 AND table_type = 'BASE TABLE';`
+
+// GetTablesInSchema implements Querier.GetTablesInSchema.
+func (q *DBQuerier) GetTablesInSchema(ctx context.Context, schemaName pgtype.Name) ([]pgtype.Name, error) {
+	ctx = context.WithValue(ctx, "pggen_query_name", "GetTablesInSchema")
+	rows, err := q.conn.Query(ctx, getTablesInSchemaSQL, schemaName)
+	if err != nil {
+		return nil, fmt.Errorf("query GetTablesInSchema: %w", err)
+	}
+	defer rows.Close()
+	items := []pgtype.Name{}
+	for rows.Next() {
+		var item pgtype.Name
+		if err := rows.Scan(&item); err != nil {
+			return nil, fmt.Errorf("scan GetTablesInSchema row: %w", err)
+		}
+		items = append(items, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("close GetTablesInSchema rows: %w", err)
+	}
+	return items, err
+}
+
+// GetTablesInSchemaBatch implements Querier.GetTablesInSchemaBatch.
+func (q *DBQuerier) GetTablesInSchemaBatch(batch genericBatch, schemaName pgtype.Name) {
+	batch.Queue(getTablesInSchemaSQL, schemaName)
+}
+
+// GetTablesInSchemaScan implements Querier.GetTablesInSchemaScan.
+func (q *DBQuerier) GetTablesInSchemaScan(results pgx.BatchResults) ([]pgtype.Name, error) {
+	rows, err := results.Query()
+	if err != nil {
+		return nil, fmt.Errorf("query GetTablesInSchemaBatch: %w", err)
+	}
+	defer rows.Close()
+	items := []pgtype.Name{}
+	for rows.Next() {
+		var item pgtype.Name
+		if err := rows.Scan(&item); err != nil {
+			return nil, fmt.Errorf("scan GetTablesInSchemaBatch row: %w", err)
+		}
+		items = append(items, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("close GetTablesInSchemaBatch rows: %w", err)
+	}
+	return items, err
+}
+
+const checkRepSetExistsSQL = `SELECT set_name FROM spock.replication_set WHERE set_name = $1;`
+
+// CheckRepSetExists implements Querier.CheckRepSetExists.
+func (q *DBQuerier) CheckRepSetExists(ctx context.Context, setName pgtype.Name) (pgtype.Name, error) {
+	ctx = context.WithValue(ctx, "pggen_query_name", "CheckRepSetExists")
+	row := q.conn.QueryRow(ctx, checkRepSetExistsSQL, setName)
+	var item pgtype.Name
+	if err := row.Scan(&item); err != nil {
+		return item, fmt.Errorf("query CheckRepSetExists: %w", err)
+	}
+	return item, nil
+}
+
+// CheckRepSetExistsBatch implements Querier.CheckRepSetExistsBatch.
+func (q *DBQuerier) CheckRepSetExistsBatch(batch genericBatch, setName pgtype.Name) {
+	batch.Queue(checkRepSetExistsSQL, setName)
+}
+
+// CheckRepSetExistsScan implements Querier.CheckRepSetExistsScan.
+func (q *DBQuerier) CheckRepSetExistsScan(results pgx.BatchResults) (pgtype.Name, error) {
+	row := results.QueryRow()
+	var item pgtype.Name
+	if err := row.Scan(&item); err != nil {
+		return item, fmt.Errorf("scan CheckRepSetExistsBatch row: %w", err)
+	}
+	return item, nil
+}
+
+const getTablesInRepSetSQL = `SELECT concat_ws('.', nspname, relname) FROM spock.tables where set_name = $1;`
+
+// GetTablesInRepSet implements Querier.GetTablesInRepSet.
+func (q *DBQuerier) GetTablesInRepSet(ctx context.Context, setName pgtype.Name) ([]string, error) {
+	ctx = context.WithValue(ctx, "pggen_query_name", "GetTablesInRepSet")
+	rows, err := q.conn.Query(ctx, getTablesInRepSetSQL, setName)
+	if err != nil {
+		return nil, fmt.Errorf("query GetTablesInRepSet: %w", err)
+	}
+	defer rows.Close()
+	items := []string{}
+	for rows.Next() {
+		var item string
+		if err := rows.Scan(&item); err != nil {
+			return nil, fmt.Errorf("scan GetTablesInRepSet row: %w", err)
+		}
+		items = append(items, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("close GetTablesInRepSet rows: %w", err)
+	}
+	return items, err
+}
+
+// GetTablesInRepSetBatch implements Querier.GetTablesInRepSetBatch.
+func (q *DBQuerier) GetTablesInRepSetBatch(batch genericBatch, setName pgtype.Name) {
+	batch.Queue(getTablesInRepSetSQL, setName)
+}
+
+// GetTablesInRepSetScan implements Querier.GetTablesInRepSetScan.
+func (q *DBQuerier) GetTablesInRepSetScan(results pgx.BatchResults) ([]string, error) {
+	rows, err := results.Query()
+	if err != nil {
+		return nil, fmt.Errorf("query GetTablesInRepSetBatch: %w", err)
+	}
+	defer rows.Close()
+	items := []string{}
+	for rows.Next() {
+		var item string
+		if err := rows.Scan(&item); err != nil {
+			return nil, fmt.Errorf("scan GetTablesInRepSetBatch row: %w", err)
+		}
+		items = append(items, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("close GetTablesInRepSetBatch rows: %w", err)
 	}
 	return items, err
 }
