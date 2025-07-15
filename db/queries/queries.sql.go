@@ -79,6 +79,27 @@ type Querier interface {
 	// GetTablesInSchemaScan scans the result of an executed GetTablesInSchemaBatch query.
 	GetTablesInSchemaScan(results pgx.BatchResults) ([]pgtype.Name, error)
 
+	GetViewsInSchema(ctx context.Context, schemaName pgtype.Name) ([]pgtype.Name, error)
+	// GetViewsInSchemaBatch enqueues a GetViewsInSchema query into batch to be executed
+	// later by the batch.
+	GetViewsInSchemaBatch(batch genericBatch, schemaName pgtype.Name)
+	// GetViewsInSchemaScan scans the result of an executed GetViewsInSchemaBatch query.
+	GetViewsInSchemaScan(results pgx.BatchResults) ([]pgtype.Name, error)
+
+	GetFunctionsInSchema(ctx context.Context, schemaName pgtype.Name) ([]*string, error)
+	// GetFunctionsInSchemaBatch enqueues a GetFunctionsInSchema query into batch to be executed
+	// later by the batch.
+	GetFunctionsInSchemaBatch(batch genericBatch, schemaName pgtype.Name)
+	// GetFunctionsInSchemaScan scans the result of an executed GetFunctionsInSchemaBatch query.
+	GetFunctionsInSchemaScan(results pgx.BatchResults) ([]*string, error)
+
+	GetIndicesInSchema(ctx context.Context, schemaName pgtype.Name) ([]pgtype.Name, error)
+	// GetIndicesInSchemaBatch enqueues a GetIndicesInSchema query into batch to be executed
+	// later by the batch.
+	GetIndicesInSchemaBatch(batch genericBatch, schemaName pgtype.Name)
+	// GetIndicesInSchemaScan scans the result of an executed GetIndicesInSchemaBatch query.
+	GetIndicesInSchemaScan(results pgx.BatchResults) ([]pgtype.Name, error)
+
 	CheckRepSetExists(ctx context.Context, setName pgtype.Name) (pgtype.Name, error)
 	// CheckRepSetExistsBatch enqueues a CheckRepSetExists query into batch to be executed
 	// later by the batch.
@@ -195,6 +216,15 @@ func PrepareAllQueries(ctx context.Context, p preparer) error {
 	}
 	if _, err := p.Prepare(ctx, getTablesInSchemaSQL, getTablesInSchemaSQL); err != nil {
 		return fmt.Errorf("prepare query 'GetTablesInSchema': %w", err)
+	}
+	if _, err := p.Prepare(ctx, getViewsInSchemaSQL, getViewsInSchemaSQL); err != nil {
+		return fmt.Errorf("prepare query 'GetViewsInSchema': %w", err)
+	}
+	if _, err := p.Prepare(ctx, getFunctionsInSchemaSQL, getFunctionsInSchemaSQL); err != nil {
+		return fmt.Errorf("prepare query 'GetFunctionsInSchema': %w", err)
+	}
+	if _, err := p.Prepare(ctx, getIndicesInSchemaSQL, getIndicesInSchemaSQL); err != nil {
+		return fmt.Errorf("prepare query 'GetIndicesInSchema': %w", err)
 	}
 	if _, err := p.Prepare(ctx, checkRepSetExistsSQL, checkRepSetExistsSQL); err != nil {
 		return fmt.Errorf("prepare query 'CheckRepSetExists': %w", err)
@@ -889,6 +919,159 @@ func (q *DBQuerier) GetTablesInSchemaScan(results pgx.BatchResults) ([]pgtype.Na
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("close GetTablesInSchemaBatch rows: %w", err)
+	}
+	return items, err
+}
+
+const getViewsInSchemaSQL = `SELECT table_name FROM information_schema.views WHERE table_schema = $1;`
+
+// GetViewsInSchema implements Querier.GetViewsInSchema.
+func (q *DBQuerier) GetViewsInSchema(ctx context.Context, schemaName pgtype.Name) ([]pgtype.Name, error) {
+	ctx = context.WithValue(ctx, "pggen_query_name", "GetViewsInSchema")
+	rows, err := q.conn.Query(ctx, getViewsInSchemaSQL, schemaName)
+	if err != nil {
+		return nil, fmt.Errorf("query GetViewsInSchema: %w", err)
+	}
+	defer rows.Close()
+	items := []pgtype.Name{}
+	for rows.Next() {
+		var item pgtype.Name
+		if err := rows.Scan(&item); err != nil {
+			return nil, fmt.Errorf("scan GetViewsInSchema row: %w", err)
+		}
+		items = append(items, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("close GetViewsInSchema rows: %w", err)
+	}
+	return items, err
+}
+
+// GetViewsInSchemaBatch implements Querier.GetViewsInSchemaBatch.
+func (q *DBQuerier) GetViewsInSchemaBatch(batch genericBatch, schemaName pgtype.Name) {
+	batch.Queue(getViewsInSchemaSQL, schemaName)
+}
+
+// GetViewsInSchemaScan implements Querier.GetViewsInSchemaScan.
+func (q *DBQuerier) GetViewsInSchemaScan(results pgx.BatchResults) ([]pgtype.Name, error) {
+	rows, err := results.Query()
+	if err != nil {
+		return nil, fmt.Errorf("query GetViewsInSchemaBatch: %w", err)
+	}
+	defer rows.Close()
+	items := []pgtype.Name{}
+	for rows.Next() {
+		var item pgtype.Name
+		if err := rows.Scan(&item); err != nil {
+			return nil, fmt.Errorf("scan GetViewsInSchemaBatch row: %w", err)
+		}
+		items = append(items, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("close GetViewsInSchemaBatch rows: %w", err)
+	}
+	return items, err
+}
+
+const getFunctionsInSchemaSQL = `SELECT p.proname || '(' || COALESCE(pg_get_function_identity_arguments(p.oid), '') || ')' as function_signature
+FROM pg_proc p
+LEFT JOIN pg_namespace n ON p.pronamespace = n.oid
+WHERE n.nspname = $1;`
+
+// GetFunctionsInSchema implements Querier.GetFunctionsInSchema.
+func (q *DBQuerier) GetFunctionsInSchema(ctx context.Context, schemaName pgtype.Name) ([]*string, error) {
+	ctx = context.WithValue(ctx, "pggen_query_name", "GetFunctionsInSchema")
+	rows, err := q.conn.Query(ctx, getFunctionsInSchemaSQL, schemaName)
+	if err != nil {
+		return nil, fmt.Errorf("query GetFunctionsInSchema: %w", err)
+	}
+	defer rows.Close()
+	items := []*string{}
+	for rows.Next() {
+		var item string
+		if err := rows.Scan(&item); err != nil {
+			return nil, fmt.Errorf("scan GetFunctionsInSchema row: %w", err)
+		}
+		items = append(items, &item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("close GetFunctionsInSchema rows: %w", err)
+	}
+	return items, err
+}
+
+// GetFunctionsInSchemaBatch implements Querier.GetFunctionsInSchemaBatch.
+func (q *DBQuerier) GetFunctionsInSchemaBatch(batch genericBatch, schemaName pgtype.Name) {
+	batch.Queue(getFunctionsInSchemaSQL, schemaName)
+}
+
+// GetFunctionsInSchemaScan implements Querier.GetFunctionsInSchemaScan.
+func (q *DBQuerier) GetFunctionsInSchemaScan(results pgx.BatchResults) ([]*string, error) {
+	rows, err := results.Query()
+	if err != nil {
+		return nil, fmt.Errorf("query GetFunctionsInSchemaBatch: %w", err)
+	}
+	defer rows.Close()
+	items := []*string{}
+	for rows.Next() {
+		var item string
+		if err := rows.Scan(&item); err != nil {
+			return nil, fmt.Errorf("scan GetFunctionsInSchemaBatch row: %w", err)
+		}
+		items = append(items, &item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("close GetFunctionsInSchemaBatch rows: %w", err)
+	}
+	return items, err
+}
+
+const getIndicesInSchemaSQL = `SELECT indexname FROM pg_indexes WHERE schemaname = $1;`
+
+// GetIndicesInSchema implements Querier.GetIndicesInSchema.
+func (q *DBQuerier) GetIndicesInSchema(ctx context.Context, schemaName pgtype.Name) ([]pgtype.Name, error) {
+	ctx = context.WithValue(ctx, "pggen_query_name", "GetIndicesInSchema")
+	rows, err := q.conn.Query(ctx, getIndicesInSchemaSQL, schemaName)
+	if err != nil {
+		return nil, fmt.Errorf("query GetIndicesInSchema: %w", err)
+	}
+	defer rows.Close()
+	items := []pgtype.Name{}
+	for rows.Next() {
+		var item pgtype.Name
+		if err := rows.Scan(&item); err != nil {
+			return nil, fmt.Errorf("scan GetIndicesInSchema row: %w", err)
+		}
+		items = append(items, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("close GetIndicesInSchema rows: %w", err)
+	}
+	return items, err
+}
+
+// GetIndicesInSchemaBatch implements Querier.GetIndicesInSchemaBatch.
+func (q *DBQuerier) GetIndicesInSchemaBatch(batch genericBatch, schemaName pgtype.Name) {
+	batch.Queue(getIndicesInSchemaSQL, schemaName)
+}
+
+// GetIndicesInSchemaScan implements Querier.GetIndicesInSchemaScan.
+func (q *DBQuerier) GetIndicesInSchemaScan(results pgx.BatchResults) ([]pgtype.Name, error) {
+	rows, err := results.Query()
+	if err != nil {
+		return nil, fmt.Errorf("query GetIndicesInSchemaBatch: %w", err)
+	}
+	defer rows.Close()
+	items := []pgtype.Name{}
+	for rows.Next() {
+		var item pgtype.Name
+		if err := rows.Scan(&item); err != nil {
+			return nil, fmt.Errorf("scan GetIndicesInSchemaBatch row: %w", err)
+		}
+		items = append(items, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("close GetIndicesInSchemaBatch rows: %w", err)
 	}
 	return items, err
 }
