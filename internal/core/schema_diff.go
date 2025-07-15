@@ -2,9 +2,11 @@ package core
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"maps"
+	"sort"
 	"strconv"
 
 	"github.com/jackc/pgtype"
@@ -22,7 +24,7 @@ type SchemaDiffCmd struct {
 	Quiet             bool
 	SkipTables        string
 	SkipFile          string
-	ddlOnly           bool
+	DDLOnly           bool
 	skipTablesList    []string
 	tableList         []string
 	nodeList          []string
@@ -140,9 +142,218 @@ func (c *SchemaDiffCmd) Validate() error {
 	return nil
 }
 
+type SchemaObjects struct {
+	Tables    []string `json:"tables"`
+	Views     []string `json:"views"`
+	Functions []string `json:"functions"`
+	Indices   []string `json:"indices"`
+}
+
+func (so SchemaObjects) IsEmpty() bool {
+	return len(so.Tables) == 0 && len(so.Views) == 0 && len(so.Functions) == 0 && len(so.Indices) == 0
+}
+
+type NodeSchemaReport struct {
+	NodeName string        `json:"node_name"`
+	Objects  SchemaObjects `json:"objects"`
+}
+
+type NodeComparisonReport struct {
+	Status string              `json:"status"`
+	Diffs  map[string]NodeDiff `json:"diffs,omitempty"`
+}
+
+type NodeDiff struct {
+	MissingObjects SchemaObjects `json:"missing_objects"`
+	ExtraObjects   SchemaObjects `json:"extra_objects"`
+}
+
+func diffStringSlices(a, b []string) (missing, extra []string) {
+	sort.Strings(a)
+	sort.Strings(b)
+
+	aMap := make(map[string]struct{}, len(a))
+	for _, s := range a {
+		aMap[s] = struct{}{}
+	}
+
+	bMap := make(map[string]struct{}, len(b))
+	for _, s := range b {
+		bMap[s] = struct{}{}
+	}
+
+	for _, s := range a {
+		if _, found := bMap[s]; !found {
+			missing = append(missing, s)
+		}
+	}
+
+	for _, s := range b {
+		if _, found := aMap[s]; !found {
+			extra = append(extra, s)
+		}
+	}
+
+	return missing, extra
+}
+
+func getObjectsForSchema(db queries.Querier, schemaName string) (*SchemaObjects, error) {
+	pgSchemaName := pgtype.Name{String: schemaName, Status: pgtype.Present}
+
+	tables, err := db.GetTablesInSchema(context.Background(), pgSchemaName)
+	if err != nil {
+		return nil, fmt.Errorf("could not query tables: %w", err)
+	}
+	var tableNames []string
+	for _, t := range tables {
+		tableNames = append(tableNames, t.String)
+	}
+
+	views, err := db.GetViewsInSchema(context.Background(), pgSchemaName)
+	if err != nil {
+		return nil, fmt.Errorf("could not query views: %w", err)
+	}
+	var viewNames []string
+	for _, v := range views {
+		viewNames = append(viewNames, v.String)
+	}
+
+	functions, err := db.GetFunctionsInSchema(context.Background(), pgSchemaName)
+	if err != nil {
+		return nil, fmt.Errorf("could not query functions: %w", err)
+	}
+	var functionSignatures []string
+	for _, f := range functions {
+		functionSignatures = append(functionSignatures, *f)
+	}
+
+	indices, err := db.GetIndicesInSchema(context.Background(), pgSchemaName)
+	if err != nil {
+		return nil, fmt.Errorf("could not query indices: %w", err)
+	}
+	var indexNames []string
+	for _, i := range indices {
+		indexNames = append(indexNames, i.String)
+	}
+
+	return &SchemaObjects{
+		Tables:    tableNames,
+		Views:     viewNames,
+		Functions: functionSignatures,
+		Indices:   indexNames,
+	}, nil
+}
+
+func schemaDDLDiff(task *SchemaDiffCmd) error {
+	var allNodeObjects []NodeSchemaReport
+
+	for _, nodeInfo := range task.clusterNodes {
+		nodeName := nodeInfo["Name"].(string)
+		nodeWithDBInfo := make(map[string]any)
+		maps.Copy(nodeWithDBInfo, nodeInfo)
+		nodeWithDBInfo["DBName"] = task.database.DBName
+		nodeWithDBInfo["DBUser"] = task.database.DBUser
+		nodeWithDBInfo["DBPassword"] = task.database.DBPassword
+		if portVal, ok := nodeWithDBInfo["Port"]; ok {
+			if portFloat, isFloat := portVal.(float64); isFloat {
+				nodeWithDBInfo["Port"] = strconv.Itoa(int(portFloat))
+			}
+		}
+
+		pool, err := auth.GetClusterNodeConnection(nodeWithDBInfo, "")
+		if err != nil {
+			log.Printf("could not connect to node %s: %v. Skipping.", nodeName, err)
+			continue
+		}
+		defer pool.Close()
+
+		db := queries.NewQuerier(pool)
+		objects, err := getObjectsForSchema(db, task.SchemaName)
+		if err != nil {
+			log.Printf("could not get schema objects for node %s: %v. Skipping.", nodeName, err)
+			continue
+		}
+
+		allNodeObjects = append(allNodeObjects, NodeSchemaReport{
+			NodeName: nodeName,
+			Objects:  *objects,
+		})
+	}
+
+	if len(allNodeObjects) < 2 {
+		fmt.Println("{\"status\": \"Not enough nodes to compare (at least 2 required).\"}")
+		return nil
+	}
+
+	finalReport := make(map[string]NodeComparisonReport)
+	for i := 0; i < len(allNodeObjects); i++ {
+		for j := i + 1; j < len(allNodeObjects); j++ {
+			referenceNode := allNodeObjects[i]
+			compareNode := allNodeObjects[j]
+
+			refObjects := referenceNode.Objects
+			cmpObjects := compareNode.Objects
+
+			missingTables, extraTables := diffStringSlices(refObjects.Tables, cmpObjects.Tables)
+			missingViews, extraViews := diffStringSlices(refObjects.Views, cmpObjects.Views)
+			missingFunctions, extraFunctions := diffStringSlices(refObjects.Functions, cmpObjects.Functions)
+			missingIndices, extraIndices := diffStringSlices(refObjects.Indices, cmpObjects.Indices)
+
+			refExtraObjects := SchemaObjects{
+				Tables:    missingTables,
+				Views:     missingViews,
+				Functions: missingFunctions,
+				Indices:   missingIndices,
+			}
+			refMissingObjects := SchemaObjects{
+				Tables:    extraTables,
+				Views:     extraViews,
+				Functions: extraFunctions,
+				Indices:   extraIndices,
+			}
+
+			comparisonKey := fmt.Sprintf("%s/%s", referenceNode.NodeName, compareNode.NodeName)
+
+			var report NodeComparisonReport
+			if refMissingObjects.IsEmpty() && refExtraObjects.IsEmpty() {
+				report = NodeComparisonReport{
+					Status: "IDENTICAL",
+				}
+			} else {
+				report = NodeComparisonReport{
+					Status: "MISMATCH",
+					Diffs: map[string]NodeDiff{
+						referenceNode.NodeName: {
+							MissingObjects: refMissingObjects,
+							ExtraObjects:   refExtraObjects,
+						},
+						compareNode.NodeName: {
+							MissingObjects: refExtraObjects,
+							ExtraObjects:   refMissingObjects,
+						},
+					},
+				}
+			}
+			finalReport[comparisonKey] = report
+		}
+	}
+
+	output, err := json.MarshalIndent(finalReport, "", "  ")
+	if err != nil {
+		return fmt.Errorf("could not marshal diff to json: %w", err)
+	}
+	fmt.Println(string(output))
+
+	return nil
+}
+
 func SchemaDiff(task *SchemaDiffCmd) error {
 	if err := task.RunChecks(false); err != nil {
 		return err
+	}
+
+	if task.DDLOnly {
+		return schemaDDLDiff(task)
 	}
 
 	for _, tableName := range task.tableList {

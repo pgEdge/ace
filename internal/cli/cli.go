@@ -164,6 +164,11 @@ func SetupCLI() *cli.App {
 
 	sc_flags := append(commonFlags, diffFlags...)
 	sc_flags = append(sc_flags, skipFlags...)
+	sc_flags = append(sc_flags, &cli.BoolFlag{
+		Name:  "ddl-only",
+		Usage: "Compare only schema objects (tables, functions, etc.), not table data",
+		Value: false,
+	})
 
 	app := &cli.App{
 		Name:  "ace",
@@ -263,7 +268,7 @@ func TableDiffCLI(ctx *cli.Context) error {
 		return fmt.Errorf("validation failed: %v", err)
 	}
 
-	if err := task.RunChecks(true); err != nil { // Pass true to skip inner validation if Validate() was just called
+	if err := task.RunChecks(true); err != nil {
 		return fmt.Errorf("checks failed: %v", err)
 	}
 
@@ -353,6 +358,7 @@ func SchemaDiffCLI(ctx *cli.Context) error {
 		SkipTables:  ctx.String("skip-tables"),
 		SkipFile:    ctx.String("skip-file"),
 		Quiet:       ctx.Bool("quiet"),
+		DDLOnly:     ctx.Bool("ddl-only"),
 	}
 
 	task.BlockSize = int(blockSizeInt)

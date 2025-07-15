@@ -258,6 +258,18 @@ SELECT EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = pggen.arg('schema_name
 --name: GetTablesInSchema :many
 SELECT table_name FROM information_schema.tables WHERE table_schema = pggen.arg('schema_name') AND table_type = 'BASE TABLE';
 
+--name: GetViewsInSchema :many
+SELECT table_name FROM information_schema.views WHERE table_schema = pggen.arg('schema_name');
+
+--name: GetFunctionsInSchema :many
+SELECT p.proname || '(' || COALESCE(pg_get_function_identity_arguments(p.oid), '') || ')' as function_signature
+FROM pg_proc p
+LEFT JOIN pg_namespace n ON p.pronamespace = n.oid
+WHERE n.nspname = pggen.arg('schema_name');
+
+--name: GetIndicesInSchema :many
+SELECT indexname FROM pg_indexes WHERE schemaname = pggen.arg('schema_name');
+
 --name: CheckRepSetExists :one
 SELECT set_name FROM spock.replication_set WHERE set_name = pggen.arg('set_name');
 
