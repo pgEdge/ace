@@ -113,6 +113,13 @@ type Querier interface {
 	GetTablesInRepSetBatch(batch genericBatch, setName pgtype.Name)
 	// GetTablesInRepSetScan scans the result of an executed GetTablesInRepSetBatch query.
 	GetTablesInRepSetScan(results pgx.BatchResults) ([]string, error)
+
+	GetPkeyColumnTypes(ctx context.Context, params GetPkeyColumnTypesParams) ([]GetPkeyColumnTypesRow, error)
+	// GetPkeyColumnTypesBatch enqueues a GetPkeyColumnTypes query into batch to be executed
+	// later by the batch.
+	GetPkeyColumnTypesBatch(batch genericBatch, params GetPkeyColumnTypesParams)
+	// GetPkeyColumnTypesScan scans the result of an executed GetPkeyColumnTypesBatch query.
+	GetPkeyColumnTypesScan(results pgx.BatchResults) ([]GetPkeyColumnTypesRow, error)
 }
 
 type DBQuerier struct {
@@ -231,6 +238,9 @@ func PrepareAllQueries(ctx context.Context, p preparer) error {
 	}
 	if _, err := p.Prepare(ctx, getTablesInRepSetSQL, getTablesInRepSetSQL); err != nil {
 		return fmt.Errorf("prepare query 'GetTablesInRepSet': %w", err)
+	}
+	if _, err := p.Prepare(ctx, getPkeyColumnTypesSQL, getPkeyColumnTypesSQL); err != nil {
+		return fmt.Errorf("prepare query 'GetPkeyColumnTypes': %w", err)
 	}
 	return nil
 }
@@ -1150,6 +1160,74 @@ func (q *DBQuerier) GetTablesInRepSetScan(results pgx.BatchResults) ([]string, e
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("close GetTablesInRepSetBatch rows: %w", err)
+	}
+	return items, err
+}
+
+const getPkeyColumnTypesSQL = `SELECT a.attname, pg_catalog.format_type(a.atttypid, a.atttypmod)
+FROM pg_catalog.pg_attribute a
+JOIN pg_catalog.pg_class c ON a.attrelid = c.oid
+JOIN pg_catalog.pg_namespace n ON c.relnamespace = n.oid
+WHERE n.nspname = $1
+AND c.relname = $2
+AND a.attname = ANY($3::text[])
+AND a.attnum > 0 AND NOT a.attisdropped;`
+
+type GetPkeyColumnTypesParams struct {
+	SchemaName   pgtype.Name `json:"schema_name"`
+	TableName    pgtype.Name `json:"table_name"`
+	PkeyColumns  []string    `json:"pkey_columns"`
+}
+
+type GetPkeyColumnTypesRow struct {
+	Attname    pgtype.Name `json:"attname"`
+	FormatType *string     `json:"format_type"`
+}
+
+// GetPkeyColumnTypes implements Querier.GetPkeyColumnTypes.
+func (q *DBQuerier) GetPkeyColumnTypes(ctx context.Context, params GetPkeyColumnTypesParams) ([]GetPkeyColumnTypesRow, error) {
+	ctx = context.WithValue(ctx, "pggen_query_name", "GetPkeyColumnTypes")
+	rows, err := q.conn.Query(ctx, getPkeyColumnTypesSQL, params.SchemaName, params.TableName, params.PkeyColumns)
+	if err != nil {
+		return nil, fmt.Errorf("query GetPkeyColumnTypes: %w", err)
+	}
+	defer rows.Close()
+	items := []GetPkeyColumnTypesRow{}
+	for rows.Next() {
+		var item GetPkeyColumnTypesRow
+		if err := rows.Scan(&item.Attname, &item.FormatType); err != nil {
+			return nil, fmt.Errorf("scan GetPkeyColumnTypes row: %w", err)
+		}
+		items = append(items, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("close GetPkeyColumnTypes rows: %w", err)
+	}
+	return items, err
+}
+
+// GetPkeyColumnTypesBatch implements Querier.GetPkeyColumnTypesBatch.
+func (q *DBQuerier) GetPkeyColumnTypesBatch(batch genericBatch, params GetPkeyColumnTypesParams) {
+	batch.Queue(getPkeyColumnTypesSQL, params.SchemaName, params.TableName, params.PkeyColumns)
+}
+
+// GetPkeyColumnTypesScan implements Querier.GetPkeyColumnTypesScan.
+func (q *DBQuerier) GetPkeyColumnTypesScan(results pgx.BatchResults) ([]GetPkeyColumnTypesRow, error) {
+	rows, err := results.Query()
+	if err != nil {
+		return nil, fmt.Errorf("query GetPkeyColumnTypesBatch: %w", err)
+	}
+	defer rows.Close()
+	items := []GetPkeyColumnTypesRow{}
+	for rows.Next() {
+		var item GetPkeyColumnTypesRow
+		if err := rows.Scan(&item.Attname, &item.FormatType); err != nil {
+			return nil, fmt.Errorf("scan GetPkeyColumnTypesBatch row: %w", err)
+		}
+		items = append(items, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("close GetPkeyColumnTypesBatch rows: %w", err)
 	}
 	return items, err
 }

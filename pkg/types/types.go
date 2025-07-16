@@ -96,6 +96,7 @@ type DiffSummary struct {
 	TotalRowsChecked      int64          `json:"total_rows_checked"` // Estimated
 	InitialRangesCount    int            `json:"initial_ranges_count"`
 	MismatchedRangesCount int            `json:"mismatched_ranges_count"`
+	PrimaryKey            []string       `json:"primary_key"`
 }
 
 // NodePairDiff is a more detailed breakdown of differences for a single pair, often used internally during comparison.

@@ -206,50 +206,6 @@ func CheckUserPrivileges(db *pgxpool.Pool, username, schema, table string, requi
 	return allPresent, missingPrivileges, nil
 }
 
-func CheckDiffFileFormat(diffFilePath string, task *TableDiffTask) error {
-	fileData, err := os.ReadFile(diffFilePath)
-	if err != nil {
-		return fmt.Errorf("could not read diff file: %w", err)
-	}
-
-	var diffJson map[string]interface{}
-	if err := json.Unmarshal(fileData, &diffJson); err != nil {
-		return fmt.Errorf("could not parse diff file as JSON: %w", err)
-	}
-
-	diffs, ok := diffJson["diffs"].(map[string]interface{})
-	if !ok {
-		return fmt.Errorf("contents of diff file improperly formatted: missing 'diffs' object")
-	}
-
-	for nodePair, nodesData := range diffs {
-		nodeNames := strings.Split(nodePair, "/")
-		if len(nodeNames) != 2 {
-			return fmt.Errorf("invalid node pair format: %s", nodePair)
-		}
-
-		nodes, ok := nodesData.(map[string]interface{})
-		if !ok {
-			return fmt.Errorf("invalid nodes data for pair %s", nodePair)
-		}
-
-		for nodeName := range nodes {
-			found := false
-			for _, n := range nodeNames {
-				if n == nodeName {
-					found = true
-					break
-				}
-			}
-			if !found {
-				return fmt.Errorf("node %s not found in pair %s", nodeName, nodePair)
-			}
-		}
-	}
-
-	return nil
-}
-
 func Contains(slice []string, value string) bool {
 	return slices.Contains(slice, value)
 }
