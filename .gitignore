@@ -1,0 +1,7 @@
+.attic
+.vscode
+*diffs-*.json
+reports
+# Added by goreleaser init:
+dist/
+
