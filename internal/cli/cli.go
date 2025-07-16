@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strconv"
 
+	"github.com/google/uuid"
 	"github.com/pgedge/ace/internal/core"
 	"github.com/urfave/cli/v2"
 )
@@ -67,6 +68,14 @@ func SetupCLI() *cli.App {
 		},
 	}
 
+	rerunOnlyFlags := []cli.Flag{
+		&cli.StringFlag{
+			Name:     "diff-file",
+			Usage:    "Path to the diff file to rerun from (required)",
+			Required: true,
+		},
+	}
+
 	skipFlags := []cli.Flag{
 		&cli.StringFlag{
 			Name:  "skip-tables",
@@ -84,6 +93,8 @@ func SetupCLI() *cli.App {
 		Usage: "Where clause expression to use while diffing tables",
 		Value: "",
 	})
+
+	trr_flags := append(commonFlags, rerunOnlyFlags...)
 
 	tr_flags := []cli.Flag{
 		&cli.StringFlag{
@@ -189,6 +200,18 @@ func SetupCLI() *cli.App {
 				Flags: td_flags,
 			},
 			{
+				Name:      "table-rerun",
+				Usage:     "Re-run a diff from a file to check for persistent differences",
+				ArgsUsage: "<cluster>",
+				Flags:     trr_flags,
+				Action: func(ctx *cli.Context) error {
+					if ctx.Args().Len() < 1 {
+						return fmt.Errorf("missing required argument for table-rerun: needs <cluster>")
+					}
+					return TableRerunCLI(ctx)
+				},
+			},
+			{
 				Name:      "table-repair",
 				Usage:     "Repair table inconsistencies based on a diff file",
 				ArgsUsage: "<cluster> <table>",
@@ -277,6 +300,26 @@ func TableDiffCLI(ctx *cli.Context) error {
 	}
 
 	fmt.Println("Table diff completed")
+	return nil
+}
+
+func TableRerunCLI(ctx *cli.Context) error {
+	debugMode := ctx.Bool("debug")
+
+	task := core.NewTableDiffTask()
+	task.TaskID = uuid.NewString()
+	task.Mode = "rerun"
+	task.ClusterName = ctx.Args().Get(0)
+	task.DiffFilePath = ctx.String("diff-file")
+	task.DBName = ctx.String("dbname")
+	task.Nodes = ctx.String("nodes")
+	task.QuietMode = ctx.Bool("quiet")
+
+	if err := task.ExecuteRerunTask(debugMode); err != nil {
+		return fmt.Errorf("error during table-rerun: %v", err)
+	}
+
+	fmt.Println("Table rerun completed")
 	return nil
 }
 

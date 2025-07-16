@@ -163,23 +163,35 @@ func sanitise(identifier string) string {
 	return pgx.Identifier{identifier}.Sanitize()
 }
 
-func stringifyKey(pkValues map[string]any, pkCols []string) string {
+func StringifyKey(pkValues map[string]any, pkCols []string) (string, error) {
 	if len(pkCols) == 0 {
-		return ""
+		return "", nil
 	}
+	if len(pkValues) != len(pkCols) {
+		return "", fmt.Errorf("mismatch between pk value count (%d) and pk column count (%d)", len(pkValues), len(pkCols))
+	}
+
 	if len(pkCols) == 1 {
-		return fmt.Sprintf("%v", pkValues[pkCols[0]])
+		val, ok := pkValues[pkCols[0]]
+		if !ok {
+			return "", fmt.Errorf("pk column '%s' not found in pk values map", pkCols[0])
+		}
+		return fmt.Sprintf("%v", val), nil
 	}
+
 	sortedPkCols := make([]string, len(pkCols))
 	copy(sortedPkCols, pkCols)
 	sort.Strings(sortedPkCols)
 
 	var parts []string
 	for _, col := range sortedPkCols {
-		parts = append(parts, fmt.Sprintf("%v", pkValues[col]))
+		val, ok := pkValues[col]
+		if !ok {
+			return "", fmt.Errorf("pk column '%s' not found in pk values map", col)
+		}
+		parts = append(parts, fmt.Sprintf("%v", val))
 	}
-	// TODO: Need to revisit this separator
-	return strings.Join(parts, "||")
+	return strings.Join(parts, "||"), nil
 }
 
 func isKnownScalarType(colType string) bool {
@@ -442,7 +454,11 @@ func (t *TableDiffTask) compareBlocks(
 		for _, pkCol := range t.Key {
 			pkVal[pkCol] = row[pkCol]
 		}
-		lookupN1[stringifyKey(pkVal, t.Key)] = row
+		pkStr, err := StringifyKey(pkVal, t.Key)
+		if err != nil {
+			return nil, fmt.Errorf("failed to stringify n1 pkey: %w", err)
+		}
+		lookupN1[pkStr] = row
 	}
 
 	lookupN2 := make(map[string]map[string]any)
@@ -451,7 +467,11 @@ func (t *TableDiffTask) compareBlocks(
 		for _, pkCol := range t.Key {
 			pkVal[pkCol] = row[pkCol]
 		}
-		lookupN2[stringifyKey(pkVal, t.Key)] = row
+		pkStr, err := StringifyKey(pkVal, t.Key)
+		if err != nil {
+			return nil, fmt.Errorf("failed to stringify n2 pkey: %w", err)
+		}
+		lookupN2[pkStr] = row
 	}
 
 	diffResult := &NodePairDiff{}
@@ -780,12 +800,6 @@ func (t *TableDiffTask) RunChecks(skipValidation bool) error {
 		return err
 	}
 
-	if t.DiffFilePath != "" {
-		if err := CheckDiffFileFormat(t.DiffFilePath, t); err != nil {
-			return err
-		}
-	}
-
 	if t.TableFilter != "" {
 		t.Table = fmt.Sprintf("%s_%s_filtered", t.TaskID, t.Table)
 	}
@@ -866,6 +880,10 @@ func (t *TableDiffTask) ExecuteTask(debugMode bool) error {
 	if debugMode {
 		logger.SetLevel(LevelDebug)
 		logger.Info("Debug logging enabled")
+	}
+
+	if t.Mode == "rerun" {
+		return t.ExecuteRerunTask(debugMode)
 	}
 
 	logger.Debug("Using CompareUnitSize: %d", t.CompareUnitSize)
@@ -1158,6 +1176,8 @@ func (t *TableDiffTask) ExecuteTask(debugMode bool) error {
 	endTime := time.Now()
 	t.DiffResult.Summary.EndTime = endTime.Format(time.RFC3339)
 	t.DiffResult.Summary.TimeTaken = endTime.Sub(startTime).String()
+
+	t.AddPrimaryKeyToDiffSummary()
 
 	if len(t.DiffResult.NodeDiffs) > 0 {
 		outputFileName := fmt.Sprintf("%s_%s_diffs-%s.json",
@@ -1674,4 +1694,10 @@ func (t *TableDiffTask) getPkeyOffsets(ctx context.Context, pool *pgxpool.Pool) 
 
 	logger.Debug("[%s.%s] Generated %d ranges without sampling from %d pkeys with block_size %d.", t.Schema, t.Table, len(ranges), len(allPks), t.BlockSize)
 	return ranges, nil
+}
+
+func (t *TableDiffTask) AddPrimaryKeyToDiffSummary() {
+	if t.DiffResult.Summary.PrimaryKey == nil {
+		t.DiffResult.Summary.PrimaryKey = t.Key
+	}
 }

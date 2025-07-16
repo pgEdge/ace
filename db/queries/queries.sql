@@ -276,4 +276,12 @@ SELECT set_name FROM spock.replication_set WHERE set_name = pggen.arg('set_name'
 --name: GetTablesInRepSet :many
 SELECT concat_ws('.', nspname, relname) FROM spock.tables where set_name = pggen.arg('set_name');
 
-
+--name: GetPkeyColumnTypes :many
+SELECT a.attname, pg_catalog.format_type(a.atttypid, a.atttypmod)
+FROM pg_catalog.pg_attribute a
+JOIN pg_catalog.pg_class c ON a.attrelid = c.oid
+JOIN pg_catalog.pg_namespace n ON c.relnamespace = n.oid
+WHERE n.nspname = pggen.arg('schema_name')
+AND c.relname = pggen.arg('table_name')
+AND a.attname = ANY(pggen.arg('pkey_columns')::text[])
+AND a.attnum > 0 AND NOT a.attisdropped;
