@@ -8,7 +8,7 @@ The Active Consistency Engine (ACE) is a tool designed to ensure eventual consis
 
 ## Building
 
-To build ACE, you need to have Go (version 1.18 or higher) installed on your system.
+To build ACE, you need to have Go (version 1.18 or higher) installed.
 
 1.  Clone the repository:
     ```sh
@@ -26,69 +26,73 @@ To build ACE, you need to have Go (version 1.18 or higher) installed on your sys
 
 ACE requires a cluster configuration file to connect to the database nodes. Please refer to the [pgEdge docs](https://docs.pgedge.com/platform/installing_pgedge/json) on how to create this file.
 
-## Usage
+## Quickstart
 
-ACE currently provides two main commands: `table-diff` and `table-repair`.
+This section provides a quick guide to get started with ACE. For a full list of commands and their options, please refer to the [API Reference](docs/api.md).
 
-### `table-diff`
+### 1. Finding Differences
 
-Compares a table between nodes and generates a diff report.
-
-**Usage:**
-`./ace table-diff [flags] <cluster> <schema.table>`
-
-**Arguments:**
--   `<cluster>`: The name of the cluster to connect to (must match a cluster name in the configuration file).
--   `<schema.table>`: The fully qualified name of the table to compare.
-
-**Flags:**
-| Flag                  | Alias | Description                                                        | Default  |
-| --------------------- | ----- | ------------------------------------------------------------------ | -------- |
-| `--dbname`            | `-d`  | Name of the database                                               |          |
-| `--block-size`        | `-b`  | Number of rows per block                                           | 100000   |
-| `--concurrency-factor`| `-c`  | Concurrency factor                                                 | 1        |
-| `--compare-unit-size` | `-s`  | Max size of the smallest block to use when diffs are present       | 10000    |
-| `--output`            | `-o`  | Output format                                                      | json     |
-| `--nodes`             | `-n`  | Nodes to include in the diff (comma-separated, or "all")           | all      |
-| `--table-filter`      |       | `WHERE` clause expression to use while diffing tables              |          |
-| `--quiet`             |       | Suppress output                                                    | false    |
-| `--override-block-size`|      | Override block size                                                | false    |
-| `--debug`             | `-v`  | Enable debug logging                                               | false    |
+To find differences between nodes for a specific table, use the `table-diff` command. This command will compare the data in the specified table across all nodes in the cluster and generate a diff report if any inconsistencies are found.
 
 **Example:**
 ```sh
-./ace table-diff --nodes="n1,n2" --dbname=mydatabase my-cluster public.my_table 
+./ace table-diff hetzner public.customers_large
 ```
 
-### `table-repair`
+**Sample Output (with differences):**
+```
+2025/07/18 13:45:40 [INFO] Cluster hetzner exists
+2025/07/18 13:45:40 [INFO] Connections successful to nodes in cluster
+2025/07/18 13:45:40 [INFO] Table public.customers_large is comparable across nodes
+2025/07/18 13:45:40 [INFO] Using 16 CPUs, max concurrent workers = 16
+2025/07/18 13:45:40 [INFO] Created 59 initial ranges to compare
+  Hashing ranges: 177 / 177 [========================================================================================================================================================================] 1s | done
+2025/07/18 13:45:42 [INFO] Initial hash calculations complete. Proceeding with comparisons for mismatches...
+2025/07/18 13:45:42 [INFO] Table diff comparison completed for public.customers_large
+2025/07/18 13:45:42 [INFO] Diff report written to public_customers_large_diffs-20250718134542.json
+Table diff completed
+```
 
-Repairs table inconsistencies using a diff file.
+If no differences are found, ACE will indicate that, and no diff file will be created.
 
-**Usage:**
-`./ace table-repair <cluster> <schema.table> [flags]`
+**Sample Output (no differences):**
+```
+2025/07/18 13:47:55 [INFO] Cluster hetzner exists
+2025/07/18 13:47:55 [INFO] Connections successful to nodes in cluster
+2025/07/18 13:47:55 [INFO] Table public.customers_large is comparable across nodes
+2025/07/18 13:47:55 [INFO] Using 16 CPUs, max concurrent workers = 16
+2025/07/18 13:47:55 [INFO] Created 59 initial ranges to compare
+  Hashing ranges: 177 / 177 [========================================================================================================================================================================] 1s | done
+2025/07/18 13:47:57 [INFO] Initial hash calculations complete. Proceeding with comparisons for mismatches...
+2025/07/18 13:47:57 [INFO] Table diff comparison completed for public.customers_large
+2025/07/18 13:47:57 [INFO] No differences found. Diff file not created.
+Table diff completed
+```
 
-**Arguments:**
--   `<cluster>`: The name of the cluster to connect to.
--   `<schema.table>`: The fully qualified name of the table to repair.
+### 2. Repairing Differences
 
-**Flags:**
-| Flag                  | Alias | Description                                                        | Default  |
-| --------------------- | ----- | ------------------------------------------------------------------ | -------- |
-| `--dbname`            | `-d`  | Name of the database                                               |          |
-| `--diff-file`         | `-f`  | Path to the diff file (**required**)                               |          |
-| `--source-of-truth`   | `-s`  | Name of the node to be considered the source of truth              |          |
-| `--nodes`             | `-n`  | Nodes to include for cluster info (comma-separated, or "all")      | all      |
-| `--quiet`             |       | Suppress output                                                    | false    |
-| `--debug`             | `-v`  | Enable debug logging                                               | false    |
-| `--dry-run`           |       | Show what would be done without executing                          | false    |
-| `--generate-report`   |       | Generate a report of the repair operation                          | false    |
-| `--insert-only`       |       | Only perform inserts, no updates or deletes                        | false    |
-| `--upsert-only`       |       | Only perform upserts (insert or update), no deletes                | false    |
-| `--fire-triggers`     |       | Fire triggers during repairs                                       | false    |
-| `--bidirectional`     |       | Perform repairs in both directions (use with insert-only)          | false    |
+Once a diff file has been generated, you can use the `table-repair` command to resolve the inconsistencies. You will need to specify the diff file and a "source of truth" node, which is the node that has the correct data.
 
 **Example:**
 ```sh
-./ace table-repair --diff-file=public_my_table_diffs-20231027100000.json --source-of-truth=n1 --dbname=mydatabase my-cluster public.my_table 
-``` 
- 
+./ace table-repair --diff-file=public_customers_large_diffs-20250718134542.json --source-of-truth=n1 hetzner public.customers_large
+```
+
+**Sample Output:**
+```
+2025/07/18 13:46:36 Table repair task validated and prepared successfully.
+2025/07/18 13:46:36 Starting table repair for public.customers_large on cluster hetzner
+2025/07/18 13:46:36 Processing repairs for divergent node: n2
+2025/07/18 13:46:36 spock.repair_mode(true) set on n2
+2025/07/18 13:46:36 session_replication_role set on n2 (fire_triggers: false)
+2025/07/18 13:46:36 Executed 99 upsert operations on n2
+2025/07/18 13:46:36 spock.repair_mode(false) set on n2
+2025/07/18 13:46:36 Transaction committed successfully on n2
+2025/07/18 13:46:36 Table repair for public.customers_large completed successfully.
+2025/07/18 13:46:36 Total operations: map[n2:map[deleted:0 upserted:99]]
+2025/07/18 13:46:36 *** SUMMARY ***
+2025/07/18 13:46:36 n2 UPSERTED = 99 rows
+
+2025/07/18 13:46:36 n2 DELETED = 0 rows
+2025/07/18 13:46:36 RUN TIME = 0.00 seconds
+```
