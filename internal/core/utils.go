@@ -26,6 +26,7 @@ import (
 	"github.com/jackc/pgtype"
 	"github.com/jackc/pgx/v4/pgxpool"
 	"github.com/pgedge/ace/db/queries"
+	"github.com/pgedge/ace/internal/logger"
 	"github.com/pgedge/ace/pkg/types"
 )
 
@@ -219,11 +220,6 @@ func CheckUserPrivileges(db *pgxpool.Pool, username, schema, table string, requi
 
 func Contains(slice []string, value string) bool {
 	return slices.Contains(slice, value)
-}
-
-// TODO: Need to revisit logging
-func SetGlobalLogLevel(level LogLevel) {
-	logger.SetLevel(level)
 }
 
 func readClusterInfo(t ClusterConfigProvider) error {

@@ -111,7 +111,7 @@ func runTableDiff(t *testing.T, qualifiedTableName string, nodesToCompare []stri
 	tdTask := newTestTableDiffTask(t, qualifiedTableName, nodesToCompare)
 	err := tdTask.RunChecks(false)
 	require.NoError(t, err, "table-diff validation failed")
-	err = tdTask.ExecuteTask(false)
+	err = tdTask.ExecuteTask()
 	require.NoError(t, err, "table-diff execution failed")
 
 	latestDiffFile := getLatestDiffFile(t)
@@ -149,7 +149,7 @@ func assertNoTableDiff(t *testing.T, qualifiedTableName string) {
 	err := tdTask.RunChecks(false)
 	require.NoError(t, err, "assertNoTableDiff: validation failed")
 
-	err = tdTask.ExecuteTask(false)
+	err = tdTask.ExecuteTask()
 	require.NoError(t, err, "assertNoTableDiff: execution failed")
 
 	assert.Empty(t, tdTask.DiffResult.NodeDiffs, "Expected no differences after repair, but diffs were found")
@@ -246,7 +246,7 @@ func TestTableRepair_InsertOnly(t *testing.T) {
 	tdTask := newTestTableDiffTask(t, qualifiedTableName, []string{serviceN1, serviceN2})
 	err = tdTask.RunChecks(false)
 	require.NoError(t, err)
-	err = tdTask.ExecuteTask(false)
+	err = tdTask.ExecuteTask()
 	require.NoError(t, err)
 
 	pairKey := serviceN1 + "/" + serviceN2
@@ -289,7 +289,7 @@ func TestTableRepair_UpsertOnly(t *testing.T) {
 	tdTask := newTestTableDiffTask(t, qualifiedTableName, []string{serviceN1, serviceN2})
 	err = tdTask.RunChecks(false)
 	require.NoError(t, err)
-	err = tdTask.ExecuteTask(false)
+	err = tdTask.ExecuteTask()
 	require.NoError(t, err)
 
 	pairKey := serviceN1 + "/" + serviceN2

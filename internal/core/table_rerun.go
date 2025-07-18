@@ -27,16 +27,12 @@ import (
 	"github.com/jackc/pgx/v4/pgxpool"
 	"github.com/pgedge/ace/db/queries"
 	"github.com/pgedge/ace/internal/auth"
+	"github.com/pgedge/ace/internal/logger"
 	"github.com/pgedge/ace/pkg/types"
 )
 
-func (t *TableDiffTask) ExecuteRerunTask(debugMode bool) error {
+func (t *TableDiffTask) ExecuteRerunTask() error {
 	startTime := time.Now()
-	logger.SetLevel(LevelInfo)
-	if debugMode {
-		logger.SetLevel(LevelDebug)
-		logger.Info("Debug logging enabled for table-rerun")
-	}
 
 	if err := CheckDiffFileFormat(t.DiffFilePath, t); err != nil {
 		return err

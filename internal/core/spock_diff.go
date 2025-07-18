@@ -25,6 +25,7 @@ import (
 	"github.com/jackc/pgx/v4/pgxpool"
 	"github.com/pgedge/ace/db/queries"
 	"github.com/pgedge/ace/internal/auth"
+	"github.com/pgedge/ace/internal/logger"
 	"github.com/pgedge/ace/pkg/types"
 )
 
@@ -178,13 +179,8 @@ func (t *SpockDiffTask) RunChecks(skipValidation bool) error {
 	return nil
 }
 
-func (t *SpockDiffTask) ExecuteTask(debugMode bool) error {
+func (t *SpockDiffTask) ExecuteTask() error {
 	startTime := time.Now()
-	logger.SetLevel(LevelInfo)
-	if debugMode {
-		logger.SetLevel(LevelDebug)
-		logger.Info("Debug logging enabled")
-	}
 
 	ctx := context.Background()
 

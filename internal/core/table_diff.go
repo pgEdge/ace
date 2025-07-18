@@ -15,7 +15,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
 	"maps"
 	"math"
 	"os"
@@ -33,23 +32,12 @@ import (
 	"github.com/pgedge/ace/db/helpers"
 	"github.com/pgedge/ace/db/queries"
 	"github.com/pgedge/ace/internal/auth"
+	"github.com/pgedge/ace/internal/logger"
 	"github.com/pgedge/ace/pkg/config"
 	"github.com/pgedge/ace/pkg/types"
 	"github.com/vbauerster/mpb/v8"
 	"github.com/vbauerster/mpb/v8/decor"
 )
-
-type LogLevel int
-
-const (
-	LevelInfo LogLevel = iota
-	LevelDebug
-)
-
-type Logger struct {
-	level LogLevel
-	*log.Logger
-}
 
 type Range struct {
 	Start any
@@ -133,31 +121,6 @@ type HashResult struct {
 }
 
 type RangeResults map[string]HashResult
-
-func NewLogger(out *os.File, level LogLevel) *Logger {
-	return &Logger{
-		level:  level,
-		Logger: log.New(out, "", log.LstdFlags),
-	}
-}
-
-func (l *Logger) Info(format string, v ...any) {
-	if l.level <= LevelInfo {
-		l.Printf("[INFO] "+format, v...)
-	}
-}
-
-func (l *Logger) Debug(format string, v ...any) {
-	if l.level >= LevelDebug {
-		l.Printf("[DEBUG] "+format, v...)
-	}
-}
-
-func (l *Logger) SetLevel(level LogLevel) {
-	l.level = level
-}
-
-var logger = NewLogger(os.Stdout, LevelInfo)
 
 func NewTableDiffTask() *TableDiffTask {
 	return &TableDiffTask{
@@ -355,7 +318,7 @@ func (t *TableDiffTask) fetchRows(ctx context.Context, nodeName string, r Range)
 
 	querySQL = fmt.Sprintf("SELECT %s FROM %s %s %s", selectColsStr, quotedSchemaTable, whereClause, orderByClause)
 
-	logger.Debug("[%s] Fetching rows for range: Start=%v, End=%v. SQL: %s, Args: %v", nodeName, r.Start, r.End, querySQL, args)
+	logger.Log.Debug("[%s] Fetching rows for range: Start=%v, End=%v. SQL: %s, Args: %v", nodeName, r.Start, r.End, querySQL, args)
 
 	pgRows, err := pool.Query(ctx, querySQL, args...)
 	if err != nil {
@@ -885,16 +848,11 @@ func (t *TableDiffTask) CheckColumnSize() error {
 	return nil
 }
 
-func (t *TableDiffTask) ExecuteTask(debugMode bool) error {
+func (t *TableDiffTask) ExecuteTask() error {
 	startTime := time.Now()
-	logger.SetLevel(LevelInfo)
-	if debugMode {
-		logger.SetLevel(LevelDebug)
-		logger.Info("Debug logging enabled")
-	}
 
 	if t.Mode == "rerun" {
-		return t.ExecuteRerunTask(debugMode)
+		return t.ExecuteRerunTask()
 	}
 
 	logger.Debug("Using CompareUnitSize: %d", t.CompareUnitSize)
