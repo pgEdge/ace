@@ -200,7 +200,7 @@ func RepsetDiff(task *RepsetDiffCmd) error {
 			log.Printf("checks for table %s failed: %v", tableName, err)
 			continue
 		}
-		if err := tdTask.ExecuteTask(false); err != nil {
+		if err := tdTask.ExecuteTask(); err != nil {
 			log.Printf("error during comparison for table %s: %v", tableName, err)
 			continue
 		}

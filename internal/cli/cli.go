@@ -15,8 +15,10 @@ import (
 	"fmt"
 	"strconv"
 
+	"github.com/charmbracelet/log"
 	"github.com/google/uuid"
 	"github.com/pgedge/ace/internal/core"
+	"github.com/pgedge/ace/internal/logger"
 	"github.com/urfave/cli/v2"
 )
 
@@ -98,22 +100,16 @@ func SetupCLI() *cli.App {
 		},
 	}
 
-	td_flags := append(commonFlags, diffFlags...)
-	td_flags = append(td_flags, &cli.StringFlag{
+	tableDiffFlags := append(commonFlags, diffFlags...)
+	tableDiffFlags = append(tableDiffFlags, &cli.StringFlag{
 		Name:  "table-filter",
 		Usage: "Where clause expression to use while diffing tables",
 		Value: "",
 	})
 
-	trr_flags := append(commonFlags, rerunOnlyFlags...)
+	tableRerunFlags := append(commonFlags, rerunOnlyFlags...)
 
-	tr_flags := []cli.Flag{
-		&cli.StringFlag{
-			Name:    "dbname",
-			Aliases: []string{"d"},
-			Usage:   "Name of the database",
-			Value:   "",
-		},
+	tableRepairFlags := []cli.Flag{
 		&cli.StringFlag{
 			Name:     "diff-file",
 			Aliases:  []string{"f"},
@@ -124,23 +120,6 @@ func SetupCLI() *cli.App {
 			Name:    "source-of-truth",
 			Aliases: []string{"s"},
 			Usage:   "Name of the node to be considered the source of truth",
-		},
-		&cli.StringFlag{
-			Name:    "nodes",
-			Aliases: []string{"n"},
-			Usage:   "Nodes to include for cluster info (default: all)",
-			Value:   "all",
-		},
-		&cli.BoolFlag{
-			Name:  "quiet",
-			Usage: "Whether to suppress output",
-			Value: false,
-		},
-		&cli.BoolFlag{
-			Name:    "debug",
-			Aliases: []string{"v"},
-			Usage:   "Enable debug logging",
-			Value:   false,
 		},
 		&cli.BoolFlag{
 			Name:  "dry-run",
@@ -174,19 +153,21 @@ func SetupCLI() *cli.App {
 		},
 	}
 
-	sd_flags := append(commonFlags, &cli.StringFlag{
+	tableRepairFlags = append(commonFlags, tableRepairFlags...)
+
+	spockDiffFlags := append(commonFlags, &cli.StringFlag{
 		Name:    "output",
 		Aliases: []string{"o"},
 		Usage:   "Output format",
 		Value:   "json",
 	})
 
-	rd_flags := append(commonFlags, diffFlags...)
-	rd_flags = append(rd_flags, skipFlags...)
+	repsetDiffFlags := append(commonFlags, diffFlags...)
+	repsetDiffFlags = append(repsetDiffFlags, skipFlags...)
 
-	sc_flags := append(commonFlags, diffFlags...)
-	sc_flags = append(sc_flags, skipFlags...)
-	sc_flags = append(sc_flags, &cli.BoolFlag{
+	schemaDiffFlags := append(commonFlags, diffFlags...)
+	schemaDiffFlags = append(schemaDiffFlags, skipFlags...)
+	schemaDiffFlags = append(schemaDiffFlags, &cli.BoolFlag{
 		Name:  "ddl-only",
 		Usage: "Compare only schema objects (tables, functions, etc.), not table data",
 		Value: false,
@@ -194,7 +175,7 @@ func SetupCLI() *cli.App {
 
 	app := &cli.App{
 		Name:  "ace",
-		Usage: "Advanced Command-line Executor for database operations",
+		Usage: "ACE - Active Consistency Engine",
 		Commands: []*cli.Command{
 			{
 				Name:      "table-diff",
@@ -208,66 +189,114 @@ func SetupCLI() *cli.App {
 					}
 					return TableDiffCLI(ctx)
 				},
-				Flags: td_flags,
+				Flags: tableDiffFlags,
+				Before: func(ctx *cli.Context) error {
+					if ctx.Bool("debug") {
+						logger.SetLevel(log.DebugLevel)
+					} else {
+						logger.SetLevel(log.InfoLevel)
+					}
+					return nil
+				},
 			},
 			{
 				Name:      "table-rerun",
 				Usage:     "Re-run a diff from a file to check for persistent differences",
 				ArgsUsage: "<cluster>",
-				Flags:     trr_flags,
+				Flags:     tableRerunFlags,
 				Action: func(ctx *cli.Context) error {
 					if ctx.Args().Len() < 1 {
 						return fmt.Errorf("missing required argument for table-rerun: needs <cluster>")
 					}
 					return TableRerunCLI(ctx)
 				},
+				Before: func(ctx *cli.Context) error {
+					if ctx.Bool("debug") {
+						logger.SetLevel(log.DebugLevel)
+					} else {
+						logger.SetLevel(log.InfoLevel)
+					}
+					return nil
+				},
 			},
 			{
 				Name:      "table-repair",
 				Usage:     "Repair table inconsistencies based on a diff file",
 				ArgsUsage: "<cluster> <table>",
-				Flags:     tr_flags,
+				Flags:     tableRepairFlags,
 				Action: func(ctx *cli.Context) error {
 					if ctx.Args().Len() < 2 {
 						return fmt.Errorf("missing required arguments for table-repair: needs <cluster> and <table>")
 					}
 					return TableRepairCLI(ctx)
 				},
+				Before: func(ctx *cli.Context) error {
+					if ctx.Bool("debug") {
+						logger.SetLevel(log.DebugLevel)
+					} else {
+						logger.SetLevel(log.InfoLevel)
+					}
+					return nil
+				},
 			},
 			{
 				Name:      "spock-diff",
 				Usage:     "Compare spock metadata across cluster nodes",
 				ArgsUsage: "<cluster>",
-				Flags:     sd_flags,
+				Flags:     spockDiffFlags,
 				Action: func(ctx *cli.Context) error {
 					if ctx.Args().Len() < 1 {
 						return fmt.Errorf("missing required argument for spock-diff: needs <cluster>")
 					}
 					return SpockDiffCLI(ctx)
 				},
+				Before: func(ctx *cli.Context) error {
+					if ctx.Bool("debug") {
+						logger.SetLevel(log.DebugLevel)
+					} else {
+						logger.SetLevel(log.InfoLevel)
+					}
+					return nil
+				},
 			},
 			{
 				Name:      "schema-diff",
 				Usage:     "Compare schemas across cluster nodes",
 				ArgsUsage: "<cluster> <schema>",
-				Flags:     sc_flags,
+				Flags:     schemaDiffFlags,
 				Action: func(ctx *cli.Context) error {
 					if ctx.Args().Len() < 2 {
 						return fmt.Errorf("missing required arguments for schema-diff: needs <cluster> and <schema>")
 					}
 					return SchemaDiffCLI(ctx)
 				},
+				Before: func(ctx *cli.Context) error {
+					if ctx.Bool("debug") {
+						logger.SetLevel(log.DebugLevel)
+					} else {
+						logger.SetLevel(log.InfoLevel)
+					}
+					return nil
+				},
 			},
 			{
 				Name:      "repset-diff",
 				Usage:     "Compare replication sets across cluster nodes",
 				ArgsUsage: "<cluster> <repset>",
-				Flags:     rd_flags,
+				Flags:     repsetDiffFlags,
 				Action: func(ctx *cli.Context) error {
 					if ctx.Args().Len() < 2 {
 						return fmt.Errorf("missing required arguments for repset-diff: needs <cluster> and <repset>")
 					}
 					return RepsetDiffCLI(ctx)
+				},
+				Before: func(ctx *cli.Context) error {
+					if ctx.Bool("debug") {
+						logger.SetLevel(log.DebugLevel)
+					} else {
+						logger.SetLevel(log.InfoLevel)
+					}
+					return nil
 				},
 			},
 		},
@@ -282,8 +311,6 @@ func TableDiffCLI(ctx *cli.Context) error {
 	if err != nil {
 		return fmt.Errorf("invalid block size '%s': %v", blockSizeStr, err)
 	}
-
-	debugMode := ctx.Bool("debug")
 
 	task := core.NewTableDiffTask()
 	task.ClusterName = ctx.Args().Get(0)
@@ -306,7 +333,7 @@ func TableDiffCLI(ctx *cli.Context) error {
 		return fmt.Errorf("checks failed: %v", err)
 	}
 
-	if err := task.ExecuteTask(debugMode); err != nil {
+	if err := task.ExecuteTask(); err != nil {
 		return fmt.Errorf("error during comparison: %v", err)
 	}
 
@@ -315,8 +342,6 @@ func TableDiffCLI(ctx *cli.Context) error {
 }
 
 func TableRerunCLI(ctx *cli.Context) error {
-	debugMode := ctx.Bool("debug")
-
 	task := core.NewTableDiffTask()
 	task.TaskID = uuid.NewString()
 	task.Mode = "rerun"
@@ -326,7 +351,7 @@ func TableRerunCLI(ctx *cli.Context) error {
 	task.Nodes = ctx.String("nodes")
 	task.QuietMode = ctx.Bool("quiet")
 
-	if err := task.ExecuteRerunTask(debugMode); err != nil {
+	if err := task.ExecuteRerunTask(); err != nil {
 		return fmt.Errorf("error during table-rerun: %v", err)
 	}
 
@@ -343,12 +368,6 @@ func TableRepairCLI(ctx *cli.Context) error {
 	task.Nodes = ctx.String("nodes")
 	task.SourceOfTruth = ctx.String("source-of-truth")
 	task.QuietMode = ctx.Bool("quiet")
-
-	if ctx.Bool("debug") {
-		core.SetGlobalLogLevel(core.LevelDebug)
-	} else {
-		core.SetGlobalLogLevel(core.LevelInfo)
-	}
 
 	task.DryRun = ctx.Bool("dry-run")
 	task.InsertOnly = ctx.Bool("insert-only")
@@ -371,8 +390,6 @@ func TableRepairCLI(ctx *cli.Context) error {
 }
 
 func SpockDiffCLI(ctx *cli.Context) error {
-	debugMode := ctx.Bool("debug")
-
 	task := core.NewSpockDiffTask()
 	task.ClusterName = ctx.Args().Get(0)
 	task.DBName = ctx.String("dbname")
@@ -383,11 +400,11 @@ func SpockDiffCLI(ctx *cli.Context) error {
 		return fmt.Errorf("validation failed: %v", err)
 	}
 
-	if err := task.RunChecks(true); err != nil { // Pass true to skip inner validation
+	if err := task.RunChecks(true); err != nil {
 		return fmt.Errorf("checks failed: %v", err)
 	}
 
-	if err := task.ExecuteTask(debugMode); err != nil {
+	if err := task.ExecuteTask(); err != nil {
 		return fmt.Errorf("error during spock diff: %v", err)
 	}
 
@@ -396,8 +413,6 @@ func SpockDiffCLI(ctx *cli.Context) error {
 }
 
 func SchemaDiffCLI(ctx *cli.Context) error {
-	debugMode := ctx.Bool("debug")
-
 	blockSizeStr := ctx.String("block-size")
 	blockSizeInt, err := strconv.ParseInt(blockSizeStr, 10, 64)
 	if err != nil {
@@ -421,10 +436,6 @@ func SchemaDiffCLI(ctx *cli.Context) error {
 	task.Output = ctx.String("output")
 	task.OverrideBlockSize = ctx.Bool("override-block-size")
 
-	if debugMode {
-		core.SetGlobalLogLevel(core.LevelDebug)
-	}
-
 	if err := core.SchemaDiff(task); err != nil {
 		return fmt.Errorf("error during schema diff: %v", err)
 	}
@@ -434,8 +445,6 @@ func SchemaDiffCLI(ctx *cli.Context) error {
 }
 
 func RepsetDiffCLI(ctx *cli.Context) error {
-	debugMode := ctx.Bool("debug")
-
 	blockSizeStr := ctx.String("block-size")
 	blockSizeInt, err := strconv.ParseInt(blockSizeStr, 10, 64)
 	if err != nil {
@@ -457,10 +466,6 @@ func RepsetDiffCLI(ctx *cli.Context) error {
 	task.CompareUnitSize = ctx.Int("compare-unit-size")
 	task.Output = ctx.String("output")
 	task.OverrideBlockSize = ctx.Bool("override-block-size")
-
-	if debugMode {
-		core.SetGlobalLogLevel(core.LevelDebug)
-	}
 
 	if err := core.RepsetDiff(task); err != nil {
 		return fmt.Errorf("error during repset diff: %v", err)

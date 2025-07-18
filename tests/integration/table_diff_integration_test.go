@@ -116,7 +116,7 @@ func TestTableDiff_NoDifferences(t *testing.T) {
 		t.Fatalf("table-diff validations and checks failed: %v", err)
 	}
 
-	if err := tdTask.ExecuteTask(false); err != nil {
+	if err := tdTask.ExecuteTask(); err != nil {
 		t.Fatalf("ExecuteTask failed: %v", err)
 	}
 
@@ -185,7 +185,7 @@ func TestTableDiff_DataOnlyOnNode1(t *testing.T) {
 		t.Fatalf("table-diff validations and checks failed: %v", err)
 	}
 
-	if err := tdTask.ExecuteTask(false); err != nil {
+	if err := tdTask.ExecuteTask(); err != nil {
 		t.Fatalf("ExecuteTask failed: %v", err)
 	}
 
@@ -281,7 +281,7 @@ func TestTableDiff_DataOnlyOnNode2(t *testing.T) {
 		t.Fatalf("table-diff validations and checks failed: %v", err)
 	}
 
-	if err := tdTask.ExecuteTask(false); err != nil {
+	if err := tdTask.ExecuteTask(); err != nil {
 		t.Fatalf("ExecuteTask failed: %v", err)
 	}
 
@@ -412,7 +412,7 @@ func TestTableDiff_ModifiedRows(t *testing.T) {
 		t.Fatalf("table-diff validations and checks failed: %v", err)
 	}
 
-	if err = tdTask.ExecuteTask(false); err != nil {
+	if err = tdTask.ExecuteTask(); err != nil {
 		t.Fatalf("ExecuteTask failed: %v", err)
 	}
 
@@ -593,7 +593,7 @@ CREATE TABLE IF NOT EXISTS %s (
 		t.Fatalf("table-diff validations and checks failed: %v", err)
 	}
 
-	if err = tdTask.ExecuteTask(false); err != nil {
+	if err = tdTask.ExecuteTask(); err != nil {
 		t.Fatalf("ExecuteTask failed for mixed-case table: %v", err)
 	}
 
@@ -777,7 +777,7 @@ CREATE TABLE IF NOT EXISTS %s.%s (
 		t.Fatalf("table-diff validations and checks failed: %v", err)
 	}
 
-	if err := tdTask.ExecuteTask(false); err != nil {
+	if err := tdTask.ExecuteTask(); err != nil {
 		t.Fatalf("ExecuteTask failed for data type table: %v", err)
 	}
 
@@ -945,7 +945,7 @@ func TestTableDiff_TableFiltering(t *testing.T) {
 		t.Fatalf("table-diff validations and checks failed: %v", err)
 	}
 
-	if err = tdTask.ExecuteTask(false); err != nil {
+	if err = tdTask.ExecuteTask(); err != nil {
 		t.Fatalf("ExecuteTask failed for table filtering test: %v", err)
 	}
 
@@ -1166,7 +1166,7 @@ func TestTableDiff_WithSpockMetadata(t *testing.T) {
 	if err != nil {
 		t.Fatalf("table-diff validations and checks failed: %v", err)
 	}
-	if err := tdTask.ExecuteTask(false); err != nil {
+	if err := tdTask.ExecuteTask(); err != nil {
 		t.Fatalf("ExecuteTask failed: %v", err)
 	}
 
