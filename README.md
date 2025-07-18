@@ -6,9 +6,9 @@ The Active Consistency Engine (ACE) is a tool designed to ensure eventual consis
 
 
 
-## Installation
+## Building
 
-To install ACE, you need to have Go (version 1.18 or higher) installed on your system.
+To build ACE, you need to have Go (version 1.18 or higher) installed on your system.
 
 1.  Clone the repository:
     ```sh
