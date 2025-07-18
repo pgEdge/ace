@@ -1,4 +1,14 @@
-# Acknowledgement
+#############################################################################
+#
+# ACE - Active Consistency Engine
+#
+# Copyright (C) 2023 - 2025, pgEdge (https://www.pgedge.com/)
+#
+# This software is released under the pgEdge Community License:
+#      https://www.pgedge.com/communitylicense
+#
+#############################################################################
+
 # This file is based on the compose file in the pgedge/pgedge-docker repository,
 # and it uses the pgedge/pgedge image.
 configs:

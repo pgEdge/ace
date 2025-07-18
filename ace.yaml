@@ -1,3 +1,14 @@
+#############################################################################
+#
+# ACE - Active Consistency Engine
+#
+# Copyright (C) 2023 - 2025, pgEdge (https://www.pgedge.com/)
+#
+# This software is released under the pgEdge Community License:
+#      https://www.pgedge.com/communitylicense
+#
+#############################################################################
+
 postgres:
   statement_timeout: 0       # milliseconds
   connection_timeout: 10     # seconds
