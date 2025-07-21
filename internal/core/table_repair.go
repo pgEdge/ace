@@ -15,7 +15,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
 	"maps"
 	"os"
 	"path/filepath"
@@ -25,6 +24,7 @@ import (
 	"github.com/jackc/pgx/v4"
 	"github.com/jackc/pgx/v4/pgxpool"
 	"github.com/pgedge/ace/internal/auth"
+	"github.com/pgedge/ace/internal/logger"
 	"github.com/pgedge/ace/pkg/types"
 )
 
@@ -174,7 +174,7 @@ func (t *TableRepairTask) ValidateAndPrepare() error {
 		port, okPort := nodeInfo["Port"].(string)
 
 		if !okHostname || !okPublicIP || !okPort {
-			log.Printf("Warning: Skipping node with incomplete info: %+v", nodeInfo)
+			logger.Warn("Skipping node with incomplete info: %+v", nodeInfo)
 			continue
 		}
 		t.HostMap[fmt.Sprintf("%s:%s", publicIP, port)] = hostname
@@ -245,7 +245,7 @@ func (t *TableRepairTask) ValidateAndPrepare() error {
 		if nodeName == t.SourceOfTruth || involvedNodeNames[nodeName] {
 			connPool, err := auth.GetClusterNodeConnection(nodeInfo, t.ClientRole)
 			if err != nil {
-				log.Printf("Warning: Failed to connect to node %s: %v. Will attempt to proceed if it's not critical or SoT.", nodeName, err)
+				logger.Warn("Failed to connect to node %s: %v. Will attempt to proceed if it's not critical or SoT.", nodeName, err)
 				if nodeName == t.SourceOfTruth {
 					return fmt.Errorf("failed to connect to source_of_truth node %s: %w", nodeName, err)
 				}
@@ -309,7 +309,7 @@ func (t *TableRepairTask) ValidateAndPrepare() error {
 		return fmt.Errorf("failed to establish a connection to the source_of_truth node: %s", t.SourceOfTruth)
 	}
 
-	log.Println("Table repair task validated and prepared successfully.")
+	logger.Debug("Table repair task validated and prepared successfully.")
 	return nil
 }
 
@@ -378,7 +378,7 @@ func writeReportToFile(report *RepairReport) error {
 		return fmt.Errorf("failed to write report to file %s: %w", filePath, err)
 	}
 
-	log.Printf("Wrote report to %s", filePath)
+	logger.Info("Wrote report to %s", filePath)
 	return nil
 }
 
@@ -398,7 +398,7 @@ func (t *TableRepairTask) Run(skipValidation bool) error {
 		if t.GenerateReport && t.report != nil {
 			t.report.RunTimeSeconds = time.Since(startTime).Seconds()
 			if err := writeReportToFile(t.report); err != nil {
-				log.Printf("Warning: failed to write repair report: %v", err)
+				logger.Warn("Warning: failed to write repair report: %v", err)
 			}
 		}
 	}()
@@ -416,7 +416,7 @@ func (t *TableRepairTask) Run(skipValidation bool) error {
 		for nodeName, pool := range t.Pools {
 			if pool != nil {
 				pool.Close()
-				log.Printf("Closed connection pool for node: %s", nodeName)
+				logger.Debug("Closed connection pool for node: %s", nodeName)
 			}
 		}
 	}()
@@ -429,7 +429,7 @@ func (t *TableRepairTask) Run(skipValidation bool) error {
 }
 
 func (t *TableRepairTask) runUnidirectionalRepair(startTime time.Time) error {
-	log.Printf("Starting table repair for %s on cluster %s", t.QualifiedTableName, t.ClusterName)
+	logger.Info("Starting table repair for %s on cluster %s", t.QualifiedTableName, t.ClusterName)
 
 	// Core repair logic begins here
 	totalOps := make(map[string]map[string]int) // node -> "upserted"/"deleted" -> count
@@ -456,10 +456,10 @@ func (t *TableRepairTask) runUnidirectionalRepair(startTime time.Time) error {
 	 */
 
 	for nodeName := range divergentNodes {
-		log.Printf("Processing repairs for divergent node: %s", nodeName)
+		logger.Info("Processing repairs for divergent node: %s", nodeName)
 		divergentPool, ok := t.Pools[nodeName]
 		if !ok || divergentPool == nil {
-			log.Printf("Connection pool for divergent node %s not found, attempting to connect.", nodeName)
+			logger.Debug("Connection pool for divergent node %s not found, attempting to connect.", nodeName)
 			var nodeInfo map[string]any
 			for _, ni := range t.ClusterNodes {
 				if name, _ := ni["Name"].(string); name == nodeName {
@@ -469,7 +469,7 @@ func (t *TableRepairTask) runUnidirectionalRepair(startTime time.Time) error {
 			}
 
 			if nodeInfo == nil {
-				log.Printf("Error: Could not find node info for %s. Skipping repairs for this node.", nodeName)
+				logger.Error("Could not find node info for %s. Skipping repairs for this node.", nodeName)
 				repairErrors = append(repairErrors, fmt.Sprintf("no node info for %s", nodeName))
 				continue
 			}
@@ -477,17 +477,17 @@ func (t *TableRepairTask) runUnidirectionalRepair(startTime time.Time) error {
 			var err error
 			divergentPool, err = auth.GetClusterNodeConnection(nodeInfo, t.ClientRole)
 			if err != nil {
-				log.Printf("Error: Failed to connect to node %s: %v. Skipping repairs for this node.", nodeName, err)
+				logger.Error("Failed to connect to node %s: %v. Skipping repairs for this node.", nodeName, err)
 				repairErrors = append(repairErrors, fmt.Sprintf("connection failed for %s: %v", nodeName, err))
 				continue
 			}
 			t.Pools[nodeName] = divergentPool
-			log.Printf("Successfully connected to node %s and created a new connection pool.", nodeName)
+			logger.Debug("Successfully connected to node %s and created a new connection pool.", nodeName)
 		}
 
 		tx, err := divergentPool.Begin(context.Background())
 		if err != nil {
-			log.Printf("Error starting transaction on node %s: %v", nodeName, err)
+			logger.Error("starting transaction on node %s: %v", nodeName, err)
 			repairErrors = append(repairErrors, fmt.Sprintf("tx begin failed for %s: %v", nodeName, err))
 			continue
 		}
@@ -496,12 +496,12 @@ func (t *TableRepairTask) runUnidirectionalRepair(startTime time.Time) error {
 		_, err = tx.Exec(context.Background(), "SELECT spock.repair_mode(true)")
 		if err != nil {
 			tx.Rollback(context.Background())
-			log.Printf("Error enabling spock.repair_mode(true) on %s: %v", nodeName, err)
+			logger.Error("enabling spock.repair_mode(true) on %s: %v", nodeName, err)
 			repairErrors = append(repairErrors, fmt.Sprintf("spock.repair_mode(true) failed for %s: %v", nodeName, err))
 			continue
 		}
 		spockRepairModeActive = true
-		log.Printf("spock.repair_mode(true) set on %s", nodeName)
+		logger.Debug("spock.repair_mode(true) set on %s", nodeName)
 
 		if t.FireTriggers {
 			_, err = tx.Exec(context.Background(), "SET session_replication_role = 'local'")
@@ -510,11 +510,11 @@ func (t *TableRepairTask) runUnidirectionalRepair(startTime time.Time) error {
 		}
 		if err != nil {
 			tx.Rollback(context.Background())
-			log.Printf("Error setting session_replication_role on %s: %v", nodeName, err)
+			logger.Error("setting session_replication_role on %s: %v", nodeName, err)
 			repairErrors = append(repairErrors, fmt.Sprintf("session_replication_role failed for %s: %v", nodeName, err))
 			continue
 		}
-		log.Printf("session_replication_role set on %s (fire_triggers: %v)", nodeName, t.FireTriggers)
+		logger.Debug("session_replication_role set on %s (fire_triggers: %v)", nodeName, t.FireTriggers)
 
 		// TODO: DROP PRIVILEGES HERE!
 
@@ -525,12 +525,12 @@ func (t *TableRepairTask) runUnidirectionalRepair(startTime time.Time) error {
 				deletedCount, err := executeDeletes(tx, t, nodeDeletes)
 				if err != nil {
 					tx.Rollback(context.Background())
-					log.Printf("Error executing deletes on node %s: %v", nodeName, err)
+					logger.Error("executing deletes on node %s: %v", nodeName, err)
 					repairErrors = append(repairErrors, fmt.Sprintf("delete ops failed for %s: %v", nodeName, err))
 					continue
 				}
 				totalOps[nodeName]["deleted"] = deletedCount
-				log.Printf("Executed %d delete operations on %s", deletedCount, nodeName)
+				logger.Info("Executed %d delete operations on %s", deletedCount, nodeName)
 
 				if t.report != nil {
 					if _, ok := t.report.Changes[nodeName]; !ok {
@@ -558,7 +558,7 @@ func (t *TableRepairTask) runUnidirectionalRepair(startTime time.Time) error {
 			if targetNodeHostPortKey == "" {
 				tx.Rollback(context.Background())
 				errStr := fmt.Sprintf("could not find host:port key for target node %s to get col types", nodeName)
-				log.Printf("Error: %s", errStr)
+				logger.Error("%s", errStr)
 				repairErrors = append(repairErrors, errStr)
 				continue
 			}
@@ -566,7 +566,7 @@ func (t *TableRepairTask) runUnidirectionalRepair(startTime time.Time) error {
 			if !ok {
 				tx.Rollback(context.Background())
 				errStr := fmt.Sprintf("column types for target node '%s' (key: %s) not found for upserts", nodeName, targetNodeHostPortKey)
-				log.Printf("Error: %s", errStr)
+				logger.Error("%s", errStr)
 				repairErrors = append(repairErrors, errStr)
 				continue
 			}
@@ -574,12 +574,12 @@ func (t *TableRepairTask) runUnidirectionalRepair(startTime time.Time) error {
 			upsertedCount, err := executeUpserts(tx, t, nodeUpserts, targetNodeColTypes)
 			if err != nil {
 				tx.Rollback(context.Background())
-				log.Printf("Error executing upserts on node %s: %v", nodeName, err)
+				logger.Error("executing upserts on node %s: %v", nodeName, err)
 				repairErrors = append(repairErrors, fmt.Sprintf("upsert ops failed for %s: %v", nodeName, err))
 				continue
 			}
 			totalOps[nodeName]["upserted"] = upsertedCount
-			log.Printf("Executed %d upsert operations on %s", upsertedCount, nodeName)
+			logger.Info("Executed %d upsert operations on %s", upsertedCount, nodeName)
 
 			if t.report != nil {
 				if _, ok := t.report.Changes[nodeName]; !ok {
@@ -603,28 +603,72 @@ func (t *TableRepairTask) runUnidirectionalRepair(startTime time.Time) error {
 			_, err = tx.Exec(context.Background(), "SELECT spock.repair_mode(false)")
 			if err != nil {
 				tx.Rollback(context.Background())
-				log.Printf("Error disabling spock.repair_mode(false) on %s: %v", nodeName, err)
+				logger.Error("disabling spock.repair_mode(false) on %s: %v", nodeName, err)
 				repairErrors = append(repairErrors, fmt.Sprintf("spock.repair_mode(false) failed for %s: %v", nodeName, err))
 				continue
 			}
-			log.Printf("spock.repair_mode(false) set on %s", nodeName)
+			logger.Debug("spock.repair_mode(false) set on %s", nodeName)
 		}
 
 		err = tx.Commit(context.Background())
 		if err != nil {
-			log.Printf("Error committing transaction on node %s: %v", nodeName, err)
+			logger.Error("committing transaction on node %s: %v", nodeName, err)
 			repairErrors = append(repairErrors, fmt.Sprintf("commit failed for %s: %v", nodeName, err))
 			continue
 		}
-		log.Printf("Transaction committed successfully on %s", nodeName)
+		logger.Debug("Transaction committed successfully on %s", nodeName)
 	}
 
+	t.FinishedAt = time.Now()
+	t.TimeTaken = float64(t.FinishedAt.Sub(startTime).Milliseconds())
+	runTimeStr := fmt.Sprintf("%.3fs", t.TimeTaken/1000)
+
 	if len(repairErrors) > 0 {
-		log.Printf("Table repair for %s finished with errors: %s", t.QualifiedTableName, strings.Join(repairErrors, "; "))
+		logger.Error("Repair of %s failed in %s with errors: %s", t.QualifiedTableName, runTimeStr, strings.Join(repairErrors, "; "))
 		t.TaskStatus = "FAILED"
 		t.TaskContext = strings.Join(repairErrors, "; ")
 	} else {
-		log.Printf("Table repair for %s completed successfully.", t.QualifiedTableName)
+		totalUpserted := 0
+		totalDeleted := 0
+		repairedNodes := make(map[string]bool)
+		for node, ops := range totalOps {
+			if ops["upserted"] > 0 || ops["deleted"] > 0 {
+				repairedNodes[node] = true
+			}
+			totalUpserted += ops["upserted"]
+			totalDeleted += ops["deleted"]
+		}
+
+		summaryParts := []string{}
+		if totalUpserted > 0 {
+			op := "upserted"
+			if t.InsertOnly {
+				op = "inserted"
+			}
+			summaryParts = append(summaryParts, fmt.Sprintf("%d %s", totalUpserted, op))
+		}
+		if totalDeleted > 0 {
+			summaryParts = append(summaryParts, fmt.Sprintf("%d deleted", totalDeleted))
+		}
+
+		if len(repairedNodes) > 0 {
+			nodeList := []string{}
+			for node := range repairedNodes {
+				nodeList = append(nodeList, node)
+			}
+			logger.Info("Repair of %s complete in %s. Nodes %s repaired (%s).",
+				t.QualifiedTableName,
+				runTimeStr,
+				strings.Join(nodeList, ", "),
+				strings.Join(summaryParts, ", "),
+			)
+		} else {
+			logger.Info("Repair of %s complete in %s. No differences found.",
+				t.QualifiedTableName,
+				runTimeStr,
+			)
+		}
+
 		t.TaskStatus = "COMPLETED"
 		summary := strings.Builder{}
 		for node, ops := range totalOps {
@@ -633,36 +677,13 @@ func (t *TableRepairTask) runUnidirectionalRepair(startTime time.Time) error {
 		t.TaskContext = strings.TrimSpace(summary.String())
 	}
 
-	log.Printf("Total operations: %v", totalOps)
-
-	log.Println("*** SUMMARY ***")
-	for nodeName := range divergentNodes {
-		ops := totalOps[nodeName]
-		if t.InsertOnly {
-			log.Printf("%s INSERTED = %d rows", nodeName, ops["upserted"])
-		} else {
-			log.Printf("%s UPSERTED = %d rows", nodeName, ops["upserted"])
-		}
-	}
-	fmt.Println()
-	if !t.UpsertOnly && !t.InsertOnly {
-		for nodeName := range divergentNodes {
-			ops := totalOps[nodeName]
-			log.Printf("%s DELETED = %d rows", nodeName, ops["deleted"])
-		}
-	}
-
-	t.FinishedAt = time.Now()
-	t.TimeTaken = t.FinishedAt.Sub(startTime).Seconds()
-	log.Printf("RUN TIME = %.2f seconds", t.TimeTaken)
-
 	// TODO: Update task metrics in a local DB
 	return nil
 }
 
 func (t *TableRepairTask) runBidirectionalRepair() error {
 	startTime := time.Now()
-	log.Printf("Starting bidirectional table repair for %s on cluster %s", t.QualifiedTableName, t.ClusterName)
+	logger.Info("Starting bidirectional table repair for %s on cluster %s", t.QualifiedTableName, t.ClusterName)
 
 	totalOps := make(map[string]int)
 	var repairErrors []string
@@ -670,11 +691,11 @@ func (t *TableRepairTask) runBidirectionalRepair() error {
 	for nodePairKey, diffs := range t.RawDiffs.NodeDiffs {
 		nodes := strings.Split(nodePairKey, "/")
 		if len(nodes) != 2 {
-			log.Printf("Warning: Invalid node pair key '%s', skipping", nodePairKey)
+			logger.Warn("Warning: Invalid node pair key '%s', skipping", nodePairKey)
 			continue
 		}
 		node1Name, node2Name := nodes[0], nodes[1]
-		log.Printf("Processing node pair: %s/%s", node1Name, node2Name)
+		logger.Info("Processing node pair: %s/%s", node1Name, node2Name)
 
 		node1Rows := diffs.Rows[node1Name]
 		node2Rows := diffs.Rows[node2Name]
@@ -759,12 +780,41 @@ func (t *TableRepairTask) runBidirectionalRepair() error {
 		}
 	}
 
+	t.FinishedAt = time.Now()
+	t.TimeTaken = float64(t.FinishedAt.Sub(startTime).Milliseconds())
+	runTimeStr := fmt.Sprintf("%.3fs", t.TimeTaken/1000)
+
 	if len(repairErrors) > 0 {
-		log.Printf("Bidirectional table repair for %s finished with errors: %s", t.QualifiedTableName, strings.Join(repairErrors, "; "))
+		logger.Error("Bidirectional repair of %s failed in %s with errors: %s", t.QualifiedTableName, runTimeStr, strings.Join(repairErrors, "; "))
 		t.TaskStatus = "FAILED"
 		t.TaskContext = strings.Join(repairErrors, "; ")
 	} else {
-		log.Printf("Bidirectional table repair for %s completed successfully.", t.QualifiedTableName)
+		totalInserted := 0
+		repairedNodes := make(map[string]bool)
+		for node, count := range totalOps {
+			if count > 0 {
+				repairedNodes[node] = true
+			}
+			totalInserted += count
+		}
+
+		if totalInserted > 0 {
+			nodeList := []string{}
+			for node := range repairedNodes {
+				nodeList = append(nodeList, node)
+			}
+			logger.Info("Bidirectional repair of %s complete in %s. Nodes %s repaired (%d rows inserted).",
+				t.QualifiedTableName,
+				runTimeStr,
+				strings.Join(nodeList, ", "),
+				totalInserted,
+			)
+		} else {
+			logger.Info("Bidirectional repair of %s complete in %s. No differences found.",
+				t.QualifiedTableName,
+				runTimeStr,
+			)
+		}
 		t.TaskStatus = "COMPLETED"
 		summary := strings.Builder{}
 		for node, count := range totalOps {
@@ -772,15 +822,6 @@ func (t *TableRepairTask) runBidirectionalRepair() error {
 		}
 		t.TaskContext = strings.TrimSpace(summary.String())
 	}
-
-	log.Println("*** SUMMARY ***")
-	for nodeName, count := range totalOps {
-		log.Printf("%s INSERTED = %d rows", nodeName, count)
-	}
-
-	t.FinishedAt = time.Now()
-	t.TimeTaken = t.FinishedAt.Sub(startTime).Seconds()
-	log.Printf("RUN TIME = %.2f seconds", t.TimeTaken)
 
 	return nil
 }
@@ -801,7 +842,7 @@ func (t *TableRepairTask) performBirectionalInserts(nodeName string, inserts map
 	if err != nil {
 		return 0, fmt.Errorf("failed to enable spock.repair_mode(true) on %s: %w", nodeName, err)
 	}
-	log.Printf("spock.repair_mode(true) set on %s", nodeName)
+	logger.Info("spock.repair_mode(true) set on %s", nodeName)
 
 	if t.FireTriggers {
 		_, err = tx.Exec(context.Background(), "SET session_replication_role = 'local'")
@@ -811,7 +852,7 @@ func (t *TableRepairTask) performBirectionalInserts(nodeName string, inserts map
 	if err != nil {
 		return 0, fmt.Errorf("failed to set session_replication_role on %s: %w", nodeName, err)
 	}
-	log.Printf("session_replication_role set on %s (fire_triggers: %v)", nodeName, t.FireTriggers)
+	logger.Info("session_replication_role set on %s (fire_triggers: %v)", nodeName, t.FireTriggers)
 
 	targetNodeHostPortKey := ""
 	for hostPort, mappedName := range t.HostMap {
@@ -837,18 +878,18 @@ func (t *TableRepairTask) performBirectionalInserts(nodeName string, inserts map
 	if err != nil {
 		return 0, fmt.Errorf("failed to execute inserts on %s: %w", nodeName, err)
 	}
-	log.Printf("Executed %d insert operations on %s", insertedCount, nodeName)
+	logger.Info("Executed %d insert operations on %s", insertedCount, nodeName)
 
 	_, err = tx.Exec(context.Background(), "SELECT spock.repair_mode(false)")
 	if err != nil {
 		return 0, fmt.Errorf("failed to disable spock.repair_mode(false) on %s: %w", nodeName, err)
 	}
-	log.Printf("spock.repair_mode(false) set on %s", nodeName)
+	logger.Info("spock.repair_mode(false) set on %s", nodeName)
 
 	if err := tx.Commit(context.Background()); err != nil {
 		return 0, fmt.Errorf("failed to commit transaction on %s: %w", nodeName, err)
 	}
-	log.Printf("Transaction committed successfully on %s", nodeName)
+	logger.Info("Transaction committed successfully on %s", nodeName)
 
 	return insertedCount, nil
 }
