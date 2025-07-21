@@ -16,14 +16,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"maps"
-	"sort"
 	"strconv"
 
 	"github.com/jackc/pgtype"
 	"github.com/jackc/pgx/v4/pgxpool"
 	"github.com/pgedge/ace/db/queries"
 	"github.com/pgedge/ace/internal/auth"
-	"github.com/pgedge/ace/internal/logger"
+	utils "github.com/pgedge/ace/pkg/common"
+	"github.com/pgedge/ace/pkg/logger"
 	"github.com/pgedge/ace/pkg/types"
 )
 
@@ -50,6 +50,32 @@ type SchemaDiffCmd struct {
 	OverrideBlockSize bool
 }
 
+type SchemaObjects struct {
+	Tables    []string `json:"tables"`
+	Views     []string `json:"views"`
+	Functions []string `json:"functions"`
+	Indices   []string `json:"indices"`
+}
+
+func (so SchemaObjects) IsEmpty() bool {
+	return len(so.Tables) == 0 && len(so.Views) == 0 && len(so.Functions) == 0 && len(so.Indices) == 0
+}
+
+type NodeSchemaReport struct {
+	NodeName string        `json:"node_name"`
+	Objects  SchemaObjects `json:"objects"`
+}
+
+type NodeComparisonReport struct {
+	Status string              `json:"status"`
+	Diffs  map[string]NodeDiff `json:"diffs,omitempty"`
+}
+
+type NodeDiff struct {
+	MissingObjects SchemaObjects `json:"missing_objects"`
+	ExtraObjects   SchemaObjects `json:"extra_objects"`
+}
+
 func (c *SchemaDiffCmd) GetClusterName() string              { return c.ClusterName }
 func (c *SchemaDiffCmd) GetDBName() string                   { return c.DBName }
 func (c *SchemaDiffCmd) SetDBName(name string)               { c.DBName = name }
@@ -60,25 +86,13 @@ func (c *SchemaDiffCmd) SetDatabase(db types.Database)       { c.database = db }
 func (c *SchemaDiffCmd) GetClusterNodes() []map[string]any   { return c.clusterNodes }
 func (c *SchemaDiffCmd) SetClusterNodes(cn []map[string]any) { c.clusterNodes = cn }
 
-func (c *SchemaDiffCmd) getTablesInSchema(db *pgxpool.Pool) error {
-	rows, err := db.Query(context.Background(),
-		"SELECT table_name FROM information_schema.tables WHERE table_schema = $1 AND table_type = 'BASE TABLE'",
-		c.SchemaName)
-	if err != nil {
-		return fmt.Errorf("could not query tables in schema: %w", err)
+func (c *SchemaDiffCmd) Validate() error {
+	if c.ClusterName == "" {
+		return fmt.Errorf("cluster name is required")
 	}
-	defer rows.Close()
-
-	var tables []string
-	for rows.Next() {
-		var tableName string
-		if err := rows.Scan(&tableName); err != nil {
-			return fmt.Errorf("could not scan table name: %w", err)
-		}
-		tables = append(tables, tableName)
+	if c.SchemaName == "" {
+		return fmt.Errorf("schema name is required")
 	}
-
-	c.tableList = tables
 	return nil
 }
 
@@ -89,7 +103,7 @@ func (c *SchemaDiffCmd) RunChecks(skipValidation bool) error {
 		}
 	}
 
-	if err := readClusterInfo(c); err != nil {
+	if err := utils.ReadClusterInfo(c); err != nil {
 		return err
 	}
 	if len(c.clusterNodes) == 0 {
@@ -143,119 +157,7 @@ func (c *SchemaDiffCmd) RunChecks(skipValidation bool) error {
 	return nil
 }
 
-func (c *SchemaDiffCmd) Validate() error {
-	if c.ClusterName == "" {
-		return fmt.Errorf("cluster name is required")
-	}
-	if c.SchemaName == "" {
-		return fmt.Errorf("schema name is required")
-	}
-	return nil
-}
-
-type SchemaObjects struct {
-	Tables    []string `json:"tables"`
-	Views     []string `json:"views"`
-	Functions []string `json:"functions"`
-	Indices   []string `json:"indices"`
-}
-
-func (so SchemaObjects) IsEmpty() bool {
-	return len(so.Tables) == 0 && len(so.Views) == 0 && len(so.Functions) == 0 && len(so.Indices) == 0
-}
-
-type NodeSchemaReport struct {
-	NodeName string        `json:"node_name"`
-	Objects  SchemaObjects `json:"objects"`
-}
-
-type NodeComparisonReport struct {
-	Status string              `json:"status"`
-	Diffs  map[string]NodeDiff `json:"diffs,omitempty"`
-}
-
-type NodeDiff struct {
-	MissingObjects SchemaObjects `json:"missing_objects"`
-	ExtraObjects   SchemaObjects `json:"extra_objects"`
-}
-
-func diffStringSlices(a, b []string) (missing, extra []string) {
-	sort.Strings(a)
-	sort.Strings(b)
-
-	aMap := make(map[string]struct{}, len(a))
-	for _, s := range a {
-		aMap[s] = struct{}{}
-	}
-
-	bMap := make(map[string]struct{}, len(b))
-	for _, s := range b {
-		bMap[s] = struct{}{}
-	}
-
-	for _, s := range a {
-		if _, found := bMap[s]; !found {
-			missing = append(missing, s)
-		}
-	}
-
-	for _, s := range b {
-		if _, found := aMap[s]; !found {
-			extra = append(extra, s)
-		}
-	}
-
-	return missing, extra
-}
-
-func getObjectsForSchema(db queries.Querier, schemaName string) (*SchemaObjects, error) {
-	pgSchemaName := pgtype.Name{String: schemaName, Status: pgtype.Present}
-
-	tables, err := db.GetTablesInSchema(context.Background(), pgSchemaName)
-	if err != nil {
-		return nil, fmt.Errorf("could not query tables: %w", err)
-	}
-	var tableNames []string
-	for _, t := range tables {
-		tableNames = append(tableNames, t.String)
-	}
-
-	views, err := db.GetViewsInSchema(context.Background(), pgSchemaName)
-	if err != nil {
-		return nil, fmt.Errorf("could not query views: %w", err)
-	}
-	var viewNames []string
-	for _, v := range views {
-		viewNames = append(viewNames, v.String)
-	}
-
-	functions, err := db.GetFunctionsInSchema(context.Background(), pgSchemaName)
-	if err != nil {
-		return nil, fmt.Errorf("could not query functions: %w", err)
-	}
-	var functionSignatures []string
-	for _, f := range functions {
-		functionSignatures = append(functionSignatures, *f)
-	}
-
-	indices, err := db.GetIndicesInSchema(context.Background(), pgSchemaName)
-	if err != nil {
-		return nil, fmt.Errorf("could not query indices: %w", err)
-	}
-	var indexNames []string
-	for _, i := range indices {
-		indexNames = append(indexNames, i.String)
-	}
-
-	return &SchemaObjects{
-		Tables:    tableNames,
-		Views:     viewNames,
-		Functions: functionSignatures,
-		Indices:   indexNames,
-	}, nil
-}
-
-func schemaDDLDiff(task *SchemaDiffCmd) error {
+func (task *SchemaDiffCmd) schemaObjectDiff() error {
 	var allNodeObjects []NodeSchemaReport
 
 	for _, nodeInfo := range task.clusterNodes {
@@ -305,10 +207,10 @@ func schemaDDLDiff(task *SchemaDiffCmd) error {
 			refObjects := referenceNode.Objects
 			cmpObjects := compareNode.Objects
 
-			missingTables, extraTables := diffStringSlices(refObjects.Tables, cmpObjects.Tables)
-			missingViews, extraViews := diffStringSlices(refObjects.Views, cmpObjects.Views)
-			missingFunctions, extraFunctions := diffStringSlices(refObjects.Functions, cmpObjects.Functions)
-			missingIndices, extraIndices := diffStringSlices(refObjects.Indices, cmpObjects.Indices)
+			missingTables, extraTables := utils.DiffStringSlices(refObjects.Tables, cmpObjects.Tables)
+			missingViews, extraViews := utils.DiffStringSlices(refObjects.Views, cmpObjects.Views)
+			missingFunctions, extraFunctions := utils.DiffStringSlices(refObjects.Functions, cmpObjects.Functions)
+			missingIndices, extraIndices := utils.DiffStringSlices(refObjects.Indices, cmpObjects.Indices)
 
 			refExtraObjects := SchemaObjects{
 				Tables:    missingTables,
@@ -358,13 +260,13 @@ func schemaDDLDiff(task *SchemaDiffCmd) error {
 	return nil
 }
 
-func SchemaDiff(task *SchemaDiffCmd) error {
+func (task *SchemaDiffCmd) SchemaTableDiff() error {
 	if err := task.RunChecks(false); err != nil {
 		return err
 	}
 
 	if task.DDLOnly {
-		return schemaDDLDiff(task)
+		return task.schemaObjectDiff()
 	}
 
 	for _, tableName := range task.tableList {
@@ -403,4 +305,51 @@ func SchemaDiff(task *SchemaDiffCmd) error {
 	}
 
 	return nil
+}
+
+func getObjectsForSchema(db queries.Querier, schemaName string) (*SchemaObjects, error) {
+	pgSchemaName := pgtype.Name{String: schemaName, Status: pgtype.Present}
+
+	tables, err := db.GetTablesInSchema(context.Background(), pgSchemaName)
+	if err != nil {
+		return nil, fmt.Errorf("could not query tables: %w", err)
+	}
+	var tableNames []string
+	for _, t := range tables {
+		tableNames = append(tableNames, t.String)
+	}
+
+	views, err := db.GetViewsInSchema(context.Background(), pgSchemaName)
+	if err != nil {
+		return nil, fmt.Errorf("could not query views: %w", err)
+	}
+	var viewNames []string
+	for _, v := range views {
+		viewNames = append(viewNames, v.String)
+	}
+
+	functions, err := db.GetFunctionsInSchema(context.Background(), pgSchemaName)
+	if err != nil {
+		return nil, fmt.Errorf("could not query functions: %w", err)
+	}
+	var functionSignatures []string
+	for _, f := range functions {
+		functionSignatures = append(functionSignatures, *f)
+	}
+
+	indices, err := db.GetIndicesInSchema(context.Background(), pgSchemaName)
+	if err != nil {
+		return nil, fmt.Errorf("could not query indices: %w", err)
+	}
+	var indexNames []string
+	for _, i := range indices {
+		indexNames = append(indexNames, i.String)
+	}
+
+	return &SchemaObjects{
+		Tables:    tableNames,
+		Views:     viewNames,
+		Functions: functionSignatures,
+		Indices:   indexNames,
+	}, nil
 }

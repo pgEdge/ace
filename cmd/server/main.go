@@ -16,8 +16,8 @@ import (
 	"path/filepath"
 
 	"github.com/pgedge/ace/internal/cli"
-	"github.com/pgedge/ace/internal/logger"
 	"github.com/pgedge/ace/pkg/config"
+	"github.com/pgedge/ace/pkg/logger"
 )
 
 func main() {

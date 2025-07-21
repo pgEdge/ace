@@ -24,7 +24,8 @@ import (
 	"github.com/jackc/pgx/v4/pgxpool"
 	"github.com/pgedge/ace/db/queries"
 	"github.com/pgedge/ace/internal/auth"
-	"github.com/pgedge/ace/internal/logger"
+	utils "github.com/pgedge/ace/pkg/common"
+	"github.com/pgedge/ace/pkg/logger"
 	"github.com/pgedge/ace/pkg/types"
 )
 
@@ -81,7 +82,7 @@ func (t *SpockDiffTask) Validate() error {
 		return fmt.Errorf("cluster_name is a required argument")
 	}
 
-	nodeList, err := ParseNodes(t.Nodes)
+	nodeList, err := utils.ParseNodes(t.Nodes)
 	if err != nil {
 		return fmt.Errorf("nodes should be a comma-separated list of nodenames. E.g., nodes=\"n1,n2\". Error: %w", err)
 	}
@@ -91,7 +92,7 @@ func (t *SpockDiffTask) Validate() error {
 		return fmt.Errorf("spock-diff needs at least two nodes to compare")
 	}
 
-	err = readClusterInfo(t)
+	err = utils.ReadClusterInfo(t)
 	if err != nil {
 		return fmt.Errorf("error loading cluster information: %w", err)
 	}
@@ -102,7 +103,7 @@ func (t *SpockDiffTask) Validate() error {
 	for _, nodeMap := range t.ClusterNodes {
 		if len(nodeList) > 0 {
 			nameVal, _ := nodeMap["Name"].(string)
-			if !Contains(nodeList, nameVal) {
+			if !utils.Contains(nodeList, nameVal) {
 				continue
 			}
 		}
@@ -160,7 +161,7 @@ func (t *SpockDiffTask) RunChecks(skipValidation bool) error {
 			port = "5432"
 		}
 
-		if !Contains(t.NodeList, hostname) {
+		if !utils.Contains(t.NodeList, hostname) {
 			continue
 		}
 
@@ -228,7 +229,7 @@ func (t *SpockDiffTask) ExecuteTask() error {
 					sub.ReplicationSets = ni.SubReplicationSets
 					if len(ni.SubReplicationSets) == 0 {
 						hint := fmt.Sprintf("Subscription '%s' has no replication sets.", sub.SubName)
-						if !Contains(config.Hints, hint) {
+						if !utils.Contains(config.Hints, hint) {
 							config.Hints = append(config.Hints, hint)
 						}
 					}
@@ -321,10 +322,10 @@ func (t *SpockDiffTask) ExecuteTask() error {
 
 			if !diff.Mismatch {
 				diff.Message = fmt.Sprintf("Replication rules are the same for %s and %s", refNodeName, compareNodeName)
-				fmt.Printf("%s No differences found.\n", CheckMark)
+				fmt.Printf("%s No differences found.\n", utils.CheckMark)
 			} else {
 				diff.Message = fmt.Sprintf("Difference in Replication Rules between %s and %s", refNodeName, compareNodeName)
-				fmt.Printf("%s Differences found:\n", CrossMark)
+				fmt.Printf("%s Differences found:\n", utils.CrossMark)
 				printDiffDetails(diff.Details, refNodeName, compareNodeName)
 			}
 			t.DiffResult.Diffs[pairKey] = diff

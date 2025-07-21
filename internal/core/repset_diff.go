@@ -24,7 +24,8 @@ import (
 	"github.com/jackc/pgx/v4/pgxpool"
 	"github.com/pgedge/ace/db/queries"
 	"github.com/pgedge/ace/internal/auth"
-	"github.com/pgedge/ace/internal/logger"
+	utils "github.com/pgedge/ace/pkg/common"
+	"github.com/pgedge/ace/pkg/logger"
 	"github.com/pgedge/ace/pkg/types"
 )
 
@@ -94,7 +95,7 @@ func (c *RepsetDiffCmd) RunChecks(skipValidation bool) error {
 		return err
 	}
 
-	if err := readClusterInfo(c); err != nil {
+	if err := utils.ReadClusterInfo(c); err != nil {
 		return err
 	}
 	if len(c.clusterNodes) == 0 {

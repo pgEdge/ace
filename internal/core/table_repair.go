@@ -24,7 +24,8 @@ import (
 	"github.com/jackc/pgx/v4"
 	"github.com/jackc/pgx/v4/pgxpool"
 	"github.com/pgedge/ace/internal/auth"
-	"github.com/pgedge/ace/internal/logger"
+	utils "github.com/pgedge/ace/pkg/common"
+	"github.com/pgedge/ace/pkg/logger"
 	"github.com/pgedge/ace/pkg/types"
 )
 
@@ -158,13 +159,13 @@ func (t *TableRepairTask) ValidateAndPrepare() error {
 
 	// Reading nodelist is unnecessary since the diff file will contain that info.
 	// TODO: Remove this once checks are handled correctly in readClusterInfo
-	nodeList, err := ParseNodes(t.Nodes)
+	nodeList, err := utils.ParseNodes(t.Nodes)
 	if err != nil {
 		return fmt.Errorf("nodes should be a comma-separated list of nodenames. E.g., nodes=\"n1,n2\". Error: %w", err)
 	}
 	t.NodeList = nodeList
 
-	if err := readClusterInfo(t); err != nil {
+	if err := utils.ReadClusterInfo(t); err != nil {
 		return fmt.Errorf("failed to read cluster info: %w", err)
 	}
 
@@ -219,7 +220,7 @@ func (t *TableRepairTask) ValidateAndPrepare() error {
 	for _, nodeMap := range t.ClusterNodes {
 		if len(t.NodeList) > 0 {
 			nameVal, _ := nodeMap["Name"].(string)
-			if !Contains(t.NodeList, nameVal) {
+			if !utils.Contains(t.NodeList, nameVal) {
 				continue
 			}
 		}
@@ -253,13 +254,13 @@ func (t *TableRepairTask) ValidateAndPrepare() error {
 			}
 			t.Pools[nodeName] = connPool
 
-			cols, err := GetColumns(connPool, t.Schema, t.Table)
+			cols, err := utils.GetColumns(connPool, t.Schema, t.Table)
 			if err != nil {
 				return fmt.Errorf("failed to get columns for %s.%s on node %s: %w", t.Schema, t.Table, nodeName, err)
 			}
 			t.Cols = cols
 
-			pKey, err := GetPrimaryKey(connPool, t.Schema, t.Table)
+			pKey, err := utils.GetPrimaryKey(connPool, t.Schema, t.Table)
 			if err != nil {
 				return fmt.Errorf("failed to get primary key for %s.%s on node %s: %w", t.Schema, t.Table, nodeName, err)
 			}
@@ -271,7 +272,7 @@ func (t *TableRepairTask) ValidateAndPrepare() error {
 
 			publicIP, _ := nodeInfo["PublicIP"].(string)
 			port, _ := nodeInfo["Port"].(string)
-			colTypes, err := GetColumnTypes(connPool, t.Table)
+			colTypes, err := utils.GetColumnTypes(connPool, t.Table)
 			if err != nil {
 				return fmt.Errorf("failed to get column types for %s on node %s: %w", t.Table, nodeName, err)
 			}
@@ -285,7 +286,7 @@ func (t *TableRepairTask) ValidateAndPrepare() error {
 				dbUser = t.Database.DBUser
 			}
 
-			authorized, missingPrivsMap, err := CheckUserPrivileges(connPool, dbUser, t.Schema, t.Table, requiredPrivileges)
+			authorized, missingPrivsMap, err := utils.CheckUserPrivileges(connPool, dbUser, t.Schema, t.Table, requiredPrivileges)
 			if err != nil {
 				return fmt.Errorf("failed to check user privileges on node %s: %w", nodeName, err)
 			}
@@ -702,7 +703,7 @@ func (t *TableRepairTask) runBidirectionalRepair() error {
 
 		node1RowsByPKey := make(map[string]map[string]any)
 		for _, row := range node1Rows {
-			pkeyStr, err := stringifyPKey(row, t.Key, t.SimplePrimaryKey)
+			pkeyStr, err := utils.StringifyKey(row, t.Key)
 			if err != nil {
 				repairErrors = append(repairErrors, fmt.Sprintf("stringify pkey failed for %s: %v", node1Name, err))
 				continue
@@ -712,7 +713,7 @@ func (t *TableRepairTask) runBidirectionalRepair() error {
 
 		node2RowsByPKey := make(map[string]map[string]any)
 		for _, row := range node2Rows {
-			pkeyStr, err := stringifyPKey(row, t.Key, t.SimplePrimaryKey)
+			pkeyStr, err := utils.StringifyKey(row, t.Key)
 			if err != nil {
 				repairErrors = append(repairErrors, fmt.Sprintf("stringify pkey failed for %s: %v", node2Name, err))
 				continue
@@ -723,14 +724,14 @@ func (t *TableRepairTask) runBidirectionalRepair() error {
 		insertsForNode1 := make(map[string]map[string]any)
 		for pkey, row := range node2RowsByPKey {
 			if _, exists := node1RowsByPKey[pkey]; !exists {
-				insertsForNode1[pkey] = stripSpockMetadata(row)
+				insertsForNode1[pkey] = utils.StripSpockMetadata(row)
 			}
 		}
 
 		insertsForNode2 := make(map[string]map[string]any)
 		for pkey, row := range node1RowsByPKey {
 			if _, exists := node2RowsByPKey[pkey]; !exists {
-				insertsForNode2[pkey] = stripSpockMetadata(row)
+				insertsForNode2[pkey] = utils.StripSpockMetadata(row)
 			}
 		}
 
@@ -1015,7 +1016,7 @@ func executeUpserts(tx pgx.Tx, task *TableRepairTask, upserts map[string]map[str
 				return 0, fmt.Errorf("type for column %s not found in target node's colTypes", colName)
 			}
 
-			convertedVal, err := convertToPgxType(val, pgType)
+			convertedVal, err := utils.ConvertToPgxType(val, pgType)
 			if err != nil {
 				return 0, fmt.Errorf("error converting value for column %s (value: %v, type: %s): %w", colName, val, pgType, err)
 			}
@@ -1133,7 +1134,7 @@ func getDryRunOutput(task *TableRepairTask) (string, error) {
 
 			node1RowsByPKey := make(map[string]map[string]any)
 			for _, row := range node1Rows {
-				pkeyStr, err := stringifyPKey(row, task.Key, task.SimplePrimaryKey)
+				pkeyStr, err := utils.StringifyKey(row, task.Key)
 				if err != nil {
 					return "", fmt.Errorf("error stringifying pkey for row on %s: %w", node1Name, err)
 				}
@@ -1142,7 +1143,7 @@ func getDryRunOutput(task *TableRepairTask) (string, error) {
 
 			node2RowsByPKey := make(map[string]map[string]any)
 			for _, row := range node2Rows {
-				pkeyStr, err := stringifyPKey(row, task.Key, task.SimplePrimaryKey)
+				pkeyStr, err := utils.StringifyKey(row, task.Key)
 				if err != nil {
 					return "", fmt.Errorf("error stringifying pkey for row on %s: %w", node2Name, err)
 				}
@@ -1273,13 +1274,6 @@ func getDryRunOutput(task *TableRepairTask) (string, error) {
 	return sb.String(), nil
 }
 
-func stripSpockMetadata(row map[string]any) map[string]any {
-	if row != nil {
-		delete(row, "_spock_metadata_")
-	}
-	return row
-}
-
 func calculateRepairSets(task *TableRepairTask) (map[string]map[string]map[string]any, map[string]map[string]map[string]any, error) {
 	fullRowsToUpsert := make(map[string]map[string]map[string]any) // nodeName -> string(pkey) -> rowData
 	fullRowsToDelete := make(map[string]map[string]map[string]any) // nodeName -> string(pkey) -> rowData
@@ -1318,22 +1312,22 @@ func calculateRepairSets(task *TableRepairTask) (map[string]map[string]map[strin
 
 		sourceRowsByPKey := make(map[string]map[string]any)
 		for _, row := range sourceRows {
-			pkeyStr, err := stringifyPKey(row, task.Key, task.SimplePrimaryKey)
+			pkeyStr, err := utils.StringifyKey(row, task.Key)
 			if err != nil {
 				return nil, nil, fmt.Errorf("error stringifying pkey for source row on %s: %w", task.SourceOfTruth, err)
 			}
-			cleanRow := stripSpockMetadata(row)
+			cleanRow := utils.StripSpockMetadata(row)
 			sourceRowsByPKey[pkeyStr] = cleanRow
 			fullRowsToUpsert[targetNode][pkeyStr] = cleanRow
 		}
 
 		targetRowsByPKey := make(map[string]map[string]any)
 		for _, row := range targetRows {
-			pkeyStr, err := stringifyPKey(row, task.Key, task.SimplePrimaryKey)
+			pkeyStr, err := utils.StringifyKey(row, task.Key)
 			if err != nil {
 				return nil, nil, fmt.Errorf("error stringifying pkey for target row on %s: %w", targetNode, err)
 			}
-			cleanRow := stripSpockMetadata(row)
+			cleanRow := utils.StripSpockMetadata(row)
 			targetRowsByPKey[pkeyStr] = cleanRow
 			if _, existsInSource := sourceRowsByPKey[pkeyStr]; !existsInSource {
 				fullRowsToDelete[targetNode][pkeyStr] = cleanRow

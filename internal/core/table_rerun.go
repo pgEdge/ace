@@ -27,7 +27,8 @@ import (
 	"github.com/jackc/pgx/v4/pgxpool"
 	"github.com/pgedge/ace/db/queries"
 	"github.com/pgedge/ace/internal/auth"
-	"github.com/pgedge/ace/internal/logger"
+	utils "github.com/pgedge/ace/pkg/common"
+	"github.com/pgedge/ace/pkg/logger"
 	"github.com/pgedge/ace/pkg/types"
 )
 
@@ -39,7 +40,7 @@ func (t *TableDiffTask) ExecuteRerunTask() error {
 	}
 	logger.Info("Successfully loaded and validated diff file: %s", t.DiffFilePath)
 
-	if err := readClusterInfo(t); err != nil {
+	if err := utils.ReadClusterInfo(t); err != nil {
 		return fmt.Errorf("error loading cluster information for rerun: %w", err)
 	}
 
@@ -63,7 +64,7 @@ func (t *TableDiffTask) ExecuteRerunTask() error {
 	pools := make(map[string]*pgxpool.Pool)
 	for _, nodeInfo := range t.ClusterNodes {
 		name := nodeInfo["Name"].(string)
-		if !Contains(t.NodeList, name) {
+		if !utils.Contains(t.NodeList, name) {
 			continue
 		}
 		pool, err := auth.GetClusterNodeConnection(nodeInfo, t.ClientRole)
@@ -148,7 +149,7 @@ func (t *TableDiffTask) ExecuteRerunTask() error {
 		for _, count := range newDiffResult.Summary.DiffRowsCount {
 			totalPersistentDiffs += count
 		}
-		logger.Warn("%s Found %d persistent differences. Writing new report to %s", CrossMark, totalPersistentDiffs, outputFileName)
+		logger.Warn("%s Found %d persistent differences. Writing new report to %s", utils.CrossMark, totalPersistentDiffs, outputFileName)
 		jsonData, mErr := json.MarshalIndent(newDiffResult, "", "  ")
 		if mErr != nil {
 			return fmt.Errorf("failed to marshal new diff report: %w", mErr)
@@ -157,7 +158,7 @@ func (t *TableDiffTask) ExecuteRerunTask() error {
 			return fmt.Errorf("failed to write new diff report: %w", wErr)
 		}
 	} else {
-		logger.Info("%s All previously reported differences have been resolved.", CheckMark)
+		logger.Info("%s All previously reported differences have been resolved.", utils.CheckMark)
 	}
 
 	return nil
@@ -213,7 +214,7 @@ func (t *TableDiffTask) collectPkeysFromDiff() (map[string]map[string]any, error
 						return nil, fmt.Errorf("primary key column '%s' not found in a diff row", pkCol)
 					}
 				}
-				pkStr, err := StringifyKey(pkVal, t.Key)
+				pkStr, err := utils.StringifyKey(pkVal, t.Key)
 				if err != nil {
 					return nil, fmt.Errorf("failed to stringify key: %w", err)
 				}
@@ -226,6 +227,7 @@ func (t *TableDiffTask) collectPkeysFromDiff() (map[string]map[string]any, error
 
 // fetchRowsByPkeys efficiently fetches a list of rows from a node by their primary keys.
 // It uses a temporary table and a JOIN for high performance with large numbers of keys.
+// TODO: Can this be separated out into a common function that can be used by other tasks?
 func fetchRowsByPkeys(ctx context.Context, pool *pgxpool.Pool, t *TableDiffTask, pkeyVals [][]any) (map[string]map[string]any, error) {
 	if len(pkeyVals) == 0 {
 		return make(map[string]map[string]any), nil
@@ -301,7 +303,7 @@ func fetchRowsByPkeys(ctx context.Context, pool *pgxpool.Pool, t *TableDiffTask,
 		for _, pkCol := range t.Key {
 			pkMap[pkCol] = rowData[pkCol]
 		}
-		pkStr, err := StringifyKey(pkMap, t.Key)
+		pkStr, err := utils.StringifyKey(pkMap, t.Key)
 		if err != nil {
 			return nil, fmt.Errorf("failed to stringify fetched row key: %w", err)
 		}
@@ -346,7 +348,7 @@ func (t *TableDiffTask) reCompareDiffs(fetchedRowsByNode map[string]map[string]m
 			for _, pkCol := range t.Key {
 				pkMap[pkCol] = row[pkCol]
 			}
-			pkStr, _ := StringifyKey(pkMap, t.Key)
+			pkStr, _ := utils.StringifyKey(pkMap, t.Key)
 			originalNode1Rows[pkStr] = row
 			allPkeysForPair[pkStr] = true
 		}
@@ -355,7 +357,7 @@ func (t *TableDiffTask) reCompareDiffs(fetchedRowsByNode map[string]map[string]m
 			for _, pkCol := range t.Key {
 				pkMap[pkCol] = row[pkCol]
 			}
-			pkStr, _ := StringifyKey(pkMap, t.Key)
+			pkStr, _ := utils.StringifyKey(pkMap, t.Key)
 			originalNode2Rows[pkStr] = row
 			allPkeysForPair[pkStr] = true
 		}
@@ -386,10 +388,10 @@ func (t *TableDiffTask) reCompareDiffs(fetchedRowsByNode map[string]map[string]m
 			if isDifferent {
 				persistentDiffCount++
 				if nowOnNode1 {
-					newDiffsForPair.Rows[node1] = append(newDiffsForPair.Rows[node1], addSpockMetadata(newRow1))
+					newDiffsForPair.Rows[node1] = append(newDiffsForPair.Rows[node1], utils.AddSpockMetadata(newRow1))
 				}
 				if nowOnNode2 {
-					newDiffsForPair.Rows[node2] = append(newDiffsForPair.Rows[node2], addSpockMetadata(newRow2))
+					newDiffsForPair.Rows[node2] = append(newDiffsForPair.Rows[node2], utils.AddSpockMetadata(newRow2))
 				}
 			}
 		}
