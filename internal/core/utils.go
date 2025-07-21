@@ -30,6 +30,11 @@ import (
 	"github.com/pgedge/ace/pkg/types"
 )
 
+const (
+	CheckMark = "\u2714"
+	CrossMark = "\u2718"
+)
+
 type ClusterConfigProvider interface {
 	GetClusterName() string
 	GetDBName() string

@@ -15,7 +15,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
 	"maps"
 	"os"
 	"reflect"
@@ -209,7 +208,7 @@ func (t *SpockDiffTask) ExecuteTask() error {
 		q := queries.NewQuerier(pool)
 		config := SpockNodeConfig{NodeName: nodeName, Hints: []string{}}
 
-		log.Printf("Fetching Spock config for node: %s\n", nodeName)
+		logger.Debug("Fetching Spock config for node: %s", nodeName)
 
 		// Fetch node and subscription info
 		nodeInfos, err := q.SpockNodeAndSubInfo(ctx)
@@ -264,37 +263,37 @@ func (t *SpockDiffTask) ExecuteTask() error {
 	// Pretty print configs
 	for _, nodeName := range nodeNames {
 		config := allNodeConfigs[nodeName]
-		log.Printf("\n===== Spock Config: %s =====\n", nodeName)
+		fmt.Printf("\n===== Spock Config: %s =====\n", nodeName)
 		if len(config.Subscriptions) > 0 {
-			log.Println("  Subscriptions:")
+			fmt.Println("  Subscriptions:")
 			for _, sub := range config.Subscriptions {
 				if sub.SubName != "" {
-					log.Printf("    - Name: %s (Enabled: %t)\n", sub.SubName, sub.SubEnabled)
-					log.Printf("      Replication Sets: %v\n", sub.ReplicationSets)
+					fmt.Printf("    - Name: %s (Enabled: %t)\n", sub.SubName, sub.SubEnabled)
+					fmt.Printf("      Replication Sets: %v\n", sub.ReplicationSets)
 				}
 			}
 		} else {
-			log.Println("  No subscriptions found.")
+			fmt.Println("  No subscriptions found.")
 		}
 
 		if len(config.RepSetInfo) > 0 {
-			log.Println("  Replication Sets:")
+			fmt.Println("  Replication Sets:")
 			for _, rs := range config.RepSetInfo {
 				if rs.SetName.Status == 2 {
-					log.Printf("    - %s:\n", rs.SetName.String)
+					fmt.Printf("    - %s:\n", rs.SetName.String)
 					for _, table := range rs.Relname {
-						log.Printf("      - %s\n", table)
+						fmt.Printf("      - %s\n", table)
 					}
 				}
 			}
 		} else {
-			log.Println("  No replication sets found.")
+			fmt.Println("  No replication sets found.")
 		}
 
 		if len(config.Hints) > 0 {
-			log.Println("  Hints:")
+			fmt.Println("  Hints:")
 			for _, hint := range config.Hints {
-				log.Printf("    - %s\n", hint)
+				fmt.Printf("    - %s\n", hint)
 			}
 		}
 	}
@@ -304,7 +303,7 @@ func (t *SpockDiffTask) ExecuteTask() error {
 		t.DiffResult.SpockConfigs[k] = v
 	}
 
-	log.Println("\n===== Spock Diff =====")
+	fmt.Println("\n===== Spock Diff =====")
 
 	for i := 0; i < len(nodeNames); i++ {
 		for j := i + 1; j < len(nodeNames); j++ {
@@ -315,25 +314,26 @@ func (t *SpockDiffTask) ExecuteTask() error {
 
 			pairKey := fmt.Sprintf("%s/%s", refNodeName, compareNodeName)
 
-			log.Printf("\nComparing %s vs %s:\n", refNodeName, compareNodeName)
+			fmt.Printf("\nComparing %s vs %s:\n", refNodeName, compareNodeName)
 
 			// Perform detailed diff
 			diff := compareSpockConfigs(refConfig, compareConfig)
 
 			if !diff.Mismatch {
 				diff.Message = fmt.Sprintf("Replication rules are the same for %s and %s", refNodeName, compareNodeName)
-				log.Printf("  ✔ No differences found.\n")
+				fmt.Printf("%s No differences found.\n", CheckMark)
 			} else {
 				diff.Message = fmt.Sprintf("Difference in Replication Rules between %s and %s", refNodeName, compareNodeName)
-				log.Printf("  ✘ Differences found:\n")
+				fmt.Printf("%s Differences found:\n", CrossMark)
 				printDiffDetails(diff.Details, refNodeName, compareNodeName)
 			}
 			t.DiffResult.Diffs[pairKey] = diff
 		}
 	}
 
+	fmt.Println()
+
 	endTime := time.Now()
-	log.Printf("\nSpock diff completed in %s\n", endTime.Sub(startTime))
 
 	if len(t.DiffResult.Diffs) > 0 {
 		outputFileName := fmt.Sprintf("spock_diffs-%s.json",
@@ -353,6 +353,8 @@ func (t *SpockDiffTask) ExecuteTask() error {
 		}
 		logger.Info("Diff report written to %s", outputFileName)
 	}
+
+	logger.Info("Spock diff completed in %.3f seconds", endTime.Sub(startTime).Seconds())
 
 	return nil
 }
@@ -481,26 +483,26 @@ func compareReplicationSets(c1, c2 SpockNodeConfig) types.ReplicationSetDiff {
 
 func printDiffDetails(details types.SpockDiffDetail, node1, node2 string) {
 	if len(details.Subscriptions.MissingOnNode1) > 0 {
-		log.Printf("    Missing reciprocal subscriptions on %s: %v\n", node1, details.Subscriptions.MissingOnNode1)
+		fmt.Printf("    Missing reciprocal subscriptions on %s: %v\n", node1, details.Subscriptions.MissingOnNode1)
 	}
 	if len(details.Subscriptions.MissingOnNode2) > 0 {
-		log.Printf("    Missing reciprocal subscriptions on %s: %v\n", node2, details.Subscriptions.MissingOnNode2)
+		fmt.Printf("    Missing reciprocal subscriptions on %s: %v\n", node2, details.Subscriptions.MissingOnNode2)
 	}
 	if len(details.Subscriptions.Different) > 0 {
-		log.Println("    Subscriptions with different properties:")
+		fmt.Println("    Subscriptions with different properties:")
 		for _, d := range details.Subscriptions.Different {
-			log.Printf("      - Mismatch in settings for subscriptions between %s and %s:\n", node1, node2)
-			log.Printf("        - On %s (subscription '%s'): Enabled: %t, Repsets: %v\n", node1, d.Node1.SubName, d.Node1.SubEnabled, d.Node1.ReplicationSets)
-			log.Printf("        - On %s (subscription '%s'): Enabled: %t, Repsets: %v\n", node2, d.Node2.SubName, d.Node2.SubEnabled, d.Node2.ReplicationSets)
+			fmt.Printf("      - Mismatch in settings for subscriptions between %s and %s:\n", node1, node2)
+			fmt.Printf("        - On %s (subscription '%s'): Enabled: %t, Repsets: %v\n", node1, d.Node1.SubName, d.Node1.SubEnabled, d.Node1.ReplicationSets)
+			fmt.Printf("        - On %s (subscription '%s'): Enabled: %t, Repsets: %v\n", node2, d.Node2.SubName, d.Node2.SubEnabled, d.Node2.ReplicationSets)
 		}
 	}
 
 	if len(details.ReplicationSets.TablePlacementDiffs) > 0 {
-		log.Println("    Table placement in replication sets differs:")
+		fmt.Println("    Table placement in replication sets differs:")
 		for _, d := range details.ReplicationSets.TablePlacementDiffs {
-			log.Printf("      - Table '%s':\n", d.TableName)
-			log.Printf("        - on %s: in repset '%s'\n", node1, d.Node1RepSet)
-			log.Printf("        - on %s: in repset '%s'\n", node2, d.Node2RepSet)
+			fmt.Printf("      - Table '%s':\n", d.TableName)
+			fmt.Printf("        - on %s: in repset '%s'\n", node1, d.Node1RepSet)
+			fmt.Printf("        - on %s: in repset '%s'\n", node2, d.Node2RepSet)
 		}
 	}
 }

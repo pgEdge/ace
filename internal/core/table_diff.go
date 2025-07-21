@@ -969,7 +969,7 @@ func (t *TableDiffTask) ExecuteTask() error {
 	// 		t.Schema, t.Table, maxCount, t.TableFilter)
 	// 	r, err := t.getPkeyOffsets(ctx, pools[maxNode])
 	// 	if err != nil {
-	// 		return fmt.Errorf("failed to get pkey offsets directly: %w", err)
+	// 		return logger.Error("failed to get pkey offsets directly: %w", err)
 	// 	}
 	// 	ranges = r
 	// } else {
@@ -1032,7 +1032,7 @@ func (t *TableDiffTask) ExecuteTask() error {
 	}
 	// }
 
-	logger.Info("Created %d initial ranges to compare", len(ranges))
+	logger.Debug("Created %d initial ranges to compare", len(ranges))
 	logger.Debug("Ranges: %v", ranges)
 	t.DiffResult.Summary.InitialRangesCount = len(ranges)
 
@@ -1046,10 +1046,11 @@ func (t *TableDiffTask) ExecuteTask() error {
 	sort.Strings(nodeNames)
 
 	totalHashTasks := len(nodeNames) * len(ranges)
-	p := mpb.New()
+	p := mpb.New(mpb.WithOutput(os.Stderr))
 	bar := p.AddBar(int64(totalHashTasks),
+		mpb.BarRemoveOnComplete(),
 		mpb.PrependDecorators(
-			decor.Name("Hashing ranges: ", decor.WC{W: 18}),
+			decor.Name("Hashing initial ranges: ", decor.WC{W: 18}),
 			decor.CountersNoUnit("%d / %d", decor.WCSyncWidth),
 		),
 		mpb.AppendDecorators(
@@ -1097,12 +1098,11 @@ func (t *TableDiffTask) ExecuteTask() error {
 	}
 	close(hashTaskQueue)
 	initialHashWg.Wait()
-	p.Wait()
 
 	logger.Info("Initial hash calculations complete. Proceeding with comparisons for mismatches...")
 
 	var diffWg sync.WaitGroup
-	// var mismatchedRangesCountAtomic int32
+	var mismatchedTasks []RecursiveDiffTask
 
 	for rangeIdx := 0; rangeIdx < len(ranges); rangeIdx++ {
 		currentRange := ranges[rangeIdx]
@@ -1121,24 +1121,48 @@ func (t *TableDiffTask) ExecuteTask() error {
 				}
 
 				if r1.hash != r2.hash {
-					logger.Debug("✗ Mismatch in initial range %d (%v-%v) for %s vs %s. Hashes: %s... / %s... narrowing down diffs...",
-						rangeIdx, currentRange.Start, currentRange.End, node1, node2, safeCut(r1.hash, 8), safeCut(r2.hash, 8))
-					diffWg.Add(1)
-					go t.recursiveDiff(ctx, RecursiveDiffTask{
+					logger.Debug("%s Mismatch in initial range %d (%v-%v) for %s vs %s. Hashes: %s... / %s... narrowing down diffs...",
+						CrossMark, rangeIdx, currentRange.Start, currentRange.End, node1, node2, safeCut(r1.hash, 8), safeCut(r2.hash, 8))
+					mismatchedTasks = append(mismatchedTasks, RecursiveDiffTask{
 						Node1Name:                 node1,
 						Node2Name:                 node2,
 						CurrentRange:              currentRange,
 						CurrentEstimatedBlockSize: t.BlockSize,
-					}, &diffWg)
+					})
+
 				} else {
-					logger.Debug("✓ Match in initial range %d (%v-%v) for %s vs %s", rangeIdx, currentRange.Start, currentRange.End, node1, node2)
+					logger.Debug("%s Match in initial range %d (%v-%v) for %s vs %s", CheckMark, rangeIdx, currentRange.Start, currentRange.End, node1, node2)
 				}
 			}
 		}
 	}
 
+	if len(mismatchedTasks) > 0 {
+		logger.Debug("Found %d initial mismatched ranges. Narrowing down differences.", len(mismatchedTasks))
+
+		diffBar := p.AddBar(int64(len(mismatchedTasks)),
+			mpb.PrependDecorators(
+				decor.Name("Analysing mismatches: ", decor.WC{W: 18}),
+				decor.CountersNoUnit("%d / %d", decor.WCSyncWidth),
+			),
+			mpb.AppendDecorators(
+				decor.Elapsed(decor.ET_STYLE_GO),
+				decor.Name(" | "),
+				decor.OnComplete(decor.AverageETA(decor.ET_STYLE_GO), "done"),
+			),
+		)
+
+		for _, task := range mismatchedTasks {
+			diffWg.Add(1)
+			go func(task RecursiveDiffTask) {
+				defer diffBar.Increment()
+				t.recursiveDiff(ctx, task, &diffWg)
+			}(task)
+		}
+	}
+
 	diffWg.Wait()
-	// t.DiffResult.Summary.MismatchedRangesCount = int(mismatchedRangesCountAtomic)
+	p.Wait()
 
 	logger.Info("Table diff comparison completed for %s", t.QualifiedTableName)
 
@@ -1166,9 +1190,16 @@ func (t *TableDiffTask) ExecuteTask() error {
 			logger.Info("ERROR writing diff output to file %s: %v", outputFileName, err)
 			return fmt.Errorf("failed to write diffs file: %w", err)
 		}
+		logger.Warn("%s TABLES DO NOT MATCH", CrossMark)
+
+		for key, diffCount := range t.DiffResult.Summary.DiffRowsCount {
+			logger.Warn("Found %d differences between %s", diffCount, key)
+		}
+
 		logger.Info("Diff report written to %s", outputFileName)
+
 	} else {
-		logger.Info("No differences found. Diff file not created.")
+		logger.Info("%s TABLES MATCH", CheckMark)
 	}
 
 	return nil
@@ -1561,8 +1592,8 @@ func (t *TableDiffTask) recursiveDiff(
 		}
 
 		if res1.hash != res2.hash {
-			logger.Debug("✗ Mismatch in sub-range %v-%v for %s (%s...) vs %s (%s...). Recursing.",
-				sr.Start, sr.End, node1Name, safeCut(res1.hash, 8), node2Name, safeCut(res2.hash, 8))
+			logger.Debug("%s Mismatch in sub-range %v-%v for %s (%s...) vs %s (%s...). Recursing.",
+				CrossMark, sr.Start, sr.End, node1Name, safeCut(res1.hash, 8), node2Name, safeCut(res2.hash, 8))
 			wg.Add(1)
 			go t.recursiveDiff(ctx, RecursiveDiffTask{
 				Node1Name:                 node1Name,
@@ -1571,7 +1602,7 @@ func (t *TableDiffTask) recursiveDiff(
 				CurrentEstimatedBlockSize: newEstimatedBlockSize,
 			}, wg)
 		} else {
-			logger.Debug("✓ Match in sub-range %v-%v for %s vs %s.", sr.Start, sr.End, node1Name, node2Name)
+			logger.Debug("%s Match in sub-range %v-%v for %s vs %s.", CheckMark, sr.Start, sr.End, node1Name, node2Name)
 		}
 	}
 }

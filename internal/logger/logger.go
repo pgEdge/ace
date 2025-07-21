@@ -1,34 +1,39 @@
 package logger
 
 import (
+	"fmt"
 	"os"
 
 	"github.com/charmbracelet/log"
 )
 
 var (
-	// Log is the global logger.
 	Log = log.NewWithOptions(os.Stderr, log.Options{
 		ReportTimestamp: true,
 	})
 )
 
-// SetLevel sets the log level for the global logger.
 func SetLevel(level log.Level) {
 	Log.SetLevel(level)
 }
 
-// Info logs a formatted string at the info level.
 func Info(format string, args ...any) {
 	Log.Infof(format, args...)
 }
 
-// Debug logs a formatted string at the debug level.
 func Debug(format string, args ...any) {
 	Log.Debugf(format, args...)
 }
 
-// Error logs a formatted string at the error level.
-func Error(format string, args ...any) {
+func Warn(format string, args ...any) {
+	Log.Warnf(format, args...)
+}
+
+func Error(format string, args ...any) error {
 	Log.Errorf(format, args...)
+	return fmt.Errorf(format, args...)
+}
+
+func Fatal(msg any, args ...any) {
+	Log.Fatal(msg, args...)
 }

@@ -309,7 +309,7 @@ func TableDiffCLI(ctx *cli.Context) error {
 	blockSizeStr := ctx.String("block-size")
 	blockSizeInt, err := strconv.ParseInt(blockSizeStr, 10, 64)
 	if err != nil {
-		return fmt.Errorf("invalid block size '%s': %v", blockSizeStr, err)
+		return fmt.Errorf("invalid block size '%s': %w", blockSizeStr, err)
 	}
 
 	task := core.NewTableDiffTask()
@@ -326,18 +326,17 @@ func TableDiffCLI(ctx *cli.Context) error {
 	task.OverrideBlockSize = ctx.Bool("override-block-size")
 
 	if err := task.Validate(); err != nil {
-		return fmt.Errorf("validation failed: %v", err)
+		return fmt.Errorf("validation failed: %w", err)
 	}
 
 	if err := task.RunChecks(true); err != nil {
-		return fmt.Errorf("checks failed: %v", err)
+		return fmt.Errorf("checks failed: %w", err)
 	}
 
 	if err := task.ExecuteTask(); err != nil {
-		return fmt.Errorf("error during comparison: %v", err)
+		return fmt.Errorf("error during comparison: %w", err)
 	}
 
-	fmt.Println("Table diff completed")
 	return nil
 }
 
@@ -352,10 +351,9 @@ func TableRerunCLI(ctx *cli.Context) error {
 	task.QuietMode = ctx.Bool("quiet")
 
 	if err := task.ExecuteRerunTask(); err != nil {
-		return fmt.Errorf("error during table-rerun: %v", err)
+		return fmt.Errorf("error during table-rerun: %w", err)
 	}
 
-	fmt.Println("Table rerun completed")
 	return nil
 }
 
@@ -378,14 +376,13 @@ func TableRepairCLI(ctx *cli.Context) error {
 	task.GenerateReport = ctx.Bool("generate-report")
 
 	if err := task.ValidateAndPrepare(); err != nil {
-		return fmt.Errorf("validation failed: %v", err)
+		return fmt.Errorf("validation failed: %w", err)
 	}
 
 	if err := task.Run(true); err != nil {
-		return fmt.Errorf("error during table repair: %v", err)
+		return fmt.Errorf("error during table repair: %w", err)
 	}
 
-	fmt.Println("Table repair complete")
 	return nil
 }
 
@@ -397,18 +394,16 @@ func SpockDiffCLI(ctx *cli.Context) error {
 	task.Output = ctx.String("output")
 
 	if err := task.Validate(); err != nil {
-		return fmt.Errorf("validation failed: %v", err)
+		return fmt.Errorf("validation failed: %w", err)
 	}
 
 	if err := task.RunChecks(true); err != nil {
-		return fmt.Errorf("checks failed: %v", err)
+		return fmt.Errorf("checks failed: %w", err)
 	}
 
 	if err := task.ExecuteTask(); err != nil {
-		return fmt.Errorf("error during spock diff: %v", err)
+		return fmt.Errorf("error during spock diff: %w", err)
 	}
-
-	fmt.Println("Spock diff completed")
 	return nil
 }
 
@@ -416,7 +411,7 @@ func SchemaDiffCLI(ctx *cli.Context) error {
 	blockSizeStr := ctx.String("block-size")
 	blockSizeInt, err := strconv.ParseInt(blockSizeStr, 10, 64)
 	if err != nil {
-		return fmt.Errorf("invalid block size '%s': %v", blockSizeStr, err)
+		return fmt.Errorf("invalid block size '%s': %w", blockSizeStr, err)
 	}
 
 	task := &core.SchemaDiffCmd{
@@ -437,10 +432,8 @@ func SchemaDiffCLI(ctx *cli.Context) error {
 	task.OverrideBlockSize = ctx.Bool("override-block-size")
 
 	if err := core.SchemaDiff(task); err != nil {
-		return fmt.Errorf("error during schema diff: %v", err)
+		return fmt.Errorf("error during schema diff: %w", err)
 	}
-
-	fmt.Println("Schema diff completed")
 	return nil
 }
 
@@ -448,7 +441,7 @@ func RepsetDiffCLI(ctx *cli.Context) error {
 	blockSizeStr := ctx.String("block-size")
 	blockSizeInt, err := strconv.ParseInt(blockSizeStr, 10, 64)
 	if err != nil {
-		return fmt.Errorf("invalid block size '%s': %v", blockSizeStr, err)
+		return fmt.Errorf("invalid block size '%s': %w", blockSizeStr, err)
 	}
 
 	task := &core.RepsetDiffCmd{
@@ -468,9 +461,7 @@ func RepsetDiffCLI(ctx *cli.Context) error {
 	task.OverrideBlockSize = ctx.Bool("override-block-size")
 
 	if err := core.RepsetDiff(task); err != nil {
-		return fmt.Errorf("error during repset diff: %v", err)
+		return fmt.Errorf("error during repset diff: %w", err)
 	}
-
-	fmt.Println("Repset diff completed")
 	return nil
 }
