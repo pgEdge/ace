@@ -15,7 +15,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
 	"maps"
 	"sort"
 	"strconv"
@@ -24,6 +23,7 @@ import (
 	"github.com/jackc/pgx/v4/pgxpool"
 	"github.com/pgedge/ace/db/queries"
 	"github.com/pgedge/ace/internal/auth"
+	"github.com/pgedge/ace/internal/logger"
 	"github.com/pgedge/ace/pkg/types"
 )
 
@@ -273,7 +273,7 @@ func schemaDDLDiff(task *SchemaDiffCmd) error {
 
 		pool, err := auth.GetClusterNodeConnection(nodeWithDBInfo, "")
 		if err != nil {
-			log.Printf("could not connect to node %s: %v. Skipping.", nodeName, err)
+			logger.Warn("could not connect to node %s: %v. Skipping.", nodeName, err)
 			continue
 		}
 		defer pool.Close()
@@ -281,7 +281,7 @@ func schemaDDLDiff(task *SchemaDiffCmd) error {
 		db := queries.NewQuerier(pool)
 		objects, err := getObjectsForSchema(db, task.SchemaName)
 		if err != nil {
-			log.Printf("could not get schema objects for node %s: %v. Skipping.", nodeName, err)
+			logger.Warn("could not get schema objects for node %s: %v. Skipping.", nodeName, err)
 			continue
 		}
 
@@ -370,7 +370,7 @@ func SchemaDiff(task *SchemaDiffCmd) error {
 	for _, tableName := range task.tableList {
 		qualifiedTableName := fmt.Sprintf("%s.%s", task.SchemaName, tableName)
 		if !task.Quiet {
-			fmt.Printf("Diffing table: %s\n", qualifiedTableName)
+			logger.Info("Diffing table: %s", qualifiedTableName)
 		}
 
 		tdTask := NewTableDiffTask()
@@ -387,16 +387,16 @@ func SchemaDiff(task *SchemaDiffCmd) error {
 		tdTask.QuietMode = task.Quiet
 
 		if err := tdTask.Validate(); err != nil {
-			log.Printf("validation for table %s failed: %v", qualifiedTableName, err)
+			logger.Warn("validation for table %s failed: %v", qualifiedTableName, err)
 			continue
 		}
 
 		if err := tdTask.RunChecks(true); err != nil {
-			log.Printf("checks for table %s failed: %v", qualifiedTableName, err)
+			logger.Warn("checks for table %s failed: %v", qualifiedTableName, err)
 			continue
 		}
 		if err := tdTask.ExecuteTask(); err != nil {
-			log.Printf("error during comparison for table %s: %v", qualifiedTableName, err)
+			logger.Warn("error during comparison for table %s: %v", qualifiedTableName, err)
 			continue
 		}
 

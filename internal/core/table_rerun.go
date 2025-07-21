@@ -148,7 +148,7 @@ func (t *TableDiffTask) ExecuteRerunTask() error {
 		for _, count := range newDiffResult.Summary.DiffRowsCount {
 			totalPersistentDiffs += count
 		}
-		logger.Info("Found %d persistent differences. Writing new report to %s", totalPersistentDiffs, outputFileName)
+		logger.Warn("%s Found %d persistent differences. Writing new report to %s", CrossMark, totalPersistentDiffs, outputFileName)
 		jsonData, mErr := json.MarshalIndent(newDiffResult, "", "  ")
 		if mErr != nil {
 			return fmt.Errorf("failed to marshal new diff report: %w", mErr)
@@ -157,7 +157,7 @@ func (t *TableDiffTask) ExecuteRerunTask() error {
 			return fmt.Errorf("failed to write new diff report: %w", wErr)
 		}
 	} else {
-		logger.Info("All previously reported differences have been resolved.")
+		logger.Info("%s All previously reported differences have been resolved.", CheckMark)
 	}
 
 	return nil
@@ -255,11 +255,13 @@ func fetchRowsByPkeys(ctx context.Context, pool *pgxpool.Pool, t *TableDiffTask,
 	}
 
 	createTempTableSQL := fmt.Sprintf("CREATE TEMPORARY TABLE %s (%s) ON COMMIT PRESERVE ROWS", sanitisedTempTable, strings.Join(pkColDefs, ", "))
+	logger.Debug("Creating temporary table for pkeys: %s", createTempTableSQL)
 	_, err = tx.Exec(ctx, createTempTableSQL)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create temporary table: %w", err)
 	}
 
+	logger.Debug("Copying %d pkey sets into temporary table %s", len(pkeyVals), tempTableName)
 	_, err = tx.CopyFrom(ctx, pgx.Identifier{tempTableName}, t.Key, pgx.CopyFromRows(pkeyVals))
 	if err != nil {
 		return nil, fmt.Errorf("failed to copy primary keys to temporary table: %w", err)
@@ -282,6 +284,7 @@ func fetchRowsByPkeys(ctx context.Context, pool *pgxpool.Pool, t *TableDiffTask,
 	fetchSQL := fmt.Sprintf("SELECT %s FROM %s t JOIN %s temp ON %s",
 		strings.Join(selectCols, ", "), schemaTable, sanitisedTempTable, strings.Join(joinConditions, " AND "))
 
+	logger.Debug("Fetching rows with pkeys from temporary table: %s", fetchSQL)
 	pgRows, err := tx.Query(ctx, fetchSQL)
 	if err != nil {
 		return nil, fmt.Errorf("failed to query rows using temp table join: %w", err)
@@ -366,21 +369,17 @@ func (t *TableDiffTask) reCompareDiffs(fetchedRowsByNode map[string]map[string]m
 			newRow1, nowOnNode1 := fetchedRowsByNode[node1][pkStr]
 			newRow2, nowOnNode2 := fetchedRowsByNode[node2][pkStr]
 
-			_, wasOnNode1 := originalNode1Rows[pkStr]
-			_, wasOnNode2 := originalNode2Rows[pkStr]
-
 			isDifferent := false
-			if wasOnNode1 && wasOnNode2 {
-				if !nowOnNode1 || !nowOnNode2 || !reflect.DeepEqual(newRow1, newRow2) {
-					isDifferent = true
-				}
-			} else if wasOnNode1 {
-				if !nowOnNode1 || nowOnNode2 {
-					isDifferent = true
-				}
+			if !nowOnNode1 || !nowOnNode2 {
+				isDifferent = true
 			} else {
-				if nowOnNode1 || !nowOnNode2 {
-					isDifferent = true
+				for _, colName := range t.Cols {
+					val1 := newRow1[colName]
+					val2 := newRow2[colName]
+					if !reflect.DeepEqual(val1, val2) {
+						isDifferent = true
+						break
+					}
 				}
 			}
 

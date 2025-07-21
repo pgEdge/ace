@@ -15,7 +15,6 @@ import (
 	"bufio"
 	"context"
 	"fmt"
-	"log"
 	"maps"
 	"os"
 	"strconv"
@@ -25,6 +24,7 @@ import (
 	"github.com/jackc/pgx/v4/pgxpool"
 	"github.com/pgedge/ace/db/queries"
 	"github.com/pgedge/ace/internal/auth"
+	"github.com/pgedge/ace/internal/logger"
 	"github.com/pgedge/ace/pkg/types"
 )
 
@@ -164,7 +164,7 @@ func RepsetDiff(task *RepsetDiffCmd) error {
 		for _, skip := range task.skipTablesList {
 			if strings.TrimSpace(skip) == tableName {
 				if !task.Quiet {
-					fmt.Printf("Skipping table: %s\n", tableName)
+					logger.Info("Skipping table: %s", tableName)
 				}
 				skipped = true
 				break
@@ -175,7 +175,7 @@ func RepsetDiff(task *RepsetDiffCmd) error {
 		}
 
 		if !task.Quiet {
-			fmt.Printf("Diffing table: %s\n", tableName)
+			logger.Info("Diffing table: %s", tableName)
 		}
 
 		tdTask := NewTableDiffTask()
@@ -192,16 +192,16 @@ func RepsetDiff(task *RepsetDiffCmd) error {
 		tdTask.QuietMode = task.Quiet
 
 		if err := tdTask.Validate(); err != nil {
-			log.Printf("validation for table %s failed: %v", tableName, err)
+			logger.Warn("validation for table %s failed: %v", tableName, err)
 			continue
 		}
 
 		if err := tdTask.RunChecks(true); err != nil {
-			log.Printf("checks for table %s failed: %v", tableName, err)
+			logger.Warn("checks for table %s failed: %v", tableName, err)
 			continue
 		}
 		if err := tdTask.ExecuteTask(); err != nil {
-			log.Printf("error during comparison for table %s: %v", tableName, err)
+			logger.Warn("error during comparison for table %s: %v", tableName, err)
 			continue
 		}
 	}
