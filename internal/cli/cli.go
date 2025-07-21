@@ -18,7 +18,7 @@ import (
 	"github.com/charmbracelet/log"
 	"github.com/google/uuid"
 	"github.com/pgedge/ace/internal/core"
-	"github.com/pgedge/ace/internal/logger"
+	"github.com/pgedge/ace/pkg/logger"
 	"github.com/urfave/cli/v2"
 )
 
@@ -431,7 +431,7 @@ func SchemaDiffCLI(ctx *cli.Context) error {
 	task.Output = ctx.String("output")
 	task.OverrideBlockSize = ctx.Bool("override-block-size")
 
-	if err := core.SchemaDiff(task); err != nil {
+	if err := task.SchemaTableDiff(); err != nil {
 		return fmt.Errorf("error during schema diff: %w", err)
 	}
 	return nil

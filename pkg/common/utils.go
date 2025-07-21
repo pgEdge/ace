@@ -9,7 +9,7 @@
 //
 /////////////////////////////////////////////////////////////////////////////
 
-package core
+package common
 
 import (
 	"context"
@@ -26,7 +26,7 @@ import (
 	"github.com/jackc/pgtype"
 	"github.com/jackc/pgx/v4/pgxpool"
 	"github.com/pgedge/ace/db/queries"
-	"github.com/pgedge/ace/internal/logger"
+	"github.com/pgedge/ace/pkg/logger"
 	"github.com/pgedge/ace/pkg/types"
 )
 
@@ -227,7 +227,7 @@ func Contains(slice []string, value string) bool {
 	return slices.Contains(slice, value)
 }
 
-func readClusterInfo(t ClusterConfigProvider) error {
+func ReadClusterInfo(t ClusterConfigProvider) error {
 	configPath := fmt.Sprintf("%s.json", t.GetClusterName())
 	if _, err := os.Stat(configPath); os.IsNotExist(err) {
 		return fmt.Errorf("cluster configuration file not found for %s", t.GetClusterName())
@@ -319,8 +319,8 @@ func readClusterInfo(t ClusterConfigProvider) error {
 	return nil
 }
 
-// convertToPgxType converts a value from a JSON unmarshal to a type that pgx can handle
-func convertToPgxType(val interface{}, pgType string) (interface{}, error) {
+// ConvertToPgxType converts a value from a JSON unmarshal to a type that pgx can handle
+func ConvertToPgxType(val any, pgType string) (any, error) {
 	if val == nil {
 		return nil, nil
 	}
@@ -461,32 +461,112 @@ func convertToPgxType(val interface{}, pgType string) (interface{}, error) {
 	// TODO: Array handling!
 }
 
-// stringifyPKey converts a primary key (simple or composite) from a row map into a consistent string representation.
-func stringifyPKey(row map[string]any, keyCols []string, isSimplePK bool) (string, error) {
-	if len(keyCols) == 0 {
-		return "", fmt.Errorf("no primary key columns defined")
+func SafeCut(s string, n int) string {
+	if len(s) < n {
+		return s
 	}
+	return s[:n]
+}
 
-	if isSimplePK {
-		val, ok := row[keyCols[0]]
+func IsKnownScalarType(colType string) bool {
+	knownPrefixes := []string{
+		"character", "text",
+		"integer", "bigint", "smallint",
+		"numeric", "decimal", "real", "double precision",
+		"boolean",
+		"bytea",
+		"json", "jsonb",
+		"uuid",
+		"timestamp", "date", "time",
+	}
+	for _, prefix := range knownPrefixes {
+		if strings.HasPrefix(colType, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+func StringifyKey(row map[string]any, pKeyCols []string) (string, error) {
+	if len(pKeyCols) == 0 {
+		return "", nil
+	}
+	// if len(pkValues) != len(pkCols) {
+	// 	return "", fmt.Errorf("mismatch between pk value count (%d) and pk column count (%d)", len(pkValues), len(pkCols))
+	// }
+
+	if len(pKeyCols) == 1 {
+		val, ok := row[pKeyCols[0]]
 		if !ok {
-			return "", fmt.Errorf("primary key column %s not found in row", keyCols[0])
+			return "", fmt.Errorf("pk column '%s' not found in pk values map", pKeyCols[0])
 		}
 		return fmt.Sprintf("%v", val), nil
 	}
 
-	// Composite key: sort and then join for consistency
-	sortedKeyCols := make([]string, len(keyCols))
-	copy(sortedKeyCols, keyCols)
-	sort.Strings(sortedKeyCols)
+	sortedPkCols := make([]string, len(pKeyCols))
+	copy(sortedPkCols, pKeyCols)
+	sort.Strings(sortedPkCols)
 
-	var pkParts []string
-	for _, colName := range sortedKeyCols {
-		val, ok := row[colName]
+	var parts []string
+	for _, col := range sortedPkCols {
+		val, ok := row[col]
 		if !ok {
-			return "", fmt.Errorf("primary key column %s not found in row", colName)
+			return "", fmt.Errorf("pk column '%s' not found in pk values map", col)
 		}
-		pkParts = append(pkParts, fmt.Sprintf("%v", val))
+		parts = append(parts, fmt.Sprintf("%v", val))
 	}
-	return strings.Join(pkParts, "||"), nil
+	return strings.Join(parts, "||"), nil
+}
+
+func AddSpockMetadata(row map[string]any) map[string]any {
+	if row == nil {
+		return nil
+	}
+	metadata := make(map[string]any)
+	if commitTs, ok := row["commit_ts"]; ok {
+		metadata["commit_ts"] = commitTs
+		delete(row, "commit_ts")
+	}
+	if nodeOrigin, ok := row["node_origin"]; ok {
+		metadata["node_origin"] = nodeOrigin
+		delete(row, "node_origin")
+	}
+	row["_spock_metadata_"] = metadata
+	return row
+}
+
+func StripSpockMetadata(row map[string]any) map[string]any {
+	if row != nil {
+		delete(row, "_spock_metadata_")
+	}
+	return row
+}
+
+func DiffStringSlices(a, b []string) (missing, extra []string) {
+	sort.Strings(a)
+	sort.Strings(b)
+
+	aMap := make(map[string]struct{}, len(a))
+	for _, s := range a {
+		aMap[s] = struct{}{}
+	}
+
+	bMap := make(map[string]struct{}, len(b))
+	for _, s := range b {
+		bMap[s] = struct{}{}
+	}
+
+	for _, s := range a {
+		if _, found := bMap[s]; !found {
+			missing = append(missing, s)
+		}
+	}
+
+	for _, s := range b {
+		if _, found := aMap[s]; !found {
+			extra = append(extra, s)
+		}
+	}
+
+	return missing, extra
 }

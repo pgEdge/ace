@@ -32,8 +32,9 @@ import (
 	"github.com/pgedge/ace/db/helpers"
 	"github.com/pgedge/ace/db/queries"
 	"github.com/pgedge/ace/internal/auth"
-	"github.com/pgedge/ace/internal/logger"
+	utils "github.com/pgedge/ace/pkg/common"
 	"github.com/pgedge/ace/pkg/config"
+	"github.com/pgedge/ace/pkg/logger"
 	"github.com/pgedge/ace/pkg/types"
 	"github.com/vbauerster/mpb/v8"
 	"github.com/vbauerster/mpb/v8/decor"
@@ -133,60 +134,6 @@ func NewTableDiffTask() *TableDiffTask {
 	}
 }
 
-func sanitise(identifier string) string {
-	return pgx.Identifier{identifier}.Sanitize()
-}
-
-func StringifyKey(pkValues map[string]any, pkCols []string) (string, error) {
-	if len(pkCols) == 0 {
-		return "", nil
-	}
-	if len(pkValues) != len(pkCols) {
-		return "", fmt.Errorf("mismatch between pk value count (%d) and pk column count (%d)", len(pkValues), len(pkCols))
-	}
-
-	if len(pkCols) == 1 {
-		val, ok := pkValues[pkCols[0]]
-		if !ok {
-			return "", fmt.Errorf("pk column '%s' not found in pk values map", pkCols[0])
-		}
-		return fmt.Sprintf("%v", val), nil
-	}
-
-	sortedPkCols := make([]string, len(pkCols))
-	copy(sortedPkCols, pkCols)
-	sort.Strings(sortedPkCols)
-
-	var parts []string
-	for _, col := range sortedPkCols {
-		val, ok := pkValues[col]
-		if !ok {
-			return "", fmt.Errorf("pk column '%s' not found in pk values map", col)
-		}
-		parts = append(parts, fmt.Sprintf("%v", val))
-	}
-	return strings.Join(parts, "||"), nil
-}
-
-func isKnownScalarType(colType string) bool {
-	knownPrefixes := []string{
-		"character", "text",
-		"integer", "bigint", "smallint",
-		"numeric", "decimal", "real", "double precision",
-		"boolean",
-		"bytea",
-		"json", "jsonb",
-		"uuid",
-		"timestamp", "date", "time",
-	}
-	for _, prefix := range knownPrefixes {
-		if strings.HasPrefix(colType, prefix) {
-			return true
-		}
-	}
-	return false
-}
-
 func (t *TableDiffTask) fetchRows(ctx context.Context, nodeName string, r Range) ([]map[string]any, error) {
 	pool, ok := t.Pools[nodeName]
 	if !ok {
@@ -197,8 +144,8 @@ func (t *TableDiffTask) fetchRows(ctx context.Context, nodeName string, r Range)
 		return nil, fmt.Errorf("primary key not defined for table %s.%s", t.Schema, t.Table)
 	}
 
-	quotedSchema := sanitise(t.Schema)
-	quotedTable := sanitise(t.Table)
+	quotedSchema := pgx.Identifier{t.Schema}.Sanitize()
+	quotedTable := pgx.Identifier{t.Table}.Sanitize()
 	quotedSchemaTable := fmt.Sprintf("%s.%s", quotedSchema, quotedTable)
 
 	var colTypes map[string]string
@@ -231,10 +178,10 @@ func (t *TableDiffTask) fetchRows(ctx context.Context, nodeName string, r Range)
 
 	for _, colName := range t.Cols {
 		colType := colTypes[colName]
-		quotedColName := sanitise(colName)
+		quotedColName := pgx.Identifier{colName}.Sanitize()
 
 		// We cast user defined types and arrays to TEXT to avoid scan errors with unknown OIDs
-		if strings.HasSuffix(colType, "[]") || !isKnownScalarType(colType) {
+		if strings.HasSuffix(colType, "[]") || !utils.IsKnownScalarType(colType) {
 			selectCols = append(selectCols, fmt.Sprintf("%s::TEXT AS %s", quotedColName, quotedColName))
 		} else {
 			selectCols = append(selectCols, quotedColName)
@@ -245,7 +192,7 @@ func (t *TableDiffTask) fetchRows(ctx context.Context, nodeName string, r Range)
 
 	quotedKeyCols := make([]string, len(t.Key))
 	for i, k := range t.Key {
-		quotedKeyCols[i] = sanitise(k)
+		quotedKeyCols[i] = pgx.Identifier{k}.Sanitize()
 	}
 
 	orderByClause := ""
@@ -428,7 +375,7 @@ func (t *TableDiffTask) compareBlocks(
 		for _, pkCol := range t.Key {
 			pkVal[pkCol] = row[pkCol]
 		}
-		pkStr, err := StringifyKey(pkVal, t.Key)
+		pkStr, err := utils.StringifyKey(pkVal, t.Key)
 		if err != nil {
 			return nil, fmt.Errorf("failed to stringify n1 pkey: %w", err)
 		}
@@ -441,7 +388,7 @@ func (t *TableDiffTask) compareBlocks(
 		for _, pkCol := range t.Key {
 			pkVal[pkCol] = row[pkCol]
 		}
-		pkStr, err := StringifyKey(pkVal, t.Key)
+		pkStr, err := utils.StringifyKey(pkVal, t.Key)
 		if err != nil {
 			return nil, fmt.Errorf("failed to stringify n2 pkey: %w", err)
 		}
@@ -521,7 +468,7 @@ func (t *TableDiffTask) Validate() error {
 		return fmt.Errorf("table-diff currently supports only csv, json and html output formats")
 	}
 
-	nodeList, err := ParseNodes(t.Nodes)
+	nodeList, err := utils.ParseNodes(t.Nodes)
 	if err != nil {
 		return fmt.Errorf("nodes should be a comma-separated list of nodenames. E.g., nodes=\"n1,n2\". Error: %w", err)
 	}
@@ -536,7 +483,7 @@ func (t *TableDiffTask) Validate() error {
 		return fmt.Errorf("table-diff needs at least two nodes to compare")
 	}
 
-	err = readClusterInfo(t)
+	err = utils.ReadClusterInfo(t)
 	if err != nil {
 		return fmt.Errorf("error loading cluster information: %w", err)
 	}
@@ -566,7 +513,7 @@ func (t *TableDiffTask) Validate() error {
 	for _, nodeMap := range t.ClusterNodes {
 		if len(nodeList) > 0 {
 			nameVal, _ := nodeMap["Name"].(string)
-			if !Contains(nodeList, nameVal) {
+			if !utils.Contains(nodeList, nameVal) {
 				continue
 			}
 		}
@@ -631,7 +578,7 @@ func (t *TableDiffTask) RunChecks(skipValidation bool) error {
 			port = "5432"
 		}
 
-		if !Contains(t.NodeList, hostname) {
+		if !utils.Contains(t.NodeList, hostname) {
 			continue
 		}
 
@@ -641,7 +588,7 @@ func (t *TableDiffTask) RunChecks(skipValidation bool) error {
 		}
 		defer conn.Close()
 
-		currCols, err := GetColumns(conn, schema, table)
+		currCols, err := utils.GetColumns(conn, schema, table)
 		if err != nil {
 			return fmt.Errorf("failed to get columns for table %s.%s on node %s: %w", schema, table, hostname, err)
 		}
@@ -649,7 +596,7 @@ func (t *TableDiffTask) RunChecks(skipValidation bool) error {
 			return fmt.Errorf("table '%s.%s' not found on %s, or the current user does not have adequate privileges", schema, table, hostname)
 		}
 
-		currKey, err := GetPrimaryKey(conn, schema, table)
+		currKey, err := utils.GetPrimaryKey(conn, schema, table)
 		if err != nil {
 			return fmt.Errorf("failed to get primary key for table %s.%s on node %s: %w", schema, table, hostname, err)
 		}
@@ -669,7 +616,7 @@ func (t *TableDiffTask) RunChecks(skipValidation bool) error {
 		cols = currCols
 		key = currKey
 
-		colTypes, err := GetColumnTypes(conn, table)
+		colTypes, err := utils.GetColumnTypes(conn, table)
 		if err != nil {
 			return fmt.Errorf("failed to get column types for table %s on node %s: %w", table, hostname, err)
 		}
@@ -681,7 +628,7 @@ func (t *TableDiffTask) RunChecks(skipValidation bool) error {
 		}
 		t.ColTypes[colTypesKey] = colTypes
 
-		authorized, missingPrivileges, err := CheckUserPrivileges(conn, user, schema, table, requiredPrivileges)
+		authorized, missingPrivileges, err := utils.CheckUserPrivileges(conn, user, schema, table, requiredPrivileges)
 		if err != nil {
 			return fmt.Errorf("failed to check user privileges on node %s: %w", hostname, err)
 		}
@@ -704,9 +651,9 @@ func (t *TableDiffTask) RunChecks(skipValidation bool) error {
 
 		if t.TableFilter != "" {
 			viewName := fmt.Sprintf("%s_%s_filtered", t.TaskID, table)
-			sanitisedViewName := sanitise(viewName)
-			sanitisedSchema := sanitise(schema)
-			sanitisedTable := sanitise(table)
+			sanitisedViewName := pgx.Identifier{viewName}.Sanitize()
+			sanitisedSchema := pgx.Identifier{schema}.Sanitize()
+			sanitisedTable := pgx.Identifier{table}.Sanitize()
 			viewSQL := fmt.Sprintf("CREATE MATERIALIZED VIEW IF NOT EXISTS %s AS SELECT * FROM %s.%s WHERE %s",
 				sanitisedViewName, sanitisedSchema, sanitisedTable, t.TableFilter)
 
@@ -901,8 +848,8 @@ func (t *TableDiffTask) ExecuteTask() error {
 				continue
 			}
 		} else {
-			sanitisedSchema := sanitise(t.Schema)
-			sanitisedTable := sanitise(t.Table)
+			sanitisedSchema := pgx.Identifier{t.Schema}.Sanitize()
+			sanitisedTable := pgx.Identifier{t.Table}.Sanitize()
 			countQuerySQL := fmt.Sprintf("SELECT COUNT(*) FROM %s.%s", sanitisedSchema, sanitisedTable)
 			logger.Debug("[%s] Executing count query for filtered table: %s", name, countQuerySQL)
 			err = pool.QueryRow(ctx, countQuerySQL).Scan(&count)
@@ -1122,7 +1069,7 @@ func (t *TableDiffTask) ExecuteTask() error {
 
 				if r1.hash != r2.hash {
 					logger.Debug("%s Mismatch in initial range %d (%v-%v) for %s vs %s. Hashes: %s... / %s... narrowing down diffs...",
-						CrossMark, rangeIdx, currentRange.Start, currentRange.End, node1, node2, safeCut(r1.hash, 8), safeCut(r2.hash, 8))
+						utils.CrossMark, rangeIdx, currentRange.Start, currentRange.End, node1, node2, utils.SafeCut(r1.hash, 8), utils.SafeCut(r2.hash, 8))
 					mismatchedTasks = append(mismatchedTasks, RecursiveDiffTask{
 						Node1Name:                 node1,
 						Node2Name:                 node2,
@@ -1131,7 +1078,7 @@ func (t *TableDiffTask) ExecuteTask() error {
 					})
 
 				} else {
-					logger.Debug("%s Match in initial range %d (%v-%v) for %s vs %s", CheckMark, rangeIdx, currentRange.Start, currentRange.End, node1, node2)
+					logger.Debug("%s Match in initial range %d (%v-%v) for %s vs %s", utils.CheckMark, rangeIdx, currentRange.Start, currentRange.End, node1, node2)
 				}
 			}
 		}
@@ -1190,7 +1137,7 @@ func (t *TableDiffTask) ExecuteTask() error {
 			logger.Info("ERROR writing diff output to file %s: %v", outputFileName, err)
 			return fmt.Errorf("failed to write diffs file: %w", err)
 		}
-		logger.Warn("%s TABLES DO NOT MATCH", CrossMark)
+		logger.Warn("%s TABLES DO NOT MATCH", utils.CrossMark)
 
 		for key, diffCount := range t.DiffResult.Summary.DiffRowsCount {
 			logger.Warn("Found %d differences between %s", diffCount, key)
@@ -1199,7 +1146,7 @@ func (t *TableDiffTask) ExecuteTask() error {
 		logger.Info("Diff report written to %s", outputFileName)
 
 	} else {
-		logger.Info("%s TABLES MATCH", CheckMark)
+		logger.Info("%s TABLES MATCH", utils.CheckMark)
 	}
 
 	return nil
@@ -1297,11 +1244,11 @@ func (t *TableDiffTask) generateSubRanges(
 
 	quotedKeyCols := make([]string, len(t.Key))
 	for i, k := range t.Key {
-		quotedKeyCols[i] = sanitise(k)
+		quotedKeyCols[i] = pgx.Identifier{k}.Sanitize()
 	}
 	pkColsStr := strings.Join(quotedKeyCols, ", ")
 	pkTupleStr := fmt.Sprintf("ROW(%s)", pkColsStr)
-	schemaTable := fmt.Sprintf("%s.%s", sanitise(t.Schema), sanitise(t.Table))
+	schemaTable := fmt.Sprintf("%s.%s", pgx.Identifier{t.Schema}.Sanitize(), pgx.Identifier{t.Table}.Sanitize())
 
 	var conditions []string
 	args := []any{}
@@ -1435,23 +1382,6 @@ func (t *TableDiffTask) generateSubRanges(
 	return []Range{parentRange}, nil
 }
 
-func addSpockMetadata(row map[string]any) map[string]any {
-	if row == nil {
-		return nil
-	}
-	metadata := make(map[string]any)
-	if commitTs, ok := row["commit_ts"]; ok {
-		metadata["commit_ts"] = commitTs
-		delete(row, "commit_ts")
-	}
-	if nodeOrigin, ok := row["node_origin"]; ok {
-		metadata["node_origin"] = nodeOrigin
-		delete(row, "node_origin")
-	}
-	row["_spock_metadata_"] = metadata
-	return row
-}
-
 func (t *TableDiffTask) recursiveDiff(
 	ctx context.Context,
 	task RecursiveDiffTask,
@@ -1504,16 +1434,16 @@ func (t *TableDiffTask) recursiveDiff(
 			}
 
 			for _, row := range diffInfo.Node1OnlyRows {
-				t.DiffResult.NodeDiffs[pairKey].Rows[node1Name] = append(t.DiffResult.NodeDiffs[pairKey].Rows[node1Name], addSpockMetadata(row))
+				t.DiffResult.NodeDiffs[pairKey].Rows[node1Name] = append(t.DiffResult.NodeDiffs[pairKey].Rows[node1Name], utils.AddSpockMetadata(row))
 				currentDiffRowsForPair++
 			}
 			for _, row := range diffInfo.Node2OnlyRows {
-				t.DiffResult.NodeDiffs[pairKey].Rows[node2Name] = append(t.DiffResult.NodeDiffs[pairKey].Rows[node2Name], addSpockMetadata(row))
+				t.DiffResult.NodeDiffs[pairKey].Rows[node2Name] = append(t.DiffResult.NodeDiffs[pairKey].Rows[node2Name], utils.AddSpockMetadata(row))
 				currentDiffRowsForPair++
 			}
 			for _, modRow := range diffInfo.ModifiedRows {
-				t.DiffResult.NodeDiffs[pairKey].Rows[node1Name] = append(t.DiffResult.NodeDiffs[pairKey].Rows[node1Name], addSpockMetadata(modRow.Node1Data))
-				t.DiffResult.NodeDiffs[pairKey].Rows[node2Name] = append(t.DiffResult.NodeDiffs[pairKey].Rows[node2Name], addSpockMetadata(modRow.Node2Data))
+				t.DiffResult.NodeDiffs[pairKey].Rows[node1Name] = append(t.DiffResult.NodeDiffs[pairKey].Rows[node1Name], utils.AddSpockMetadata(modRow.Node1Data))
+				t.DiffResult.NodeDiffs[pairKey].Rows[node2Name] = append(t.DiffResult.NodeDiffs[pairKey].Rows[node2Name], utils.AddSpockMetadata(modRow.Node2Data))
 				currentDiffRowsForPair++
 			}
 
@@ -1593,7 +1523,7 @@ func (t *TableDiffTask) recursiveDiff(
 
 		if res1.hash != res2.hash {
 			logger.Debug("%s Mismatch in sub-range %v-%v for %s (%s...) vs %s (%s...). Recursing.",
-				CrossMark, sr.Start, sr.End, node1Name, safeCut(res1.hash, 8), node2Name, safeCut(res2.hash, 8))
+				utils.CrossMark, sr.Start, sr.End, node1Name, utils.SafeCut(res1.hash, 8), node2Name, utils.SafeCut(res2.hash, 8))
 			wg.Add(1)
 			go t.recursiveDiff(ctx, RecursiveDiffTask{
 				Node1Name:                 node1Name,
@@ -1602,98 +1532,9 @@ func (t *TableDiffTask) recursiveDiff(
 				CurrentEstimatedBlockSize: newEstimatedBlockSize,
 			}, wg)
 		} else {
-			logger.Debug("%s Match in sub-range %v-%v for %s vs %s.", CheckMark, sr.Start, sr.End, node1Name, node2Name)
+			logger.Debug("%s Match in sub-range %v-%v for %s vs %s.", utils.CheckMark, sr.Start, sr.End, node1Name, node2Name)
 		}
 	}
-}
-
-func safeCut(s string, n int) string {
-	if len(s) < n {
-		return s
-	}
-	return s[:n]
-}
-
-func (t *TableDiffTask) getPkeyOffsets(ctx context.Context, pool *pgxpool.Pool) ([]Range, error) {
-	if len(t.Key) == 0 {
-		return nil, fmt.Errorf("primary key not defined for table %s.%s", t.Schema, t.Table)
-	}
-
-	schemaIdent := sanitise(t.Schema)
-	tableIdent := sanitise(t.Table)
-
-	quotedKeyCols := make([]string, len(t.Key))
-	for i, k := range t.Key {
-		quotedKeyCols[i] = sanitise(k)
-	}
-	// Using this for both select and order by to keep things simple
-	pkStr := strings.Join(quotedKeyCols, ", ")
-
-	querySQL := fmt.Sprintf("SELECT %s FROM %s.%s ORDER BY %s", pkStr, schemaIdent, tableIdent, pkStr)
-
-	pgRows, err := pool.Query(ctx, querySQL)
-	if err != nil {
-		return nil, fmt.Errorf("failed to query primary keys for direct offset generation from %s.%s: %w", t.Schema, t.Table, err)
-	}
-	defer pgRows.Close()
-
-	var allPks []any
-	numPKCols := len(t.Key)
-	scanDest := make([]any, numPKCols)
-	scanDestPtrs := make([]any, numPKCols)
-	for i := range scanDest {
-		scanDestPtrs[i] = &scanDest[i]
-	}
-
-	for pgRows.Next() {
-		if err := pgRows.Scan(scanDestPtrs...); err != nil {
-			return nil, fmt.Errorf("failed to scan primary key value from %s.%s: %w", t.Schema, t.Table, err)
-		}
-		if numPKCols == 1 {
-			allPks = append(allPks, scanDest[0])
-		} else {
-			/* PKs are composite, so create a new slice for each PK to avoid allPks
-			 * elements pointing to the same underlying scanDest array.
-			 */
-			currentPkComposite := make([]any, numPKCols)
-			copy(currentPkComposite, scanDest)
-			allPks = append(allPks, currentPkComposite)
-		}
-	}
-
-	if err := pgRows.Err(); err != nil {
-		return nil, fmt.Errorf("error iterating over primary key rows from %s.%s: %w", t.Schema, t.Table, err)
-	}
-
-	if len(allPks) == 0 {
-		logger.Info("[%s.%s] No primary key values found, returning empty ranges for direct generation.", t.Schema, t.Table)
-		return []Range{}, nil
-	}
-
-	var ranges []Range
-	// As always the case, our first range needs to be (NULL, first_pkey)
-	ranges = append(ranges, Range{Start: nil, End: allPks[0]})
-
-	currentPkIndex := 0
-	for currentPkIndex < len(allPks) {
-		currentBlockStartPkey := allPks[currentPkIndex]
-
-		nextPKeyIndexForRangeEnd := currentPkIndex + t.BlockSize
-
-		if nextPKeyIndexForRangeEnd < len(allPks) {
-			rangeEndValue := allPks[nextPKeyIndexForRangeEnd]
-			ranges = append(ranges, Range{Start: currentBlockStartPkey, End: rangeEndValue})
-			currentPkIndex = nextPKeyIndexForRangeEnd
-		} else {
-			if !(currentPkIndex == 0 && len(allPks) <= t.BlockSize && len(allPks) == 1) {
-				ranges = append(ranges, Range{Start: currentBlockStartPkey, End: nil})
-			}
-			break
-		}
-	}
-
-	logger.Debug("[%s.%s] Generated %d ranges without sampling from %d pkeys with block_size %d.", t.Schema, t.Table, len(ranges), len(allPks), t.BlockSize)
-	return ranges, nil
 }
 
 func (t *TableDiffTask) AddPrimaryKeyToDiffSummary() {
