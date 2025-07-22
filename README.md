@@ -41,32 +41,30 @@ To find differences between nodes for a specific table, use the `table-diff` com
 
 **Sample Output (with differences):**
 ```
-2025/07/18 13:45:40 [INFO] Cluster hetzner exists
-2025/07/18 13:45:40 [INFO] Connections successful to nodes in cluster
-2025/07/18 13:45:40 [INFO] Table public.customers_large is comparable across nodes
-2025/07/18 13:45:40 [INFO] Using 16 CPUs, max concurrent workers = 16
-2025/07/18 13:45:40 [INFO] Created 59 initial ranges to compare
-  Hashing ranges: 177 / 177 [========================================================================================================================================================================] 1s | done
-2025/07/18 13:45:42 [INFO] Initial hash calculations complete. Proceeding with comparisons for mismatches...
-2025/07/18 13:45:42 [INFO] Table diff comparison completed for public.customers_large
-2025/07/18 13:45:42 [INFO] Diff report written to public_customers_large_diffs-20250718134542.json
-Table diff completed
+2025/07/22 12:03:51 INFO Cluster hetzner exists
+2025/07/22 12:03:51 INFO Connections successful to nodes in cluster
+2025/07/22 12:03:51 INFO Table public.customers_large is comparable across nodes
+2025/07/22 12:03:51 INFO Using 16 CPUs, max concurrent workers = 16
+Hashing initial ranges: 171 / 177 [=======================================================================>---] 1s | 0s
+Analysing mismatches: 2 / 2 [=================================================================================] 0s | done
+2025/07/22 12:03:53 INFO Table diff comparison completed for public.customers_large
+2025/07/22 12:03:53 WARN ✘ TABLES DO NOT MATCH
+2025/07/22 12:03:53 WARN Found 99 differences between n1/n2
+2025/07/22 12:03:53 WARN Found 99 differences between n2/n3
+2025/07/22 12:03:53 INFO Diff report written to public_customers_large_diffs-20250722120353.json
 ```
 
 If no differences are found, ACE will indicate that, and no diff file will be created.
 
 **Sample Output (no differences):**
 ```
-2025/07/18 13:47:55 [INFO] Cluster hetzner exists
-2025/07/18 13:47:55 [INFO] Connections successful to nodes in cluster
-2025/07/18 13:47:55 [INFO] Table public.customers_large is comparable across nodes
-2025/07/18 13:47:55 [INFO] Using 16 CPUs, max concurrent workers = 16
-2025/07/18 13:47:55 [INFO] Created 59 initial ranges to compare
-  Hashing ranges: 177 / 177 [========================================================================================================================================================================] 1s | done
-2025/07/18 13:47:57 [INFO] Initial hash calculations complete. Proceeding with comparisons for mismatches...
-2025/07/18 13:47:57 [INFO] Table diff comparison completed for public.customers_large
-2025/07/18 13:47:57 [INFO] No differences found. Diff file not created.
-Table diff completed
+2025/07/22 12:05:59 INFO Cluster hetzner exists
+2025/07/22 12:05:59 INFO Connections successful to nodes in cluster
+2025/07/22 12:05:59 INFO Table public.customers_large is comparable across nodes
+2025/07/22 12:05:59 INFO Using 16 CPUs, max concurrent workers = 16
+Hashing initial ranges: 168 / 177 [======================================================================>----] 1s | 0s
+2025/07/22 12:06:01 INFO Table diff comparison completed for public.customers_large
+2025/07/22 12:06:01 INFO ✔ TABLES MATCH
 ```
 
 ### 2. Repairing Differences
@@ -80,19 +78,8 @@ Once a diff file has been generated, you can use the `table-repair` command to r
 
 **Sample Output:**
 ```
-2025/07/18 13:46:36 Table repair task validated and prepared successfully.
-2025/07/18 13:46:36 Starting table repair for public.customers_large on cluster hetzner
-2025/07/18 13:46:36 Processing repairs for divergent node: n2
-2025/07/18 13:46:36 spock.repair_mode(true) set on n2
-2025/07/18 13:46:36 session_replication_role set on n2 (fire_triggers: false)
-2025/07/18 13:46:36 Executed 99 upsert operations on n2
-2025/07/18 13:46:36 spock.repair_mode(false) set on n2
-2025/07/18 13:46:36 Transaction committed successfully on n2
-2025/07/18 13:46:36 Table repair for public.customers_large completed successfully.
-2025/07/18 13:46:36 Total operations: map[n2:map[deleted:0 upserted:99]]
-2025/07/18 13:46:36 *** SUMMARY ***
-2025/07/18 13:46:36 n2 UPSERTED = 99 rows
-
-2025/07/18 13:46:36 n2 DELETED = 0 rows
-2025/07/18 13:46:36 RUN TIME = 0.00 seconds
+2025/07/22 12:05:24 INFO Starting table repair for public.customers_large on cluster hetzner
+2025/07/22 12:05:24 INFO Processing repairs for divergent node: n2
+2025/07/22 12:05:24 INFO Executed 99 upsert operations on n2
+2025/07/22 12:05:24 INFO Repair of public.customers_large complete in 0.003s. Nodes n2 repaired (99 upserted).
 ```
