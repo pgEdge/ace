@@ -29,85 +29,807 @@ where the identifiers are dynamic, so we cannot parameterise them.
 This file contains helper functions for those queries.
 */
 
-var (
-	validIdentifierRegex = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
-)
+type Templates struct {
+	CreateMetadataTable           *template.Template
+	GetPkeyOffsets                *template.Template
+	CreateSimpleMtreeTable        *template.Template
+	CreateIndex                   *template.Template
+	CreateCompositeType           *template.Template
+	DropCompositeType             *template.Template
+	CreateCompositeMtreeTable     *template.Template
+	InsertCompositeBlockRanges    *template.Template
+	CreateXORFunction             *template.Template
+	EstimateRowCount              *template.Template
+	GetPkeyType                   *template.Template
+	UpdateMetadata                *template.Template
+	InsertBlockRanges             *template.Template
+	ComputeLeafHashes             *template.Template
+	UpdateLeafHashes              *template.Template
+	GetBlockRanges                *template.Template
+	GetDirtyAndNewBlocks          *template.Template
+	ClearDirtyFlags               *template.Template
+	BuildParentNodes              *template.Template
+	GetRootNode                   *template.Template
+	GetNodeChildren               *template.Template
+	GetLeafRanges                 *template.Template
+	GetRowCountEstimate           *template.Template
+	GetMaxValComposite            *template.Template
+	UpdateMaxVal                  *template.Template
+	GetMaxValSimple               *template.Template
+	GetCountComposite             *template.Template
+	GetCountSimple                *template.Template
+	GetSplitPointComposite        *template.Template
+	GetSplitPointSimple           *template.Template
+	DeleteParentNodes             *template.Template
+	GetMaxNodePosition            *template.Template
+	UpdateBlockRangeEnd           *template.Template
+	UpdateNodePositionsTemp       *template.Template
+	DeleteBlock                   *template.Template
+	UpdateNodePositionsSequential *template.Template
+	FindBlocksToSplit             *template.Template
+	FindBlocksToMergeComposite    *template.Template
+	FindBlocksToMergeSimple       *template.Template
+	GetBlockCountComposite        *template.Template
+	GetBlockCountSimple           *template.Template
+	GetBlockSizeFromMetadata      *template.Template
+	GetMaxNodeLevel               *template.Template
+	CompareBlocksSQL              *template.Template
+	DropXORFunction               *template.Template
+	DropMetadataTable             *template.Template
+	DropMtreeTable                *template.Template
+}
 
-var pkeyOffsetsTmpl = template.Must(template.New("pkeyOffsets").Parse(`
-WITH sampled_data AS (
-    SELECT
-        {{.KeyColumnsSelect}}
-    FROM {{.SchemaIdent}}.{{.TableIdent}}
-    TABLESAMPLE {{.TableSampleMethod}}({{.SamplePercent}})
-    ORDER BY {{.KeyColumnsOrder}}
-),
-first_row AS (
-    SELECT
-        {{.KeyColumnsSelect}}
-    FROM {{.SchemaIdent}}.{{.TableIdent}}
-    ORDER BY {{.KeyColumnsOrder}}
-    LIMIT 1
-),
-last_row AS (
-    SELECT
-        {{.KeyColumnsSelect}}
-    FROM {{.SchemaIdent}}.{{.TableIdent}}
-    ORDER BY {{.KeyColumnsOrderDesc}}
-    LIMIT 1
-),
-sample_boundaries AS (
-    SELECT
-        {{.KeyColumnsSelect}},
-        ntile({{.NtileCount}}) OVER (ORDER BY {{.KeyColumnsOrder}}) as bucket
-    FROM sampled_data
-),
-block_starts AS (
-    SELECT DISTINCT ON (bucket)
-        {{.KeyColumnsSelect}}
-    FROM sample_boundaries
-    ORDER BY bucket, {{.KeyColumnsOrder}}
-),
-all_bounds AS (
-    SELECT
-        {{.FirstRowSelects}},
-        0 as seq
-    UNION ALL
-    SELECT
-        {{.KeyColumnsSelect}},
-        1 as seq
-    FROM block_starts
-    WHERE ({{.KeyColumnsSelect}}) > (
-        {{.FirstRowTupleSelects}}
-    )
-    UNION ALL
-    SELECT
-        {{.LastRowSelects}},
-        2 as seq
-),
-ranges AS (
-    SELECT
-        {{.KeyColumnsSelect}},
-        {{.RangeStartColumns}},
-        {{.RangeEndColumns}},
-        seq
-    FROM all_bounds
-)
-SELECT
-    {{.RangeOutputColumns}}
-FROM ranges
-ORDER BY seq;
-`))
+var SQLTemplates = Templates{
+	// A template isn't needed for this query; just keeping the struct uniform
+	CreateMetadataTable: template.Must(template.New("createMetadataTable").Parse(`
+		CREATE TABLE ace_mtree_metadata (
+			schema_name text,
+			table_name text,
+			total_rows bigint,
+			block_size int,
+			num_blocks int,
+			is_composite boolean NOT NULL DEFAULT false,
+			last_updated timestamptz,
+			PRIMARY KEY (schema_name, table_name)
+		)`),
+	),
+	GetPkeyOffsets: template.Must(template.New("pkeyOffsets").Parse(`
+		WITH sampled_data AS (
+			SELECT
+				{{.KeyColumnsSelect}}
+			FROM
+				{{.SchemaIdent}}.{{.TableIdent}}
+			TABLESAMPLE {{.TableSampleMethod}}({{.SamplePercent}})
+			ORDER BY
+				{{.KeyColumnsOrder}}
+		),
+		first_row AS (
+			SELECT
+				{{.KeyColumnsSelect}}
+			FROM
+				{{.SchemaIdent}}.{{.TableIdent}}
+			ORDER BY
+				{{.KeyColumnsOrder}}
+			LIMIT 1
+		),
+		last_row AS (
+			SELECT
+				{{.KeyColumnsSelect}}
+			FROM
+				{{.SchemaIdent}}.{{.TableIdent}}
+			ORDER BY
+				{{.KeyColumnsOrderDesc}}
+			LIMIT 1
+		),
+		sample_boundaries AS (
+			SELECT
+				{{.KeyColumnsSelect}},
+				ntile({{.NtileCount}}) OVER (
+					ORDER BY
+						{{.KeyColumnsOrder}}
+				) as bucket
+			FROM
+				sampled_data
+		),
+		block_starts AS (
+			SELECT
+				DISTINCT ON (bucket) {{.KeyColumnsSelect}}
+			FROM
+				sample_boundaries
+			ORDER BY
+				bucket,
+				{{.KeyColumnsOrder}}
+		),
+		all_bounds AS (
+			SELECT
+				{{.FirstRowSelects}},
+				0 as seq
+			UNION ALL
+			SELECT
+				{{.KeyColumnsSelect}},
+				1 as seq
+			FROM
+				block_starts
+			WHERE
+				({{.KeyColumnsSelect}}) > ({{.FirstRowTupleSelects}})
+			UNION ALL
+			SELECT
+				{{.LastRowSelects}},
+				2 as seq
+		),
+		ranges AS (
+			SELECT
+				{{.KeyColumnsSelect}},
+				{{.RangeStartColumns}},
+				{{.RangeEndColumns}},
+				seq
+			FROM
+				all_bounds
+		)
+		SELECT
+			{{.RangeOutputColumns}}
+		FROM
+			ranges
+		ORDER BY
+			seq;
+	`)),
+	CreateSimpleMtreeTable: template.Must(template.New("createSimpleMtreeTable").Parse(`
+		CREATE TABLE {{.MtreeTable}} (
+			node_level integer NOT NULL,
+			node_position bigint NOT NULL,
+			range_start {{.PkeyType}},
+			range_end {{.PkeyType}},
+			leaf_hash bytea,
+			node_hash bytea,
+			dirty boolean DEFAULT false,
+			inserts_since_tree_update bigint DEFAULT 0,
+			deletes_since_tree_update bigint DEFAULT 0,
+			last_modified timestamptz DEFAULT current_timestamp,
+			PRIMARY KEY (node_level, node_position)
+		)`),
+	),
+	CreateIndex: template.Must(template.New("createIndex").Parse(`
+		CREATE INDEX IF NOT EXISTS {{.IndexName}}
+		ON {{.MtreeTable}} (range_start, range_end)
+		WHERE
+			node_level = 0;
+	`)),
+	CreateCompositeType: template.Must(template.New("createCompositeType").Parse(`
+		CREATE TYPE {{.SchemaIdent}}_{{.TableIdent}}_key_type AS (
+			{{.KeyTypeColumns}}
+		)`),
+	),
+	DropCompositeType: template.Must(template.New("dropCompositeType").Parse(`
+		DROP TYPE IF EXISTS {{.SchemaIdent}}_{{.TableIdent}}_key_type CASCADE;
+	`)),
+	CreateCompositeMtreeTable: template.Must(template.New("createCompositeMtreeTable").Parse(`
+		CREATE TABLE {{.MtreeTable}} (
+			node_level integer NOT NULL,
+			node_position bigint NOT NULL,
+			range_start {{.SchemaIdent}}_{{.TableIdent}}_key_type,
+			range_end {{.SchemaIdent}}_{{.TableIdent}}_key_type,
+			leaf_hash bytea,
+			node_hash bytea,
+			dirty boolean DEFAULT false,
+			inserts_since_tree_update bigint DEFAULT 0,
+			deletes_since_tree_update bigint DEFAULT 0,
+			last_modified timestamptz DEFAULT current_timestamp,
+			PRIMARY KEY (node_level, node_position)
+		)`),
+	),
+	InsertCompositeBlockRanges: template.Must(template.New("insertCompositeBlockRanges").Parse(`
+		INSERT INTO
+			{{.MtreeTable}} (node_level, node_position, range_start, range_end)
+		VALUES
+			(0, %s, ROW({{.StartTupleValues}}), ROW({{.EndTupleValues}}));
+	`)),
+	CreateXORFunction: template.Must(template.New("createXORFunction").Parse(`
+		CREATE
+		OR REPLACE FUNCTION bytea_xor(a bytea, b bytea) RETURNS bytea AS $$
+		DECLARE
+			result bytea;
+			len int;
+		BEGIN
+			IF length(a) != length(b) THEN
+				RAISE EXCEPTION 'bytea_xor inputs must be same length';
+			END IF;
+			len := length(a);
+			result := a;
+			FOR i IN 0..len - 1 LOOP
+			result := set_byte(result, i, get_byte(a, i) # get_byte(b, i));
+			END LOOP;
+			RETURN result;
+		END;
+		$$ LANGUAGE plpgsql IMMUTABLE STRICT;
+		DO $$
+		BEGIN
+			IF NOT EXISTS (
+				SELECT
+					1
+				FROM
+					pg_operator
+				WHERE
+					oprname = '#'
+					AND oprleft = 'bytea'::regtype
+					AND oprright = 'bytea'::regtype
+			) THEN
+			CREATE OPERATOR # (
+				LEFTARG = bytea,
+				RIGHTARG = bytea,
+				PROCEDURE = bytea_xor
+			);
+			END IF;
+		END $$;
+	`)),
+	EstimateRowCount: template.Must(template.New("estimateRowCount").Parse(`
+		SELECT
+			(
+				CASE
+					WHEN s.n_live_tup > 0 THEN s.n_live_tup
+					WHEN c.reltuples > 0 THEN c.reltuples
+					ELSE pg_relation_size(c.oid) / (8192 * 0.7)
+				END
+			)::bigint as estimate
+		FROM
+			pg_class c
+			JOIN pg_namespace n ON n.oid = c.relnamespace
+			LEFT JOIN pg_stat_user_tables s ON s.schemaname = n.nspname
+			AND s.relname = c.relname
+		WHERE
+			n.nspname = {{.SchemaIdent}}
+			AND c.relname = {{.TableIdent}}
+	`)),
+	GetPkeyType: template.Must(template.New("getPkeyType").Parse(`
+		SELECT
+			a.atttypid::regtype::text
+		FROM
+			pg_attribute a
+			JOIN pg_class c ON c.oid = a.attrelid
+			JOIN pg_namespace n ON n.oid = c.relnamespace
+		WHERE
+			n.nspname = $1
+			AND c.relname = $2
+			AND a.attname = $3
+	`)),
+	UpdateMetadata: template.Must(template.New("updateMetadata").Parse(`
+		INSERT INTO
+			ace_mtree_metadata (
+				schema_name,
+				table_name,
+				total_rows,
+				block_size,
+				num_blocks,
+				is_composite,
+				last_updated
+			)
+		VALUES
+			($1, $2, $3, $4, $5, $6, current_timestamp)
+		ON CONFLICT (schema_name, table_name) DO
+		UPDATE
+		SET
+			total_rows = EXCLUDED.total_rows,
+			block_size = EXCLUDED.block_size,
+			num_blocks = EXCLUDED.num_blocks,
+			is_composite = EXCLUDED.is_composite,
+			last_updated = EXCLUDED.last_updated
+	`)),
+	InsertBlockRanges: template.Must(template.New("insertBlockRanges").Parse(`
+		INSERT INTO
+			{{.MtreeTable}} (
+				node_level,
+				node_position,
+				range_start,
+				range_end,
+				last_modified
+			)
+		VALUES
+			(0, $1, $2, $3, current_timestamp)
+	`)),
+	ComputeLeafHashes: template.Must(template.New("computeLeafHashes").Parse(`
+		WITH block_rows AS (
+			SELECT
+				*
+			FROM
+				{{.SchemaIdent}}.{{.TableIdent}}
+			WHERE
+				{{.WhereClause}}
+		),
+		block_hash AS (
+			SELECT
+				digest(
+					COALESCE(
+						string_agg(
+							concat_ws('|', {{.Columns}}),
+							'|'
+							ORDER BY
+								{{.Key}}
+						),
+						'EMPTY_BLOCK'
+					),
+					'sha256'
+				) as leaf_hash
+			FROM
+				block_rows
+		)
+		SELECT
+			leaf_hash
+		FROM
+			block_hash
+	`)),
+	UpdateLeafHashes: template.Must(template.New("updateLeafHashes").Parse(`
+		UPDATE
+			{{.MtreeTable}} mt
+		SET
+			leaf_hash = $1,
+			node_hash = $1,
+			last_modified = current_timestamp
+		WHERE
+			node_position = $2
+			AND mt.node_level = 0
+		RETURNING
+			mt.node_position
+	`)),
+	GetBlockRanges: template.Must(template.New("getBlockRanges").Parse(`
+		SELECT
+			node_position,
+			range_start,
+			range_end
+		FROM
+			{{.MtreeTable}}
+		WHERE
+			node_level = 0
+		ORDER BY
+			node_position
+	`)),
+	GetDirtyAndNewBlocks: template.Must(template.New("getDirtyAndNewBlocks").Parse(`
+		SELECT
+			node_position,
+			range_start,
+			range_end
+		FROM
+			{{.MtreeTable}}
+		WHERE
+			node_level = 0
+			AND (
+				dirty = true
+				OR leaf_hash IS NULL
+			)
+		ORDER BY
+			node_position
+	`)),
+	ClearDirtyFlags: template.Must(template.New("clearDirtyFlags").Parse(`
+		UPDATE
+			{{.MtreeTable}}
+		SET
+			dirty = false,
+			inserts_since_tree_update = 0,
+			deletes_since_tree_update = 0,
+			last_modified = current_timestamp
+		WHERE
+			node_level = 0
+			AND node_position = ANY($1)
+	`)),
+	BuildParentNodes: template.Must(template.New("buildParentNodes").Parse(`
+		WITH pairs AS (
+			SELECT
+				node_level,
+				node_position / 2 as parent_position,
+				array_agg(node_hash ORDER BY node_position) as child_hashes
+			FROM
+				{{.MtreeTable}}
+			WHERE
+				node_level = $1
+			GROUP BY
+				node_level,
+				node_position / 2
+		),
+		inserted AS (
+			INSERT INTO
+				{{.MtreeTable}} (
+					node_level,
+					node_position,
+					node_hash,
+					last_modified
+				)
+			SELECT
+				$1 + 1,
+				parent_position,
+				CASE
+					WHEN array_length(child_hashes, 1) = 1 THEN child_hashes[1]
+					ELSE child_hashes[1] # child_hashes[2]
+				END,
+				current_timestamp
+			FROM
+				pairs
+			RETURNING
+				1
+		)
+		SELECT
+			count(*)
+		FROM
+			inserted
+	`)),
+	GetRootNode: template.Must(template.New("getRootNode").Parse(`
+		SELECT
+			node_position,
+			node_hash
+		FROM
+			{{.MtreeTable}}
+		WHERE
+			node_level = (
+				SELECT
+					MAX(node_level)
+				FROM
+					{{.MtreeTable}}
+			)
+	`)),
+	GetNodeChildren: template.Must(template.New("getNodeChildren").Parse(`
+		SELECT
+			node_level,
+			node_position,
+			node_hash
+		FROM
+			{{.MtreeTable}}
+		WHERE
+			node_level = $1 - 1
+			AND node_position / 2 = $2
+		ORDER BY
+			node_position
+	`)),
+	GetLeafRanges: template.Must(template.New("getLeafRanges").Parse(`
+		SELECT
+			range_start,
+			range_end
+		FROM
+			{{.MtreeTable}}
+		WHERE
+			node_level = 0
+			AND node_position = ANY($1)
+		ORDER BY
+			node_position
+	`)),
+	GetRowCountEstimate: template.Must(template.New("getRowCountEstimate").Parse(`
+		SELECT
+			total_rows
+		FROM
+			ace_mtree_metadata
+		WHERE
+			schema_name = $1
+			AND table_name = $2
+	`)),
+	GetMaxValComposite: template.Must(template.New("getMaxValComposite").Parse(`
+		SELECT
+			{{.PkeyCols}}
+		FROM
+			{{.SchemaIdent}}.{{.TableIdent}}
+		WHERE
+			({{.PkeyCols}}) >= ({{.PkeyValues}})
+		ORDER BY
+			({{.PkeyCols}}) DESC
+		LIMIT
+			1
+	`)),
+	UpdateMaxVal: template.Must(template.New("updateMaxVal").Parse(`
+		UPDATE
+			{{.MtreeTable}}
+		SET
+			range_end = $1
+		WHERE
+			node_level = 0
+			AND node_position = $2
+	`)),
+	GetMaxValSimple: template.Must(template.New("getMaxValSimple").Parse(`
+		SELECT
+			{{.Key}}
+		FROM
+			{{.SchemaIdent}}.{{.TableIdent}}
+		WHERE
+			{{.Key}} >= $1
+		ORDER BY
+			{{.Key}} DESC
+		LIMIT
+			1
+	`)),
+	GetCountComposite: template.Must(template.New("getCountComposite").Parse(`
+		SELECT
+			count(*)
+		FROM
+			{{.SchemaIdent}}.{{.TableIdent}}
+		WHERE
+			{{.WhereClause}}
+	`)),
+	GetCountSimple: template.Must(template.New("getCountSimple").Parse(`
+		SELECT
+			count(*)
+		FROM
+			{{.SchemaIdent}}.{{.TableIdent}}
+		WHERE
+			{{.Key}} >= $1
+			AND (
+				{{.Key}} < $2
+				OR $3::{{.PkeyType}} IS NULL
+			)
+	`)),
+	GetSplitPointComposite: template.Must(template.New("getSplitPointComposite").Parse(`
+		SELECT
+			ROW({{.PkeyCols}})
+		FROM
+			{{.SchemaIdent}}.{{.TableIdent}}
+		WHERE
+			{{.WhereClause}}
+		ORDER BY
+			{{.OrderCols}}
+		OFFSET
+			$1
+		LIMIT
+			1
+	`)),
+	GetSplitPointSimple: template.Must(template.New("getSplitPointSimple").Parse(`
+		SELECT
+			{{.Key}}
+		FROM
+			{{.SchemaIdent}}.{{.TableIdent}}
+		WHERE
+			{{.Key}} >= $1
+			AND (
+				{{.Key}} < $2
+				OR $3::{{.PkeyType}} IS NULL
+			)
+		ORDER BY
+			{{.Key}}
+		OFFSET
+			$4
+		LIMIT
+			1
+	`)),
+	DeleteParentNodes: template.Must(template.New("deleteParentNodes").Parse(`
+		DELETE FROM
+			{{.MtreeTable}}
+		WHERE
+			node_level > 0
+	`)),
+	GetMaxNodePosition: template.Must(template.New("getMaxNodePosition").Parse(`
+		SELECT
+			MAX(node_position) + 1
+		FROM
+			{{.MtreeTable}}
+		WHERE
+			node_level = 0
+	`)),
+	UpdateBlockRangeEnd: template.Must(template.New("updateBlockRangeEnd").Parse(`
+		UPDATE
+			{{.MtreeTable}}
+		SET
+			range_end = $1,
+			dirty = true,
+			last_modified = current_timestamp
+		WHERE
+			node_level = 0
+			AND node_position = $2
+	`)),
+	UpdateNodePositionsTemp: template.Must(template.New("updateNodePositionsTemp").Parse(`
+		UPDATE
+			{{.MtreeTable}}
+		SET
+			node_position = node_position + $1
+		WHERE
+			node_level = 0
+			AND node_position > $2
+	`)),
+	DeleteBlock: template.Must(template.New("deleteBlock").Parse(`
+		DELETE FROM
+			{{.MtreeTable}}
+		WHERE
+			node_level = 0
+			AND node_position = $1
+	`)),
+	UpdateNodePositionsSequential: template.Must(template.New("updateNodePositionsSequential").Parse(`
+		UPDATE
+			{{.MtreeTable}}
+		SET
+			node_position = pos_seq
+		FROM
+			(
+				SELECT
+					node_position,
+					row_number() OVER (
+						ORDER BY
+							node_position
+					) + $1 as pos_seq
+				FROM
+					{{.MtreeTable}}
+				WHERE
+					node_level = 0
+					AND node_position > $2
+			) as seq
+		WHERE
+			{{.MtreeTable}}.node_position = seq.node_position
+			AND node_level = 0
+	`)),
+	FindBlocksToSplit: template.Must(template.New("findBlocksToSplit").Parse(`
+		SELECT
+			node_position,
+			range_start,
+			range_end
+		FROM
+			{{.MtreeTable}}
+		WHERE
+			node_level = 0
+			AND inserts_since_tree_update >= $1
+			AND node_position = ANY($2)
+	`)),
+	FindBlocksToMergeComposite: template.Must(template.New("findBlocksToMergeComposite").Parse(`
+		WITH range_sizes AS (
+			SELECT
+				mt.node_position,
+				mt.range_start,
+				mt.range_end,
+				mt.deletes_since_tree_update,
+				COUNT(*) AS current_size
+			FROM
+				{{.MtreeTable}} mt
+				LEFT JOIN {{.SchemaIdent}}.{{.TableIdent}} t ON ROW({{.KeyColumns}}) >= mt.range_start
+				AND (
+					ROW({{.KeyColumns}}) < mt.range_end
+					OR mt.range_end IS NULL
+				)
+			WHERE
+				mt.node_level = 0
+				AND mt.node_position = ANY($1)
+			GROUP BY
+				mt.node_position,
+				mt.range_start,
+				mt.range_end,
+				mt.deletes_since_tree_update
+		)
+		SELECT
+			node_position,
+			range_start,
+			range_end
+		FROM
+			range_sizes
+		WHERE
+			deletes_since_tree_update >= current_size * {{.MergeThreshold}}
+	`)),
+	FindBlocksToMergeSimple: template.Must(template.New("findBlocksToMergeSimple").Parse(`
+		WITH range_sizes AS (
+			SELECT
+				mt.node_position,
+				mt.range_start,
+				mt.range_end,
+				mt.deletes_since_tree_update,
+				COUNT(*) AS current_size
+			FROM
+				{{.MtreeTable}} mt
+				LEFT JOIN {{.SchemaIdent}}.{{.TableIdent}} t ON t.{{.Key}} >= mt.range_start
+				AND (
+					t.{{.Key}} < mt.range_end
+					OR mt.range_end IS NULL
+				)
+			WHERE
+				mt.node_level = 0
+				AND mt.node_position = ANY($1)
+			GROUP BY
+				mt.node_position,
+				mt.range_start,
+				mt.range_end,
+				mt.deletes_since_tree_update
+		)
+		SELECT
+			node_position,
+			range_start,
+			range_end
+		FROM
+			range_sizes
+		WHERE
+			deletes_since_tree_update >= current_size * {{.MergeThreshold}}
+	`)),
+	GetBlockCountComposite: template.Must(template.New("getBlockCountComposite").Parse(`
+		WITH block_data AS (
+			SELECT
+				node_position,
+				range_start,
+				range_end
+			FROM
+				{{.MtreeTable}}
+			WHERE
+				node_level = 0
+				AND node_position = $1
+		)
+		SELECT
+			b.node_position,
+			b.range_start,
+			b.range_end,
+			COUNT(t.*) AS cnt
+		FROM
+			block_data b
+			LEFT JOIN {{.SchemaIdent}}.{{.TableIdent}} t ON ROW({{.PkeyCols}}) >= b.range_start
+			AND (
+				ROW({{.PkeyCols}}) <= b.range_end
+				OR b.range_end IS NULL
+			)
+		GROUP BY
+			b.node_position,
+			b.range_start,
+			b.range_end
+		ORDER BY
+			b.node_position
+	`)),
+	GetBlockCountSimple: template.Must(template.New("getBlockCountSimple").Parse(`
+		SELECT
+			node_position,
+			range_start,
+			range_end,
+			count(t.{{.Key}})
+		FROM
+			{{.MtreeTable}} mt
+			LEFT JOIN {{.SchemaIdent}}.{{.TableIdent}} t ON t.{{.Key}} >= mt.range_start
+			AND (
+				t.{{.Key}} <= mt.range_end
+				OR mt.range_end IS NULL
+			)
+		WHERE
+			mt.node_level = 0
+			AND mt.node_position = $1
+		GROUP BY
+			mt.node_position,
+			mt.range_start,
+			mt.range_end
+	`)),
+	GetBlockSizeFromMetadata: template.Must(template.New("getBlockSizeFromMetadata").Parse(`
+		SELECT
+			block_size
+		FROM
+			ace_mtree_metadata
+		WHERE
+			schema_name = $1
+			AND table_name = $2
+	`)),
+	GetMaxNodeLevel: template.Must(template.New("getMaxNodeLevel").Parse(`
+		SELECT
+			MAX(node_level)
+		FROM
+			{{.MtreeTable}}
+	`)),
+	CompareBlocksSQL: template.Must(template.New("compareBlocksSQL").Parse(`
+		SELECT
+			*
+		FROM
+			{{.TableName}}
+		WHERE
+			{{.WhereClause}}
+	`)),
+	DropXORFunction: template.Must(template.New("dropXORFunction").Parse(`
+		DROP FUNCTION IF EXISTS bytea_xor(bytea, bytea) CASCADE
+	`)),
+	DropMetadataTable: template.Must(template.New("dropMetadataTable").Parse(`
+		DROP TABLE IF EXISTS ace_mtree_metadata CASCADE
+	`)),
+	DropMtreeTable: template.Must(template.New("dropMtreeTable").Parse(`
+		DROP TABLE IF EXISTS {{.MtreeTable}} CASCADE
+	`)),
+}
 
 // For mocking
 type DBQuerier interface {
 	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
 }
 
-func SanitiseIdentifier(input string) error {
-	if !validIdentifierRegex.MatchString(input) {
-		return fmt.Errorf("invalid identifier: %s", input)
+var validIdentifierRegex = regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_]*$`)
+
+func SanitiseIdentifier(ident string) error {
+	if !validIdentifierRegex.MatchString(ident) {
+		return fmt.Errorf("invalid identifier: %s", ident)
 	}
 	return nil
+}
+
+func RenderSQL(t *template.Template, data any) (string, error) {
+	var buf bytes.Buffer
+	if err := t.Execute(&buf, data); err != nil {
+		return "", fmt.Errorf("failed to render SQL: %w", err)
+	}
+	return buf.String(), nil
 }
 
 func MaxColumnSize(ctx context.Context, db DBQuerier, schema, table, column string) (int64, error) {
@@ -233,11 +955,7 @@ func GeneratePkeyOffsetsQuery(
 		"RangeOutputColumns":   strings.Join(selectOutputCols, ",\n    "),
 	}
 
-	var buf bytes.Buffer
-	if err := pkeyOffsetsTmpl.Execute(&buf, data); err != nil {
-		return "", fmt.Errorf("failed to render pkey offsets SQL: %w", err)
-	}
-	return buf.String(), nil
+	return RenderSQL(SQLTemplates.GetPkeyOffsets, data)
 }
 
 func BlockHashSQL(schema, table string, primaryKeyCols []string) (string, error) {
