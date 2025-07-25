@@ -173,6 +173,45 @@ func SetupCLI() *cli.App {
 		Value: false,
 	})
 
+	mtreeBuildFlags := []cli.Flag{
+		&cli.StringFlag{
+			Name:    "block-size",
+			Aliases: []string{"b"},
+			Usage:   "Rows per leaf block",
+			Value:   "10000",
+		},
+		&cli.Float64Flag{
+			Name:  "max-cpu-ratio",
+			Usage: "Max CPU for parallel operations",
+			Value: 0.5,
+		},
+		&cli.BoolFlag{
+			Name:  "override-block-size",
+			Usage: "Skip block size check, and potentially tolerate unsafe block sizes",
+			Value: false,
+		},
+		&cli.BoolFlag{
+			Name:  "analyse",
+			Usage: "Run ANALYZE on the table",
+			Value: false,
+		},
+		&cli.BoolFlag{
+			Name:  "recreate-objects",
+			Usage: "Drop and recreate Merkle tree objects",
+			Value: false,
+		},
+		&cli.BoolFlag{
+			Name:  "write-ranges",
+			Usage: "Write block ranges to a JSON file",
+			Value: false,
+		},
+		&cli.StringFlag{
+			Name:  "ranges-file",
+			Usage: "Path to a file with pre-computed ranges",
+		},
+	}
+	mtreeBuildFlags = append(mtreeBuildFlags, commonFlags...)
+
 	app := &cli.App{
 		Name:  "ace",
 		Usage: "ACE - Active Consistency Engine",
@@ -299,6 +338,32 @@ func SetupCLI() *cli.App {
 					return nil
 				},
 			},
+			{
+				Name:  "mtree",
+				Usage: "Merkle tree operations",
+				Subcommands: []*cli.Command{
+					{
+						Name:      "build",
+						Usage:     "Build a new Merkle tree for a table",
+						ArgsUsage: "<cluster> <table>",
+						Action: func(ctx *cli.Context) error {
+							if ctx.Args().Len() < 2 {
+								return fmt.Errorf("missing required arguments for mtree build: needs <cluster> and <table>")
+							}
+							return MtreeBuildCLI(ctx)
+						},
+						Flags: mtreeBuildFlags,
+						Before: func(ctx *cli.Context) error {
+							if ctx.Bool("debug") {
+								logger.SetLevel(log.DebugLevel)
+							} else {
+								logger.SetLevel(log.InfoLevel)
+							}
+							return nil
+						},
+					},
+				},
+			},
 		},
 	}
 
@@ -335,6 +400,43 @@ func TableDiffCLI(ctx *cli.Context) error {
 
 	if err := task.ExecuteTask(); err != nil {
 		return fmt.Errorf("error during comparison: %w", err)
+	}
+
+	return nil
+}
+
+func MtreeBuildCLI(ctx *cli.Context) error {
+	blockSizeStr := ctx.String("block-size")
+	blockSizeInt, err := strconv.ParseInt(blockSizeStr, 10, 64)
+	if err != nil {
+		return fmt.Errorf("invalid block size '%s': %w", blockSizeStr, err)
+	}
+
+	task := core.NewMerkleTreeTask()
+	task.ClusterName = ctx.Args().Get(0)
+	task.QualifiedTableName = ctx.Args().Get(1)
+	task.DBName = ctx.String("dbname")
+	task.Nodes = ctx.String("nodes")
+	task.QuietMode = ctx.Bool("quiet")
+	task.BlockSize = int(blockSizeInt)
+	task.MaxCpuRatio = ctx.Float64("max-cpu-ratio")
+	task.OverrideBlockSize = ctx.Bool("override-block-size")
+	task.Analyse = ctx.Bool("analyse")
+	task.RecreateObjects = ctx.Bool("recreate-objects")
+	task.WriteRanges = ctx.Bool("write-ranges")
+	task.RangesFile = ctx.String("ranges-file")
+	task.Mode = "build"
+
+	if err := task.Validate(); err != nil {
+		return fmt.Errorf("validation failed: %w", err)
+	}
+
+	if err := task.RunChecks(true); err != nil {
+		return fmt.Errorf("checks failed: %w", err)
+	}
+
+	if err := task.BuildMtree(); err != nil {
+		return fmt.Errorf("error during merkle tree build: %w", err)
 	}
 
 	return nil
