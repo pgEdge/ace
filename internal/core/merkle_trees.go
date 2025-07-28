@@ -692,20 +692,32 @@ func (m *MerkleTreeTask) createMtreeObjects(pool *pgxpool.Pool) error {
 		}
 
 		compositeTypeName := fmt.Sprintf("%s_%s_key_type", m.Schema, m.Table)
-		dropTypeSQL := fmt.Sprintf("DROP TYPE IF EXISTS %s CASCADE;", pgx.Identifier{compositeTypeName}.Sanitize())
+
+		dropTypeSQL, err := helpers.RenderSQL(helpers.SQLTemplates.DropCompositeType, map[string]string{
+			"CompositeTypeName": pgx.Identifier{compositeTypeName}.Sanitize(),
+		})
+		if err != nil {
+			return fmt.Errorf("failed to render drop composite type sql: %w", err)
+		}
+
 		if _, err := tx.Exec(context.Background(), dropTypeSQL); err != nil {
 			return fmt.Errorf("failed to drop composite type: %w", err)
 		}
 
-		createTypeSQL := fmt.Sprintf("CREATE TYPE %s AS (%s);", pgx.Identifier{compositeTypeName}.Sanitize(), strings.Join(keyTypeColumns, ", "))
+		createTypeSQL, err := helpers.RenderSQL(helpers.SQLTemplates.CreateCompositeType, map[string]string{
+			"CompositeTypeName": pgx.Identifier{compositeTypeName}.Sanitize(),
+			"KeyTypeColumns":    strings.Join(keyTypeColumns, ", "),
+		})
+		if err != nil {
+			return fmt.Errorf("failed to render create composite type sql: %w", err)
+		}
 		if _, err := tx.Exec(context.Background(), createTypeSQL); err != nil {
 			return fmt.Errorf("failed to create composite type: %w", err)
 		}
 
 		createSQL, err := helpers.RenderSQL(helpers.SQLTemplates.CreateCompositeMtreeTable, map[string]string{
-			"MtreeTable":  pgx.Identifier{mtreeTableName}.Sanitize(),
-			"SchemaIdent": pgx.Identifier{m.Schema}.Sanitize(),
-			"TableIdent":  pgx.Identifier{m.Table}.Sanitize(),
+			"MtreeTable":        pgx.Identifier{mtreeTableName}.Sanitize(),
+			"CompositeTypeName": pgx.Identifier{compositeTypeName}.Sanitize(),
 		})
 		if err != nil {
 			return fmt.Errorf("failed to render create composite mtree table sql: %w", err)

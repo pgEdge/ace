@@ -195,19 +195,19 @@ var SQLTemplates = Templates{
 			node_level = 0;
 	`)),
 	CreateCompositeType: template.Must(template.New("createCompositeType").Parse(`
-		CREATE TYPE {{.SchemaIdent}}_{{.TableIdent}}_key_type AS (
+		CREATE TYPE {{.CompositeTypeName}} AS (
 			{{.KeyTypeColumns}}
 		)`),
 	),
 	DropCompositeType: template.Must(template.New("dropCompositeType").Parse(`
-		DROP TYPE IF EXISTS {{.SchemaIdent}}_{{.TableIdent}}_key_type CASCADE;
+		DROP TYPE IF EXISTS {{.CompositeTypeName}} CASCADE;
 	`)),
 	CreateCompositeMtreeTable: template.Must(template.New("createCompositeMtreeTable").Parse(`
 		CREATE TABLE {{.MtreeTable}} (
 			node_level integer NOT NULL,
 			node_position bigint NOT NULL,
-			range_start {{.SchemaIdent}}_{{.TableIdent}}_key_type,
-			range_end {{.SchemaIdent}}_{{.TableIdent}}_key_type,
+			range_start {{.CompositeTypeName}},
+			range_end {{.CompositeTypeName}},
 			leaf_hash bytea,
 			node_hash bytea,
 			dirty boolean DEFAULT false,
@@ -221,7 +221,7 @@ var SQLTemplates = Templates{
 		INSERT INTO
 			{{.MtreeTable}} (node_level, node_position, range_start, range_end)
 		VALUES
-			(0, %s, ROW({{.StartTupleValues}}), ROW({{.EndTupleValues}}));
+			(0, $1, ROW({{.StartTupleValues}}), ROW({{.EndTupleValues}}));
 	`)),
 	CreateXORFunction: template.Must(template.New("createXORFunction").Parse(`
 		CREATE
