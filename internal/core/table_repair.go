@@ -938,7 +938,7 @@ func executeDeletes(tx pgx.Tx, task *TableRepairTask, deletes map[string]map[str
 		batchKeys := keysToDelete[i:end]
 
 		var deleteSQL strings.Builder
-		args := []interface{}{}
+		args := []any{}
 		paramIdx := 1
 
 		deleteSQL.WriteString(fmt.Sprintf("DELETE FROM %s WHERE ", tableIdent))
@@ -1062,7 +1062,7 @@ func executeUpserts(tx pgx.Tx, task *TableRepairTask, upserts map[string]map[str
 		batchRows := rowsToUpsert[i:end]
 
 		var upsertSQL strings.Builder
-		args := []interface{}{}
+		args := []any{}
 		paramIdx := 1
 
 		upsertSQL.WriteString(fmt.Sprintf("INSERT INTO %s (%s) VALUES ", tableIdent, colsSQL))
