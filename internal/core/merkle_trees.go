@@ -22,6 +22,8 @@ import (
 	utils "github.com/pgedge/ace/pkg/common"
 	"github.com/pgedge/ace/pkg/logger"
 	"github.com/pgedge/ace/pkg/types"
+	"github.com/vbauerster/mpb/v8"
+	"github.com/vbauerster/mpb/v8/decor"
 )
 
 const (
@@ -135,11 +137,6 @@ func (m *MerkleTreeTask) Validate() error {
 		return err
 	}
 
-	/*
-		We've not eliminated our dependence on the cluster json file just yet.
-		So, for convenience, we'll append the chosen db credentials to the
-		cluster nodes.
-	*/
 	var clusterNodes []map[string]any
 	for _, nodeMap := range m.ClusterNodes {
 		if len(nodeList) > 0 {
@@ -306,8 +303,8 @@ func (m *MerkleTreeTask) BuildMtree() error {
 
 		numKeyCols := len(keyColumns)
 		for i := 0; rows.Next(); i++ {
-			dest := make([]interface{}, 2*numKeyCols)
-			destPtrs := make([]interface{}, 2*numKeyCols)
+			dest := make([]any, 2*numKeyCols)
+			destPtrs := make([]any, 2*numKeyCols)
 			for j := range dest {
 				destPtrs[j] = &dest[j]
 			}
@@ -354,7 +351,7 @@ func (m *MerkleTreeTask) BuildMtree() error {
 		}
 
 		fmt.Println("  - Computing leaf hashes...")
-		err = m.computeLeafHashes(pool, blockRanges, nodeInfo)
+		err = m.computeLeafHashes(pool, blockRanges)
 		if err != nil {
 			pool.Close()
 			return fmt.Errorf("failed to compute leaf hashes on node %s: %w", nodeInfo["Name"], err)
@@ -423,7 +420,7 @@ type LeafHashResult struct {
 	Err     error
 }
 
-func (m *MerkleTreeTask) computeLeafHashes(pool *pgxpool.Pool, ranges []BlockRange, nodeInfo map[string]any) error {
+func (m *MerkleTreeTask) computeLeafHashes(pool *pgxpool.Pool, ranges []BlockRange) error {
 
 	numWorkers := int(float64(runtime.NumCPU()) * m.MaxCpuRatio)
 	if numWorkers < 1 {
@@ -432,10 +429,24 @@ func (m *MerkleTreeTask) computeLeafHashes(pool *pgxpool.Pool, ranges []BlockRan
 	jobs := make(chan BlockRange, len(ranges))
 	results := make(chan LeafHashResult, len(ranges))
 
+	p := mpb.New(mpb.WithOutput(os.Stderr))
+	bar := p.AddBar(int64(len(ranges)),
+		mpb.BarRemoveOnComplete(),
+		mpb.PrependDecorators(
+			decor.Name("Computing leaf hashes:", decor.WC{W: 25}),
+			decor.CountersNoUnit("%d / %d", decor.WCSyncWidth),
+		),
+		mpb.AppendDecorators(
+			decor.Elapsed(decor.ET_STYLE_GO),
+			decor.Name(" | "),
+			decor.OnComplete(decor.AverageETA(decor.ET_STYLE_GO), "done"),
+		),
+	)
+
 	var wg sync.WaitGroup
 	for i := 0; i < numWorkers; i++ {
 		wg.Add(1)
-		go m.leafHashWorker(i, &wg, jobs, results, pool)
+		go m.leafHashWorker(&wg, jobs, results, pool, bar)
 	}
 
 	for _, r := range ranges {
@@ -445,6 +456,8 @@ func (m *MerkleTreeTask) computeLeafHashes(pool *pgxpool.Pool, ranges []BlockRan
 
 	wg.Wait()
 	close(results)
+
+	p.Wait()
 
 	leafHashes := make(map[int][]byte)
 	for result := range results {
@@ -489,13 +502,14 @@ func (m *MerkleTreeTask) computeLeafHashes(pool *pgxpool.Pool, ranges []BlockRan
 	return tx.Commit(context.Background())
 }
 
-func (m *MerkleTreeTask) leafHashWorker(id int, wg *sync.WaitGroup, jobs <-chan BlockRange, results chan<- LeafHashResult, pool *pgxpool.Pool) {
+func (m *MerkleTreeTask) leafHashWorker(wg *sync.WaitGroup, jobs <-chan BlockRange, results chan<- LeafHashResult, pool *pgxpool.Pool, bar *mpb.Bar) {
 	defer wg.Done()
 
 	for block := range jobs {
 		whereClause, err := m.buildWhereClause(block)
 		if err != nil {
 			results <- LeafHashResult{BlockID: block.ID, Err: err}
+			bar.Increment()
 			continue
 		}
 
@@ -508,6 +522,7 @@ func (m *MerkleTreeTask) leafHashWorker(id int, wg *sync.WaitGroup, jobs <-chan 
 		})
 		if err != nil {
 			results <- LeafHashResult{BlockID: block.ID, Err: fmt.Errorf("failed to render compute leaf hashes sql: %w", err)}
+			bar.Increment()
 			continue
 		}
 
@@ -515,9 +530,11 @@ func (m *MerkleTreeTask) leafHashWorker(id int, wg *sync.WaitGroup, jobs <-chan 
 		err = pool.QueryRow(context.Background(), computeSQL).Scan(&leafHash)
 		if err != nil {
 			results <- LeafHashResult{BlockID: block.ID, Err: fmt.Errorf("failed to compute hash for block %d: %w", block.ID, err)}
+			bar.Increment()
 			continue
 		}
 		results <- LeafHashResult{BlockID: block.ID, Hash: leafHash}
+		bar.Increment()
 	}
 }
 
@@ -539,14 +556,14 @@ func (m *MerkleTreeTask) buildWhereClause(block BlockRange) (string, error) {
 		}
 		pkTuple := fmt.Sprintf("(%s)", strings.Join(pkCols, ", "))
 
-		if block.Start != nil && len(block.Start) > 0 && block.Start[0] != nil {
+		if len(block.Start) > 0 && block.Start[0] != nil {
 			startVals := make([]string, len(block.Start))
 			for i, v := range block.Start {
 				startVals[i] = fmt.Sprintf("'%v'", v)
 			}
 			whereConditions = append(whereConditions, fmt.Sprintf("%s >= (%s)", pkTuple, strings.Join(startVals, ", ")))
 		}
-		if block.End != nil && len(block.End) > 0 && block.End[0] != nil {
+		if len(block.End) > 0 && block.End[0] != nil {
 			endVals := make([]string, len(block.End))
 			for i, v := range block.End {
 				endVals[i] = fmt.Sprintf("'%v'", v)
