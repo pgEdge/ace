@@ -27,9 +27,8 @@ import (
 	"time"
 
 	"github.com/jackc/pgtype"
-	"github.com/jackc/pgx/v4"
-	"github.com/jackc/pgx/v4/pgxpool"
-	"github.com/pgedge/ace/db/helpers"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/pgedge/ace/db/queries"
 	"github.com/pgedge/ace/internal/auth"
 	utils "github.com/pgedge/ace/pkg/common"
@@ -497,10 +496,10 @@ func (t *TableDiffTask) Validate() error {
 	schema, table := parts[0], parts[1]
 
 	// Sanitise inputs here
-	if err := helpers.SanitiseIdentifier(schema); err != nil {
+	if err := queries.SanitiseIdentifier(schema); err != nil {
 		return err
 	}
-	if err := helpers.SanitiseIdentifier(table); err != nil {
+	if err := queries.SanitiseIdentifier(table); err != nil {
 		return err
 	}
 
@@ -564,7 +563,7 @@ func (t *TableDiffTask) RunChecks(skipValidation bool) error {
 
 	var cols, key []string
 	hostMap := make(map[string]string)
-	requiredPrivileges := []string{"SELECT"}
+
 	schema := t.Schema
 	table := t.Table
 
@@ -588,7 +587,7 @@ func (t *TableDiffTask) RunChecks(skipValidation bool) error {
 		}
 		defer conn.Close()
 
-		currCols, err := utils.GetColumns(conn, schema, table)
+		currCols, err := queries.GetColumns(context.Background(), conn, schema, table)
 		if err != nil {
 			return fmt.Errorf("failed to get columns for table %s.%s on node %s: %w", schema, table, hostname, err)
 		}
@@ -596,7 +595,7 @@ func (t *TableDiffTask) RunChecks(skipValidation bool) error {
 			return fmt.Errorf("table '%s.%s' not found on %s, or the current user does not have adequate privileges", schema, table, hostname)
 		}
 
-		currKey, err := utils.GetPrimaryKey(conn, schema, table)
+		currKey, err := queries.GetPrimaryKey(context.Background(), conn, schema, table)
 		if err != nil {
 			return fmt.Errorf("failed to get primary key for table %s.%s on node %s: %w", schema, table, hostname, err)
 		}
@@ -616,7 +615,7 @@ func (t *TableDiffTask) RunChecks(skipValidation bool) error {
 		cols = currCols
 		key = currKey
 
-		colTypes, err := utils.GetColumnTypes(conn, table)
+		colTypes, err := queries.GetColumnTypes(context.Background(), conn, schema, table)
 		if err != nil {
 			return fmt.Errorf("failed to get column types for table %s on node %s: %w", table, hostname, err)
 		}
@@ -628,23 +627,14 @@ func (t *TableDiffTask) RunChecks(skipValidation bool) error {
 		}
 		t.ColTypes[colTypesKey] = colTypes
 
-		authorized, missingPrivileges, err := utils.CheckUserPrivileges(conn, user, schema, table, requiredPrivileges)
+		actualPrivs, err := queries.CheckUserPrivileges(context.Background(), conn, user, schema, table)
 		if err != nil {
 			return fmt.Errorf("failed to check user privileges on node %s: %w", hostname, err)
 		}
 
-		if !authorized {
-			var missingPrivs []string
-			for _, priv := range requiredPrivileges {
-				for missingPriv := range missingPrivileges {
-					if strings.HasSuffix(missingPriv, strings.ToLower(priv)) {
-						missingPrivs = append(missingPrivs, priv)
-					}
-				}
-			}
-
-			return fmt.Errorf("user \"%s\" does not have the necessary privileges to run %s on table \"%s.%s\" on node \"%s\"",
-				user, strings.Join(missingPrivs, ", "), schema, table, hostname)
+		if !actualPrivs.TableSelect {
+			return fmt.Errorf("user \"%s\" does not have the necessary privileges to run table-diff on table \"%s.%s\" on node \"%s\"",
+				user, schema, table, hostname)
 		}
 
 		hostMap[hostIP+":"+port] = hostname
@@ -775,7 +765,7 @@ func (t *TableDiffTask) CheckColumnSize() error {
 				continue
 			}
 
-			maxSize, err := helpers.MaxColumnSize(context.Background(), pool, t.Schema, t.Table, colName)
+			maxSize, err := queries.MaxColumnSize(context.Background(), pool, t.Schema, t.Table, colName)
 			logger.Debug("Column %s of table %s.%s has max size %d", colName, t.Schema, t.Table, maxSize)
 			if err != nil {
 				pool.Close()
@@ -822,30 +812,24 @@ func (t *TableDiffTask) ExecuteTask() error {
 	}
 	t.Pools = pools
 
-	blockHashSQL, err := helpers.BlockHashSQL(t.Schema, t.Table, t.Key)
+	blockHashSQL, err := queries.BlockHashSQL(t.Schema, t.Table, t.Key)
 	if err != nil {
 		return fmt.Errorf("failed to build block-hash SQL: %w", err)
 	}
 	t.BlockHashSQL = blockHashSQL
 
-	schemaName := pgtype.Name{String: t.Schema, Status: pgtype.Present}
-	tableName := pgtype.Name{String: t.Table, Status: pgtype.Present}
-
-	var maxCount int
+	var maxCount int64
 	var maxNode string
 	var totalEstimatedRowsAcrossNodes int64
 
 	for name, pool := range pools {
-		q := queries.NewQuerier(pool)
-		var countPtr *int
-		var count int
+		var count int64
 		// TODO: Estimates cannot be used on views. But we can't run a count(*)
 		// on millions of rows either. Need to find a better way to do this.
 		if t.TableFilter == "" {
-			countPtr, err = q.EstimateRowCount(ctx, schemaName, tableName)
+			count, err = queries.GetRowCountEstimate(ctx, pool, t.Schema, t.Table)
 			if err != nil {
-				logger.Info("Error getting row count on %s: %v. This might affect range generation.", name, err)
-				continue
+				return fmt.Errorf("failed to render estimate row count query: %w", err)
 			}
 		} else {
 			sanitisedSchema := pgx.Identifier{t.Schema}.Sanitize()
@@ -858,9 +842,6 @@ func (t *TableDiffTask) ExecuteTask() error {
 			}
 		}
 
-		if countPtr != nil {
-			count = int(*countPtr)
-		}
 		totalEstimatedRowsAcrossNodes += int64(count)
 		logger.Debug("Table contains %d rows (estimated) on %s", count, name)
 		if count > maxCount {
@@ -925,7 +906,7 @@ func (t *TableDiffTask) ExecuteTask() error {
 		ntileCount = 1
 	}
 
-	querySQL, err := helpers.GeneratePkeyOffsetsQuery(t.Schema, t.Table, t.Key, sampleMethod, samplePercent, ntileCount)
+	querySQL, err := queries.GeneratePkeyOffsetsQuery(t.Schema, t.Table, t.Key, sampleMethod, samplePercent, ntileCount)
 	logger.Debug("Generated offsets query: %s", querySQL)
 	if err != nil {
 		return fmt.Errorf("failed to generate offsets query: %w", err)

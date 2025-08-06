@@ -20,8 +20,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/jackc/pgtype"
-	"github.com/jackc/pgx/v4/pgxpool"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/pgedge/ace/db/queries"
 	"github.com/pgedge/ace/internal/auth"
 	utils "github.com/pgedge/ace/pkg/common"
@@ -122,20 +121,19 @@ func (c *RepsetDiffCmd) RunChecks(skipValidation bool) error {
 	}
 	defer pool.Close()
 
-	db := queries.NewQuerier(pool)
-
-	repset, err := db.CheckRepSetExists(context.Background(), pgtype.Name{String: c.RepsetName, Status: pgtype.Present})
+	repsetExists, err := queries.CheckRepSetExists(context.Background(), pool, c.RepsetName)
 	if err != nil {
 		return fmt.Errorf("could not check if repset exists: %w", err)
 	}
-	if repset.Status != pgtype.Present {
+	if !repsetExists {
 		return fmt.Errorf("repset %s not found", c.RepsetName)
 	}
 
-	tables, err := db.GetTablesInRepSet(context.Background(), pgtype.Name{String: c.RepsetName, Status: pgtype.Present})
+	tables, err := queries.GetTablesInRepSet(context.Background(), pool, c.RepsetName)
 	if err != nil {
 		return fmt.Errorf("could not get tables in repset: %w", err)
 	}
+
 	c.tableList = tables
 
 	if len(c.tableList) == 0 {

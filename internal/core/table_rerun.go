@@ -23,8 +23,8 @@ import (
 	"time"
 
 	"github.com/jackc/pgtype"
-	"github.com/jackc/pgx/v4"
-	"github.com/jackc/pgx/v4/pgxpool"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/pgedge/ace/db/queries"
 	"github.com/pgedge/ace/internal/auth"
 	utils "github.com/pgedge/ace/pkg/common"
@@ -233,7 +233,7 @@ func fetchRowsByPkeys(ctx context.Context, pool *pgxpool.Pool, t *TableDiffTask,
 		return make(map[string]map[string]any), nil
 	}
 
-	pkColTypes, err := getPkeyColumnTypes(ctx, pool, t.Schema, t.Table, t.Key)
+	pkColTypes, err := queries.GetPkeyColumnTypes(ctx, pool, t.Schema, t.Table, t.Key)
 	if err != nil {
 		return nil, fmt.Errorf("could not determine primary key column types: %w", err)
 	}
@@ -402,27 +402,6 @@ func (t *TableDiffTask) reCompareDiffs(fetchedRowsByNode map[string]map[string]m
 		}
 	}
 	return newDiffResult, nil
-}
-
-func getPkeyColumnTypes(ctx context.Context, pool *pgxpool.Pool, schema, table string, pkeyCols []string) (map[string]string, error) {
-	db := queries.NewQuerier(pool)
-
-	rows, err := db.GetPkeyColumnTypes(ctx, queries.GetPkeyColumnTypesParams{
-		SchemaName:  pgtype.Name{String: schema, Status: pgtype.Present},
-		TableName:   pgtype.Name{String: table, Status: pgtype.Present},
-		PkeyColumns: pkeyCols,
-	})
-	if err != nil {
-		return nil, err
-	}
-
-	types := make(map[string]string)
-	for _, row := range rows {
-		if row.FormatType != nil {
-			types[row.Attname.String] = *row.FormatType
-		}
-	}
-	return types, nil
 }
 
 func scanRow(pgRows pgx.Rows) (map[string]any, error) {
