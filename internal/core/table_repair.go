@@ -21,8 +21,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jackc/pgx/v4"
-	"github.com/jackc/pgx/v4/pgxpool"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/pgedge/ace/db/queries"
 	"github.com/pgedge/ace/internal/auth"
 	utils "github.com/pgedge/ace/pkg/common"
 	"github.com/pgedge/ace/pkg/logger"
@@ -239,7 +240,12 @@ func (t *TableRepairTask) ValidateAndPrepare() error {
 
 	// Repair needs these privileges. Perhaps we can pare this down depending
 	// on the repair options, but for now we'll keep it as is.
-	requiredPrivileges := []string{"SELECT", "INSERT", "UPDATE", "DELETE"}
+	requiredPrivileges := types.UserPrivileges{
+		TableSelect: true,
+		TableInsert: true,
+		TableUpdate: true,
+		TableDelete: true,
+	}
 
 	for _, nodeInfo := range t.ClusterNodes {
 		nodeName, _ := nodeInfo["Name"].(string)
@@ -254,13 +260,13 @@ func (t *TableRepairTask) ValidateAndPrepare() error {
 			}
 			t.Pools[nodeName] = connPool
 
-			cols, err := utils.GetColumns(connPool, t.Schema, t.Table)
+			cols, err := queries.GetColumns(context.Background(), connPool, t.Schema, t.Table)
 			if err != nil {
 				return fmt.Errorf("failed to get columns for %s.%s on node %s: %w", t.Schema, t.Table, nodeName, err)
 			}
 			t.Cols = cols
 
-			pKey, err := utils.GetPrimaryKey(connPool, t.Schema, t.Table)
+			pKey, err := queries.GetPrimaryKey(context.Background(), connPool, t.Schema, t.Table)
 			if err != nil {
 				return fmt.Errorf("failed to get primary key for %s.%s on node %s: %w", t.Schema, t.Table, nodeName, err)
 			}
@@ -272,7 +278,7 @@ func (t *TableRepairTask) ValidateAndPrepare() error {
 
 			publicIP, _ := nodeInfo["PublicIP"].(string)
 			port, _ := nodeInfo["Port"].(string)
-			colTypes, err := utils.GetColumnTypes(connPool, t.Table)
+			colTypes, err := queries.GetColumnTypes(context.Background(), connPool, t.Schema, t.Table)
 			if err != nil {
 				return fmt.Errorf("failed to get column types for %s on node %s: %w", t.Table, nodeName, err)
 			}
@@ -285,21 +291,30 @@ func (t *TableRepairTask) ValidateAndPrepare() error {
 			if dbUser == "" {
 				dbUser = t.Database.DBUser
 			}
-
-			authorized, missingPrivsMap, err := utils.CheckUserPrivileges(connPool, dbUser, t.Schema, t.Table, requiredPrivileges)
+			privs, err := queries.CheckUserPrivileges(context.Background(), connPool, dbUser, t.Schema, t.Table)
 			if err != nil {
 				return fmt.Errorf("failed to check user privileges on node %s: %w", nodeName, err)
 			}
-			if !authorized {
-				var missingPrivs []string
-				for priv, present := range missingPrivsMap {
-					if !present {
-						missingPrivs = append(missingPrivs, strings.Replace(priv, "table_", "", 1))
-					}
-				}
+
+			missingPrivs := []string{}
+			if requiredPrivileges.TableSelect && !privs.TableSelect {
+				missingPrivs = append(missingPrivs, "SELECT")
+			}
+			if requiredPrivileges.TableInsert && !privs.TableInsert {
+				missingPrivs = append(missingPrivs, "INSERT")
+			}
+			if requiredPrivileges.TableUpdate && !privs.TableUpdate {
+				missingPrivs = append(missingPrivs, "UPDATE")
+			}
+			if requiredPrivileges.TableDelete && !privs.TableDelete {
+				missingPrivs = append(missingPrivs, "DELETE")
+			}
+
+			if len(missingPrivs) > 0 {
 				return fmt.Errorf("user '%s' on node '%s' is missing privileges: %s for table %s.%s",
 					dbUser, nodeName, strings.Join(missingPrivs, ", "), t.Schema, t.Table)
 			}
+
 		}
 	}
 

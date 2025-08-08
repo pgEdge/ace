@@ -21,7 +21,7 @@ import (
 	"sort"
 	"time"
 
-	"github.com/jackc/pgx/v4/pgxpool"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/pgedge/ace/db/queries"
 	"github.com/pgedge/ace/internal/auth"
 	utils "github.com/pgedge/ace/pkg/common"
@@ -31,10 +31,10 @@ import (
 
 // SpockNodeConfig aggregates all spock configuration for a single node.
 type SpockNodeConfig struct {
-	NodeName      string                       `json:"node_name"`
-	Subscriptions []types.SpockSubscription    `json:"subscriptions"`
-	RepSetInfo    []queries.SpockRepSetInfoRow `json:"rep_set_info"`
-	Hints         []string                     `json:"hints"`
+	NodeName      string                    `json:"node_name"`
+	Subscriptions []types.SpockSubscription `json:"subscriptions"`
+	RepSetInfo    []types.SpockRepSetInfo   `json:"rep_set_info"`
+	Hints         []string                  `json:"hints"`
 }
 
 // SpockDiffTask defines the task for comparing spock metadata across nodes.
@@ -206,26 +206,23 @@ func (t *SpockDiffTask) ExecuteTask() error {
 
 	for _, nodeName := range nodeNames {
 		pool := pools[nodeName]
-		q := queries.NewQuerier(pool)
 		config := SpockNodeConfig{NodeName: nodeName, Hints: []string{}}
 
 		logger.Debug("Fetching Spock config for node: %s", nodeName)
 
 		// Fetch node and subscription info
-		nodeInfos, err := q.SpockNodeAndSubInfo(ctx)
+		nodeInfos, err := queries.GetSpockNodeAndSubInfo(ctx, pool)
 		if err != nil {
 			return fmt.Errorf("querying spock.node and spock.subscription on node %s failed: %w", nodeName, err)
 		}
 
 		if len(nodeInfos) > 0 {
-			config.NodeName = nodeInfos[0].NodeName.String
+			config.NodeName = nodeInfos[0].NodeName
 			for _, ni := range nodeInfos {
 				sub := types.SpockSubscription{}
-				if ni.SubName.Status == 2 { // Present
-					sub.SubName = ni.SubName.String
-					if ni.SubEnabled != nil {
-						sub.SubEnabled = *ni.SubEnabled
-					}
+				if ni.SubName != "" {
+					sub.SubName = ni.SubName
+					sub.SubEnabled = ni.SubEnabled
 					sub.ReplicationSets = ni.SubReplicationSets
 					if len(ni.SubReplicationSets) == 0 {
 						hint := fmt.Sprintf("Subscription '%s' has no replication sets.", sub.SubName)
@@ -241,7 +238,7 @@ func (t *SpockDiffTask) ExecuteTask() error {
 		}
 
 		// Fetch replication set info
-		repRows, err := q.SpockRepSetInfo(ctx)
+		repRows, err := queries.GetSpockRepSetInfo(ctx, pool)
 		if err != nil {
 			return fmt.Errorf("querying spock.tables on node %s failed: %w", nodeName, err)
 		}
@@ -250,8 +247,8 @@ func (t *SpockDiffTask) ExecuteTask() error {
 
 		var tablesInRepSets []string
 		for _, rs := range repRows {
-			if rs.SetName.Status == 3 {
-				tablesInRepSets = append(tablesInRepSets, rs.Relname...)
+			if rs.SetName != "" {
+				tablesInRepSets = append(tablesInRepSets, rs.RelName...)
 			}
 		}
 		if len(repRows) > 0 && len(tablesInRepSets) == 0 {
@@ -280,9 +277,9 @@ func (t *SpockDiffTask) ExecuteTask() error {
 		if len(config.RepSetInfo) > 0 {
 			fmt.Println("  Replication Sets:")
 			for _, rs := range config.RepSetInfo {
-				if rs.SetName.Status == 2 {
-					fmt.Printf("    - %s:\n", rs.SetName.String)
-					for _, table := range rs.Relname {
+				if rs.SetName != "" {
+					fmt.Printf("    - %s:\n", rs.SetName)
+					for _, table := range rs.RelName {
 						fmt.Printf("      - %s\n", table)
 					}
 				}
@@ -437,17 +434,17 @@ func compareReplicationSets(c1, c2 SpockNodeConfig) types.ReplicationSetDiff {
 	// Map tables to their replication sets for each node
 	tablesToRepSetN1 := make(map[string]string)
 	for _, rs := range c1.RepSetInfo {
-		if rs.SetName.Status == 2 {
-			for _, table := range rs.Relname {
-				tablesToRepSetN1[table] = rs.SetName.String
+		if rs.SetName != "" {
+			for _, table := range rs.RelName {
+				tablesToRepSetN1[table] = rs.SetName
 			}
 		}
 	}
 	tablesToRepSetN2 := make(map[string]string)
 	for _, rs := range c2.RepSetInfo {
-		if rs.SetName.Status == 2 {
-			for _, table := range rs.Relname {
-				tablesToRepSetN2[table] = rs.SetName.String
+		if rs.SetName != "" {
+			for _, table := range rs.RelName {
+				tablesToRepSetN2[table] = rs.SetName
 			}
 		}
 	}

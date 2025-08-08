@@ -12,7 +12,6 @@
 package common
 
 import (
-	"context"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -24,8 +23,6 @@ import (
 	"time"
 
 	"github.com/jackc/pgtype"
-	"github.com/jackc/pgx/v4/pgxpool"
-	"github.com/pgedge/ace/db/queries"
 	"github.com/pgedge/ace/pkg/logger"
 	"github.com/pgedge/ace/pkg/types"
 )
@@ -91,136 +88,6 @@ func CheckClusterExists(clusterName string) bool {
 	clusterDir := "cluster/" + clusterName
 	_, err := os.Stat(clusterDir)
 	return err == nil
-}
-
-func GetColumns(db *pgxpool.Pool, schema, table string) ([]string, error) {
-	var schemaName pgtype.Name
-	var tableName pgtype.Name
-
-	err := schemaName.Set(schema)
-	if err != nil {
-		return nil, err
-	}
-	err = tableName.Set(table)
-	if err != nil {
-		return nil, err
-	}
-	q := queries.NewQuerier(db)
-	rows, err := q.GetColumns(context.Background(), schemaName, tableName)
-	if err != nil {
-		return nil, err
-	}
-
-	var columns []string
-	for _, col := range rows {
-		columns = append(columns, col.String)
-	}
-
-	if len(columns) == 0 {
-		return nil, nil
-	}
-
-	return columns, nil
-}
-
-func GetPrimaryKey(db *pgxpool.Pool, schema, table string) ([]string, error) {
-	var schemaName pgtype.Name
-	var tableName pgtype.Name
-
-	err := schemaName.Set(schema)
-	if err != nil {
-		return nil, err
-	}
-	err = tableName.Set(table)
-	if err != nil {
-		return nil, err
-	}
-	q := queries.NewQuerier(db)
-	rows, err := q.GetPrimaryKey(context.Background(), schemaName, tableName)
-	if err != nil {
-		return nil, err
-	}
-
-	var keys []string
-	for _, key := range rows {
-		keys = append(keys, key.String)
-	}
-
-	if len(keys) == 0 {
-		return nil, nil
-	}
-
-	return keys, nil
-}
-
-func GetColumnTypes(db *pgxpool.Pool, table string) (map[string]string, error) {
-	var tableName pgtype.Name
-
-	err := tableName.Set(table)
-	if err != nil {
-		return nil, err
-	}
-	q := queries.NewQuerier(db)
-	rows, err := q.GetColumnTypes(context.Background(), tableName)
-	if err != nil {
-		return nil, err
-	}
-
-	types := make(map[string]string)
-	for _, row := range rows {
-		types[row.ColumnName.String] = *row.DataType
-	}
-
-	if len(types) == 0 {
-		return nil, fmt.Errorf("could not fetch column types")
-	}
-
-	return types, nil
-}
-
-func CheckUserPrivileges(db *pgxpool.Pool, username, schema, table string, requiredPrivileges []string) (bool, map[string]bool, error) {
-	q := queries.NewQuerier(db)
-	result, err := q.CheckUserPrivileges(context.Background(), queries.CheckUserPrivilegesParams{
-		Username:   username,
-		SchemaName: schema,
-		TableName:  table,
-	})
-	if err != nil {
-		return false, nil, err
-	}
-
-	privileges := map[string]bool{
-		"table_select":             *result.TableSelect,
-		"table_create":             *result.TableCreate,
-		"table_insert":             *result.TableInsert,
-		"table_update":             *result.TableUpdate,
-		"table_delete":             *result.TableDelete,
-		"columns_select":           *result.ColumnsSelect,
-		"table_constraints_select": *result.TableConstraintsSelect,
-		"key_column_usage_select":  *result.KeyColumnUsageSelect,
-	}
-
-	missingPrivileges := make(map[string]bool)
-	allPresent := true
-
-	if len(requiredPrivileges) > 0 {
-		for _, priv := range requiredPrivileges {
-			privKey := "table_" + strings.ToLower(priv)
-			if !privileges[privKey] {
-				missingPrivileges[privKey] = false
-				allPresent = false
-			}
-		}
-	} else {
-		for k, v := range privileges {
-			if !v {
-				missingPrivileges[k] = false
-				allPresent = false
-			}
-		}
-	}
-
-	return allPresent, missingPrivileges, nil
 }
 
 func Contains(slice []string, value string) bool {

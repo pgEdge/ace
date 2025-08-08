@@ -18,8 +18,7 @@ import (
 	"maps"
 	"strconv"
 
-	"github.com/jackc/pgtype"
-	"github.com/jackc/pgx/v4/pgxpool"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/pgedge/ace/db/queries"
 	"github.com/pgedge/ace/internal/auth"
 	utils "github.com/pgedge/ace/pkg/common"
@@ -130,9 +129,7 @@ func (c *SchemaDiffCmd) RunChecks(skipValidation bool) error {
 	}
 	defer pool.Close()
 
-	db := queries.NewQuerier(pool)
-
-	schemaExists, err := db.CheckSchemaExists(context.Background(), pgtype.Name{String: c.SchemaName, Status: pgtype.Present})
+	schemaExists, err := queries.CheckSchemaExists(context.Background(), pool, c.SchemaName)
 	if err != nil {
 		return fmt.Errorf("could not check if schema exists: %w", err)
 	}
@@ -140,14 +137,14 @@ func (c *SchemaDiffCmd) RunChecks(skipValidation bool) error {
 		return fmt.Errorf("schema %s not found", c.SchemaName)
 	}
 
-	tables, err := db.GetTablesInSchema(context.Background(), pgtype.Name{String: c.SchemaName, Status: pgtype.Present})
+	tables, err := queries.GetTablesInSchema(context.Background(), pool, c.SchemaName)
 	if err != nil {
 		return fmt.Errorf("could not get tables in schema: %w", err)
 	}
 
 	c.tableList = []string{}
 	for _, table := range tables {
-		c.tableList = append(c.tableList, table.String)
+		c.tableList = append(c.tableList, table)
 	}
 
 	if len(c.tableList) == 0 {
@@ -180,8 +177,7 @@ func (task *SchemaDiffCmd) schemaObjectDiff() error {
 		}
 		defer pool.Close()
 
-		db := queries.NewQuerier(pool)
-		objects, err := getObjectsForSchema(db, task.SchemaName)
+		objects, err := getObjectsForSchema(pool, task.SchemaName)
 		if err != nil {
 			logger.Warn("could not get schema objects for node %s: %v. Skipping.", nodeName, err)
 			continue
@@ -307,43 +303,41 @@ func (task *SchemaDiffCmd) SchemaTableDiff() error {
 	return nil
 }
 
-func getObjectsForSchema(db queries.Querier, schemaName string) (*SchemaObjects, error) {
-	pgSchemaName := pgtype.Name{String: schemaName, Status: pgtype.Present}
-
-	tables, err := db.GetTablesInSchema(context.Background(), pgSchemaName)
+func getObjectsForSchema(pool *pgxpool.Pool, schemaName string) (*SchemaObjects, error) {
+	tables, err := queries.GetTablesInSchema(context.Background(), pool, schemaName)
 	if err != nil {
 		return nil, fmt.Errorf("could not query tables: %w", err)
 	}
 	var tableNames []string
 	for _, t := range tables {
-		tableNames = append(tableNames, t.String)
+		tableNames = append(tableNames, t)
 	}
 
-	views, err := db.GetViewsInSchema(context.Background(), pgSchemaName)
+	views, err := queries.GetViewsInSchema(context.Background(), pool, schemaName)
 	if err != nil {
 		return nil, fmt.Errorf("could not query views: %w", err)
 	}
 	var viewNames []string
 	for _, v := range views {
-		viewNames = append(viewNames, v.String)
+		viewNames = append(viewNames, v)
 	}
 
-	functions, err := db.GetFunctionsInSchema(context.Background(), pgSchemaName)
+	functions, err := queries.GetFunctionsInSchema(context.Background(), pool, schemaName)
 	if err != nil {
 		return nil, fmt.Errorf("could not query functions: %w", err)
 	}
 	var functionSignatures []string
 	for _, f := range functions {
-		functionSignatures = append(functionSignatures, *f)
+		functionSignatures = append(functionSignatures, f)
 	}
 
-	indices, err := db.GetIndicesInSchema(context.Background(), pgSchemaName)
+	indices, err := queries.GetIndicesInSchema(context.Background(), pool, schemaName)
 	if err != nil {
 		return nil, fmt.Errorf("could not query indices: %w", err)
 	}
 	var indexNames []string
 	for _, i := range indices {
-		indexNames = append(indexNames, i.String)
+		indexNames = append(indexNames, i)
 	}
 
 	return &SchemaObjects{

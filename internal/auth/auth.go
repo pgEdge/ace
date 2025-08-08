@@ -16,7 +16,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/jackc/pgx/v4/pgxpool"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 func GetClusterNodeConnection(nodeInfo map[string]any, clientRole string) (*pgxpool.Pool, error) {
@@ -51,7 +51,7 @@ func SetupDBPool(ctx context.Context, connStr, name string) (*pgxpool.Pool, erro
 	config.MaxConnLifetime = time.Minute * 5
 	config.MaxConnIdleTime = time.Minute * 2
 
-	pool, err := pgxpool.ConnectConfig(ctx, config)
+	pool, err := pgxpool.NewWithConfig(ctx, config)
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect: %w", err)
 	}
