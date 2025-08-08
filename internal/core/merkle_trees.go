@@ -660,22 +660,7 @@ func (m *MerkleTreeTask) leafHashWorker(wg *sync.WaitGroup, jobs <-chan types.Bl
 	defer wg.Done()
 
 	for block := range jobs {
-		whereClause, err := m.buildWhereClause(block)
-		if err != nil {
-			results <- LeafHashResult{BlockID: block.NodePosition, Err: err}
-			bar.Increment()
-			continue
-		}
-
-		computeSQL, err := queries.ComputeLeafHashes(context.Background(), pool, m.Schema, m.Table, whereClause, m.Key)
-		if err != nil {
-			results <- LeafHashResult{BlockID: block.NodePosition, Err: fmt.Errorf("failed to render compute leaf hashes sql: %w", err)}
-			bar.Increment()
-			continue
-		}
-
-		var leafHash []byte
-		err = pool.QueryRow(context.Background(), string(computeSQL)).Scan(&leafHash)
+		leafHash, err := queries.ComputeLeafHashes(context.Background(), pool, m.Schema, m.Table, m.SimplePrimaryKey, m.Key, block.RangeStart, block.RangeEnd)
 		if err != nil {
 			results <- LeafHashResult{BlockID: block.NodePosition, Err: fmt.Errorf("failed to compute hash for block %d: %w", block.NodePosition, err)}
 			bar.Increment()
@@ -686,70 +671,57 @@ func (m *MerkleTreeTask) leafHashWorker(wg *sync.WaitGroup, jobs <-chan types.Bl
 	}
 }
 
-func (m *MerkleTreeTask) buildWhereClause(block types.BlockRange) (string, error) {
-	var whereConditions []string
-	keyColumns := m.Key
+// func (m *MerkleTreeTask) buildWhereClause(block types.BlockRange) (string, error) {
+// 	var whereConditions []string
+// 	keyColumns := m.Key
 
-	if m.SimplePrimaryKey {
-		if block.RangeStart[0] != nil {
-			whereConditions = append(whereConditions, fmt.Sprintf("%s >= %v", pgx.Identifier{keyColumns[0]}.Sanitize(), block.RangeStart[0]))
-		}
-		if block.RangeEnd[0] != nil {
-			whereConditions = append(whereConditions, fmt.Sprintf("%s <= %v", pgx.Identifier{keyColumns[0]}.Sanitize(), block.RangeEnd[0]))
-		}
-	} else {
-		pkCols := make([]string, len(keyColumns))
-		for i, c := range keyColumns {
-			pkCols[i] = pgx.Identifier{c}.Sanitize()
-		}
-		pkTuple := fmt.Sprintf("(%s)", strings.Join(pkCols, ", "))
+// 	if m.SimplePrimaryKey {
+// 		if block.RangeStart[0] != nil {
+// 			whereConditions = append(whereConditions, fmt.Sprintf("%s >= %v", pgx.Identifier{keyColumns[0]}.Sanitize(), block.RangeStart[0]))
+// 		}
+// 		if block.RangeEnd[0] != nil {
+// 			whereConditions = append(whereConditions, fmt.Sprintf("%s <= %v", pgx.Identifier{keyColumns[0]}.Sanitize(), block.RangeEnd[0]))
+// 		}
+// 	} else {
+// 		pkCols := make([]string, len(keyColumns))
+// 		for i, c := range keyColumns {
+// 			pkCols[i] = pgx.Identifier{c}.Sanitize()
+// 		}
+// 		pkTuple := fmt.Sprintf("(%s)", strings.Join(pkCols, ", "))
 
-		if len(block.RangeStart) > 0 && block.RangeStart[0] != nil {
-			startVals := make([]string, len(block.RangeStart))
-			for i, v := range block.RangeStart {
-				startVals[i] = fmt.Sprintf("'%v'", v)
-			}
-			whereConditions = append(whereConditions, fmt.Sprintf("%s >= (%s)", pkTuple, strings.Join(startVals, ", ")))
-		}
-		if len(block.RangeEnd) > 0 && block.RangeEnd[0] != nil {
-			endVals := make([]string, len(block.RangeEnd))
-			for i, v := range block.RangeEnd {
-				endVals[i] = fmt.Sprintf("'%v'", v)
-			}
-			whereConditions = append(whereConditions, fmt.Sprintf("%s <= (%s)", pkTuple, strings.Join(endVals, ", ")))
-		}
-	}
+// 		if len(block.RangeStart) > 0 && block.RangeStart[0] != nil {
+// 			startVals := make([]string, len(block.RangeStart))
+// 			for i, v := range block.RangeStart {
+// 				startVals[i] = fmt.Sprintf("'%v'", v)
+// 			}
+// 			whereConditions = append(whereConditions, fmt.Sprintf("%s >= (%s)", pkTuple, strings.Join(startVals, ", ")))
+// 		}
+// 		if len(block.RangeEnd) > 0 && block.RangeEnd[0] != nil {
+// 			endVals := make([]string, len(block.RangeEnd))
+// 			for i, v := range block.RangeEnd {
+// 				endVals[i] = fmt.Sprintf("'%v'", v)
+// 			}
+// 			whereConditions = append(whereConditions, fmt.Sprintf("%s <= (%s)", pkTuple, strings.Join(endVals, ", ")))
+// 		}
+// 	}
 
-	if len(whereConditions) == 0 {
-		return "TRUE", nil
-	}
-	return strings.Join(whereConditions, " AND "), nil
-}
+// 	if len(whereConditions) == 0 {
+// 		return "TRUE", nil
+// 	}
+// 	return strings.Join(whereConditions, " AND "), nil
+// }
 
 func (m *MerkleTreeTask) insertBlockRanges(pool *pgxpool.Pool, ranges []types.BlockRange) error {
 	mtreeTableName := fmt.Sprintf("ace_mtree_%s_%s", m.Schema, m.Table)
 	mtreeTableIdent := pgx.Identifier{mtreeTableName}
 
 	if m.SimplePrimaryKey {
-		for _, r := range ranges {
-			err := queries.InsertBlockRanges(context.Background(), pool, mtreeTableIdent.Sanitize(), r.NodePosition, r.RangeStart[0], r.RangeEnd[0])
-			if err != nil {
-				return err
-			}
+		if err := queries.InsertBlockRangesBatchSimple(context.Background(), pool, mtreeTableIdent.Sanitize(), ranges); err != nil {
+			return err
 		}
 	} else {
-		startPlaceholders := make([]string, len(m.Key))
-		endPlaceholders := make([]string, len(m.Key))
-		for i := 0; i < len(m.Key); i++ {
-			startPlaceholders[i] = fmt.Sprintf("$%d", i+2)
-			endPlaceholders[i] = fmt.Sprintf("$%d", i+2+len(m.Key))
-		}
-
-		for _, r := range ranges {
-			err := queries.InsertCompositeBlockRanges(context.Background(), pool, mtreeTableIdent.Sanitize(), r.NodePosition, strings.Join(startPlaceholders, ","), strings.Join(endPlaceholders, ","))
-			if err != nil {
-				return err
-			}
+		if err := queries.InsertBlockRangesBatchComposite(context.Background(), pool, mtreeTableIdent.Sanitize(), ranges, len(m.Key)); err != nil {
+			return err
 		}
 	}
 

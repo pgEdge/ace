@@ -46,52 +46,54 @@ type Templates struct {
 	GetTablesInRepSet    *template.Template
 	GetPkeyColumnTypes   *template.Template
 
-	CreateMetadataTable           *template.Template
-	GetPkeyOffsets                *template.Template
-	CreateSimpleMtreeTable        *template.Template
-	CreateIndex                   *template.Template
-	CreateCompositeType           *template.Template
-	DropCompositeType             *template.Template
-	CreateCompositeMtreeTable     *template.Template
-	InsertCompositeBlockRanges    *template.Template
-	CreateXORFunction             *template.Template
-	GetPkeyType                   *template.Template
-	UpdateMetadata                *template.Template
-	InsertBlockRanges             *template.Template
-	ComputeLeafHashes             *template.Template
-	UpdateLeafHashes              *template.Template
-	GetBlockRanges                *template.Template
-	GetDirtyAndNewBlocks          *template.Template
-	ClearDirtyFlags               *template.Template
-	BuildParentNodes              *template.Template
-	GetRootNode                   *template.Template
-	GetNodeChildren               *template.Template
-	GetLeafRanges                 *template.Template
-	GetRowCountEstimate           *template.Template
-	GetMaxValComposite            *template.Template
-	UpdateMaxVal                  *template.Template
-	GetMaxValSimple               *template.Template
-	GetCountComposite             *template.Template
-	GetCountSimple                *template.Template
-	GetSplitPointComposite        *template.Template
-	GetSplitPointSimple           *template.Template
-	DeleteParentNodes             *template.Template
-	GetMaxNodePosition            *template.Template
-	UpdateBlockRangeEnd           *template.Template
-	UpdateNodePositionsTemp       *template.Template
-	DeleteBlock                   *template.Template
-	UpdateNodePositionsSequential *template.Template
-	FindBlocksToSplit             *template.Template
-	FindBlocksToMergeComposite    *template.Template
-	FindBlocksToMergeSimple       *template.Template
-	GetBlockCountComposite        *template.Template
-	GetBlockCountSimple           *template.Template
-	GetBlockSizeFromMetadata      *template.Template
-	GetMaxNodeLevel               *template.Template
-	CompareBlocksSQL              *template.Template
-	DropXORFunction               *template.Template
-	DropMetadataTable             *template.Template
-	DropMtreeTable                *template.Template
+	CreateMetadataTable             *template.Template
+	GetPkeyOffsets                  *template.Template
+	CreateSimpleMtreeTable          *template.Template
+	CreateIndex                     *template.Template
+	CreateCompositeType             *template.Template
+	DropCompositeType               *template.Template
+	CreateCompositeMtreeTable       *template.Template
+	InsertCompositeBlockRanges      *template.Template
+	CreateXORFunction               *template.Template
+	GetPkeyType                     *template.Template
+	UpdateMetadata                  *template.Template
+	InsertBlockRanges               *template.Template
+	InsertBlockRangesBatchSimple    *template.Template
+	InsertBlockRangesBatchComposite *template.Template
+	ComputeLeafHashes               *template.Template
+	UpdateLeafHashes                *template.Template
+	GetBlockRanges                  *template.Template
+	GetDirtyAndNewBlocks            *template.Template
+	ClearDirtyFlags                 *template.Template
+	BuildParentNodes                *template.Template
+	GetRootNode                     *template.Template
+	GetNodeChildren                 *template.Template
+	GetLeafRanges                   *template.Template
+	GetRowCountEstimate             *template.Template
+	GetMaxValComposite              *template.Template
+	UpdateMaxVal                    *template.Template
+	GetMaxValSimple                 *template.Template
+	GetCountComposite               *template.Template
+	GetCountSimple                  *template.Template
+	GetSplitPointComposite          *template.Template
+	GetSplitPointSimple             *template.Template
+	DeleteParentNodes               *template.Template
+	GetMaxNodePosition              *template.Template
+	UpdateBlockRangeEnd             *template.Template
+	UpdateNodePositionsTemp         *template.Template
+	DeleteBlock                     *template.Template
+	UpdateNodePositionsSequential   *template.Template
+	FindBlocksToSplit               *template.Template
+	FindBlocksToMergeComposite      *template.Template
+	FindBlocksToMergeSimple         *template.Template
+	GetBlockCountComposite          *template.Template
+	GetBlockCountSimple             *template.Template
+	GetBlockSizeFromMetadata        *template.Template
+	GetMaxNodeLevel                 *template.Template
+	CompareBlocksSQL                *template.Template
+	DropXORFunction                 *template.Template
+	DropMetadataTable               *template.Template
+	DropMtreeTable                  *template.Template
 }
 
 var SQLTemplates = Templates{
@@ -639,6 +641,20 @@ var SQLTemplates = Templates{
 		VALUES
 			(0, $1, $2, $3, current_timestamp)
 	`)),
+	InsertBlockRangesBatchSimple: template.Must(template.New("insertBlockRangesBatchSimple").Parse(`
+        INSERT INTO {{.MtreeTable}} (node_level, node_position, range_start, range_end, last_modified)
+        VALUES
+        {{- range $i, $r := .Rows}}{{if $i}},{{end}}
+        (0, {{$r.NodePos}}, {{$r.Start}}, {{$r.End}}, current_timestamp)
+        {{- end }}
+    `)),
+	InsertBlockRangesBatchComposite: template.Must(template.New("insertBlockRangesBatchComposite").Parse(`
+        INSERT INTO {{.MtreeTable}} (node_level, node_position, range_start, range_end, last_modified)
+        VALUES
+        {{- range $i, $r := .Rows}}{{if $i}},{{end}}
+        (0, {{$r.NodePos}}, ROW({{$r.StartList}}), ROW({{$r.EndList}}), current_timestamp)
+        {{- end }}
+    `)),
 	ComputeLeafHashes: template.Must(template.New("computeLeafHashes").Parse(`
 		WITH block_rows AS (
 			SELECT
@@ -1413,6 +1429,159 @@ func InsertCompositeBlockRanges(ctx context.Context, db *pgxpool.Pool, mtreeTabl
 	return nil
 }
 
+func InsertBlockRangesBatchSimple(ctx context.Context, db *pgxpool.Pool, mtreeTable string, ranges []types.BlockRange) error {
+	if len(ranges) == 0 {
+		return nil
+	}
+
+	const maxParams = 60000
+	const paramsPerRow = 3
+	chunkSize := maxParams / paramsPerRow
+	if chunkSize < 1 {
+		chunkSize = 1
+	}
+
+	for start := 0; start < len(ranges); start += chunkSize {
+		end := start + chunkSize
+		if end > len(ranges) {
+			end = len(ranges)
+		}
+
+		type rowPlaceholders struct {
+			NodePos string
+			Start   string
+			End     string
+		}
+
+		rowsMeta := make([]rowPlaceholders, 0, end-start)
+		args := make([]any, 0, (end-start)*paramsPerRow)
+		paramIdx := 1
+		for i := start; i < end; i++ {
+			r := ranges[i]
+			rowsMeta = append(rowsMeta, rowPlaceholders{
+				NodePos: fmt.Sprintf("$%d", paramIdx),
+				Start:   fmt.Sprintf("$%d", paramIdx+1),
+				End:     fmt.Sprintf("$%d", paramIdx+2),
+			})
+			paramIdx += 3
+
+			args = append(args, r.NodePosition)
+			var rs any
+			var re any
+			if len(r.RangeStart) > 0 {
+				rs = r.RangeStart[0]
+			}
+			if len(r.RangeEnd) > 0 {
+				re = r.RangeEnd[0]
+			}
+			args = append(args, rs, re)
+		}
+
+		data := map[string]any{
+			"MtreeTable": mtreeTable,
+			"Rows":       rowsMeta,
+		}
+
+		sql, err := RenderSQL(SQLTemplates.InsertBlockRangesBatchSimple, data)
+		if err != nil {
+			return fmt.Errorf("failed to render InsertBlockRangesBatchSimple SQL: %w", err)
+		}
+
+		if _, err := db.Exec(ctx, sql, args...); err != nil {
+			return fmt.Errorf("batch insert block ranges for '%s' failed: %w", mtreeTable, err)
+		}
+	}
+
+	return nil
+}
+
+func InsertBlockRangesBatchComposite(ctx context.Context, db *pgxpool.Pool, mtreeTable string, ranges []types.BlockRange, keyLen int) error {
+	if len(ranges) == 0 {
+		return nil
+	}
+
+	if keyLen <= 0 {
+		return fmt.Errorf("invalid keyLen")
+	}
+
+	const maxParams = 60000
+	paramsPerRow := 1 + 2*keyLen
+	if paramsPerRow <= 0 {
+		paramsPerRow = 1
+	}
+	chunkSize := maxParams / paramsPerRow
+	if chunkSize < 1 {
+		chunkSize = 1
+	}
+
+	for start := 0; start < len(ranges); start += chunkSize {
+		end := start + chunkSize
+		if end > len(ranges) {
+			end = len(ranges)
+		}
+
+		type rowPlaceholders struct {
+			NodePos   string
+			StartList string
+			EndList   string
+		}
+
+		rowsMeta := make([]rowPlaceholders, 0, end-start)
+		args := make([]any, 0, (end-start)*paramsPerRow)
+		paramIdx := 1
+		for i := start; i < end; i++ {
+			r := ranges[i]
+			nodePos := fmt.Sprintf("$%d", paramIdx)
+			args = append(args, r.NodePosition)
+			paramIdx++
+
+			startPh := make([]string, keyLen)
+			for k := 0; k < keyLen; k++ {
+				startPh[k] = fmt.Sprintf("$%d", paramIdx)
+				var v any
+				if k < len(r.RangeStart) {
+					v = r.RangeStart[k]
+				}
+				args = append(args, v)
+				paramIdx++
+			}
+
+			endPh := make([]string, keyLen)
+			for k := 0; k < keyLen; k++ {
+				endPh[k] = fmt.Sprintf("$%d", paramIdx)
+				var v any
+				if k < len(r.RangeEnd) {
+					v = r.RangeEnd[k]
+				}
+				args = append(args, v)
+				paramIdx++
+			}
+
+			rowsMeta = append(rowsMeta, rowPlaceholders{
+				NodePos:   nodePos,
+				StartList: strings.Join(startPh, ", "),
+				EndList:   strings.Join(endPh, ", "),
+			})
+		}
+
+		data := map[string]any{
+			"MtreeTable": mtreeTable,
+			"Rows":       rowsMeta,
+		}
+
+		sql, err := RenderSQL(SQLTemplates.InsertBlockRangesBatchComposite, data)
+		if err != nil {
+			return fmt.Errorf("failed to render InsertBlockRangesBatchComposite SQL: %w", err)
+		}
+
+		if _, err := db.Exec(ctx, sql, args...); err != nil {
+			return fmt.Errorf("batch insert composite block ranges for '%s' failed: %w", mtreeTable, err)
+		}
+	}
+
+	return nil
+}
+
 func GetPkeyOffsets(ctx context.Context, db *pgxpool.Pool, schema, table string, keyColumns []string, tableSampleMethod string, samplePercent float64, ntileCount int) ([]types.PkeyOffset, error) {
 	sql, err := GeneratePkeyOffsetsQuery(schema, table, keyColumns, tableSampleMethod, samplePercent, ntileCount)
 	if err != nil {
@@ -1514,10 +1683,10 @@ func BlockHashSQL(schema, table string, primaryKeyCols []string) (string, error)
 	}
 
 	query := fmt.Sprintf(
-		`SELECT encode(digest(COALESCE(string_agg(%s::text, '|' ORDER BY %s), '[EMPTY_BLOCK]'), 'sha1'), 'hex')
-		 FROM %s.%s AS %s
-		 WHERE ($1::boolean OR %s >= %s)
-		   AND ($%d::boolean OR %s < %s)`,
+		`SELECT digest(COALESCE(string_agg(%s::text, '|' ORDER BY %s), 'EMPTY_BLOCK'), 'sha256')
+         FROM %s.%s AS %s
+         WHERE ($1::boolean OR %s >= %s)
+           AND ($%d::boolean OR %s < %s)`,
 		tableAlias,
 		pkOrderByStr,
 		schemaIdent,
@@ -1962,26 +2131,28 @@ func UpdateMetadata(ctx context.Context, db *pgxpool.Pool, schema, table string,
 	return nil
 }
 
-func ComputeLeafHashes(ctx context.Context, db *pgxpool.Pool, schema, table, whereClause string, key []string) ([]byte, error) {
-	data := map[string]interface{}{
-		"SchemaIdent": pgx.Identifier{schema}.Sanitize(),
-		"TableIdent":  pgx.Identifier{table}.Sanitize(),
-		"WhereClause": whereClause,
-		"Key":         strings.Join(key, ", "),
-	}
-
-	sql, err := RenderSQL(SQLTemplates.ComputeLeafHashes, data)
+func ComputeLeafHashes(ctx context.Context, db *pgxpool.Pool, schema, table string, simpleKey bool, key []string, start []any, end []any) ([]byte, error) {
+	// Build a parameterized SQL using BlockHashSQL to avoid embedding raw values
+	sql, err := BlockHashSQL(schema, table, key)
 	if err != nil {
-		return nil, fmt.Errorf("failed to render ComputeLeafHashes SQL: %w", err)
+		return nil, err
 	}
 
-	fmt.Println(sql)
+	// Build args: $1 skipMinCheck, [start values], $skipMaxCheck, [end values]
+	// When no start, set skipMinCheck=true; likewise for end
+	args := make([]any, 0, 2+len(start)+len(end))
+	skipMin := len(start) == 0 || start[0] == nil
+	args = append(args, skipMin)
+	args = append(args, start...)
+
+	skipMax := len(end) == 0 || end[0] == nil
+	args = append(args, skipMax)
+	args = append(args, end...)
+
 	var leafHash []byte
-	err = db.QueryRow(ctx, sql).Scan(&leafHash)
-	if err != nil {
+	if err := db.QueryRow(ctx, sql, args...).Scan(&leafHash); err != nil {
 		return nil, fmt.Errorf("query to compute leaf hashes for '%s.%s' failed: %w", schema, table, err)
 	}
-
 	return leafHash, nil
 }
 
