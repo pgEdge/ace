@@ -60,7 +60,8 @@ type Templates struct {
 	InsertBlockRanges               *template.Template
 	InsertBlockRangesBatchSimple    *template.Template
 	InsertBlockRangesBatchComposite *template.Template
-	ComputeLeafHashes               *template.Template
+	TDBlockHashSQL                  *template.Template
+	MtreeLeafHashSQL                *template.Template
 	UpdateLeafHashes                *template.Template
 	GetBlockRanges                  *template.Template
 	GetDirtyAndNewBlocks            *template.Template
@@ -655,37 +656,18 @@ var SQLTemplates = Templates{
         (0, {{$r.NodePos}}, ROW({{$r.StartList}}), ROW({{$r.EndList}}), current_timestamp)
         {{- end }}
     `)),
-	ComputeLeafHashes: template.Must(template.New("computeLeafHashes").Parse(`
-		WITH block_rows AS (
-			SELECT
-				*
-			FROM
-				{{.SchemaIdent}}.{{.TableIdent}}
-			WHERE
-				{{.WhereClause}}
-		),
-		block_hash AS (
-			SELECT
-				digest(
-					COALESCE(
-						string_agg(
-							t::text,
-							'|'
-							ORDER BY
-								{{.Key}}
-						),
-						'EMPTY_BLOCK'
-					),
-					'sha256'
-				) as leaf_hash
-			FROM
-				block_rows t
-		)
-		SELECT
-			leaf_hash
-		FROM
-			block_hash
-	`)),
+	TDBlockHashSQL: template.Must(template.New("tdBlockHashSQL").Parse(`
+        SELECT encode(digest(COALESCE(string_agg({{.TableAlias}}::text, '|' ORDER BY {{.PkOrderByStr}}), 'EMPTY_BLOCK'), 'sha256'), 'hex')
+        FROM {{.SchemaIdent}}.{{.TableIdent}} AS {{.TableAlias}}
+        WHERE ($1::boolean OR {{.PkComparisonExpression}} >= {{.StartValueExpression}})
+        AND (${{.SkipMaxIdx}}::boolean OR {{.PkComparisonExpression}} < {{.EndValueExpression}})
+    `)),
+	MtreeLeafHashSQL: template.Must(template.New("mtreeLeafHashSQL").Parse(`
+        SELECT digest(COALESCE(string_agg({{.TableAlias}}::text, '|' ORDER BY {{.PkOrderByStr}}), 'EMPTY_BLOCK'), 'sha256')
+        FROM {{.SchemaIdent}}.{{.TableIdent}} AS {{.TableAlias}}
+        WHERE ($1::boolean OR {{.PkComparisonExpression}} >= {{.StartValueExpression}})
+        AND (${{.SkipMaxIdx}}::boolean OR {{.PkComparisonExpression}} <= {{.EndValueExpression}})
+    `)),
 	UpdateLeafHashes: template.Must(template.New("updateLeafHashes").Parse(`
 		UPDATE
 			{{.MtreeTable}} mt
@@ -1621,7 +1603,7 @@ func GetPkeyOffsets(ctx context.Context, db *pgxpool.Pool, schema, table string,
 	return offsets, nil
 }
 
-func BlockHashSQL(schema, table string, primaryKeyCols []string) (string, error) {
+func BlockHashSQL(schema, table string, primaryKeyCols []string, mode string) (string, error) {
 	if len(primaryKeyCols) == 0 {
 		return "", fmt.Errorf("primaryKeyCols cannot be empty")
 	}
@@ -1682,23 +1664,27 @@ func BlockHashSQL(schema, table string, primaryKeyCols []string) (string, error)
 		endValueExpression = fmt.Sprintf("ROW(%s)", strings.Join(endPlaceholders, ", "))
 	}
 
-	query := fmt.Sprintf(
-		`SELECT digest(COALESCE(string_agg(%s::text, '|' ORDER BY %s), 'EMPTY_BLOCK'), 'sha256')
-         FROM %s.%s AS %s
-         WHERE ($1::boolean OR %s >= %s)
-           AND ($%d::boolean OR %s < %s)`,
-		tableAlias,
-		pkOrderByStr,
-		schemaIdent,
-		tableIdent,
-		tableAlias,
-		pkComparisonExpression,
-		startValueExpression,
-		skipMaxCheckPlaceholderIndex,
-		pkComparisonExpression,
-		endValueExpression,
-	)
-	return query, nil
+	var tmpl *template.Template
+	switch mode {
+	case "TD_BLOCK_HASH":
+		tmpl = SQLTemplates.TDBlockHashSQL
+	case "MTREE_LEAF_HASH":
+		tmpl = SQLTemplates.MtreeLeafHashSQL
+	default:
+		return "", fmt.Errorf("invalid mode: %s", mode)
+	}
+
+	data := map[string]any{
+		"SchemaIdent":            schemaIdent,
+		"TableIdent":             tableIdent,
+		"TableAlias":             tableAlias,
+		"PkOrderByStr":           pkOrderByStr,
+		"PkComparisonExpression": pkComparisonExpression,
+		"StartValueExpression":   startValueExpression,
+		"SkipMaxIdx":             skipMaxCheckPlaceholderIndex,
+		"EndValueExpression":     endValueExpression,
+	}
+	return RenderSQL(tmpl, data)
 }
 
 // GetColumns retrieves the column names for a given table.
@@ -2132,8 +2118,7 @@ func UpdateMetadata(ctx context.Context, db *pgxpool.Pool, schema, table string,
 }
 
 func ComputeLeafHashes(ctx context.Context, db *pgxpool.Pool, schema, table string, simpleKey bool, key []string, start []any, end []any) ([]byte, error) {
-	// Build a parameterized SQL using BlockHashSQL to avoid embedding raw values
-	sql, err := BlockHashSQL(schema, table, key)
+	sql, err := BlockHashSQL(schema, table, key, "MTREE_LEAF_HASH" /* mode */)
 	if err != nil {
 		return nil, err
 	}

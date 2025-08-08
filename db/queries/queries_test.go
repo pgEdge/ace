@@ -310,7 +310,7 @@ func TestBlockHashSQL(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			query, err := BlockHashSQL(tt.schema, tt.table, tt.primaryKeyCols)
+			query, err := BlockHashSQL(tt.schema, tt.table, tt.primaryKeyCols, "TD_BLOCK_HASH" /* mode */)
 
 			if (err != nil) != tt.wantErr {
 				t.Errorf("BlockHashSQL() error = %v, wantErr %v", err, tt.wantErr)

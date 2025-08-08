@@ -812,7 +812,7 @@ func (t *TableDiffTask) ExecuteTask() error {
 	}
 	t.Pools = pools
 
-	blockHashSQL, err := queries.BlockHashSQL(t.Schema, t.Table, t.Key)
+	blockHashSQL, err := queries.BlockHashSQL(t.Schema, t.Table, t.Key, "TD_BLOCK_HASH" /* mode */)
 	if err != nil {
 		return fmt.Errorf("failed to build block-hash SQL: %w", err)
 	}
