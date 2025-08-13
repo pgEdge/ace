@@ -23,7 +23,7 @@ import (
 	"time"
 
 	"github.com/docker/go-connections/nat"
-	"github.com/jackc/pgx/v4/pgxpool"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/pgedge/ace/pkg/config"
 	"github.com/pgedge/ace/pkg/types"
 	"github.com/testcontainers/testcontainers-go/modules/compose"
@@ -354,7 +354,7 @@ func connectToNode(host, port, user, password, dbname string) (*pgxpool.Pool, er
 	var pool *pgxpool.Pool
 	var err error
 	for i := 0; i < 10; i++ {
-		pool, err = pgxpool.Connect(context.Background(), connStr)
+		pool, err = pgxpool.New(context.Background(), connStr)
 		if err == nil {
 			err = pool.Ping(context.Background())
 			if err == nil {

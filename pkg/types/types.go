@@ -185,3 +185,107 @@ type ReplicationSetPair struct {
 	Node1 RepSetInfo `json:"node1"`
 	Node2 RepSetInfo `json:"node2"`
 }
+
+// ColumnType holds the name and data type of a column.
+type ColumnType struct {
+	ColumnName string `db:"column_name"`
+	DataType   string `db:"data_type"`
+}
+
+// UserPrivileges describes the privileges a user has.
+type UserPrivileges struct {
+	TableSelect            bool `db:"table_select"`
+	TableCreate            bool `db:"table_create"`
+	TableInsert            bool `db:"table_insert"`
+	TableUpdate            bool `db:"table_update"`
+	TableDelete            bool `db:"table_delete"`
+	ColumnsSelect          bool `db:"columns_select"`
+	TableConstraintsSelect bool `db:"table_constraints_select"`
+	KeyColumnUsageSelect   bool `db:"key_column_usage_select"`
+}
+
+// SpockNodeAndSubInfo contains information about a spock node and its subscription.
+type SpockNodeAndSubInfo struct {
+	NodeID             int64    `db:"node_id"`
+	NodeName           string   `db:"node_name"`
+	Location           string   `db:"location"`
+	Country            string   `db:"country"`
+	SubID              int64    `db:"sub_id"`
+	SubName            string   `db:"sub_name"`
+	SubEnabled         bool     `db:"sub_enabled"`
+	SubReplicationSets []string `db:"sub_replication_sets"`
+}
+
+// SpockRepSetInfo contains information about a replication set.
+type SpockRepSetInfo struct {
+	SetName string   `db:"set_name"`
+	RelName []string `db:"relname"`
+}
+
+// PkeyColumnType holds the name and data type of a primary key column.
+// Note: The query for this does not have aliases, so scanning relies on column order.
+type PkeyColumnType struct {
+	ColumnName string
+	DataType   string
+}
+
+// BlockRange represents a block in the Merkle tree.
+// The RangeStart and RangeEnd fields are of type any because they can be
+// a single value or a composite type.
+type BlockRange struct {
+	NodePosition int64 `db:"node_position"`
+	RangeStart   []any `db:"range_start"`
+	RangeEnd     []any `db:"range_end"`
+}
+
+// RootNode represents the root of the Merkle tree.
+type RootNode struct {
+	NodePosition int64  `db:"node_position"`
+	NodeHash     []byte `db:"node_hash"`
+}
+
+// NodeChild represents a child of a node in the Merkle tree.
+type NodeChild struct {
+	NodeLevel    int    `db:"node_level"`
+	NodePosition int64  `db:"node_position"`
+	NodeHash     []byte `db:"node_hash"`
+}
+
+// LeafRange represents the start and end of a leaf's range.
+type LeafRange struct {
+	RangeStart []any `db:"range_start"`
+	RangeEnd   []any `db:"range_end"`
+}
+
+// BlockCountComposite contains the row count for a block in a table with a composite primary key.
+type BlockCountComposite struct {
+	NodePosition int64 `db:"node_position"`
+	RangeStart   any   `db:"range_start"`
+	RangeEnd     any   `db:"range_end"`
+	Count        int64 `db:"cnt"`
+}
+
+// BlockCountSimple contains the row count for a block in a table with a simple primary key.
+type BlockCountSimple struct {
+	NodePosition int64 `db:"node_position"`
+	RangeStart   any   `db:"range_start"`
+	RangeEnd     any   `db:"range_end"`
+	Count        int64 `db:"count"`
+}
+
+// MtreeMetadata represents a row in the ace_mtree_metadata table.
+type MtreeMetadata struct {
+	SchemaName  string    `db:"schema_name"`
+	TableName   string    `db:"table_name"`
+	TotalRows   int64     `db:"total_rows"`
+	BlockSize   int       `db:"block_size"`
+	NumBlocks   int       `db:"num_blocks"`
+	IsComposite bool      `db:"is_composite"`
+	LastUpdated time.Time `db:"last_updated"`
+}
+
+// PkeyOffset represents a range of primary key values.
+type PkeyOffset struct {
+	RangeStart []any
+	RangeEnd   []any
+}

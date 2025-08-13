@@ -212,6 +212,20 @@ func SetupCLI() *cli.App {
 	}
 	mtreeBuildFlags = append(mtreeBuildFlags, commonFlags...)
 
+	mtreeUpdateFlags := []cli.Flag{
+		&cli.Float64Flag{
+			Name:  "max-cpu-ratio",
+			Usage: "Max CPU for parallel operations",
+			Value: 0.5,
+		},
+		&cli.BoolFlag{
+			Name:  "rebalance",
+			Usage: "Rebalance the tree by merging small blocks",
+			Value: false,
+		},
+	}
+	mtreeUpdateFlags = append(mtreeUpdateFlags, commonFlags...)
+
 	app := &cli.App{
 		Name:  "ace",
 		Usage: "ACE - Active Consistency Engine",
@@ -362,6 +376,26 @@ func SetupCLI() *cli.App {
 							return nil
 						},
 					},
+					{
+						Name:      "update",
+						Usage:     "Update an existing Merkle tree for a table",
+						ArgsUsage: "<cluster> <table>",
+						Action: func(ctx *cli.Context) error {
+							if ctx.Args().Len() < 2 {
+								return fmt.Errorf("missing required arguments for mtree update: needs <cluster> and <table>")
+							}
+							return MtreeUpdateCLI(ctx)
+						},
+						Flags: mtreeUpdateFlags,
+						Before: func(ctx *cli.Context) error {
+							if ctx.Bool("debug") {
+								logger.SetLevel(log.DebugLevel)
+							} else {
+								logger.SetLevel(log.InfoLevel)
+							}
+							return nil
+						},
+					},
 				},
 			},
 		},
@@ -437,6 +471,31 @@ func MtreeBuildCLI(ctx *cli.Context) error {
 
 	if err := task.BuildMtree(); err != nil {
 		return fmt.Errorf("error during merkle tree build: %w", err)
+	}
+
+	return nil
+}
+
+func MtreeUpdateCLI(ctx *cli.Context) error {
+	task := core.NewMerkleTreeTask()
+	task.ClusterName = ctx.Args().Get(0)
+	task.QualifiedTableName = ctx.Args().Get(1)
+	task.DBName = ctx.String("dbname")
+	task.Nodes = ctx.String("nodes")
+	task.QuietMode = ctx.Bool("quiet")
+	task.MaxCpuRatio = ctx.Float64("max-cpu-ratio")
+	task.Rebalance = ctx.Bool("rebalance")
+	task.Mode = "update"
+
+	if err := task.Validate(); err != nil {
+		return fmt.Errorf("validation failed: %w", err)
+	}
+
+	if err := task.RunChecks(true); err != nil {
+		return fmt.Errorf("checks failed: %w", err)
+	}
+	if err := task.UpdateMtree(true); err != nil {
+		return fmt.Errorf("error during merkle tree update: %w", err)
 	}
 
 	return nil
