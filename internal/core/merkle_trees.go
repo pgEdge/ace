@@ -407,9 +407,10 @@ func (m *MerkleTreeTask) UpdateMtree(skipAllChecks bool) error {
 			return fmt.Errorf("failed to acquire connection: %w", err)
 		}
 		defer conn.Release()
+		var compositeTypeName string
 
 		if !m.SimplePrimaryKey {
-			compositeTypeName := fmt.Sprintf("%s_%s_key_type", m.Schema, m.Table)
+			compositeTypeName = fmt.Sprintf("%s_%s_key_type", m.Schema, m.Table)
 			dt, err := conn.Conn().LoadType(context.Background(), compositeTypeName)
 			if err != nil {
 				return fmt.Errorf("failed to load composite type %s: %w", compositeTypeName, err)
@@ -425,7 +426,31 @@ func (m *MerkleTreeTask) UpdateMtree(skipAllChecks bool) error {
 
 		mtreeTableName := fmt.Sprintf("ace_mtree_%s_%s", m.Schema, m.Table)
 
-		blocksToUpdate, err := queries.GetDirtyAndNewBlocksTx(context.Background(), tx, mtreeTableName, m.SimplePrimaryKey)
+		// Ensure the first block's start reflects the table's current minimum key.
+		// This handles inserts that introduce new keys smaller than the existing first range_start.
+		if !m.SimplePrimaryKey {
+			minVals, err := queries.GetMinValCompositeTx(context.Background(), tx, m.Schema, m.Table, m.Key)
+			if err != nil {
+				return fmt.Errorf("failed to fetch composite min key: %w", err)
+			}
+			if minVals != nil {
+				if err := queries.UpdateBlockRangeStartCompositeTx(context.Background(), tx, mtreeTableName, minVals, 0); err != nil {
+					return fmt.Errorf("failed to update first block start (composite): %w", err)
+				}
+			}
+		} else {
+			minVal, err := queries.GetMinValSimpleTx(context.Background(), tx, m.Schema, m.Table, m.Key[0])
+			if err != nil {
+				return fmt.Errorf("failed to fetch simple min key: %w", err)
+			}
+			if minVal != nil {
+				if err := queries.UpdateBlockRangeStartTx(context.Background(), tx, mtreeTableName, minVal, 0); err != nil {
+					return fmt.Errorf("failed to update first block start (simple): %w", err)
+				}
+			}
+		}
+
+		blocksToUpdate, err := queries.GetDirtyAndNewBlocksTx(context.Background(), tx, mtreeTableName, m.SimplePrimaryKey, m.Key)
 		if err != nil {
 			return fmt.Errorf("error getting dirty blocks on node %s: %w", nodeInfo["Name"], err)
 		}
@@ -442,7 +467,7 @@ func (m *MerkleTreeTask) UpdateMtree(skipAllChecks bool) error {
 			blockPositionsToSplit = append(blockPositionsToSplit, b.NodePosition)
 		}
 
-		blocksToSplit, err := queries.FindBlocksToSplitTx(context.Background(), tx, mtreeTableName, splitThreshold, blockPositionsToSplit, m.SimplePrimaryKey)
+		blocksToSplit, err := queries.FindBlocksToSplitTx(context.Background(), tx, mtreeTableName, splitThreshold, blockPositionsToSplit, m.SimplePrimaryKey, m.Key)
 		if err != nil {
 			return fmt.Errorf("query to find blocks to split for '%s' failed: %w", mtreeTableName, err)
 		}
@@ -459,11 +484,22 @@ func (m *MerkleTreeTask) UpdateMtree(skipAllChecks bool) error {
 		}
 
 		if m.Rebalance {
-			fmt.Println("Rebalancing is enabled, checking for blocks to merge")
-			m.mergeBlocks(tx)
+			mergeThreshold := 0.25
+			blocksToMerge, err := queries.FindBlocksToMergeTx(context.Background(), tx, mtreeTableName, !m.SimplePrimaryKey, m.Schema, m.Table, m.Key, mergeThreshold, blockPositionsToSplit)
+			if err != nil {
+				return fmt.Errorf("query to find blocks to merge for '%s' failed: %w", mtreeTableName, err)
+			}
+			if len(blocksToMerge) > 0 {
+				fmt.Printf("Found %d blocks that may need merging\n", len(blocksToMerge))
+				merged, err := m.mergeBlocks(tx, blocksToMerge)
+				if err != nil {
+					return err
+				}
+				modifiedPositions = append(modifiedPositions, merged...)
+			}
 		}
 
-		blocksToUpdate, err = queries.GetDirtyAndNewBlocksTx(context.Background(), tx, mtreeTableName, m.SimplePrimaryKey)
+		blocksToUpdate, err = queries.GetDirtyAndNewBlocksTx(context.Background(), tx, mtreeTableName, m.SimplePrimaryKey, m.Key)
 		if err != nil {
 			return err
 		}
@@ -547,9 +583,10 @@ func (m *MerkleTreeTask) splitBlocks(tx pgx.Tx, blocksToSplit []types.BlockRange
 		pos := blk.NodePosition
 		start := blk.RangeStart
 		end := blk.RangeEnd
+		originallyUnbounded := len(end) == 0 || allNil(end)
 
 		// Handle last block with null end
-		if (len(end) == 0 || end[0] == nil) && i == len(currentBlocks)-1 {
+		if originallyUnbounded && i == len(currentBlocks)-1 {
 			var maxVal []any
 			var err error
 			if isComposite {
@@ -582,7 +619,7 @@ func (m *MerkleTreeTask) splitBlocks(tx pgx.Tx, blocksToSplit []types.BlockRange
 			return nil, fmt.Errorf("failed to get block row count for block %d: %w", pos, err)
 		}
 
-		if count < int64(m.BlockSize*2) {
+		if count < int64(float64(m.BlockSize)*1.5) {
 			i++
 			continue
 		}
@@ -609,17 +646,28 @@ func (m *MerkleTreeTask) splitBlocks(tx pgx.Tx, blocksToSplit []types.BlockRange
 			continue
 		}
 
-		// Insert new block at the end
+		// Insert new block at the end (next available position)
 		newPos, err := queries.GetMaxNodePositionTx(ctx, tx, mtreeTableName)
 		if err != nil {
 			return nil, err
 		}
-		newPos++ // Increment to get next available position
 
 		if isComposite {
-			err = queries.InsertCompositeBlockRangesTx(ctx, tx, mtreeTableName, newPos, splitPoint, end)
+			var endVals []any
+			if originallyUnbounded {
+				endVals = nil
+			} else {
+				endVals = end
+			}
+			err = queries.InsertCompositeBlockRangesTx(ctx, tx, mtreeTableName, newPos, splitPoint, endVals)
 		} else {
-			err = queries.InsertBlockRangesTx(ctx, tx, mtreeTableName, newPos, splitPoint[0], valueOrNil(end))
+			var endVal any
+			if originallyUnbounded {
+				endVal = nil
+			} else {
+				endVal = valueOrNil(end)
+			}
+			err = queries.InsertBlockRangesTx(ctx, tx, mtreeTableName, newPos, splitPoint[0], endVal)
 		}
 		if err != nil {
 			return nil, err
@@ -657,9 +705,168 @@ func valueOrNil(end []any) interface{} {
 	return end[0]
 }
 
-func (m *MerkleTreeTask) mergeBlocks(tx pgx.Tx) error {
-	fmt.Println("TODO: implement mergeBlocks")
-	return nil
+func allNil(vals []any) bool {
+	if len(vals) == 0 {
+		return true
+	}
+	for _, v := range vals {
+		if v != nil {
+			return false
+		}
+	}
+	return true
+}
+
+func (m *MerkleTreeTask) mergeBlocks(tx pgx.Tx, blocksToMerge []types.BlockRange) ([]int64, error) {
+	mtreeTableName := fmt.Sprintf("ace_mtree_%s_%s", m.Schema, m.Table)
+	isComposite := !m.SimplePrimaryKey
+	ctx := context.Background()
+	var modifiedPositions []int64
+	const tempOffset = 1_000_000
+
+	if err := queries.DeleteParentNodesTx(ctx, tx, mtreeTableName); err != nil {
+		return nil, fmt.Errorf("failed to delete parent nodes: %w", err)
+	}
+
+	currentBlocks := blocksToMerge
+	i := 0
+	for i < len(currentBlocks) {
+		blk := currentBlocks[i]
+		pos := blk.NodePosition
+		start := blk.RangeStart
+		end := blk.RangeEnd
+
+		// Handle last block with null end
+		if (len(end) == 0 || end[0] == nil) && i == len(currentBlocks)-1 {
+			var maxVal []any
+			var err error
+			if isComposite {
+				maxVal, err = queries.GetMaxValCompositeTx(ctx, tx, m.Schema, m.Table, m.Key, start)
+			} else {
+				var simpleMaxVal any
+				simpleMaxVal, err = queries.GetMaxValSimpleTx(ctx, tx, m.Schema, m.Table, m.Key[0], start[0])
+				if err == nil && simpleMaxVal != nil {
+					maxVal = []any{simpleMaxVal}
+				}
+			}
+
+			if err == nil && maxVal != nil {
+				if isComposite {
+					err = queries.UpdateBlockRangeEndCompositeTx(ctx, tx, mtreeTableName, maxVal, pos)
+				} else {
+					err = queries.UpdateBlockRangeEndTx(ctx, tx, mtreeTableName, maxVal[0], pos)
+				}
+				if err != nil {
+					return nil, err
+				}
+				end = maxVal
+				currentBlocks[i].RangeEnd = end
+			}
+		}
+		count, err := queries.GetBlockRowCount(ctx, tx, m.Schema, m.Table, m.Key, isComposite, start, end)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get block row count for block %d: %w", pos, err)
+		}
+
+		if count >= int64(float64(m.BlockSize)*0.25) {
+			i++
+			continue
+		}
+
+		// Try to merge with the previous block
+		if pos > 0 {
+			prevBlock, err := queries.GetBlockWithCountTx(ctx, tx, mtreeTableName, m.Schema, m.Table, m.Key, isComposite, pos-1)
+			if err != nil {
+				return nil, err
+			}
+			if prevBlock != nil && (count+prevBlock.Count) <= int64(m.BlockSize*2) {
+				// Move blocks to temp positions
+				if err := queries.UpdateNodePositionTx(ctx, tx, mtreeTableName, pos-1, pos-1+tempOffset); err != nil {
+					return nil, err
+				}
+				if err := queries.UpdateNodePositionTx(ctx, tx, mtreeTableName, pos, pos+tempOffset); err != nil {
+					return nil, err
+				}
+				// Merge with previous block
+				if isComposite {
+					err = queries.UpdateBlockRangeEndCompositeTx(ctx, tx, mtreeTableName, end, pos-1+tempOffset)
+				} else {
+					err = queries.UpdateBlockRangeEndTx(ctx, tx, mtreeTableName, valueOrNil(end), pos-1+tempOffset)
+				}
+				if err != nil {
+					return nil, err
+				}
+
+				// Delete current block
+				if err := queries.DeleteBlockTx(ctx, tx, mtreeTableName, pos+tempOffset); err != nil {
+					return nil, err
+				}
+				// Move remaining blocks back
+				if err := queries.UpdateNodePositionsSequentialTx(ctx, tx, mtreeTableName, pos); err != nil {
+					return nil, err
+				}
+				if err := queries.UpdateNodePositionTx(ctx, tx, mtreeTableName, pos-1+tempOffset, pos-1); err != nil {
+					return nil, err
+				}
+
+				modifiedPositions = append(modifiedPositions, pos-1)
+
+				// Remove merged block from slice
+				currentBlocks = append(currentBlocks[:i], currentBlocks[i+1:]...)
+				for j := i; j < len(currentBlocks); j++ {
+					currentBlocks[j].NodePosition--
+				}
+				continue
+			}
+		}
+
+		// Try to merge with the next block
+		if i+1 < len(currentBlocks) {
+			nextBlock, err := queries.GetBlockWithCountTx(ctx, tx, mtreeTableName, m.Schema, m.Table, m.Key, isComposite, pos+1)
+			if err != nil {
+				return nil, err
+			}
+			if nextBlock != nil && (count+nextBlock.Count) <= int64(m.BlockSize*2) {
+				// Move blocks to temp positions
+				if err := queries.UpdateNodePositionTx(ctx, tx, mtreeTableName, pos, pos+tempOffset); err != nil {
+					return nil, err
+				}
+				if err := queries.UpdateNodePositionTx(ctx, tx, mtreeTableName, pos+1, pos+1+tempOffset); err != nil {
+					return nil, err
+				}
+				// Merge with next block
+				if isComposite {
+					err = queries.UpdateBlockRangeEndCompositeTx(ctx, tx, mtreeTableName, nextBlock.RangeEnd, pos+tempOffset)
+				} else {
+					err = queries.UpdateBlockRangeEndTx(ctx, tx, mtreeTableName, valueOrNil(nextBlock.RangeEnd), pos+tempOffset)
+				}
+				if err != nil {
+					return nil, err
+				}
+				// Delete next block
+				if err := queries.DeleteBlockTx(ctx, tx, mtreeTableName, pos+1+tempOffset); err != nil {
+					return nil, err
+				}
+				// Move remaining blocks back
+				if err := queries.UpdateNodePositionsSequentialTx(ctx, tx, mtreeTableName, pos+1); err != nil {
+					return nil, err
+				}
+				if err := queries.UpdateNodePositionTx(ctx, tx, mtreeTableName, pos+tempOffset, pos); err != nil {
+					return nil, err
+				}
+				modifiedPositions = append(modifiedPositions, pos)
+
+				currentBlocks = append(currentBlocks[:i+1], currentBlocks[i+2:]...)
+				for j := i + 1; j < len(currentBlocks); j++ {
+					currentBlocks[j].NodePosition--
+				}
+				continue
+			}
+		}
+		i++
+	}
+
+	return modifiedPositions, nil
 }
 
 func (m *MerkleTreeTask) buildParentNodes(conn queries.DBTX) error {
