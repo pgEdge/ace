@@ -238,6 +238,13 @@ type BlockRange struct {
 	RangeEnd     []any `db:"range_end"`
 }
 
+type BlockRangeWithCount struct {
+	NodePosition int64 `db:"node_position"`
+	RangeStart   []any `db:"range_start"`
+	RangeEnd     []any `db:"range_end"`
+	Count        int64 `db:"count"`
+}
+
 // RootNode represents the root of the Merkle tree.
 type RootNode struct {
 	NodePosition int64  `db:"node_position"`
