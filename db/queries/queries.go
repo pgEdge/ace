@@ -94,6 +94,7 @@ type Templates struct {
 	UpdateNodePositionsSequential   *template.Template
 	FindBlocksToSplit               *template.Template
 	FindBlocksToMerge               *template.Template
+	FindBlocksToMergeExpanded       *template.Template
 	GetBlockCountComposite          *template.Template
 	GetBlockCountSimple             *template.Template
 	GetBlockSizeFromMetadata        *template.Template
@@ -104,6 +105,7 @@ type Templates struct {
 	DropMtreeTable                  *template.Template
 	GetBlockRowCount                *template.Template
 	GetBlockWithCount               *template.Template
+	GetBlockWithCountExpanded       *template.Template
 	UpdateNodePosition              *template.Template
 	GetMaxColumnSize                *template.Template
 	UpdateBlockRangeStart           *template.Template
@@ -111,6 +113,12 @@ type Templates struct {
 	GetMinValSimple                 *template.Template
 	GetDirtyAndNewBlocksExpanded    *template.Template
 	FindBlocksToSplitExpanded       *template.Template
+	ResetPositionsByStart           *template.Template
+	ResetPositionsByStartExpanded   *template.Template
+	GetBulkSplitPoints              *template.Template
+	UpdateBlockRangeStartComposite  *template.Template
+	UpdateBlockRangeEndComposite    *template.Template
+	UpdateNodePositionsWithOffset   *template.Template
 }
 
 var SQLTemplates = Templates{
@@ -1013,6 +1021,26 @@ var SQLTemplates = Templates{
 		WHERE actual_rows < $2
 		ORDER BY node_position;
 	`)),
+
+	FindBlocksToMergeExpanded: template.Must(template.New("findBlocksToMergeExpanded").Parse(`
+		WITH BlockCounts AS (
+			SELECT
+				t1.node_position,
+				COUNT(t2.*) AS actual_rows
+			FROM {{.MtreeTable}} t1
+			LEFT JOIN {{.SchemaIdent}}.{{.TableIdent}} t2 ON
+				ROW({{- range $i, $k := .Key}}{{if $i}}, {{end}}t2.{{$k}}{{end}}) >= t1.range_start AND (ROW({{- range $i, $k := .Key}}{{if $i}}, {{end}}t2.{{$k}}{{end}}) <= t1.range_end OR t1.range_end IS NULL)
+			WHERE t1.node_position = ANY($1) AND t1.node_level = 0
+			GROUP BY t1.node_position
+		)
+		SELECT t1.node_position,
+			{{.StartAttrs}},
+			{{.EndAttrs}}
+		FROM {{.MtreeTable}} t1
+		JOIN BlockCounts bc ON bc.node_position = t1.node_position
+		WHERE bc.actual_rows < $2
+		ORDER BY t1.node_position;
+	`)),
 	GetBlockCountComposite: template.Must(template.New("getBlockCountComposite").Parse(`
 		WITH block_data AS (
 			SELECT
@@ -1109,6 +1137,44 @@ var SQLTemplates = Templates{
 		WHERE t1.node_position = $1 AND t1.node_level = 0
 		GROUP BY t1.node_position, t1.range_start, t1.range_end
 	`)),
+
+	GetBlockWithCountExpanded: template.Must(template.New("getBlockWithCountExpanded").Parse(`
+		SELECT t1.node_position,
+			{{.StartAttrs}},
+			{{.EndAttrs}},
+			COUNT(t2.*)
+		FROM {{.MtreeTable}} t1
+		LEFT JOIN {{.SchemaIdent}}.{{.TableIdent}} t2 ON
+			ROW({{- range $i, $k := .Key}}{{if $i}}, {{end}}t2.{{$k}}{{end}}) >= t1.range_start AND (ROW({{- range $i, $k := .Key}}{{if $i}}, {{end}}t2.{{$k}}{{end}}) <= t1.range_end OR t1.range_end IS NULL)
+		WHERE t1.node_position = $1 AND t1.node_level = 0
+		GROUP BY t1.node_position, t1.range_start, t1.range_end
+	`)),
+
+	ResetPositionsByStart: template.Must(template.New("resetPositionsByStart").Parse(`
+		WITH seq AS (
+			SELECT node_position,
+			       row_number() OVER (ORDER BY range_start) - 1 AS pos_seq
+			FROM {{.MtreeTable}}
+			WHERE node_level = 0
+		)
+		UPDATE {{.MtreeTable}} mt
+		SET node_position = s.pos_seq
+		FROM seq s
+		WHERE mt.node_level = 0 AND mt.node_position = s.node_position
+	`)),
+
+	ResetPositionsByStartExpanded: template.Must(template.New("resetPositionsByStartExpanded").Parse(`
+		WITH seq AS (
+			SELECT node_position,
+			       row_number() OVER (ORDER BY {{.StartAttrs}}) - 1 AS pos_seq
+			FROM {{.MtreeTable}}
+			WHERE node_level = 0
+		)
+		UPDATE {{.MtreeTable}} mt
+		SET node_position = s.pos_seq
+		FROM seq s
+		WHERE mt.node_level = 0 AND mt.node_position = s.node_position
+	`)),
 	UpdateNodePosition: template.Must(template.New("updateNodePosition").Parse(`
 		UPDATE {{.MtreeTable}}
 		SET node_position = $1
@@ -1176,6 +1242,37 @@ var SQLTemplates = Templates{
 				AND inserts_since_tree_update >= $1
 				AND node_position = ANY($2)
 		`)),
+	GetBulkSplitPoints: template.Must(template.New("getBulkSplitPoints").Parse(`
+		WITH numbered AS (
+			SELECT
+				{{.PkeyColsStr}},
+				row_number() OVER (ORDER BY {{.PkeyColsStr}}) AS rn
+			FROM
+				{{.SchemaIdent}}.{{.TableIdent}}
+			{{if .WhereClause}}WHERE {{.WhereClause}}{{end}}
+		)
+		SELECT
+			{{.PkeyColsStr}}
+		FROM
+			numbered
+		WHERE
+			rn % {{.BlockSizePlaceholder}} = 0
+		ORDER BY
+			{{.PkeyColsStr}}
+	`)),
+	UpdateBlockRangeStartComposite: template.Must(template.New("updateBlockRangeStartComposite").Parse(`
+		UPDATE {{.MtreeTable}}
+		SET range_start = {{if .IsNull}}NULL{{else}}ROW({{.Placeholders}})::{{.CompositeTypeName}}{{end}}
+		WHERE node_position = {{.NodePositionPlaceholder}}
+	`)),
+	UpdateBlockRangeEndComposite: template.Must(template.New("updateBlockRangeEndComposite").Parse(`
+		UPDATE {{.MtreeTable}}
+		SET range_end = {{if .IsNull}}NULL{{else}}ROW({{.Placeholders}})::{{.CompositeTypeName}}{{end}}
+		WHERE node_position = {{.NodePositionPlaceholder}}
+	`)),
+	UpdateNodePositionsWithOffset: template.Must(template.New("updateNodePositionsWithOffset").Parse(`
+		UPDATE {{.MtreeTable}} SET node_position = node_position + $1 WHERE node_level = 0
+	`)),
 }
 
 // For mocking
@@ -2884,27 +2981,33 @@ func InsertCompositeBlockRangesTx(ctx context.Context, tx pgx.Tx, mtreeTable str
 	return nil
 }
 
-func UpdateBlockRangeEndCompositeTx(ctx context.Context, tx pgx.Tx, mtreeTable string, endVals []any, nodePosition int64) error {
-	ph := make([]string, len(endVals))
-	args := make([]any, 0, len(endVals)+1)
-	for i := range endVals {
-		ph[i] = fmt.Sprintf("$%d", i+1)
-		args = append(args, endVals[i])
-	}
-	args = append(args, nodePosition)
+func UpdateBlockRangeEndCompositeTx(ctx context.Context, tx pgx.Tx, mtreeTable string, compositeTypeName string, endVals []any, pos int64) error {
+	args := []any{}
+	isNull := len(endVals) == 0
 
-	data := map[string]interface{}{
-		"MtreeTable":   mtreeTable,
-		"RangeEndExpr": fmt.Sprintf("ROW(%s)", strings.Join(ph, ", ")),
-		"NodePosition": fmt.Sprintf("$%d", len(endVals)+1),
+	data := map[string]any{
+		"MtreeTable":              pgx.Identifier{mtreeTable}.Sanitize(),
+		"IsNull":                  isNull,
+		"CompositeTypeName":       pgx.Identifier{compositeTypeName}.Sanitize(),
+		"NodePositionPlaceholder": fmt.Sprintf("$%d", len(endVals)+1),
 	}
 
-	stmt, err := RenderSQL(SQLTemplates.UpdateBlockRangeEnd, data)
+	if !isNull {
+		placeholders := make([]string, len(endVals))
+		for i, val := range endVals {
+			placeholders[i] = fmt.Sprintf("$%d", i+1)
+			args = append(args, val)
+		}
+		data["Placeholders"] = strings.Join(placeholders, ", ")
+	}
+	args = append(args, pos)
+
+	sql, err := RenderSQL(SQLTemplates.UpdateBlockRangeEndComposite, data)
 	if err != nil {
-		return fmt.Errorf("failed to render UpdateBlockRangeEnd SQL: %w", err)
+		return fmt.Errorf("failed to render UpdateBlockRangeEndCompositeTx SQL: %w", err)
 	}
 
-	if _, err := tx.Exec(ctx, stmt, args...); err != nil {
+	if _, err := tx.Exec(ctx, sql, args...); err != nil {
 		return fmt.Errorf("query to update composite block range end for '%s' failed: %w", mtreeTable, err)
 	}
 	return nil
@@ -2926,26 +3029,33 @@ func UpdateBlockRangeStartTx(ctx context.Context, tx pgx.Tx, mtreeTable string, 
 	return nil
 }
 
-func UpdateBlockRangeStartCompositeTx(ctx context.Context, tx pgx.Tx, mtreeTable string, startVals []any, nodePosition int64) error {
-	ph := make([]string, len(startVals))
-	args := make([]any, 0, len(startVals)+1)
-	for i := range startVals {
-		ph[i] = fmt.Sprintf("$%d", i+1)
-		args = append(args, startVals[i])
-	}
-	args = append(args, nodePosition)
+func UpdateBlockRangeStartCompositeTx(ctx context.Context, tx pgx.Tx, mtreeTable string, compositeTypeName string, startVals []any, pos int64) error {
+	args := []any{}
+	isNull := len(startVals) == 0
 
-	data := map[string]interface{}{
-		"MtreeTable":     mtreeTable,
-		"RangeStartExpr": fmt.Sprintf("ROW(%s)", strings.Join(ph, ", ")),
-		"NodePosition":   fmt.Sprintf("$%d", len(startVals)+1),
+	data := map[string]any{
+		"MtreeTable":              pgx.Identifier{mtreeTable}.Sanitize(),
+		"IsNull":                  isNull,
+		"CompositeTypeName":       pgx.Identifier{compositeTypeName}.Sanitize(),
+		"NodePositionPlaceholder": fmt.Sprintf("$%d", len(startVals)+1),
 	}
 
-	stmt, err := RenderSQL(SQLTemplates.UpdateBlockRangeStart, data)
+	if !isNull {
+		placeholders := make([]string, len(startVals))
+		for i, val := range startVals {
+			placeholders[i] = fmt.Sprintf("$%d", i+1)
+			args = append(args, val)
+		}
+		data["Placeholders"] = strings.Join(placeholders, ", ")
+	}
+	args = append(args, pos)
+
+	sql, err := RenderSQL(SQLTemplates.UpdateBlockRangeStartComposite, data)
 	if err != nil {
-		return fmt.Errorf("failed to render UpdateBlockRangeStart SQL: %w", err)
+		return fmt.Errorf("failed to render UpdateBlockRangeStartCompositeTx SQL: %w", err)
 	}
-	if _, err := tx.Exec(ctx, stmt, args...); err != nil {
+
+	if _, err := tx.Exec(ctx, sql, args...); err != nil {
 		return fmt.Errorf("query to update composite block range start for '%s' failed: %w", mtreeTable, err)
 	}
 	return nil
@@ -3216,6 +3326,20 @@ func FindBlocksToMergeSimple(ctx context.Context, db *pgxpool.Pool, mtreeTable, 
 }
 
 func findBlocksToMerge(ctx context.Context, db DBTX, mtreeTable, schema, table string, key []string, simplePrimaryKey bool, nodePositions []int64, mergeThreshold float64) ([]types.BlockRange, error) {
+	// Expand candidate positions to include adjacent neighbors
+	posSet := make(map[int64]struct{}, len(nodePositions)*3)
+	for _, p := range nodePositions {
+		posSet[p] = struct{}{}
+		if p > 0 {
+			posSet[p-1] = struct{}{}
+		}
+		posSet[p+1] = struct{}{}
+	}
+	expandedPositions := make([]int64, 0, len(posSet))
+	for p := range posSet {
+		expandedPositions = append(expandedPositions, p)
+	}
+
 	sanitizedKeys := make([]string, len(key))
 	for i, k := range key {
 		sanitizedKeys[i] = pgx.Identifier{k}.Sanitize()
@@ -3227,54 +3351,97 @@ func findBlocksToMerge(ctx context.Context, db DBTX, mtreeTable, schema, table s
 	}
 	mergeThresholdValue := float64(blockSize) * mergeThreshold
 
-	data := map[string]any{
-		"MtreeTable":       mtreeTable,
-		"SchemaIdent":      pgx.Identifier{schema}.Sanitize(),
-		"TableIdent":       pgx.Identifier{table}.Sanitize(),
-		"SimplePrimaryKey": simplePrimaryKey,
-		"Key":              sanitizedKeys,
-	}
-
-	sql, err := RenderSQL(SQLTemplates.FindBlocksToMerge, data)
-	if err != nil {
-		return nil, fmt.Errorf("failed to render FindBlocksToMerge SQL: %w", err)
-	}
-
-	rows, err := db.Query(ctx, sql, nodePositions, mergeThresholdValue)
-	if err != nil {
-		return nil, fmt.Errorf("query to find blocks to merge for '%s' failed: %w", mtreeTable, err)
-	}
-	defer rows.Close()
-
-	var blocks []types.BlockRange
-	for rows.Next() {
-		var br types.BlockRange
-		if simplePrimaryKey {
+	if simplePrimaryKey {
+		data := map[string]any{
+			"MtreeTable":       mtreeTable,
+			"SchemaIdent":      pgx.Identifier{schema}.Sanitize(),
+			"TableIdent":       pgx.Identifier{table}.Sanitize(),
+			"SimplePrimaryKey": simplePrimaryKey,
+			"Key":              sanitizedKeys,
+		}
+		sql, err := RenderSQL(SQLTemplates.FindBlocksToMerge, data)
+		if err != nil {
+			return nil, fmt.Errorf("failed to render FindBlocksToMerge SQL: %w", err)
+		}
+		rows, err := db.Query(ctx, sql, expandedPositions, mergeThresholdValue)
+		if err != nil {
+			return nil, fmt.Errorf("query to find blocks to merge for '%s' failed: %w", mtreeTable, err)
+		}
+		defer rows.Close()
+		var blocks []types.BlockRange
+		for rows.Next() {
+			var br types.BlockRange
 			var start, end any
 			if err := rows.Scan(&br.NodePosition, &start, &end); err != nil {
 				return nil, fmt.Errorf("failed to scan block to merge: %w", err)
 			}
 			br.RangeStart = []any{start}
 			br.RangeEnd = []any{end}
-		} else {
-			var start, end pgtype.CompositeType
-			if err := rows.Scan(&br.NodePosition, &start, &end); err != nil {
-				return nil, fmt.Errorf("failed to scan composite block to merge: %w", err)
-			}
-			if err := start.AssignTo(&br.RangeStart); err != nil {
-				return nil, fmt.Errorf("failed to assign start range: %w", err)
-			}
-			if err := end.AssignTo(&br.RangeEnd); err != nil {
-				return nil, fmt.Errorf("failed to assign end range: %w", err)
-			}
+			blocks = append(blocks, br)
 		}
+		if err := rows.Err(); err != nil {
+			return nil, fmt.Errorf("error iterating over blocks to merge: %w", err)
+		}
+		return blocks, nil
+	}
+
+	// Composite key path: expand attributes to avoid binary composite decoding
+	startAttrs := make([]string, len(key))
+	endAttrs := make([]string, len(key))
+	for i, k := range key {
+		attr := pgx.Identifier{k}.Sanitize()
+		startAttrs[i] = fmt.Sprintf("(range_start).%s", attr)
+		endAttrs[i] = fmt.Sprintf("(range_end).%s", attr)
+	}
+	data := map[string]any{
+		"MtreeTable":  pgx.Identifier{mtreeTable}.Sanitize(),
+		"SchemaIdent": pgx.Identifier{schema}.Sanitize(),
+		"TableIdent":  pgx.Identifier{table}.Sanitize(),
+		"Key":         sanitizedKeys,
+		"StartAttrs":  strings.Join(startAttrs, ", "),
+		"EndAttrs":    strings.Join(endAttrs, ", "),
+	}
+	sql, err := RenderSQL(SQLTemplates.FindBlocksToMergeExpanded, data)
+	if err != nil {
+		return nil, fmt.Errorf("failed to render FindBlocksToMergeExpanded SQL: %w", err)
+	}
+	rows, err := db.Query(ctx, sql, expandedPositions, mergeThresholdValue)
+	if err != nil {
+		return nil, fmt.Errorf("query to find blocks to merge for '%s' failed: %w", mtreeTable, err)
+	}
+	defer rows.Close()
+	var blocks []types.BlockRange
+	for rows.Next() {
+		dest := make([]any, 1+len(key)+len(key))
+		destPtrs := make([]any, len(dest))
+		for i := range destPtrs {
+			destPtrs[i] = &dest[i]
+		}
+		if err := rows.Scan(destPtrs...); err != nil {
+			return nil, fmt.Errorf("failed to scan expanded block to merge: %w", err)
+		}
+		var br types.BlockRange
+		switch v := dest[0].(type) {
+		case int64:
+			br.NodePosition = v
+		case int32:
+			br.NodePosition = int64(v)
+		case int:
+			br.NodePosition = int64(v)
+		default:
+			return nil, fmt.Errorf("unexpected type for node_position: %T", dest[0])
+		}
+		startVals := make([]any, len(key))
+		endVals := make([]any, len(key))
+		copy(startVals, dest[1:1+len(key)])
+		copy(endVals, dest[1+len(key):])
+		br.RangeStart = startVals
+		br.RangeEnd = endVals
 		blocks = append(blocks, br)
 	}
-
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("error iterating over blocks to merge: %w", err)
+		return nil, fmt.Errorf("error iterating over expanded blocks to merge: %w", err)
 	}
-
 	return blocks, nil
 }
 
@@ -3437,7 +3604,23 @@ func GetBlockWithCountTx(ctx context.Context, tx pgx.Tx, mtreeTable, schema, tab
 		"Key":         sanitizedKeys,
 	}
 
-	query, err := RenderSQL(SQLTemplates.GetBlockWithCount, data)
+	var query string
+	var err error
+	if isComposite {
+		// Expand attributes to avoid composite binary scan
+		startAttrs := make([]string, len(key))
+		endAttrs := make([]string, len(key))
+		for i, k := range key {
+			attr := pgx.Identifier{k}.Sanitize()
+			startAttrs[i] = fmt.Sprintf("(range_start).%s", attr)
+			endAttrs[i] = fmt.Sprintf("(range_end).%s", attr)
+		}
+		data["StartAttrs"] = strings.Join(startAttrs, ", ")
+		data["EndAttrs"] = strings.Join(endAttrs, ", ")
+		query, err = RenderSQL(SQLTemplates.GetBlockWithCountExpanded, data)
+	} else {
+		query, err = RenderSQL(SQLTemplates.GetBlockWithCount, data)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("failed to render GetBlockWithCount SQL: %w", err)
 	}
@@ -3449,13 +3632,42 @@ func GetBlockWithCountTx(ctx context.Context, tx pgx.Tx, mtreeTable, schema, tab
 	row := tx.QueryRow(ctx, query, position)
 
 	if isComposite {
-		err := row.Scan(&block.NodePosition, &block.RangeStart, &block.RangeEnd, &count)
-		if err != nil {
+		// node_position, start attrs..., end attrs..., count
+		dest := make([]any, 1+len(key)+len(key)+1)
+		destPtrs := make([]any, len(dest))
+		for i := range destPtrs {
+			destPtrs[i] = &dest[i]
+		}
+		if err := row.Scan(destPtrs...); err != nil {
 			if err == pgx.ErrNoRows {
 				return nil, nil
 			}
 			return nil, err
 		}
+		if v, ok := dest[0].(int64); ok {
+			block.NodePosition = v
+		} else if v2, ok := dest[0].(int32); ok {
+			block.NodePosition = int64(v2)
+		} else if v3, ok := dest[0].(int); ok {
+			block.NodePosition = int64(v3)
+		} else {
+			return nil, fmt.Errorf("unexpected type for node_position: %T", dest[0])
+		}
+		startVals := make([]any, len(key))
+		endVals := make([]any, len(key))
+		copy(startVals, dest[1:1+len(key)])
+		copy(endVals, dest[1+len(key):1+len(key)+len(key)])
+		if c, ok := dest[len(dest)-1].(int64); ok {
+			count = c
+		} else if c2, ok := dest[len(dest)-1].(int32); ok {
+			count = int64(c2)
+		} else if c3, ok := dest[len(dest)-1].(int); ok {
+			count = int64(c3)
+		} else {
+			return nil, fmt.Errorf("unexpected type for count: %T", dest[len(dest)-1])
+		}
+		block.RangeStart = startVals
+		block.RangeEnd = endVals
 	} else {
 		err := row.Scan(&block.NodePosition, &start, &end, &count)
 		if err != nil {
@@ -3503,8 +3715,33 @@ func UpdateNodePositionsSequentialTx(ctx context.Context, tx pgx.Tx, mtreeTable 
 	if err != nil {
 		return fmt.Errorf("failed to render UpdateNodePositionsSequential SQL: %w", err)
 	}
-	_, err = tx.Exec(ctx, query, startPosition)
+	_, err = tx.Exec(ctx, query, startPosition, startPosition)
 	return err
+}
+
+func ResetPositionsByStartTx(ctx context.Context, tx pgx.Tx, mtreeTable string, key []string, isComposite bool) error {
+	data := map[string]any{
+		"MtreeTable": pgx.Identifier{mtreeTable}.Sanitize(),
+	}
+	var query string
+	var err error
+	if isComposite {
+		startAttrs := make([]string, len(key))
+		for i, k := range key {
+			startAttrs[i] = fmt.Sprintf("(range_start).%s", pgx.Identifier{k}.Sanitize())
+		}
+		data["StartAttrs"] = strings.Join(startAttrs, ", ")
+		query, err = RenderSQL(SQLTemplates.ResetPositionsByStartExpanded, data)
+	} else {
+		query, err = RenderSQL(SQLTemplates.ResetPositionsByStart, data)
+	}
+	if err != nil {
+		return fmt.Errorf("failed to render ResetPositionsByStart SQL: %w", err)
+	}
+	if _, err := tx.Exec(ctx, query); err != nil {
+		return fmt.Errorf("query to reset positions failed: %w", err)
+	}
+	return nil
 }
 
 func ComputeLeafHashesTx(ctx context.Context, tx pgx.Tx, schema, table string, cols []string, simpleKey bool, key []string, start []any, end []any) ([]byte, error) {
@@ -3543,4 +3780,107 @@ func UpdateLeafHashesTx(ctx context.Context, tx pgx.Tx, mtreeTable string, leafH
 		return 0, fmt.Errorf("query to update leaf hashes for '%s' failed: %w", mtreeTable, err)
 	}
 	return updatedPos, nil
+}
+
+func UpdateNodePositionsTempTx(ctx context.Context, tx pgx.Tx, mtreeTable string, offset int64) error {
+	data := map[string]any{
+		"MtreeTable": pgx.Identifier{mtreeTable}.Sanitize(),
+	}
+	sql, err := RenderSQL(SQLTemplates.UpdateNodePositionsWithOffset, data)
+	if err != nil {
+		return fmt.Errorf("failed to render UpdateNodePositionsTempTx SQL: %w", err)
+	}
+	if _, err := tx.Exec(ctx, sql, offset); err != nil {
+		return fmt.Errorf("query to update node positions to temp failed: %w", err)
+	}
+	return nil
+}
+
+func GetBulkSplitPointsTx(ctx context.Context, tx pgx.Tx, schema, table string, key []string, isComposite bool, start, end []any, blockSize int) ([][]any, error) {
+	args := []any{}
+	paramIndex := 1
+
+	sanitisedKeyCols := make([]string, len(key))
+	for i, k := range key {
+		sanitisedKeyCols[i] = pgx.Identifier{k}.Sanitize()
+	}
+	pkeyColsStr := strings.Join(sanitisedKeyCols, ", ")
+
+	var conditions []string
+	if start != nil {
+		if isComposite {
+			placeholders := make([]string, len(key))
+			for i := 0; i < len(key); i++ {
+				placeholders[i] = fmt.Sprintf("$%d", paramIndex+i)
+			}
+			conditions = append(conditions, fmt.Sprintf("(%s) >= (%s)", pkeyColsStr, strings.Join(placeholders, ", ")))
+			args = append(args, start...)
+			paramIndex += len(key)
+		} else {
+			conditions = append(conditions, fmt.Sprintf("%s >= $%d", sanitisedKeyCols[0], paramIndex))
+			args = append(args, start[0])
+			paramIndex++
+		}
+	}
+	if end != nil {
+		if isComposite {
+			placeholders := make([]string, len(key))
+			for i := 0; i < len(key); i++ {
+				placeholders[i] = fmt.Sprintf("$%d", paramIndex+i)
+			}
+			conditions = append(conditions, fmt.Sprintf("(%s) <= (%s)", pkeyColsStr, strings.Join(placeholders, ", ")))
+			args = append(args, end...)
+			paramIndex += len(key)
+		} else {
+			conditions = append(conditions, fmt.Sprintf("%s <= $%d", sanitisedKeyCols[0], paramIndex))
+			args = append(args, end[0])
+			paramIndex++
+		}
+	}
+
+	whereClause := ""
+	if len(conditions) > 0 {
+		whereClause = strings.Join(conditions, " AND ")
+	}
+
+	blockSizePlaceholder := fmt.Sprintf("$%d", paramIndex)
+	args = append(args, blockSize)
+
+	data := map[string]any{
+		"SchemaIdent":          pgx.Identifier{schema}.Sanitize(),
+		"TableIdent":           pgx.Identifier{table}.Sanitize(),
+		"PkeyColsStr":          pkeyColsStr,
+		"WhereClause":          whereClause,
+		"BlockSizePlaceholder": blockSizePlaceholder,
+	}
+
+	query, err := RenderSQL(SQLTemplates.GetBulkSplitPoints, data)
+	if err != nil {
+		return nil, fmt.Errorf("failed to render GetBulkSplitPoints SQL: %w", err)
+	}
+
+	rows, err := tx.Query(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("failed to execute bulk split points query: %w", err)
+	}
+	defer rows.Close()
+
+	var splitPoints [][]any
+	for rows.Next() {
+		dest := make([]any, len(key))
+		destPtrs := make([]any, len(key))
+		for i := range dest {
+			destPtrs[i] = &dest[i]
+		}
+		if err := rows.Scan(destPtrs...); err != nil {
+			return nil, fmt.Errorf("failed to scan split point row: %w", err)
+		}
+		splitPoints = append(splitPoints, dest)
+	}
+
+	if rows.Err() != nil {
+		return nil, fmt.Errorf("error iterating over split point rows: %w", rows.Err())
+	}
+
+	return splitPoints, nil
 }
