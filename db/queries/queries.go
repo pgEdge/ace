@@ -1013,12 +1013,13 @@ var SQLTemplates = Templates{
 				{{else}}
 					ROW({{- range $i, $k := .Key}}{{if $i}}, {{end}}t2.{{$k}}{{end}}) >= t1.range_start AND (ROW({{- range $i, $k := .Key}}{{if $i}}, {{end}}t2.{{$k}}{{end}}) <= t1.range_end OR t1.range_end IS NULL)
 				{{end}}
-			WHERE t1.node_position = ANY($1) AND t1.node_level = 0
+			WHERE t1.node_level = 0
+			{{if .UsePositionFilter}} AND t1.node_position = ANY({{.PositionPlaceholder}}){{end}}
 			GROUP BY t1.node_position, t1.range_start, t1.range_end
 		)
 		SELECT node_position, range_start, range_end
 		FROM BlockCounts
-		WHERE actual_rows < $2
+		WHERE actual_rows < {{.MergeValPlaceholder}}
 		ORDER BY node_position;
 	`)),
 
@@ -1030,7 +1031,8 @@ var SQLTemplates = Templates{
 			FROM {{.MtreeTable}} t1
 			LEFT JOIN {{.SchemaIdent}}.{{.TableIdent}} t2 ON
 				ROW({{- range $i, $k := .Key}}{{if $i}}, {{end}}t2.{{$k}}{{end}}) >= t1.range_start AND (ROW({{- range $i, $k := .Key}}{{if $i}}, {{end}}t2.{{$k}}{{end}}) <= t1.range_end OR t1.range_end IS NULL)
-			WHERE t1.node_position = ANY($1) AND t1.node_level = 0
+			WHERE t1.node_level = 0
+			{{if .UsePositionFilter}} AND t1.node_position = ANY({{.PositionPlaceholder}}){{end}}
 			GROUP BY t1.node_position
 		)
 		SELECT t1.node_position,
@@ -1038,7 +1040,7 @@ var SQLTemplates = Templates{
 			{{.EndAttrs}}
 		FROM {{.MtreeTable}} t1
 		JOIN BlockCounts bc ON bc.node_position = t1.node_position
-		WHERE bc.actual_rows < $2
+		WHERE bc.actual_rows < {{.MergeValPlaceholder}}
 		ORDER BY t1.node_position;
 	`)),
 	GetBlockCountComposite: template.Must(template.New("getBlockCountComposite").Parse(`
@@ -3326,18 +3328,24 @@ func FindBlocksToMergeSimple(ctx context.Context, db *pgxpool.Pool, mtreeTable, 
 }
 
 func findBlocksToMerge(ctx context.Context, db DBTX, mtreeTable, schema, table string, key []string, simplePrimaryKey bool, nodePositions []int64, mergeThreshold float64) ([]types.BlockRange, error) {
-	// Expand candidate positions to include adjacent neighbors
-	posSet := make(map[int64]struct{}, len(nodePositions)*3)
-	for _, p := range nodePositions {
-		posSet[p] = struct{}{}
-		if p > 0 {
-			posSet[p-1] = struct{}{}
+	var queryArgs []any
+	usePositionFilter := len(nodePositions) > 0
+
+	if usePositionFilter {
+		// Expand candidate positions to include adjacent neighbours
+		posSet := make(map[int64]struct{}, len(nodePositions)*3)
+		for _, p := range nodePositions {
+			posSet[p] = struct{}{}
+			if p > 0 {
+				posSet[p-1] = struct{}{}
+			}
+			posSet[p+1] = struct{}{}
 		}
-		posSet[p+1] = struct{}{}
-	}
-	expandedPositions := make([]int64, 0, len(posSet))
-	for p := range posSet {
-		expandedPositions = append(expandedPositions, p)
+		expandedPositions := make([]int64, 0, len(posSet))
+		for p := range posSet {
+			expandedPositions = append(expandedPositions, p)
+		}
+		queryArgs = append(queryArgs, expandedPositions)
 	}
 
 	sanitizedKeys := make([]string, len(key))
@@ -3350,20 +3358,24 @@ func findBlocksToMerge(ctx context.Context, db DBTX, mtreeTable, schema, table s
 		return nil, err
 	}
 	mergeThresholdValue := float64(blockSize) * mergeThreshold
+	queryArgs = append(queryArgs, mergeThresholdValue)
 
 	if simplePrimaryKey {
 		data := map[string]any{
-			"MtreeTable":       mtreeTable,
-			"SchemaIdent":      pgx.Identifier{schema}.Sanitize(),
-			"TableIdent":       pgx.Identifier{table}.Sanitize(),
-			"SimplePrimaryKey": simplePrimaryKey,
-			"Key":              sanitizedKeys,
+			"MtreeTable":          mtreeTable,
+			"SchemaIdent":         pgx.Identifier{schema}.Sanitize(),
+			"TableIdent":          pgx.Identifier{table}.Sanitize(),
+			"SimplePrimaryKey":    simplePrimaryKey,
+			"Key":                 sanitizedKeys,
+			"UsePositionFilter":   usePositionFilter,
+			"PositionPlaceholder": "$1",
+			"MergeValPlaceholder": fmt.Sprintf("$%d", len(queryArgs)),
 		}
 		sql, err := RenderSQL(SQLTemplates.FindBlocksToMerge, data)
 		if err != nil {
 			return nil, fmt.Errorf("failed to render FindBlocksToMerge SQL: %w", err)
 		}
-		rows, err := db.Query(ctx, sql, expandedPositions, mergeThresholdValue)
+		rows, err := db.Query(ctx, sql, queryArgs...)
 		if err != nil {
 			return nil, fmt.Errorf("query to find blocks to merge for '%s' failed: %w", mtreeTable, err)
 		}
@@ -3394,18 +3406,21 @@ func findBlocksToMerge(ctx context.Context, db DBTX, mtreeTable, schema, table s
 		endAttrs[i] = fmt.Sprintf("(range_end).%s", attr)
 	}
 	data := map[string]any{
-		"MtreeTable":  pgx.Identifier{mtreeTable}.Sanitize(),
-		"SchemaIdent": pgx.Identifier{schema}.Sanitize(),
-		"TableIdent":  pgx.Identifier{table}.Sanitize(),
-		"Key":         sanitizedKeys,
-		"StartAttrs":  strings.Join(startAttrs, ", "),
-		"EndAttrs":    strings.Join(endAttrs, ", "),
+		"MtreeTable":          pgx.Identifier{mtreeTable}.Sanitize(),
+		"SchemaIdent":         pgx.Identifier{schema}.Sanitize(),
+		"TableIdent":          pgx.Identifier{table}.Sanitize(),
+		"Key":                 sanitizedKeys,
+		"StartAttrs":          strings.Join(startAttrs, ", "),
+		"EndAttrs":            strings.Join(endAttrs, ", "),
+		"UsePositionFilter":   usePositionFilter,
+		"PositionPlaceholder": "$1",
+		"MergeValPlaceholder": fmt.Sprintf("$%d", len(queryArgs)),
 	}
 	sql, err := RenderSQL(SQLTemplates.FindBlocksToMergeExpanded, data)
 	if err != nil {
 		return nil, fmt.Errorf("failed to render FindBlocksToMergeExpanded SQL: %w", err)
 	}
-	rows, err := db.Query(ctx, sql, expandedPositions, mergeThresholdValue)
+	rows, err := db.Query(ctx, sql, queryArgs...)
 	if err != nil {
 		return nil, fmt.Errorf("query to find blocks to merge for '%s' failed: %w", mtreeTable, err)
 	}
