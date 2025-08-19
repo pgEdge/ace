@@ -20,7 +20,7 @@ import (
 type Config struct {
 	Postgres  PostgresConfig `yaml:"postgres"`
 	TableDiff DiffConfig     `yaml:"table_diff"`
-	MTree     MTreeConfig    `yaml:"mtree_diff"`
+	MTree     MTreeConfig    `yaml:"mtree"`
 	Server    ServerConfig   `yaml:"server"`
 
 	ScheduleJobs   []JobDef   `yaml:"schedule_jobs"`
@@ -50,9 +50,15 @@ type DiffConfig struct {
 }
 
 type MTreeConfig struct {
-	MinBlockSize int `yaml:"min_block_size"`
-	BlockSize    int `yaml:"block_size"`
-	MaxBlockSize int `yaml:"max_block_size"`
+	CDC struct {
+		SlotName        string `yaml:"slot_name"`
+		PublicationName string `yaml:"publication_name"`
+	} `yaml:"cdc"`
+	Diff struct {
+		MinBlockSize int `yaml:"min_block_size"`
+		BlockSize    int `yaml:"block_size"`
+		MaxBlockSize int `yaml:"max_block_size"`
+	} `yaml:"diff"`
 }
 
 type ServerConfig struct {
