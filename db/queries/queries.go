@@ -2802,17 +2802,38 @@ func DropCDCMetadataTable(ctx context.Context, db *pgxpool.Pool) error {
 }
 
 func GetCDCMetadata(ctx context.Context, db *pgxpool.Pool, publicationName string) (string, string, []string, error) {
-	var slotName, startLSN string
-	var tables []string
 	sql, err := RenderSQL(SQLTemplates.GetCDCMetadata, nil)
 	if err != nil {
-		return "", "", nil, fmt.Errorf("failed to render GetCDCMetadata SQL: %w", err)
+		return "", "", nil, err
 	}
-
+	var slotName, startLSN string
+	var tables []string
 	err = db.QueryRow(ctx, sql, publicationName).Scan(&slotName, &startLSN, &tables)
 	if err != nil {
-		return "", "", nil, fmt.Errorf("query to get cdc metadata failed: %w", err)
+		return "", "", nil, err
+	}
+	return slotName, startLSN, tables, nil
+}
+
+func UpdateMtreeCounters(ctx context.Context, db *pgxpool.Pool, mtreeTable string, isComposite bool, compositeTypeName string, inserts, deletes []string) error {
+	sql, err := RenderSQL(SQLTemplates.UpdateMtreeCounters, struct {
+		MtreeTable        string
+		IsComposite       bool
+		CompositeTypeName string
+	}{
+		MtreeTable:        mtreeTable,
+		IsComposite:       isComposite,
+		CompositeTypeName: compositeTypeName,
+	})
+	if err != nil {
+		return err
 	}
 
-	return slotName, startLSN, tables, nil
+	args := pgx.NamedArgs{
+		"inserts": inserts,
+		"deletes": deletes,
+	}
+
+	_, err = db.Exec(ctx, sql, args)
+	return err
 }

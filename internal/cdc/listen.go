@@ -1,3 +1,14 @@
+// ///////////////////////////////////////////////////////////////////////////
+//
+// # ACE - Active Consistency Engine
+//
+// Copyright (C) 2023 - 2025, pgEdge (https://www.pgedge.com/)
+//
+// This software is released under the pgEdge Community License:
+//
+//	https://www.pgedge.com/communitylicense
+//
+// ///////////////////////////////////////////////////////////////////////////
 package cdc
 
 import (
@@ -9,11 +20,25 @@ import (
 	"github.com/jackc/pglogrepl"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgproto3"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/pgedge/ace/db/queries"
 	"github.com/pgedge/ace/internal/auth"
 	"github.com/pgedge/ace/pkg/config"
 	"github.com/pgedge/ace/pkg/logger"
 )
+
+// Since we're using the native pgoutput plugin, there are some wire protocol
+// specifics that need to be used for parsing the messages. pglogrepl helps
+// abstract away a lot of the low-level details, but wherever raw codes, flags, OIDs,
+// etc. are used, we have provided the necessary context when needed.
+
+type cdcMsg struct {
+	operation string
+	schema    string
+	table     string
+	relation  *pglogrepl.RelationMessage
+	tuple     *pglogrepl.TupleData
+}
 
 func ListenForChanges(nodeInfo map[string]any) {
 	pool, err := auth.GetClusterNodeConnection(nodeInfo, "")
@@ -34,10 +59,8 @@ func ListenForChanges(nodeInfo map[string]any) {
 		logger.Error("failed to parse lsn: %v", err)
 	}
 
-	conn, err := auth.GetReplModeConnection(nodeInfo)
-	if err != nil {
-		logger.Error("failed to get replication connection: %v", err)
-	}
+	var lastLSN pglogrepl.LSN = startLSN
+	var conn *pgconn.PgConn
 
 	opts := pglogrepl.StartReplicationOptions{
 		PluginArgs: []string{
@@ -45,135 +68,262 @@ func ListenForChanges(nodeInfo map[string]any) {
 			fmt.Sprintf("publication_names '%s'", publication),
 		},
 	}
-	if err := pglogrepl.StartReplication(context.Background(), conn, slotName, startLSN, opts); err != nil {
-		logger.Error("StartReplication failed: %v", err)
+
+	connect := func() (*pgconn.PgConn, error) {
+		c, err := auth.GetReplModeConnection(nodeInfo)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get replication connection: %w", err)
+		}
+
+		if err := pglogrepl.StartReplication(context.Background(), c, slotName, lastLSN, opts); err != nil {
+			c.Close(context.Background())
+			return nil, fmt.Errorf("StartReplication failed: %w", err)
+		}
+		logger.Info("Logical replication started on slot %s from LSN %s", slotName, lastLSN)
+		return c, nil
 	}
-	logger.Info("Logical replication started on slot %s", slotName)
+
+	conn, err = connect()
+	if err != nil {
+		logger.Error("initial connection failed: %v", err)
+	}
 
 	ctx := context.Background()
-	defer conn.Close(ctx)
 
-	statusTick := time.NewTicker(10 * time.Second)
-	defer statusTick.Stop()
-
-	var lastLSN pglogrepl.LSN = startLSN
 	relations := make(map[uint32]*pglogrepl.RelationMessage)
+	nextStandbyMessageDeadline := time.Now().Add(10 * time.Second)
+
+	txChanges := make(map[uint32][]cdcMsg)
+	var currentXID uint32
 
 	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-statusTick.C:
+		if conn == nil {
+			logger.Info("No connection, trying to reconnect...")
+			conn, err = connect()
+			if err != nil {
+				logger.Error("reconnect failed: %v", err)
+				time.Sleep(5 * time.Second)
+			}
+			nextStandbyMessageDeadline = time.Now().Add(10 * time.Second)
+			continue
+		}
+
+		if time.Now().After(nextStandbyMessageDeadline) {
 			if err := pglogrepl.SendStandbyStatusUpdate(ctx, conn, pglogrepl.StandbyStatusUpdate{WALWritePosition: lastLSN}); err != nil {
+				conn.Close(ctx)
+				conn = nil
 				logger.Error("SendStandbyStatusUpdate failed: %v", err)
+				continue
 			}
 			logger.Info("Sent Standby status update with LSN %s", lastLSN)
-		default:
-			ctx, cancel := context.WithTimeout(context.Background(), time.Second*5)
-			msg, err := conn.ReceiveMessage(ctx)
-			cancel()
-			if err != nil {
-				if pgconn.Timeout(err) {
+			nextStandbyMessageDeadline = time.Now().Add(10 * time.Second)
+		}
+
+		timeout := time.Until(nextStandbyMessageDeadline)
+		if timeout < 0 {
+			timeout = 0
+		}
+
+		rCtx, cancel := context.WithTimeout(ctx, timeout)
+		msg, err := conn.ReceiveMessage(rCtx)
+		cancel()
+
+		if err != nil {
+			if pgconn.Timeout(err) {
+				continue
+			}
+			conn.Close(ctx)
+			conn = nil
+			logger.Error("ReceiveMessage failed: %v", err)
+			continue
+		}
+
+		switch msg := msg.(type) {
+		case *pgproto3.CopyData:
+			switch msg.Data[0] {
+			case pglogrepl.PrimaryKeepaliveMessageByteID:
+				pkm, err := pglogrepl.ParsePrimaryKeepaliveMessage(msg.Data[1:])
+				if err != nil {
+					logger.Error("ParsePrimaryKeepaliveMessage failed: %v", err)
 					continue
 				}
-				logger.Error("ReceiveMessage failed: %v", err)
+				logger.Info("Primary Keepalive Message => ServerWALEnd: %s, ServerTime: %s, ReplyRequested: %t", pkm.ServerWALEnd, pkm.ServerTime, pkm.ReplyRequested)
+
+				if pkm.ReplyRequested {
+					if err := pglogrepl.SendStandbyStatusUpdate(ctx, conn, pglogrepl.StandbyStatusUpdate{WALWritePosition: lastLSN}); err != nil {
+						conn.Close(ctx)
+						conn = nil
+						logger.Error("SendStandbyStatusUpdate failed on keepalive: %v", err)
+					} else {
+						logger.Info("Sent Standby status update with LSN %s", lastLSN)
+						nextStandbyMessageDeadline = time.Now().Add(10 * time.Second)
+					}
+				}
+
+			case pglogrepl.XLogDataByteID:
+				xld, err := pglogrepl.ParseXLogData(msg.Data[1:])
+				if err != nil {
+					logger.Error("ParseXLogData failed: %v", err)
+					continue
+				}
+
+				logicalMsg, err := pglogrepl.Parse(xld.WALData)
+				if err != nil {
+					logger.Error("Parse logical replication message failed: %v", err)
+					continue
+				}
+
+				switch logicalMsg := logicalMsg.(type) {
+				case *pglogrepl.BeginMessage:
+					currentXID = logicalMsg.Xid
+					txChanges[currentXID] = []cdcMsg{}
+				case *pglogrepl.CommitMessage:
+					if changes, ok := txChanges[currentXID]; ok {
+						if len(changes) > 0 {
+							go processChanges(pool, changes)
+						}
+						delete(txChanges, currentXID)
+					}
+				case *pglogrepl.RelationMessage:
+					relations[logicalMsg.RelationID] = logicalMsg
+				case *pglogrepl.InsertMessage:
+					rel := relations[logicalMsg.RelationID]
+					txChanges[currentXID] = append(txChanges[currentXID], cdcMsg{
+						operation: "INSERT",
+						schema:    rel.Namespace,
+						table:     rel.RelationName,
+						relation:  rel,
+						tuple:     logicalMsg.Tuple,
+					})
+				case *pglogrepl.UpdateMessage:
+					rel := relations[logicalMsg.RelationID]
+					txChanges[currentXID] = append(txChanges[currentXID], cdcMsg{
+						operation: "UPDATE",
+						schema:    rel.Namespace,
+						table:     rel.RelationName,
+						relation:  rel,
+						tuple:     logicalMsg.NewTuple,
+					})
+				case *pglogrepl.DeleteMessage:
+					rel := relations[logicalMsg.RelationID]
+					txChanges[currentXID] = append(txChanges[currentXID], cdcMsg{
+						operation: "DELETE",
+						schema:    rel.Namespace,
+						table:     rel.RelationName,
+						relation:  rel,
+						tuple:     logicalMsg.OldTuple,
+					})
+				}
+
+				lastLSN = xld.WALStart + pglogrepl.LSN(len(xld.WALData))
+			}
+		default:
+			logger.Info("Received unexpected message: %T", msg)
+		}
+	}
+}
+
+// A map of PostgreSQL type OIDs that should be quoted in SQL literals.
+var quotedOIDs = map[uint32]bool{
+	16:   true, // bool
+	17:   true, // bytea
+	25:   true, // text
+	1042: true, // character
+	1043: true, // varchar
+	1082: true, // date
+	1114: true, // timestamp
+	1184: true, // timestamptz
+	2950: true, // uuid
+}
+
+func processChanges(pool *pgxpool.Pool, changes []cdcMsg) {
+	tables := make(map[string][]cdcMsg)
+	for _, change := range changes {
+		key := fmt.Sprintf("%s.%s", change.schema, change.table)
+		tables[key] = append(tables[key], change)
+	}
+
+	for _, tableChanges := range tables {
+		if len(tableChanges) > 0 {
+			firstChange := tableChanges[0]
+			schema := firstChange.schema
+			table := firstChange.table
+			mtreeTable := fmt.Sprintf("ace_mtree_%s_%s", schema, table)
+
+			var inserts, deletes []string
+			relation := firstChange.relation
+			isComposite := len(getPrimaryKeyColumns(relation)) > 1
+			compositeTypeName := fmt.Sprintf("%s_%s_key_type", schema, table)
+
+			for _, change := range tableChanges {
+				pks := getPKs(relation, change.tuple)
+				var pkVal string
+				if isComposite {
+					// Formatting it as a record literal, e.g., "(123, 'abc')"
+					// TODO: This is a bit of a hack; need to find a better way
+					pkVal = "(" + strings.Join(pks, ",") + ")"
+				} else {
+					pkVal = pks[0]
+				}
+
+				switch change.operation {
+				case "INSERT", "UPDATE":
+					inserts = append(inserts, pkVal)
+				case "DELETE":
+					deletes = append(deletes, pkVal)
+				}
 			}
 
-			switch msg := msg.(type) {
-			case *pgproto3.CopyData:
-				switch msg.Data[0] {
-				case pglogrepl.PrimaryKeepaliveMessageByteID:
-					pkm, err := pglogrepl.ParsePrimaryKeepaliveMessage(msg.Data[1:])
-					if err != nil {
-						logger.Error("ParsePrimaryKeepaliveMessage failed: %v", err)
-					}
-					logger.Info("Primary Keepalive Message => ServerWALEnd: %s, ServerTime: %s, ReplyRequested: %t", pkm.ServerWALEnd, pkm.ServerTime, pkm.ReplyRequested)
-
-					if pkm.ReplyRequested {
-						if err := pglogrepl.SendStandbyStatusUpdate(ctx, conn, pglogrepl.StandbyStatusUpdate{WALWritePosition: lastLSN}); err != nil {
-							logger.Error("SendStandbyStatusUpdate failed: %v", err)
-						}
-					}
-
-				case pglogrepl.XLogDataByteID:
-					xld, err := pglogrepl.ParseXLogData(msg.Data[1:])
-					if err != nil {
-						logger.Error("ParseXLogData failed: %v", err)
-					}
-
-					logicalMsg, err := pglogrepl.Parse(xld.WALData)
-					if err != nil {
-						logger.Error("Parse logical replication message failed: %v", err)
-					}
-
-					switch logicalMsg := logicalMsg.(type) {
-					case *pglogrepl.BeginMessage:
-						logger.Info("BEGIN: LSN=%s, XID=%d", xld.WALStart, logicalMsg.Xid)
-					case *pglogrepl.CommitMessage:
-						logger.Info("COMMIT: LSN=%s", logicalMsg.CommitLSN)
-					case *pglogrepl.OriginMessage:
-						logger.Info("ORIGIN: Name=%q, LSN=%s", logicalMsg.Name, logicalMsg.CommitLSN)
-					case *pglogrepl.RelationMessage:
-						relations[logicalMsg.RelationID] = logicalMsg
-						logger.Info("RELATION: %s.%s (ID=%d)", logicalMsg.Namespace, logicalMsg.RelationName, logicalMsg.RelationID)
-					case *pglogrepl.InsertMessage:
-						rel := relations[logicalMsg.RelationID]
-						values := tupleKV(rel, logicalMsg.Tuple)
-						logger.Info("INSERT: %s.%s -> %s", rel.Namespace, rel.RelationName, values)
-					case *pglogrepl.UpdateMessage:
-						rel := relations[logicalMsg.RelationID]
-						values := tupleKV(rel, logicalMsg.NewTuple)
-						logger.Info("UPDATE: %s.%s -> %s", rel.Namespace, rel.RelationName, values)
-					case *pglogrepl.DeleteMessage:
-						rel := relations[logicalMsg.RelationID]
-						values := tupleKV(rel, logicalMsg.OldTuple)
-						logger.Info("DELETE: %s.%s -> %s", rel.Namespace, rel.RelationName, values)
-					case *pglogrepl.TruncateMessage:
-						logger.Info("TRUNCATE: RelationIDs=%v", logicalMsg.RelationIDs)
-					default:
-						logger.Info("Unknown message type: %T", logicalMsg)
-					}
-
-					lastLSN = xld.WALStart + pglogrepl.LSN(len(xld.WALData))
-				}
-			default:
-				logger.Info("Received unexpected message: %T", msg)
+			err := queries.UpdateMtreeCounters(context.Background(), pool, mtreeTable, isComposite, compositeTypeName, inserts, deletes)
+			if err != nil {
+				logger.Error("failed to update mtree counters for %s: %v", mtreeTable, err)
 			}
 		}
 	}
 }
 
-func tupleKV(rel *pglogrepl.RelationMessage, tup *pglogrepl.TupleData) string {
+func getPKs(rel *pglogrepl.RelationMessage, tup *pglogrepl.TupleData) []string {
+	var pks []string
 	if tup == nil || rel == nil {
-		return "{}"
+		return pks
 	}
 
-	var sb strings.Builder
-	sb.WriteString("{")
-
-	count := 0
-	for i, col := range tup.Columns {
-		colName := rel.Columns[i].Name
-
-		if count > 0 {
-			sb.WriteString(", ")
+	for i := range rel.Columns {
+		if rel.Columns[i].Flags == 1 { // Primary key
+			pks = append(pks, tupleValueToString(tup.Columns[i], rel.Columns[i]))
 		}
+	}
+	return pks
+}
 
-		sb.WriteString(fmt.Sprintf("%s: ", colName))
-
-		switch col.DataType {
-		case 'n': // null
-			sb.WriteString("NULL")
-		case 'u': // unchanged toast
-			sb.WriteString("[unchanged]")
-		case 't': // text
-			sb.WriteString(fmt.Sprintf("'%s'", string(col.Data)))
-		default:
-			sb.WriteString(string(col.Data))
-		}
-		count++
+func getPrimaryKeyColumns(rel *pglogrepl.RelationMessage) []string {
+	var pks []string
+	if rel == nil {
+		return pks
 	}
 
-	sb.WriteString("}")
-	return sb.String()
+	for _, col := range rel.Columns {
+		if col.Flags == 1 { // Primary key
+			pks = append(pks, col.Name)
+		}
+	}
+	return pks
+}
+
+func tupleValueToString(tupCol *pglogrepl.TupleDataColumn, relCol *pglogrepl.RelationMessageColumn) string {
+	switch tupCol.DataType {
+	case 'n': // null
+		return "NULL"
+	case 'u': // unchanged toast
+		logger.Warn("unchanged toast value for PK column %s", relCol.Name)
+		return ""
+	case 't': // text formatted value
+		val := string(tupCol.Data)
+		if quotedOIDs[relCol.DataType] {
+			return fmt.Sprintf("'%s'", strings.ReplaceAll(val, "'", "''"))
+		}
+		return val
+	default:
+		return string(tupCol.Data)
+	}
 }

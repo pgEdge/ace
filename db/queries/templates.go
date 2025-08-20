@@ -1,3 +1,14 @@
+// ///////////////////////////////////////////////////////////////////////////
+//
+// # ACE - Active Consistency Engine
+//
+// Copyright (C) 2023 - 2025, pgEdge (https://www.pgedge.com/)
+//
+// This software is released under the pgEdge Community License:
+//
+//	https://www.pgedge.com/communitylicense
+//
+// ///////////////////////////////////////////////////////////////////////////
 package queries
 
 import "text/template"
@@ -94,6 +105,7 @@ type Templates struct {
 	DropReplicationSlot             *template.Template
 	DropCDCMetadataTable            *template.Template
 	GetCDCMetadata                  *template.Template
+	UpdateMtreeCounters             *template.Template
 }
 
 var SQLTemplates = Templates{
@@ -178,6 +190,45 @@ var SQLTemplates = Templates{
 			ace_mtree_cdc_metadata
 		WHERE
 			publication_name = $1
+	`)),
+
+	UpdateMtreeCounters: template.Must(template.New("updateMtreeCounters").Parse(`
+		WITH pkeys_to_update AS (
+			SELECT unnest(@inserts::text[]) AS pkey, 'insert' AS op
+			UNION ALL
+			SELECT unnest(@deletes::text[]) AS pkey, 'delete' AS op
+		),
+		blocks_to_update AS (
+			SELECT
+				mt.node_position,
+				SUM(CASE WHEN p.op = 'insert' THEN 1 ELSE 0 END) AS insert_count,
+				SUM(CASE WHEN p.op = 'delete' THEN 1 ELSE 0 END) AS delete_count
+			FROM
+				{{.MtreeTable}} mt
+			JOIN
+				pkeys_to_update p ON
+				{{if .IsComposite}}
+					mt.range_start <= p.pkey::{{.CompositeTypeName}} AND (mt.range_end IS NULL OR mt.range_end >= p.pkey::{{.CompositeTypeName}})
+				{{else}}
+					mt.range_start <= p.pkey AND (mt.range_end IS NULL OR mt.range_end >= p.pkey)
+				{{end}}
+			WHERE
+				mt.node_level = 0
+			GROUP BY
+				mt.node_position
+		)
+		UPDATE
+			{{.MtreeTable}} mt
+		SET
+			dirty = true,
+			inserts_since_tree_update = mt.inserts_since_tree_update + b.insert_count,
+			deletes_since_tree_update = mt.deletes_since_tree_update + b.delete_count,
+			last_modified = current_timestamp
+		FROM
+			blocks_to_update b
+		WHERE
+			mt.node_level = 0
+			AND mt.node_position = b.node_position;
 	`)),
 
 	CreateCDCMetadataTable: template.Must(template.New("createCDCMetadataTable").Parse(`
