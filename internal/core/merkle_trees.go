@@ -13,6 +13,7 @@ package core
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"maps"
 	"math"
@@ -25,6 +26,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/pgedge/ace/db/queries"
 	"github.com/pgedge/ace/internal/auth"
@@ -36,6 +38,8 @@ import (
 	"github.com/vbauerster/mpb/v8"
 	"github.com/vbauerster/mpb/v8/decor"
 )
+
+const tableAlreadyInPublicationError = "42710"
 
 type MerkleTreeTask struct {
 	types.Task
@@ -56,7 +60,7 @@ type MerkleTreeTask struct {
 	RangesFile        string
 	WriteRanges       bool
 	OverrideBlockSize bool
-	Mode              string // Placeholder for build, update, rebalance
+	Mode              string
 }
 
 func (m *MerkleTreeTask) MtreeInit() error {
@@ -423,10 +427,16 @@ func (m *MerkleTreeTask) BuildMtree() error {
 		publicationName := cfg.PublicationName
 		err = queries.AlterPublicationAddTable(context.Background(), pool, publicationName, m.QualifiedTableName)
 		if err != nil {
-			pool.Close()
-			return fmt.Errorf("failed to add table to publication on node %s: %w", nodeInfo["Name"], err)
+			var pgErr *pgconn.PgError
+			if errors.As(err, &pgErr) && pgErr.Code == tableAlreadyInPublicationError {
+				logger.Info("Table %s is already in publication %s on node %s", m.QualifiedTableName, publicationName, nodeInfo["Name"])
+			} else {
+				pool.Close()
+				return fmt.Errorf("failed to add table to publication on node %s: %w", nodeInfo["Name"], err)
+			}
+		} else {
+			logger.Info("Added table %s to publication %s on node %s", m.QualifiedTableName, publicationName, nodeInfo["Name"])
 		}
-		logger.Info("Added table %s to publication %s on node %s", m.QualifiedTableName, publicationName, nodeInfo["Name"])
 
 		slotName, startLSN, tables, err := queries.GetCDCMetadata(context.Background(), pool, publicationName)
 		if err != nil {
@@ -493,6 +503,10 @@ func (m *MerkleTreeTask) UpdateMtree(skipAllChecks bool) error {
 		if err := m.RunChecks(true); err != nil {
 			return err
 		}
+	}
+
+	for _, nodeInfo := range m.ClusterNodes {
+		cdc.UpdateFromCDC(nodeInfo)
 	}
 
 	var blockSize int

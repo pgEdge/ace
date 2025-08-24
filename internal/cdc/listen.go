@@ -41,6 +41,14 @@ type cdcMsg struct {
 }
 
 func ListenForChanges(nodeInfo map[string]any) {
+	processReplicationStream(nodeInfo, true)
+}
+
+func UpdateFromCDC(nodeInfo map[string]any) {
+	processReplicationStream(nodeInfo, false)
+}
+
+func processReplicationStream(nodeInfo map[string]any, continuous bool) {
 	pool, err := auth.GetClusterNodeConnection(nodeInfo, "")
 	if err != nil {
 		logger.Error("failed to get connection pool: %v", err)
@@ -102,9 +110,18 @@ func ListenForChanges(nodeInfo map[string]any) {
 			conn, err = connect()
 			if err != nil {
 				logger.Error("reconnect failed: %v", err)
+				if !continuous {
+					return
+				}
 				time.Sleep(5 * time.Second)
 			}
 			nextStandbyMessageDeadline = time.Now().Add(10 * time.Second)
+
+			if !continuous {
+				if conn == nil {
+					return
+				}
+			}
 			continue
 		}
 
@@ -115,13 +132,18 @@ func ListenForChanges(nodeInfo map[string]any) {
 				logger.Error("SendStandbyStatusUpdate failed: %v", err)
 				continue
 			}
-			logger.Info("Sent Standby status update with LSN %s", lastLSN)
+			logger.Debug("Sent Standby status update with LSN %s", lastLSN)
 			nextStandbyMessageDeadline = time.Now().Add(10 * time.Second)
 		}
 
-		timeout := time.Until(nextStandbyMessageDeadline)
-		if timeout < 0 {
-			timeout = 0
+		var timeout time.Duration
+		if continuous {
+			timeout = time.Until(nextStandbyMessageDeadline)
+			if timeout < 0 {
+				timeout = 0
+			}
+		} else {
+			timeout = 1 * time.Second
 		}
 
 		rCtx, cancel := context.WithTimeout(ctx, timeout)
@@ -130,6 +152,14 @@ func ListenForChanges(nodeInfo map[string]any) {
 
 		if err != nil {
 			if pgconn.Timeout(err) {
+				if !continuous {
+					logger.Info("Replication stream drained.")
+					if err := pglogrepl.SendStandbyStatusUpdate(ctx, conn, pglogrepl.StandbyStatusUpdate{WALWritePosition: lastLSN}); err != nil {
+						logger.Error("failed to send final standby status update: %v", err)
+					}
+					conn.Close(ctx)
+					return
+				}
 				continue
 			}
 			conn.Close(ctx)
@@ -147,7 +177,7 @@ func ListenForChanges(nodeInfo map[string]any) {
 					logger.Error("ParsePrimaryKeepaliveMessage failed: %v", err)
 					continue
 				}
-				logger.Info("Primary Keepalive Message => ServerWALEnd: %s, ServerTime: %s, ReplyRequested: %t", pkm.ServerWALEnd, pkm.ServerTime, pkm.ReplyRequested)
+				logger.Debug("Primary Keepalive Message => ServerWALEnd: %s, ServerTime: %s, ReplyRequested: %t", pkm.ServerWALEnd, pkm.ServerTime, pkm.ReplyRequested)
 
 				if pkm.ReplyRequested {
 					if err := pglogrepl.SendStandbyStatusUpdate(ctx, conn, pglogrepl.StandbyStatusUpdate{WALWritePosition: lastLSN}); err != nil {
@@ -155,7 +185,7 @@ func ListenForChanges(nodeInfo map[string]any) {
 						conn = nil
 						logger.Error("SendStandbyStatusUpdate failed on keepalive: %v", err)
 					} else {
-						logger.Info("Sent Standby status update with LSN %s", lastLSN)
+						logger.Debug("Sent Standby status update with LSN %s", lastLSN)
 						nextStandbyMessageDeadline = time.Now().Add(10 * time.Second)
 					}
 				}
@@ -181,6 +211,7 @@ func ListenForChanges(nodeInfo map[string]any) {
 					if changes, ok := txChanges[currentXID]; ok {
 						if len(changes) > 0 {
 							go processChanges(pool, changes)
+							logger.Info("Processed %d changes for XID %d", len(changes), currentXID)
 						}
 						delete(txChanges, currentXID)
 					}
