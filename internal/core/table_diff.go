@@ -13,7 +13,6 @@ package core
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"maps"
 	"math"
@@ -91,16 +90,6 @@ func (t *TableDiffTask) GetClusterNodes() []map[string]any {
 	return t.ClusterNodes
 }
 func (t *TableDiffTask) SetClusterNodes(cn []map[string]any) { t.ClusterNodes = cn }
-
-type NodePairDiff struct {
-	Node1OnlyRows []map[string]any
-	Node2OnlyRows []map[string]any
-	ModifiedRows  []struct {
-		Pkey      string
-		Node1Data map[string]any
-		Node2Data map[string]any
-	}
-}
 
 type RecursiveDiffTask struct {
 	Node1Name                 string
@@ -358,7 +347,7 @@ func (t *TableDiffTask) compareBlocks(
 	ctx context.Context,
 	node1, node2 string,
 	r Range,
-) (*NodePairDiff, error) {
+) (*types.NodePairDiff, error) {
 	n1Rows, err := t.fetchRows(ctx, node1, r)
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch rows for node %s in range %v-%v: %w", node1, r.Start, r.End, err)
@@ -368,74 +357,9 @@ func (t *TableDiffTask) compareBlocks(
 		return nil, fmt.Errorf("failed to fetch rows for node %s in range %v-%v: %w", node2, r.Start, r.End, err)
 	}
 
-	lookupN1 := make(map[string]map[string]any)
-	for _, row := range n1Rows {
-		pkVal := make(map[string]any)
-		for _, pkCol := range t.Key {
-			pkVal[pkCol] = row[pkCol]
-		}
-		pkStr, err := utils.StringifyKey(pkVal, t.Key)
-		if err != nil {
-			return nil, fmt.Errorf("failed to stringify n1 pkey: %w", err)
-		}
-		lookupN1[pkStr] = row
-	}
-
-	lookupN2 := make(map[string]map[string]any)
-	for _, row := range n2Rows {
-		pkVal := make(map[string]any)
-		for _, pkCol := range t.Key {
-			pkVal[pkCol] = row[pkCol]
-		}
-		pkStr, err := utils.StringifyKey(pkVal, t.Key)
-		if err != nil {
-			return nil, fmt.Errorf("failed to stringify n2 pkey: %w", err)
-		}
-		lookupN2[pkStr] = row
-	}
-
-	diffResult := &NodePairDiff{}
-
-	for pkStr, n1Row := range lookupN1 {
-		n2Row, existsInN2 := lookupN2[pkStr]
-		if !existsInN2 {
-			diffResult.Node1OnlyRows = append(diffResult.Node1OnlyRows, n1Row)
-		} else {
-			var mismatch bool
-			for _, colName := range t.Cols {
-				val1, ok1 := n1Row[colName]
-				val2, ok2 := n2Row[colName]
-
-				if ok1 != ok2 {
-					mismatch = true
-					break
-				}
-				if !ok1 && !ok2 {
-					continue
-				}
-
-				// TODO: Need to revisit this
-				if !reflect.DeepEqual(val1, val2) {
-					mismatch = true
-					break
-				}
-			}
-
-			if mismatch {
-				diffResult.ModifiedRows = append(diffResult.ModifiedRows, struct {
-					Pkey      string
-					Node1Data map[string]any
-					Node2Data map[string]any
-				}{Pkey: pkStr, Node1Data: n1Row, Node2Data: n2Row})
-			}
-			// Remove from lookupN2 to find elements only in N2 later
-			delete(lookupN2, pkStr)
-		}
-	}
-
-	// Any remaining rows in lookupN2 are only in node2
-	for _, n2Row := range lookupN2 {
-		diffResult.Node2OnlyRows = append(diffResult.Node2OnlyRows, n2Row)
+	diffResult, err := utils.CompareRowSets(n1Rows, n2Rows, t.Key, t.Cols)
+	if err != nil {
+		return nil, fmt.Errorf("failed to compare row sets for %s vs %s: %w", node1, node2, err)
 	}
 
 	if len(diffResult.Node1OnlyRows) > 0 || len(diffResult.Node2OnlyRows) > 0 || len(diffResult.ModifiedRows) > 0 {
@@ -1100,34 +1024,8 @@ func (t *TableDiffTask) ExecuteTask() error {
 
 	t.AddPrimaryKeyToDiffSummary()
 
-	if len(t.DiffResult.NodeDiffs) > 0 {
-		outputFileName := fmt.Sprintf("%s_%s_diffs-%s.json",
-			strings.ReplaceAll(t.Schema, ".", "_"),
-			strings.ReplaceAll(t.Table, ".", "_"),
-			time.Now().Format("20060102150405"),
-		)
-
-		jsonData, err := json.MarshalIndent(t.DiffResult, "", "  ")
-		if err != nil {
-			logger.Info("ERROR marshalling diff output to JSON: %v", err)
-			return fmt.Errorf("failed to marshal diffs: %w", err)
-		}
-
-		err = os.WriteFile(outputFileName, jsonData, 0644)
-		if err != nil {
-			logger.Info("ERROR writing diff output to file %s: %v", outputFileName, err)
-			return fmt.Errorf("failed to write diffs file: %w", err)
-		}
-		logger.Warn("%s TABLES DO NOT MATCH", utils.CrossMark)
-
-		for key, diffCount := range t.DiffResult.Summary.DiffRowsCount {
-			logger.Warn("Found %d differences between %s", diffCount, key)
-		}
-
-		logger.Info("Diff report written to %s", outputFileName)
-
-	} else {
-		logger.Info("%s TABLES MATCH", utils.CheckMark)
+	if err := utils.WriteDiffReport(t.DiffResult, t.Schema, t.Table); err != nil {
+		return err
 	}
 
 	return nil

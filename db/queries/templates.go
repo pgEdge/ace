@@ -54,6 +54,7 @@ type Templates struct {
 	GetRootNode                     *template.Template
 	GetNodeChildren                 *template.Template
 	GetLeafRanges                   *template.Template
+	GetLeafRangesExpanded           *template.Template
 	GetRowCountEstimate             *template.Template
 	GetMaxValComposite              *template.Template
 	UpdateMaxVal                    *template.Template
@@ -964,6 +965,18 @@ var SQLTemplates = Templates{
 		SELECT
 			range_start,
 			range_end
+		FROM
+			{{.MtreeTable}}
+		WHERE
+			node_level = 0
+			AND node_position = ANY($1)
+		ORDER BY
+			node_position
+	`)),
+	GetLeafRangesExpanded: template.Must(template.New("getLeafRangesExpanded").Parse(`
+		SELECT
+			{{.StartAttrs}},
+			{{.EndAttrs}}
 		FROM
 			{{.MtreeTable}}
 		WHERE
