@@ -197,6 +197,31 @@ var SQLTemplates = Templates{
 			SELECT unnest(@inserts::text[]) AS pkey, 'insert' AS op
 			UNION ALL
 			SELECT unnest(@deletes::text[]) AS pkey, 'delete' AS op
+			UNION ALL
+			SELECT unnest(@updates::text[]) AS pkey, 'update' AS op
+		),
+		first_block AS (
+			SELECT
+				node_position,
+				range_start
+			FROM
+				{{.MtreeTable}}
+			WHERE
+				node_level = 0
+			ORDER BY
+				range_start ASC
+			LIMIT 1
+		),
+		new_min_pkey AS (
+			SELECT MIN(p.pkey) as pkey
+			FROM pkeys_to_update p
+			WHERE p.op = 'insert' AND (
+				{{if .IsComposite}}
+					p.pkey::{{.CompositeTypeName}} < (SELECT range_start FROM first_block)
+				{{else}}
+					p.pkey < (SELECT range_start FROM first_block)
+				{{end}}
+			)
 		),
 		blocks_to_update AS (
 			SELECT
@@ -206,12 +231,20 @@ var SQLTemplates = Templates{
 			FROM
 				{{.MtreeTable}} mt
 			JOIN
-				pkeys_to_update p ON
-				{{if .IsComposite}}
-					mt.range_start <= p.pkey::{{.CompositeTypeName}} AND (mt.range_end IS NULL OR mt.range_end >= p.pkey::{{.CompositeTypeName}})
-				{{else}}
-					mt.range_start <= p.pkey AND (mt.range_end IS NULL OR mt.range_end >= p.pkey)
-				{{end}}
+				pkeys_to_update p ON (
+					{{if .IsComposite}}
+						p.pkey::{{.CompositeTypeName}} >= mt.range_start AND (mt.range_end IS NULL OR p.pkey::{{.CompositeTypeName}} <= mt.range_end)
+					{{else}}
+						p.pkey >= mt.range_start AND (mt.range_end IS NULL OR p.pkey <= mt.range_end)
+					{{end}}
+				) OR (
+					mt.node_position = (SELECT node_position FROM first_block) AND
+					{{if .IsComposite}}
+						p.pkey::{{.CompositeTypeName}} < (SELECT range_start FROM first_block)
+					{{else}}
+						p.pkey < (SELECT range_start FROM first_block)
+					{{end}}
+				)
 			WHERE
 				mt.node_level = 0
 			GROUP BY
@@ -223,7 +256,17 @@ var SQLTemplates = Templates{
 			dirty = true,
 			inserts_since_tree_update = mt.inserts_since_tree_update + b.insert_count,
 			deletes_since_tree_update = mt.deletes_since_tree_update + b.delete_count,
-			last_modified = current_timestamp
+			last_modified = current_timestamp,
+			range_start = CASE
+				WHEN mt.node_position = (SELECT node_position FROM first_block) AND (SELECT pkey FROM new_min_pkey) IS NOT NULL
+				THEN
+					{{if .IsComposite}}
+						(SELECT pkey FROM new_min_pkey)::{{.CompositeTypeName}}
+					{{else}}
+						(SELECT pkey FROM new_min_pkey)
+					{{end}}
+				ELSE mt.range_start
+			END
 		FROM
 			blocks_to_update b
 		WHERE
@@ -1273,7 +1316,7 @@ var SQLTemplates = Templates{
 	ResetPositionsByStartExpanded: template.Must(template.New("resetPositionsByStartExpanded").Parse(`
 		WITH seq AS (
 			SELECT node_position,
-			       row_number() OVER (ORDER BY {{.StartAttrs}}) - 1 AS pos_seq
+			       row_number() OVER (ORDER BY range_start) - 1 AS pos_seq
 			FROM {{.MtreeTable}}
 			WHERE node_level = 0
 		)
@@ -1369,13 +1412,17 @@ var SQLTemplates = Templates{
 	`)),
 	UpdateBlockRangeStartComposite: template.Must(template.New("updateBlockRangeStartComposite").Parse(`
 		UPDATE {{.MtreeTable}}
-		SET range_start = {{if .IsNull}}NULL{{else}}ROW({{.Placeholders}})::{{.CompositeTypeName}}{{end}}
-		WHERE node_position = {{.NodePositionPlaceholder}}
+		SET range_start = {{if .IsNull}}NULL{{else}}ROW({{.Placeholders}})::{{.CompositeTypeName}}{{end}},
+			dirty = true,
+			last_modified = current_timestamp
+		WHERE node_position = {{.NodePositionPlaceholder}} AND node_level = 0
 	`)),
 	UpdateBlockRangeEndComposite: template.Must(template.New("updateBlockRangeEndComposite").Parse(`
 		UPDATE {{.MtreeTable}}
-		SET range_end = {{if .IsNull}}NULL{{else}}ROW({{.Placeholders}})::{{.CompositeTypeName}}{{end}}
-		WHERE node_position = {{.NodePositionPlaceholder}}
+		SET range_end = {{if .IsNull}}NULL{{else}}ROW({{.Placeholders}})::{{.CompositeTypeName}}{{end}},
+			dirty = true,
+			last_modified = current_timestamp
+		WHERE node_position = {{.NodePositionPlaceholder}} AND node_level = 0
 	`)),
 	UpdateNodePositionsWithOffset: template.Must(template.New("updateNodePositionsWithOffset").Parse(`
 		UPDATE {{.MtreeTable}} SET node_position = node_position + $1 WHERE node_level = 0

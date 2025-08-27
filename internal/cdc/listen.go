@@ -281,7 +281,7 @@ func processChanges(pool *pgxpool.Pool, changes []cdcMsg) {
 			table := firstChange.table
 			mtreeTable := fmt.Sprintf("ace_mtree_%s_%s", schema, table)
 
-			var inserts, deletes []string
+			var inserts, deletes, updates []string
 			relation := firstChange.relation
 			isComposite := len(getPrimaryKeyColumns(relation)) > 1
 			compositeTypeName := fmt.Sprintf("%s_%s_key_type", schema, table)
@@ -298,14 +298,16 @@ func processChanges(pool *pgxpool.Pool, changes []cdcMsg) {
 				}
 
 				switch change.operation {
-				case "INSERT", "UPDATE":
+				case "INSERT":
 					inserts = append(inserts, pkVal)
+				case "UPDATE":
+					updates = append(updates, pkVal)
 				case "DELETE":
 					deletes = append(deletes, pkVal)
 				}
 			}
 
-			err := queries.UpdateMtreeCounters(context.Background(), pool, mtreeTable, isComposite, compositeTypeName, inserts, deletes)
+			err := queries.UpdateMtreeCounters(context.Background(), pool, mtreeTable, isComposite, compositeTypeName, inserts, deletes, updates)
 			if err != nil {
 				logger.Error("failed to update mtree counters for %s: %v", mtreeTable, err)
 			}

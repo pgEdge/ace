@@ -676,40 +676,6 @@ func (m *MerkleTreeTask) splitBlocks(tx pgx.Tx, blocksToSplit []types.BlockRange
 	currentBlocks := make([]types.BlockRange, len(blocksToSplit))
 	copy(currentBlocks, blocksToSplit)
 
-	if !m.SimplePrimaryKey {
-		minVals, err := queries.GetMinValCompositeTx(context.Background(), tx, m.Schema, m.Table, m.Key)
-		if err != nil {
-			return nil, fmt.Errorf("failed to fetch composite min key: %w", err)
-		}
-		if minVals != nil {
-			if err := queries.UpdateBlockRangeStartCompositeTx(context.Background(), tx, mtreeTableName, compositeTypeName, minVals, 0); err != nil {
-				return nil, fmt.Errorf("failed to update first block start (composite): %w", err)
-			}
-			for i := range currentBlocks {
-				if currentBlocks[i].NodePosition == 0 {
-					currentBlocks[i].RangeStart = minVals
-					break
-				}
-			}
-		}
-	} else {
-		minVal, err := queries.GetMinValSimpleTx(context.Background(), tx, m.Schema, m.Table, m.Key[0])
-		if err != nil {
-			return nil, fmt.Errorf("failed to fetch simple min key: %w", err)
-		}
-		if minVal != nil {
-			if err := queries.UpdateBlockRangeStartTx(context.Background(), tx, mtreeTableName, minVal, 0); err != nil {
-				return nil, fmt.Errorf("failed to update first block start (simple): %w", err)
-			}
-			for i := range currentBlocks {
-				if currentBlocks[i].NodePosition == 0 {
-					currentBlocks[i].RangeStart = []any{minVal}
-					break
-				}
-			}
-		}
-	}
-
 	if err := queries.DeleteParentNodesTx(ctx, tx, mtreeTableName); err != nil {
 		return nil, fmt.Errorf("failed to delete parent nodes: %w", err)
 	}

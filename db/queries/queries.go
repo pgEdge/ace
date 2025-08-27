@@ -2510,11 +2510,6 @@ func ResetPositionsByStartTx(ctx context.Context, tx pgx.Tx, mtreeTable string, 
 	var query string
 	var err error
 	if isComposite {
-		startAttrs := make([]string, len(key))
-		for i, k := range key {
-			startAttrs[i] = fmt.Sprintf("(range_start).%s", pgx.Identifier{k}.Sanitize())
-		}
-		data["StartAttrs"] = strings.Join(startAttrs, ", ")
 		query, err = RenderSQL(SQLTemplates.ResetPositionsByStartExpanded, data)
 	} else {
 		query, err = RenderSQL(SQLTemplates.ResetPositionsByStart, data)
@@ -2815,7 +2810,7 @@ func GetCDCMetadata(ctx context.Context, db *pgxpool.Pool, publicationName strin
 	return slotName, startLSN, tables, nil
 }
 
-func UpdateMtreeCounters(ctx context.Context, db *pgxpool.Pool, mtreeTable string, isComposite bool, compositeTypeName string, inserts, deletes []string) error {
+func UpdateMtreeCounters(ctx context.Context, db *pgxpool.Pool, mtreeTable string, isComposite bool, compositeTypeName string, inserts, deletes, updates []string) error {
 	sql, err := RenderSQL(SQLTemplates.UpdateMtreeCounters, struct {
 		MtreeTable        string
 		IsComposite       bool
@@ -2832,6 +2827,7 @@ func UpdateMtreeCounters(ctx context.Context, db *pgxpool.Pool, mtreeTable strin
 	args := pgx.NamedArgs{
 		"inserts": inserts,
 		"deletes": deletes,
+		"updates": updates,
 	}
 
 	_, err = db.Exec(ctx, sql, args)
