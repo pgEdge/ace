@@ -13,6 +13,7 @@ package core
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"maps"
 	"math"
@@ -25,9 +26,11 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/pgedge/ace/db/queries"
 	"github.com/pgedge/ace/internal/auth"
+	"github.com/pgedge/ace/internal/cdc"
 	utils "github.com/pgedge/ace/pkg/common"
 	"github.com/pgedge/ace/pkg/config"
 	"github.com/pgedge/ace/pkg/logger"
@@ -35,6 +38,8 @@ import (
 	"github.com/vbauerster/mpb/v8"
 	"github.com/vbauerster/mpb/v8/decor"
 )
+
+const tableAlreadyInPublicationError = "42710"
 
 type MerkleTreeTask struct {
 	types.Task
@@ -55,7 +60,79 @@ type MerkleTreeTask struct {
 	RangesFile        string
 	WriteRanges       bool
 	OverrideBlockSize bool
-	Mode              string // Placeholder for build, update, rebalance
+	Mode              string
+}
+
+func (m *MerkleTreeTask) MtreeInit() error {
+	if err := m.validateInit(); err != nil {
+		return fmt.Errorf("validation failed: %w", err)
+	}
+
+	cfg := config.Cfg.MTree.CDC
+
+	for _, nodeInfo := range m.ClusterNodes {
+		logger.Info("Initialising Merkle tree objects on node: %s", nodeInfo["Name"])
+		pool, err := auth.GetClusterNodeConnection(nodeInfo, "")
+		if err != nil {
+			return fmt.Errorf("failed to get connection pool for node %s: %w", nodeInfo["Name"], err)
+		}
+		defer pool.Close()
+
+		err = queries.CreateXORFunction(context.Background(), pool)
+		if err != nil {
+			return fmt.Errorf("failed to create xor function: %w", err)
+		}
+
+		err = queries.CreateCDCMetadataTable(context.Background(), pool)
+		if err != nil {
+			return fmt.Errorf("failed to create cdc metadata table: %w", err)
+		}
+
+		lsn, err := cdc.SetupCDC(nodeInfo)
+		if err != nil {
+			return fmt.Errorf("failed to setup replication: %w", err)
+		}
+
+		err = queries.UpdateCDCMetadata(context.Background(), pool, cfg.PublicationName, cfg.SlotName, lsn.String(), []string{})
+		if err != nil {
+			return fmt.Errorf("failed to update cdc metadata: %w", err)
+		}
+
+		logger.Info("Merkle tree objects initialised on node: %s", nodeInfo["Name"])
+	}
+	return nil
+}
+
+func (m *MerkleTreeTask) MtreeTeardown() error {
+	if err := m.validateInit(); err != nil {
+		return fmt.Errorf("validation failed: %w", err)
+	}
+
+	for _, nodeInfo := range m.ClusterNodes {
+		pool, err := auth.GetClusterNodeConnection(nodeInfo, "")
+		if err != nil {
+			return fmt.Errorf("failed to get connection pool for node %s: %w", nodeInfo["Name"], err)
+		}
+		defer pool.Close()
+
+		err = queries.DropPublication(context.Background(), pool, "ace_mtree_pub")
+		if err != nil {
+			return fmt.Errorf("failed to drop publication: %w", err)
+		}
+		logger.Info("Publication dropped on node: %s", nodeInfo["Name"])
+
+		err = queries.DropReplicationSlot(context.Background(), pool, "ace_mtree_slot")
+		if err != nil {
+			return fmt.Errorf("failed to drop replication slot: %w", err)
+		}
+		logger.Info("Replication slot dropped on node: %s", nodeInfo["Name"])
+		err = queries.DropCDCMetadataTable(context.Background(), pool)
+		if err != nil {
+			return fmt.Errorf("failed to drop cdc metadata table: %w", err)
+		}
+		logger.Info("CDC metadata table dropped on node: %s", nodeInfo["Name"])
+	}
+	return nil
 }
 
 func (m *MerkleTreeTask) GetClusterName() string              { return m.ClusterName }
@@ -80,29 +157,13 @@ func NewMerkleTreeTask() *MerkleTreeTask {
 	}
 }
 
-func (m *MerkleTreeTask) Validate() error {
+func (m *MerkleTreeTask) validateInit() error {
+	return m.validateCommon()
+}
+
+func (m *MerkleTreeTask) validateCommon() error {
 	if m.ClusterName == "" {
 		return fmt.Errorf("cluster_name is a required argument")
-	}
-
-	if m.BlockSize != 0 && !m.OverrideBlockSize {
-		if m.BlockSize > config.Cfg.MTree.MaxBlockSize {
-			return fmt.Errorf("block size should be <= %d", config.Cfg.MTree.MaxBlockSize)
-		}
-		if m.BlockSize < config.Cfg.MTree.MinBlockSize {
-			return fmt.Errorf("block size should be >= %d", config.Cfg.MTree.MinBlockSize)
-		}
-	}
-
-	if m.MaxCpuRatio > 1.0 || m.MaxCpuRatio < 0.0 {
-		return fmt.Errorf("invalid value range for max_cpu_ratio")
-	}
-
-	if m.RangesFile != "" {
-		if _, err := os.Stat(m.RangesFile); os.IsNotExist(err) {
-			return fmt.Errorf("file %s does not exist", m.RangesFile)
-		}
-		// TODO: Add parsing and validation for ranges file content
 	}
 
 	nodeList, err := utils.ParseNodes(m.Nodes)
@@ -122,20 +183,6 @@ func (m *MerkleTreeTask) Validate() error {
 
 	logger.Info("Cluster %s exists", m.ClusterName)
 
-	parts := strings.Split(m.QualifiedTableName, ".")
-	if len(parts) != 2 {
-		return fmt.Errorf("tableName %s must be of form 'schema.table_name'", m.QualifiedTableName)
-	}
-	schema, table := parts[0], parts[1]
-
-	// Sanitise inputs here
-	if err := queries.SanitiseIdentifier(schema); err != nil {
-		return err
-	}
-	if err := queries.SanitiseIdentifier(table); err != nil {
-		return err
-	}
-
 	var clusterNodes []map[string]any
 	for _, nodeMap := range m.ClusterNodes {
 		if len(nodeList) > 0 {
@@ -151,6 +198,7 @@ func (m *MerkleTreeTask) Validate() error {
 		combinedMap["DBName"] = m.Database.DBName
 		combinedMap["DBUser"] = m.Database.DBUser
 		combinedMap["DBPassword"] = m.Database.DBPassword
+		combinedMap["Host"] = nodeMap["Host"]
 
 		clusterNodes = append(clusterNodes, combinedMap)
 	}
@@ -175,9 +223,54 @@ func (m *MerkleTreeTask) Validate() error {
 		}
 	}
 
+	m.ClusterNodes = clusterNodes
+	return nil
+}
+
+func (m *MerkleTreeTask) Validate() error {
+	if err := m.validateCommon(); err != nil {
+		return err
+	}
+	if m.Mode == "listen" {
+		return nil
+	}
+	cfg := config.Cfg.MTree.Diff
+
+	if m.BlockSize != 0 && !m.OverrideBlockSize {
+		if m.BlockSize > cfg.MaxBlockSize {
+			return fmt.Errorf("block size should be <= %d", cfg.MaxBlockSize)
+		}
+		if m.BlockSize < cfg.MinBlockSize {
+			return fmt.Errorf("block size should be >= %d", cfg.MinBlockSize)
+		}
+	}
+
+	if m.MaxCpuRatio > 1.0 || m.MaxCpuRatio < 0.0 {
+		return fmt.Errorf("invalid value range for max_cpu_ratio")
+	}
+
+	if m.RangesFile != "" {
+		if _, err := os.Stat(m.RangesFile); os.IsNotExist(err) {
+			return fmt.Errorf("file %s does not exist", m.RangesFile)
+		}
+		// TODO: Add parsing and validation for ranges file content
+	}
+
+	parts := strings.Split(m.QualifiedTableName, ".")
+	if len(parts) != 2 {
+		return fmt.Errorf("tableName %s must be of form 'schema.table_name'", m.QualifiedTableName)
+	}
+	schema, table := parts[0], parts[1]
+
+	// Sanitise inputs here
+	if err := queries.SanitiseIdentifier(schema); err != nil {
+		return err
+	}
+	if err := queries.SanitiseIdentifier(table); err != nil {
+		return err
+	}
 	m.Schema = schema
 	m.Table = table
-	m.ClusterNodes = clusterNodes
 
 	return nil
 }
@@ -238,7 +331,9 @@ func (m *MerkleTreeTask) RunChecks(skipValidation bool) error {
 func (m *MerkleTreeTask) BuildMtree() error {
 	var blockRanges []types.BlockRange
 	var numBlocks int
-	fmt.Println("Getting row estimates from all nodes...")
+	cfg := config.Cfg.MTree.CDC
+
+	logger.Info("Getting row estimates from all nodes...")
 	var maxRows int64
 	var refNode map[string]any
 	for _, nodeInfo := range m.ClusterNodes {
@@ -250,7 +345,7 @@ func (m *MerkleTreeTask) BuildMtree() error {
 
 		count, err := queries.GetRowCountEstimate(context.Background(), pool, m.Schema, m.Table)
 		if err != nil {
-			fmt.Printf("Warning: Could not get row estimate from node %s: %v\n", nodeInfo["Name"], err)
+			logger.Warn("Warning: Could not get row estimate from node %s: %v", nodeInfo["Name"], err)
 			continue
 		}
 
@@ -263,10 +358,10 @@ func (m *MerkleTreeTask) BuildMtree() error {
 	if refNode == nil {
 		return fmt.Errorf("could not determine a reference node; failed to get row estimates from all nodes")
 	}
-	fmt.Printf("Using node %s as the reference for defining block ranges.\n", refNode["Name"])
+	logger.Info("Using node %s as the reference for defining block ranges.", refNode["Name"])
 
 	if len(blockRanges) == 0 {
-		fmt.Printf("Calculating block ranges for ~%d rows...\n", maxRows)
+		logger.Info("Calculating block ranges for ~%d rows...", maxRows)
 
 		refPool, err := auth.GetClusterNodeConnection(refNode, "")
 		if err != nil {
@@ -274,7 +369,7 @@ func (m *MerkleTreeTask) BuildMtree() error {
 		}
 
 		sampleMethod, samplePercent := computeSamplingParameters(maxRows)
-		fmt.Printf("Using %s with sample percent %.2f\n", sampleMethod, samplePercent)
+		logger.Info("Using %s with sample percent %.2f", sampleMethod, samplePercent)
 
 		numBlocks = int(math.Ceil(float64(maxRows) / float64(m.BlockSize)))
 		if numBlocks == 0 && maxRows > 0 {
@@ -323,41 +418,80 @@ func (m *MerkleTreeTask) BuildMtree() error {
 	}
 
 	for _, nodeInfo := range m.ClusterNodes {
-		fmt.Printf("\nProcessing node: %s\n", nodeInfo["Name"])
+		logger.Info("Processing node: %s", nodeInfo["Name"])
 		pool, err := auth.GetClusterNodeConnection(nodeInfo, "")
 		if err != nil {
 			return fmt.Errorf("failed to connect to node %s for mtree build: %w", nodeInfo["Name"], err)
 		}
 
-		fmt.Println("  - Creating Merkle Tree objects...")
+		publicationName := cfg.PublicationName
+		err = queries.AlterPublicationAddTable(context.Background(), pool, publicationName, m.QualifiedTableName)
+		if err != nil {
+			var pgErr *pgconn.PgError
+			if errors.As(err, &pgErr) && pgErr.Code == tableAlreadyInPublicationError {
+				logger.Info("Table %s is already in publication %s on node %s", m.QualifiedTableName, publicationName, nodeInfo["Name"])
+			} else {
+				pool.Close()
+				return fmt.Errorf("failed to add table to publication on node %s: %w", nodeInfo["Name"], err)
+			}
+		} else {
+			logger.Info("Added table %s to publication %s on node %s", m.QualifiedTableName, publicationName, nodeInfo["Name"])
+		}
+
+		slotName, startLSN, tables, err := queries.GetCDCMetadata(context.Background(), pool, publicationName)
+		if err != nil {
+			pool.Close()
+			return fmt.Errorf("failed to get cdc metadata on node %s: %w", nodeInfo["Name"], err)
+		}
+
+		var tableExists bool
+		for _, table := range tables {
+			if table == m.QualifiedTableName {
+				tableExists = true
+				break
+			}
+		}
+
+		if !tableExists {
+			tables = append(tables, m.QualifiedTableName)
+		}
+
+		err = queries.UpdateCDCMetadata(context.Background(), pool, publicationName, slotName, startLSN, tables)
+		if err != nil {
+			pool.Close()
+			return fmt.Errorf("failed to update cdc metadata on node %s: %w", nodeInfo["Name"], err)
+		}
+		logger.Info("Updated CDC metadata for table %s on node %s", m.QualifiedTableName, nodeInfo["Name"])
+
+		logger.Info("Creating Merkle Tree objects on %s...", nodeInfo["Name"])
 		err = m.createMtreeObjects(pool, maxRows, numBlocks)
 		if err != nil {
 			pool.Close()
 			return fmt.Errorf("failed to create mtree objects on node %s: %w", nodeInfo["Name"], err)
 		}
 
-		fmt.Println("  - Inserting block ranges...")
+		logger.Info("Inserting block ranges on %s...", nodeInfo["Name"])
 		err = m.insertBlockRanges(pool, blockRanges)
 		if err != nil {
 			pool.Close()
 			return fmt.Errorf("failed to insert block ranges on node %s: %w", nodeInfo["Name"], err)
 		}
 
-		fmt.Println("  - Computing leaf hashes...")
+		logger.Info("Computing leaf hashes on %s...", nodeInfo["Name"])
 		err = m.computeLeafHashes(pool, blockRanges)
 		if err != nil {
 			pool.Close()
 			return fmt.Errorf("failed to compute leaf hashes on node %s: %w", nodeInfo["Name"], err)
 		}
 
-		fmt.Println("  - Building parent nodes...")
+		logger.Info("Building parent nodes on %s...", nodeInfo["Name"])
 		err = m.buildParentNodes(pool)
 		if err != nil {
 			pool.Close()
 			return fmt.Errorf("failed to build parent nodes on node %s: %w", nodeInfo["Name"], err)
 		}
 
-		fmt.Printf("Merkle tree built successfully on %s\n", nodeInfo["Name"])
+		logger.Info("Merkle tree built successfully on %s", nodeInfo["Name"])
 		pool.Close()
 	}
 
@@ -369,6 +503,10 @@ func (m *MerkleTreeTask) UpdateMtree(skipAllChecks bool) error {
 		if err := m.RunChecks(true); err != nil {
 			return err
 		}
+	}
+
+	for _, nodeInfo := range m.ClusterNodes {
+		cdc.UpdateFromCDC(nodeInfo)
 	}
 
 	var blockSize int
@@ -537,40 +675,6 @@ func (m *MerkleTreeTask) splitBlocks(tx pgx.Tx, blocksToSplit []types.BlockRange
 
 	currentBlocks := make([]types.BlockRange, len(blocksToSplit))
 	copy(currentBlocks, blocksToSplit)
-
-	if !m.SimplePrimaryKey {
-		minVals, err := queries.GetMinValCompositeTx(context.Background(), tx, m.Schema, m.Table, m.Key)
-		if err != nil {
-			return nil, fmt.Errorf("failed to fetch composite min key: %w", err)
-		}
-		if minVals != nil {
-			if err := queries.UpdateBlockRangeStartCompositeTx(context.Background(), tx, mtreeTableName, compositeTypeName, minVals, 0); err != nil {
-				return nil, fmt.Errorf("failed to update first block start (composite): %w", err)
-			}
-			for i := range currentBlocks {
-				if currentBlocks[i].NodePosition == 0 {
-					currentBlocks[i].RangeStart = minVals
-					break
-				}
-			}
-		}
-	} else {
-		minVal, err := queries.GetMinValSimpleTx(context.Background(), tx, m.Schema, m.Table, m.Key[0])
-		if err != nil {
-			return nil, fmt.Errorf("failed to fetch simple min key: %w", err)
-		}
-		if minVal != nil {
-			if err := queries.UpdateBlockRangeStartTx(context.Background(), tx, mtreeTableName, minVal, 0); err != nil {
-				return nil, fmt.Errorf("failed to update first block start (simple): %w", err)
-			}
-			for i := range currentBlocks {
-				if currentBlocks[i].NodePosition == 0 {
-					currentBlocks[i].RangeStart = []any{minVal}
-					break
-				}
-			}
-		}
-	}
 
 	if err := queries.DeleteParentNodesTx(ctx, tx, mtreeTableName); err != nil {
 		return nil, fmt.Errorf("failed to delete parent nodes: %w", err)

@@ -17,6 +17,7 @@ import (
 
 	"github.com/charmbracelet/log"
 	"github.com/google/uuid"
+	"github.com/pgedge/ace/internal/cdc"
 	"github.com/pgedge/ace/internal/core"
 	"github.com/pgedge/ace/pkg/logger"
 	"github.com/urfave/cli/v2"
@@ -357,6 +358,66 @@ func SetupCLI() *cli.App {
 				Usage: "Merkle tree operations",
 				Subcommands: []*cli.Command{
 					{
+						Name:      "init",
+						Usage:     "Initialize Merkle tree replication for a cluster",
+						ArgsUsage: "<cluster>",
+						Flags:     commonFlags,
+						Action: func(ctx *cli.Context) error {
+							if ctx.Args().Len() < 1 {
+								return fmt.Errorf("missing required argument for mtree init: needs <cluster>")
+							}
+							return MtreeInitCLI(ctx)
+						},
+						Before: func(ctx *cli.Context) error {
+							if ctx.Bool("debug") {
+								logger.SetLevel(log.DebugLevel)
+							} else {
+								logger.SetLevel(log.InfoLevel)
+							}
+							return nil
+						},
+					},
+					{
+						Name:      "listen",
+						Usage:     "Listen for changes and update Merkle trees",
+						ArgsUsage: "<cluster>",
+						Flags:     commonFlags,
+						Action: func(ctx *cli.Context) error {
+							if ctx.Args().Len() < 1 {
+								return fmt.Errorf("missing required argument for mtree listen: needs <cluster>")
+							}
+							return MtreeListenCLI(ctx)
+						},
+						Before: func(ctx *cli.Context) error {
+							if ctx.Bool("debug") {
+								logger.SetLevel(log.DebugLevel)
+							} else {
+								logger.SetLevel(log.InfoLevel)
+							}
+							return nil
+						},
+					},
+					{
+						Name:      "teardown",
+						Usage:     "Teardown Merkle tree replication for a cluster",
+						ArgsUsage: "<cluster>",
+						Flags:     commonFlags,
+						Action: func(ctx *cli.Context) error {
+							if ctx.Args().Len() < 1 {
+								return fmt.Errorf("missing required argument for mtree teardown: needs <cluster>")
+							}
+							return MtreeTeardownCLI(ctx)
+						},
+						Before: func(ctx *cli.Context) error {
+							if ctx.Bool("debug") {
+								logger.SetLevel(log.DebugLevel)
+							} else {
+								logger.SetLevel(log.InfoLevel)
+							}
+							return nil
+						},
+					},
+					{
 						Name:      "build",
 						Usage:     "Build a new Merkle tree for a table",
 						ArgsUsage: "<cluster> <table>",
@@ -434,6 +495,55 @@ func TableDiffCLI(ctx *cli.Context) error {
 
 	if err := task.ExecuteTask(); err != nil {
 		return fmt.Errorf("error during comparison: %w", err)
+	}
+
+	return nil
+}
+
+func MtreeInitCLI(ctx *cli.Context) error {
+	task := core.NewMerkleTreeTask()
+	task.ClusterName = ctx.Args().Get(0)
+	task.DBName = ctx.String("dbname")
+	task.Nodes = ctx.String("nodes")
+	task.QuietMode = ctx.Bool("quiet")
+	task.Mode = "init"
+
+	if err := task.MtreeInit(); err != nil {
+		return fmt.Errorf("error during mtree init: %w", err)
+	}
+
+	return nil
+}
+
+func MtreeListenCLI(ctx *cli.Context) error {
+	task := core.NewMerkleTreeTask()
+	task.ClusterName = ctx.Args().Get(0)
+	task.DBName = ctx.String("dbname")
+	task.Nodes = ctx.String("nodes")
+	task.QuietMode = ctx.Bool("quiet")
+	task.Mode = "listen"
+
+	if err := task.Validate(); err != nil {
+		return fmt.Errorf("validation failed: %w", err)
+	}
+
+	for _, nodeInfo := range task.GetClusterNodes() {
+		go cdc.ListenForChanges(nodeInfo)
+	}
+
+	select {}
+}
+
+func MtreeTeardownCLI(ctx *cli.Context) error {
+	task := core.NewMerkleTreeTask()
+	task.ClusterName = ctx.Args().Get(0)
+	task.DBName = ctx.String("dbname")
+	task.Nodes = ctx.String("nodes")
+	task.QuietMode = ctx.Bool("quiet")
+	task.Mode = "teardown"
+
+	if err := task.MtreeTeardown(); err != nil {
+		return fmt.Errorf("error during mtree teardown: %w", err)
 	}
 
 	return nil
