@@ -1196,33 +1196,87 @@ func GetNodeChildren(ctx context.Context, db *pgxpool.Pool, mtreeTable string, n
 	return children, nil
 }
 
-func GetLeafRanges(ctx context.Context, db *pgxpool.Pool, mtreeTable string, nodePositions []int64) ([]types.LeafRange, error) {
-	data := map[string]interface{}{
-		"MtreeTable": mtreeTable,
+func GetLeafRanges(ctx context.Context, db *pgxpool.Pool, mtreeTable string, nodePositions []int64, simplePrimaryKey bool, key []string) ([]types.LeafRange, error) {
+	if simplePrimaryKey {
+		data := map[string]interface{}{
+			"MtreeTable": mtreeTable,
+		}
+
+		sql, err := RenderSQL(SQLTemplates.GetLeafRanges, data)
+		if err != nil {
+			return nil, fmt.Errorf("failed to render GetLeafRanges SQL: %w", err)
+		}
+
+		rows, err := db.Query(ctx, sql, nodePositions)
+		if err != nil {
+			return nil, fmt.Errorf("query to get leaf ranges for '%s' failed: %w", mtreeTable, err)
+		}
+		defer rows.Close()
+
+		var ranges []types.LeafRange
+		for rows.Next() {
+			var r types.LeafRange
+			if err := rows.Scan(&r.RangeStart, &r.RangeEnd); err != nil {
+				return nil, fmt.Errorf("failed to scan leaf range: %w", err)
+			}
+			ranges = append(ranges, r)
+		}
+
+		if err := rows.Err(); err != nil {
+			return nil, fmt.Errorf("error iterating over leaf ranges: %w", err)
+		}
+
+		return ranges, nil
 	}
 
-	sql, err := RenderSQL(SQLTemplates.GetLeafRanges, data)
+	startAttrs := make([]string, len(key))
+	endAttrs := make([]string, len(key))
+	for i, k := range key {
+		attr := pgx.Identifier{k}.Sanitize()
+		startAttrs[i] = fmt.Sprintf("(range_start).%s", attr)
+		endAttrs[i] = fmt.Sprintf("(range_end).%s", attr)
+	}
+	data := map[string]any{
+		"MtreeTable": pgx.Identifier{mtreeTable}.Sanitize(),
+		"StartAttrs": strings.Join(startAttrs, ", "),
+		"EndAttrs":   strings.Join(endAttrs, ", "),
+	}
+	sql, err := RenderSQL(SQLTemplates.GetLeafRangesExpanded, data)
 	if err != nil {
-		return nil, fmt.Errorf("failed to render GetLeafRanges SQL: %w", err)
+		return nil, fmt.Errorf("failed to render GetLeafRangesExpanded SQL: %w", err)
 	}
 
 	rows, err := db.Query(ctx, sql, nodePositions)
 	if err != nil {
-		return nil, fmt.Errorf("query to get leaf ranges for '%s' failed: %w", mtreeTable, err)
+		return nil, fmt.Errorf("query to get expanded leaf ranges for '%s' failed: %w", mtreeTable, err)
 	}
 	defer rows.Close()
 
 	var ranges []types.LeafRange
+	numKeyCols := len(key)
 	for rows.Next() {
-		var r types.LeafRange
-		if err := rows.Scan(&r.RangeStart, &r.RangeEnd); err != nil {
-			return nil, fmt.Errorf("failed to scan leaf range: %w", err)
+		dest := make([]any, numKeyCols*2)
+		destPtrs := make([]any, numKeyCols*2)
+		for i := range dest {
+			destPtrs[i] = &dest[i]
 		}
-		ranges = append(ranges, r)
-	}
 
+		if err := rows.Scan(destPtrs...); err != nil {
+			return nil, fmt.Errorf("failed to scan expanded leaf range: %w", err)
+		}
+
+		startVals := make([]any, numKeyCols)
+		copy(startVals, dest[:numKeyCols])
+		endVals := make([]any, numKeyCols)
+		copy(endVals, dest[numKeyCols:])
+
+		ranges = append(ranges, types.LeafRange{
+			RangeStart: startVals,
+			RangeEnd:   endVals,
+		})
+	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("error iterating over leaf ranges: %w", err)
+		return nil, fmt.Errorf("error iterating over expanded leaf ranges: %w", err)
 	}
 
 	return ranges, nil

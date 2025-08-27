@@ -18,11 +18,14 @@ import (
 	"maps"
 	"math"
 	"os"
+	"sort"
 	"strings"
 	"time"
 
 	"runtime"
 	"sync"
+
+	"bytes"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -61,6 +64,246 @@ type MerkleTreeTask struct {
 	WriteRanges       bool
 	OverrideBlockSize bool
 	Mode              string
+
+	DiffResult types.DiffOutput
+	diffMutex  sync.Mutex
+	StartTime  time.Time
+}
+
+type CompareRangesWorkItem struct {
+	Node1  map[string]any
+	Node2  map[string]any
+	Ranges [][2][]any
+}
+
+type CompareRangesResult struct {
+	Diffs     map[string]map[string][]map[string]any
+	TotalDiff int
+	Err       error
+}
+
+func (m *MerkleTreeTask) CompareRanges(workItems []CompareRangesWorkItem) {
+	numWorkers := int(float64(runtime.NumCPU()) * m.MaxCpuRatio)
+	if numWorkers < 1 {
+		numWorkers = 1
+	}
+	jobs := make(chan CompareRangesWorkItem, len(workItems))
+
+	var wg sync.WaitGroup
+	for i := 0; i < numWorkers; i++ {
+		wg.Add(1)
+		go m.compareRangesWorker(&wg, jobs)
+	}
+
+	for _, item := range workItems {
+		jobs <- item
+	}
+	close(jobs)
+
+	wg.Wait()
+}
+
+func (m *MerkleTreeTask) compareRangesWorker(wg *sync.WaitGroup, jobs <-chan CompareRangesWorkItem) {
+	defer wg.Done()
+	for work := range jobs {
+		pool1, err := auth.GetClusterNodeConnection(work.Node1, "")
+		if err != nil {
+			logger.Error("worker failed to connect to %s: %w", work.Node1["Name"], err)
+			continue
+		}
+		defer pool1.Close()
+
+		pool2, err := auth.GetClusterNodeConnection(work.Node2, "")
+		if err != nil {
+			logger.Error("worker failed to connect to %s: %w", work.Node2["Name"], err)
+			continue
+		}
+		defer pool2.Close()
+
+		var whereClause string
+		var args []any
+		paramIndex := 1
+		var orClauses []string
+
+		if m.SimplePrimaryKey {
+			sanitisedKey := pgx.Identifier{m.Key[0]}.Sanitize()
+			for _, r := range work.Ranges {
+				var andClauses []string
+				startVal := r[0][0]
+				endVal := r[1][0]
+
+				if startVal != nil {
+					andClauses = append(andClauses, fmt.Sprintf("%s >= $%d", sanitisedKey, paramIndex))
+					args = append(args, startVal)
+					paramIndex++
+				}
+				if endVal != nil {
+					andClauses = append(andClauses, fmt.Sprintf("%s <= $%d", sanitisedKey, paramIndex))
+					args = append(args, endVal)
+					paramIndex++
+				}
+				if len(andClauses) > 0 {
+					orClauses = append(orClauses, "("+strings.Join(andClauses, " AND ")+")")
+				}
+			}
+		} else {
+			// Composite key logic
+			sanitisedKeys := make([]string, len(m.Key))
+			for i, k := range m.Key {
+				sanitisedKeys[i] = pgx.Identifier{k}.Sanitize()
+			}
+			pkeyColsStr := strings.Join(sanitisedKeys, ", ")
+
+			for _, r := range work.Ranges {
+				startVals := r[0]
+				endVals := r[1]
+
+				var andClauses []string
+
+				if len(startVals) > 0 && !allNil(startVals) {
+					placeholders := make([]string, len(startVals))
+					for i, v := range startVals {
+						placeholders[i] = fmt.Sprintf("$%d", paramIndex)
+						args = append(args, v)
+						paramIndex++
+					}
+					andClauses = append(andClauses, fmt.Sprintf("ROW(%s) >= ROW(%s)", pkeyColsStr, strings.Join(placeholders, ", ")))
+				}
+				if len(endVals) > 0 && !allNil(endVals) {
+					placeholders := make([]string, len(endVals))
+					for i, v := range endVals {
+						placeholders[i] = fmt.Sprintf("$%d", paramIndex)
+						args = append(args, v)
+						paramIndex++
+					}
+					andClauses = append(andClauses, fmt.Sprintf("ROW(%s) <= ROW(%s)", pkeyColsStr, strings.Join(placeholders, ", ")))
+				}
+
+				if len(andClauses) > 0 {
+					orClauses = append(orClauses, "("+strings.Join(andClauses, " AND ")+")")
+				}
+			}
+		}
+
+		whereClause = strings.Join(orClauses, " OR ")
+		if whereClause == "" {
+			whereClause = "TRUE"
+		}
+
+		query, err := queries.RenderSQL(queries.SQLTemplates.CompareBlocksSQL, map[string]interface{}{
+			"TableName":   m.QualifiedTableName,
+			"WhereClause": whereClause,
+		})
+		if err != nil {
+			logger.Error("failed to build compare-blocks SQL: %v", err)
+			continue
+		}
+
+		rows1, err := pool1.Query(context.Background(), query, args...)
+		if err != nil {
+			logger.Error("worker failed to get rows from %s: %v", work.Node1["Name"], err)
+			continue
+		}
+		processedRows1, err := processRows(rows1)
+		if err != nil {
+			logger.Error("worker failed to process rows from %s: %v", work.Node1["Name"], err)
+			continue
+		}
+
+		rows2, err := pool2.Query(context.Background(), query, args...)
+		if err != nil {
+			logger.Error("worker failed to get rows from %s: %v", work.Node2["Name"], err)
+			continue
+		}
+		processedRows2, err := processRows(rows2)
+		if err != nil {
+			logger.Error("worker failed to process rows from %s: %v", work.Node2["Name"], err)
+			continue
+		}
+
+		diffResult, err := utils.CompareRowSets(processedRows1, processedRows2, m.Key, m.Cols)
+		if err != nil {
+			logger.Error("worker failed to compare row sets: %v", err)
+			continue
+		}
+
+		nodePairKey := fmt.Sprintf("%s/%s", work.Node1["Name"], work.Node2["Name"])
+		m.diffMutex.Lock()
+
+		if _, ok := m.DiffResult.NodeDiffs[nodePairKey]; !ok {
+			m.DiffResult.NodeDiffs[nodePairKey] = types.DiffByNodePair{
+				Rows: make(map[string][]map[string]any),
+			}
+		}
+
+		if _, ok := m.DiffResult.NodeDiffs[nodePairKey].Rows[work.Node1["Name"].(string)]; !ok {
+			m.DiffResult.NodeDiffs[nodePairKey].Rows[work.Node1["Name"].(string)] = []map[string]any{}
+		}
+		if _, ok := m.DiffResult.NodeDiffs[nodePairKey].Rows[work.Node2["Name"].(string)]; !ok {
+			m.DiffResult.NodeDiffs[nodePairKey].Rows[work.Node2["Name"].(string)] = []map[string]any{}
+		}
+
+		var currentDiffRowsForPair int
+		for _, row := range diffResult.Node1OnlyRows {
+			m.DiffResult.NodeDiffs[nodePairKey].Rows[work.Node1["Name"].(string)] = append(m.DiffResult.NodeDiffs[nodePairKey].Rows[work.Node1["Name"].(string)], row)
+			currentDiffRowsForPair++
+		}
+		for _, row := range diffResult.Node2OnlyRows {
+			m.DiffResult.NodeDiffs[nodePairKey].Rows[work.Node2["Name"].(string)] = append(m.DiffResult.NodeDiffs[nodePairKey].Rows[work.Node2["Name"].(string)], row)
+			currentDiffRowsForPair++
+		}
+		for _, modRow := range diffResult.ModifiedRows {
+			m.DiffResult.NodeDiffs[nodePairKey].Rows[work.Node1["Name"].(string)] = append(m.DiffResult.NodeDiffs[nodePairKey].Rows[work.Node1["Name"].(string)], modRow.Node1Data)
+			m.DiffResult.NodeDiffs[nodePairKey].Rows[work.Node2["Name"].(string)] = append(m.DiffResult.NodeDiffs[nodePairKey].Rows[work.Node2["Name"].(string)], modRow.Node2Data)
+			currentDiffRowsForPair++
+		}
+
+		if m.DiffResult.Summary.DiffRowsCount == nil {
+			m.DiffResult.Summary.DiffRowsCount = make(map[string]int)
+		}
+		m.DiffResult.Summary.DiffRowsCount[nodePairKey] += currentDiffRowsForPair
+		m.diffMutex.Unlock()
+	}
+}
+
+func processRows(rows pgx.Rows) ([]map[string]any, error) {
+	var results []map[string]any
+	defer rows.Close()
+	fields := rows.FieldDescriptions()
+	for rows.Next() {
+		values, err := rows.Values()
+		if err != nil {
+			return nil, err
+		}
+		rowMap := make(map[string]any)
+		for i, field := range fields {
+			rowMap[string(field.Name)] = values[i]
+		}
+		results = append(results, rowMap)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return results, nil
+}
+
+func allNil(vals []any) bool {
+	if len(vals) == 0 {
+		return true
+	}
+	for _, v := range vals {
+		if v != nil {
+			return false
+		}
+	}
+	return true
+}
+
+func valueOrNil(end []any) interface{} {
+	if len(end) == 0 || end[0] == nil {
+		return nil
+	}
+	return end[0]
 }
 
 func (m *MerkleTreeTask) MtreeInit() error {
@@ -816,23 +1059,272 @@ func (m *MerkleTreeTask) performMerges(tx pgx.Tx) ([]int64, error) {
 	return allModifiedPositions, nil
 }
 
-func valueOrNil(end []any) interface{} {
-	if len(end) == 0 || end[0] == nil {
-		return nil
-	}
-	return end[0]
-}
-
-func allNil(vals []any) bool {
-	if len(vals) == 0 {
-		return true
-	}
-	for _, v := range vals {
-		if v != nil {
-			return false
+func getNodePairs(nodes []map[string]any) [][2]map[string]any {
+	var pairs [][2]map[string]any
+	for i := 0; i < len(nodes); i++ {
+		for j := i + 1; j < len(nodes); j++ {
+			pairs = append(pairs, [2]map[string]any{nodes[i], nodes[j]})
 		}
 	}
-	return true
+	return pairs
+}
+
+func (m *MerkleTreeTask) DiffMtree() error {
+	if err := m.UpdateMtree(true); err != nil {
+		return fmt.Errorf("failed to update merkle tree before diff: %w", err)
+	}
+	nodePairs := getNodePairs(m.ClusterNodes)
+	mtreeTableName := fmt.Sprintf("ace_mtree_%s_%s", m.Schema, m.Table)
+
+	allNodePairBatches := make(map[string]CompareRangesWorkItem)
+
+	m.StartTime = time.Now()
+	m.DiffResult = types.DiffOutput{
+		NodeDiffs: make(map[string]types.DiffByNodePair),
+		Summary: types.DiffSummary{
+			Schema:        m.Schema,
+			Table:         m.Table,
+			Nodes:         m.NodeList,
+			StartTime:     time.Now().Format(time.RFC3339),
+			DiffRowsCount: make(map[string]int),
+		},
+	}
+
+	for _, pair := range nodePairs {
+		node1 := pair[0]
+		node2 := pair[1]
+		logger.Info("Comparing merkle trees between %s and %s", node1["Name"], node2["Name"])
+
+		pool1, err := auth.GetClusterNodeConnection(node1, "")
+		if err != nil {
+			return fmt.Errorf("failed to get connection pool for node %s: %w", node1["Name"], err)
+		}
+		defer pool1.Close()
+
+		pool2, err := auth.GetClusterNodeConnection(node2, "")
+		if err != nil {
+			return fmt.Errorf("failed to get connection pool for node %s: %w", node2["Name"], err)
+		}
+		defer pool2.Close()
+
+		root1, err := queries.GetRootNode(context.Background(), pool1, mtreeTableName)
+		if err != nil {
+			return fmt.Errorf("failed to get root node on %s: %w", node1["Name"], err)
+		}
+
+		root2, err := queries.GetRootNode(context.Background(), pool2, mtreeTableName)
+		if err != nil {
+			return fmt.Errorf("failed to get root node on %s: %w", node2["Name"], err)
+		}
+
+		if root1 == nil || root2 == nil {
+			logger.Warn("Merkle tree not found on one or both nodes for table %s.%s", m.Schema, m.Table)
+			continue
+		}
+
+		if bytes.Equal(root1.NodeHash, root2.NodeHash) {
+			logger.Info("Merkle trees are identical")
+			continue
+		}
+
+		logger.Info("Trees differ - traversing to find mismatched leaf nodes...")
+
+		rootLevel, err := queries.GetMaxNodeLevel(context.Background(), pool1, mtreeTableName)
+		if err != nil {
+			return fmt.Errorf("failed to get max node level on %s: %w", node1["Name"], err)
+		}
+
+		mismatchedLeaves, err := m.findMismatchedLeaves(pool1, pool2, rootLevel, root1.NodePosition)
+		if err != nil {
+			return fmt.Errorf("failed to find mismatched leaves: %w", err)
+		}
+
+		if len(mismatchedLeaves) == 0 {
+			logger.Info("No mismatched leaf nodes found")
+			continue
+		}
+		positions := make([]int64, 0, len(mismatchedLeaves))
+		for pos := range mismatchedLeaves {
+			positions = append(positions, pos)
+		}
+
+		batches, err := m.getPkeyBatches(pool1, pool2, positions)
+		if err != nil {
+			return fmt.Errorf("failed to get pkey batches: %w", err)
+		}
+		logger.Info("Found %d mismatched blocks", len(batches))
+		if len(batches) > 0 {
+			nodePairKey := fmt.Sprintf("%s/%s", node1["Name"], node2["Name"])
+			allNodePairBatches[nodePairKey] = CompareRangesWorkItem{
+				Node1:  node1,
+				Node2:  node2,
+				Ranges: batches,
+			}
+		}
+
+	}
+
+	workItems := make([]CompareRangesWorkItem, 0, len(allNodePairBatches))
+	for _, item := range allNodePairBatches {
+		workItems = append(workItems, item)
+	}
+
+	if len(workItems) > 0 {
+		m.CompareRanges(workItems)
+		endTime := time.Now()
+		m.DiffResult.Summary.EndTime = endTime.Format(time.RFC3339)
+		m.DiffResult.Summary.TimeTaken = endTime.Sub(m.StartTime).String()
+		m.DiffResult.Summary.PrimaryKey = m.Key
+		if err := utils.WriteDiffReport(m.DiffResult, m.Schema, m.Table); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func (m *MerkleTreeTask) findMismatchedLeaves(pool1, pool2 *pgxpool.Pool, parentLevel int, parentPosition int64) (map[int64]bool, error) {
+	mismatched := make(map[int64]bool)
+	mtreeTableName := fmt.Sprintf("ace_mtree_%s_%s", m.Schema, m.Table)
+
+	children1, err := queries.GetNodeChildren(context.Background(), pool1, mtreeTableName, parentLevel, int(parentPosition))
+	if err != nil {
+		return nil, err
+	}
+	children2, err := queries.GetNodeChildren(context.Background(), pool2, mtreeTableName, parentLevel, int(parentPosition))
+	if err != nil {
+		return nil, err
+	}
+
+	maxLen := len(children1)
+	if len(children2) > maxLen {
+		maxLen = len(children2)
+	}
+
+	for i := 0; i < maxLen; i++ {
+		var child1, child2 *types.NodeChild
+		if i < len(children1) {
+			child1 = &children1[i]
+		}
+		if i < len(children2) {
+			child2 = &children2[i]
+		}
+
+		if child1 == nil || child2 == nil {
+			existingChild := child1
+			if existingChild == nil {
+				existingChild = child2
+			}
+			if existingChild.NodeLevel == 0 {
+				mismatched[existingChild.NodePosition] = true
+			} else {
+				// To handle structural differences, we must recurse using the node that has children.
+				// But we need to decide which pool to use to continue traversal.
+				// We pass both pools down and let the recursive call figure it out.
+				childMismatches, err := m.findMismatchedLeaves(pool1, pool2, existingChild.NodeLevel, existingChild.NodePosition)
+				if err != nil {
+					return nil, err
+				}
+				for pos := range childMismatches {
+					mismatched[pos] = true
+				}
+			}
+		} else if !bytes.Equal(child1.NodeHash, child2.NodeHash) {
+			if child1.NodeLevel == 0 {
+				mismatched[child1.NodePosition] = true
+			} else {
+				childMismatches, err := m.findMismatchedLeaves(pool1, pool2, child1.NodeLevel, child1.NodePosition)
+				if err != nil {
+					return nil, err
+				}
+				for pos := range childMismatches {
+					mismatched[pos] = true
+				}
+			}
+		}
+	}
+
+	return mismatched, nil
+}
+
+func (m *MerkleTreeTask) getPkeyBatches(pool1, pool2 *pgxpool.Pool, mismatchedPositions []int64) ([][2][]any, error) {
+	mtreeTableName := fmt.Sprintf("ace_mtree_%s_%s", m.Schema, m.Table)
+
+	leafRanges1, err := queries.GetLeafRanges(context.Background(), pool1, mtreeTableName, mismatchedPositions, m.SimplePrimaryKey, m.Key)
+	if err != nil {
+		return nil, err
+	}
+	leafRanges2, err := queries.GetLeafRanges(context.Background(), pool2, mtreeTableName, mismatchedPositions, m.SimplePrimaryKey, m.Key)
+	if err != nil {
+		return nil, err
+	}
+
+	allRanges := append(leafRanges1, leafRanges2...)
+	boundaries := make(map[string]any)
+	for _, r := range allRanges {
+		if r.RangeStart != nil {
+			if !allNil(r.RangeStart) {
+				boundaries[fmt.Sprint(r.RangeStart)] = r.RangeStart
+			}
+		}
+		if r.RangeEnd != nil {
+			if !allNil(r.RangeEnd) {
+				boundaries[fmt.Sprint(r.RangeEnd)] = r.RangeEnd
+			}
+		}
+	}
+
+	sortedBoundaries := make([]any, 0, len(boundaries))
+	for _, b := range boundaries {
+		sortedBoundaries = append(sortedBoundaries, b)
+	}
+
+	sort.Slice(sortedBoundaries, func(i, j int) bool {
+		// TODO: This needs to be a proper comparison of the types.
+		return fmt.Sprint(sortedBoundaries[i]) < fmt.Sprint(sortedBoundaries[j])
+	})
+
+	var batches [][2][]any
+	for i := 0; i < len(sortedBoundaries)-1; i++ {
+		start := sortedBoundaries[i]
+		end := sortedBoundaries[i+1]
+		if intervalIntersects(start, end, allRanges) {
+			var startSlice, endSlice []any
+			if s, ok := start.([]any); ok {
+				startSlice = s
+			} else {
+				startSlice = []any{start}
+			}
+			if e, ok := end.([]any); ok {
+				endSlice = e
+			} else {
+				endSlice = []any{end}
+			}
+			batches = append(batches, [2][]any{startSlice, endSlice})
+		}
+	}
+
+	return batches, nil
+}
+
+func intervalIntersects(start, end any, allRanges []types.LeafRange) bool {
+	// Simplified intersection logic
+	s := fmt.Sprint(start)
+	e := fmt.Sprint(end)
+	for _, r := range allRanges {
+		var rs, re string
+		if r.RangeStart != nil {
+			rs = fmt.Sprint(r.RangeStart)
+		}
+		if r.RangeEnd != nil {
+			re = fmt.Sprint(r.RangeEnd)
+		}
+
+		if e > rs && s < re {
+			return true
+		}
+	}
+	return false
 }
 
 func (m *MerkleTreeTask) mergeBlocks(tx pgx.Tx, blocksToMerge []types.BlockRange) ([]int64, error) {

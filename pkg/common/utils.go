@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"reflect"
 	"slices"
 	"sort"
 	"strings"
@@ -436,4 +437,108 @@ func DiffStringSlices(a, b []string) (missing, extra []string) {
 	}
 
 	return missing, extra
+}
+
+func CompareRowSets(rows1, rows2 []map[string]any, key, cols []string) (*types.NodePairDiff, error) {
+	lookupN1 := make(map[string]map[string]any)
+	for _, row := range rows1 {
+		pkVal := make(map[string]any)
+		for _, pkCol := range key {
+			pkVal[pkCol] = row[pkCol]
+		}
+		pkStr, err := StringifyKey(pkVal, key)
+		if err != nil {
+			return nil, fmt.Errorf("failed to stringify n1 pkey: %w", err)
+		}
+		lookupN1[pkStr] = row
+	}
+
+	lookupN2 := make(map[string]map[string]any)
+	for _, row := range rows2 {
+		pkVal := make(map[string]any)
+		for _, pkCol := range key {
+			pkVal[pkCol] = row[pkCol]
+		}
+		pkStr, err := StringifyKey(pkVal, key)
+		if err != nil {
+			return nil, fmt.Errorf("failed to stringify n2 pkey: %w", err)
+		}
+		lookupN2[pkStr] = row
+	}
+
+	diffResult := &types.NodePairDiff{}
+
+	for pkStr, n1Row := range lookupN1 {
+		n2Row, existsInN2 := lookupN2[pkStr]
+		if !existsInN2 {
+			diffResult.Node1OnlyRows = append(diffResult.Node1OnlyRows, n1Row)
+		} else {
+			var mismatch bool
+			for _, colName := range cols {
+				val1, ok1 := n1Row[colName]
+				val2, ok2 := n2Row[colName]
+
+				if ok1 != ok2 {
+					mismatch = true
+					break
+				}
+				if !ok1 && !ok2 {
+					continue
+				}
+
+				if !reflect.DeepEqual(val1, val2) {
+					mismatch = true
+					break
+				}
+			}
+
+			if mismatch {
+				diffResult.ModifiedRows = append(diffResult.ModifiedRows, struct {
+					Pkey      string
+					Node1Data map[string]any
+					Node2Data map[string]any
+				}{Pkey: pkStr, Node1Data: n1Row, Node2Data: n2Row})
+			}
+			delete(lookupN2, pkStr)
+		}
+	}
+
+	for _, n2Row := range lookupN2 {
+		diffResult.Node2OnlyRows = append(diffResult.Node2OnlyRows, n2Row)
+	}
+
+	return diffResult, nil
+}
+
+func WriteDiffReport(diffResult types.DiffOutput, schema, table string) error {
+	if len(diffResult.NodeDiffs) > 0 {
+		outputFileName := fmt.Sprintf("%s_%s_diffs-%s.json",
+			strings.ReplaceAll(schema, ".", "_"),
+			strings.ReplaceAll(table, ".", "_"),
+			time.Now().Format("20060102150405"),
+		)
+
+		jsonData, err := json.MarshalIndent(diffResult, "", "  ")
+		if err != nil {
+			logger.Error("ERROR marshalling diff output to JSON: %v", err)
+			return fmt.Errorf("failed to marshal diffs: %w", err)
+		}
+
+		err = os.WriteFile(outputFileName, jsonData, 0644)
+		if err != nil {
+			logger.Error("ERROR writing diff output to file %s: %v", outputFileName, err)
+			return fmt.Errorf("failed to write diffs file: %w", err)
+		}
+		logger.Warn("%s TABLES DO NOT MATCH", CrossMark)
+
+		for key, diffCount := range diffResult.Summary.DiffRowsCount {
+			logger.Warn("Found %d differences between %s", diffCount, key)
+		}
+
+		logger.Info("Diff report written to %s", outputFileName)
+
+	} else {
+		logger.Info("%s TABLES MATCH", CheckMark)
+	}
+	return nil
 }
