@@ -321,12 +321,18 @@ func (m *MerkleTreeTask) MtreeInit() error {
 		}
 		defer pool.Close()
 
-		err = queries.CreateXORFunction(context.Background(), pool)
+		tx, err := pool.Begin(context.Background())
+		if err != nil {
+			return fmt.Errorf("failed to begin transaction on node %s: %w", nodeInfo["Name"], err)
+		}
+		defer tx.Rollback(context.Background())
+
+		err = queries.CreateXORFunction(context.Background(), tx)
 		if err != nil {
 			return fmt.Errorf("failed to create xor function: %w", err)
 		}
 
-		err = queries.CreateCDCMetadataTable(context.Background(), pool)
+		err = queries.CreateCDCMetadataTable(context.Background(), tx)
 		if err != nil {
 			return fmt.Errorf("failed to create cdc metadata table: %w", err)
 		}
@@ -336,11 +342,14 @@ func (m *MerkleTreeTask) MtreeInit() error {
 			return fmt.Errorf("failed to setup replication: %w", err)
 		}
 
-		err = queries.UpdateCDCMetadata(context.Background(), pool, cfg.PublicationName, cfg.SlotName, lsn.String(), []string{})
+		err = queries.UpdateCDCMetadata(context.Background(), tx, cfg.PublicationName, cfg.SlotName, lsn.String(), []string{})
 		if err != nil {
 			return fmt.Errorf("failed to update cdc metadata: %w", err)
 		}
 
+		if err := tx.Commit(context.Background()); err != nil {
+			return fmt.Errorf("failed to commit transaction on node %s: %w", nodeInfo["Name"], err)
+		}
 		logger.Info("Merkle tree objects initialised on node: %s", nodeInfo["Name"])
 	}
 	return nil
@@ -536,12 +545,17 @@ func (m *MerkleTreeTask) RunChecks(skipValidation bool) error {
 		if _, err := pool.Exec(context.Background(), "CREATE EXTENSION IF NOT EXISTS pgcrypto;"); err != nil {
 			return fmt.Errorf("failed to ensure pgcrypto is installed on %s: %w", nodeInfo["Name"], err)
 		}
+		tx, err := pool.Begin(context.Background())
+		if err != nil {
+			return fmt.Errorf("failed to begin transaction for checks on node %s: %w", nodeInfo["Name"], err)
+		}
+		defer tx.Rollback(context.Background())
 
-		currentColsSlice, err := queries.GetColumns(context.Background(), pool, m.Schema, m.Table)
+		currentColsSlice, err := queries.GetColumns(context.Background(), tx, m.Schema, m.Table)
 		if err != nil {
 			return fmt.Errorf("failed to get columns on node %s: %w", nodeInfo["Name"], err)
 		}
-		currentKeySlice, err := queries.GetPrimaryKey(context.Background(), pool, m.Schema, m.Table)
+		currentKeySlice, err := queries.GetPrimaryKey(context.Background(), tx, m.Schema, m.Table)
 		if err != nil {
 			return fmt.Errorf("failed to get primary key on node %s: %w", nodeInfo["Name"], err)
 		}
@@ -667,8 +681,14 @@ func (m *MerkleTreeTask) BuildMtree() error {
 			return fmt.Errorf("failed to connect to node %s for mtree build: %w", nodeInfo["Name"], err)
 		}
 
+		tx, err := pool.Begin(context.Background())
+		if err != nil {
+			return fmt.Errorf("failed to begin transaction on node %s: %w", nodeInfo["Name"], err)
+		}
+		defer tx.Rollback(context.Background())
+
 		publicationName := cfg.PublicationName
-		err = queries.AlterPublicationAddTable(context.Background(), pool, publicationName, m.QualifiedTableName)
+		err = queries.AlterPublicationAddTable(context.Background(), tx, publicationName, m.QualifiedTableName)
 		if err != nil {
 			var pgErr *pgconn.PgError
 			if errors.As(err, &pgErr) && pgErr.Code == tableAlreadyInPublicationError {
@@ -681,7 +701,7 @@ func (m *MerkleTreeTask) BuildMtree() error {
 			logger.Info("Added table %s to publication %s on node %s", m.QualifiedTableName, publicationName, nodeInfo["Name"])
 		}
 
-		slotName, startLSN, tables, err := queries.GetCDCMetadata(context.Background(), pool, publicationName)
+		slotName, startLSN, tables, err := queries.GetCDCMetadata(context.Background(), tx, publicationName)
 		if err != nil {
 			pool.Close()
 			return fmt.Errorf("failed to get cdc metadata on node %s: %w", nodeInfo["Name"], err)
@@ -699,7 +719,7 @@ func (m *MerkleTreeTask) BuildMtree() error {
 			tables = append(tables, m.QualifiedTableName)
 		}
 
-		err = queries.UpdateCDCMetadata(context.Background(), pool, publicationName, slotName, startLSN, tables)
+		err = queries.UpdateCDCMetadata(context.Background(), tx, publicationName, slotName, startLSN, tables)
 		if err != nil {
 			pool.Close()
 			return fmt.Errorf("failed to update cdc metadata on node %s: %w", nodeInfo["Name"], err)
@@ -707,34 +727,35 @@ func (m *MerkleTreeTask) BuildMtree() error {
 		logger.Info("Updated CDC metadata for table %s on node %s", m.QualifiedTableName, nodeInfo["Name"])
 
 		logger.Info("Creating Merkle Tree objects on %s...", nodeInfo["Name"])
-		err = m.createMtreeObjects(pool, maxRows, numBlocks)
+		err = m.createMtreeObjects(tx, maxRows, numBlocks)
 		if err != nil {
 			pool.Close()
 			return fmt.Errorf("failed to create mtree objects on node %s: %w", nodeInfo["Name"], err)
 		}
 
 		logger.Info("Inserting block ranges on %s...", nodeInfo["Name"])
-		err = m.insertBlockRanges(pool, blockRanges)
+		err = m.insertBlockRanges(tx, blockRanges)
 		if err != nil {
 			pool.Close()
 			return fmt.Errorf("failed to insert block ranges on node %s: %w", nodeInfo["Name"], err)
 		}
 
 		logger.Info("Computing leaf hashes on %s...", nodeInfo["Name"])
-		err = m.computeLeafHashes(pool, blockRanges)
+		err = m.computeLeafHashes(pool, tx, blockRanges)
 		if err != nil {
 			pool.Close()
 			return fmt.Errorf("failed to compute leaf hashes on node %s: %w", nodeInfo["Name"], err)
 		}
 
 		logger.Info("Building parent nodes on %s...", nodeInfo["Name"])
-		err = m.buildParentNodes(pool)
+		err = m.buildParentNodes(tx)
 		if err != nil {
 			pool.Close()
 			return fmt.Errorf("failed to build parent nodes on node %s: %w", nodeInfo["Name"], err)
 		}
 
 		logger.Info("Merkle tree built successfully on %s", nodeInfo["Name"])
+		tx.Commit(context.Background())
 		pool.Close()
 	}
 
@@ -807,7 +828,7 @@ func (m *MerkleTreeTask) UpdateMtree(skipAllChecks bool) error {
 
 		mtreeTableName := fmt.Sprintf("ace_mtree_%s_%s", m.Schema, m.Table)
 
-		blocksToUpdate, err := queries.GetDirtyAndNewBlocksTx(context.Background(), tx, mtreeTableName, m.SimplePrimaryKey, m.Key)
+		blocksToUpdate, err := queries.GetDirtyAndNewBlocks(context.Background(), tx, mtreeTableName, m.SimplePrimaryKey, m.Key)
 		if err != nil {
 			return fmt.Errorf("error getting dirty blocks on node %s: %w", nodeInfo["Name"], err)
 		}
@@ -824,7 +845,7 @@ func (m *MerkleTreeTask) UpdateMtree(skipAllChecks bool) error {
 			blockPositionsToSplit = append(blockPositionsToSplit, b.NodePosition)
 		}
 
-		blocksToSplit, err := queries.FindBlocksToSplitTx(context.Background(), tx, mtreeTableName, splitThreshold, blockPositionsToSplit, m.SimplePrimaryKey, m.Key)
+		blocksToSplit, err := queries.FindBlocksToSplit(context.Background(), tx, mtreeTableName, splitThreshold, blockPositionsToSplit, m.SimplePrimaryKey, m.Key)
 		if err != nil {
 			return fmt.Errorf("query to find blocks to split for '%s' failed: %w", mtreeTableName, err)
 		}
@@ -843,7 +864,7 @@ func (m *MerkleTreeTask) UpdateMtree(skipAllChecks bool) error {
 			}
 		}
 
-		blocksToUpdate, err = queries.GetDirtyAndNewBlocksTx(context.Background(), tx, mtreeTableName, m.SimplePrimaryKey, m.Key)
+		blocksToUpdate, err = queries.GetDirtyAndNewBlocks(context.Background(), tx, mtreeTableName, m.SimplePrimaryKey, m.Key)
 		if err != nil {
 			return err
 		}
@@ -876,11 +897,11 @@ func (m *MerkleTreeTask) UpdateMtree(skipAllChecks bool) error {
 			)
 
 			for _, block := range blocksToUpdate {
-				leafHash, err := queries.ComputeLeafHashesTx(context.Background(), tx, m.Schema, m.Table, m.Cols, m.SimplePrimaryKey, m.Key, block.RangeStart, block.RangeEnd)
+				leafHash, err := queries.ComputeLeafHashes(context.Background(), tx, m.Schema, m.Table, m.SimplePrimaryKey, m.Key, block.RangeStart, block.RangeEnd)
 				if err != nil {
 					return fmt.Errorf("failed to recompute hash for block %d: %w", block.NodePosition, err)
 				}
-				if _, err := queries.UpdateLeafHashesTx(context.Background(), tx, mtreeTableName, leafHash, block.NodePosition); err != nil {
+				if _, err := queries.UpdateLeafHashes(context.Background(), tx, mtreeTableName, leafHash, block.NodePosition); err != nil {
 					return fmt.Errorf("failed to update leaf hash for block %d: %w", block.NodePosition, err)
 				}
 				bar.Increment()
@@ -893,7 +914,7 @@ func (m *MerkleTreeTask) UpdateMtree(skipAllChecks bool) error {
 			}
 
 			fmt.Println("Clearing dirty flags for affected blocks")
-			err = queries.ClearDirtyFlagsTx(context.Background(), tx, mtreeTableName, affectedPositions)
+			err = queries.ClearDirtyFlags(context.Background(), tx, mtreeTableName, affectedPositions)
 			if err != nil {
 				return err
 			}
@@ -919,7 +940,7 @@ func (m *MerkleTreeTask) splitBlocks(tx pgx.Tx, blocksToSplit []types.BlockRange
 	currentBlocks := make([]types.BlockRange, len(blocksToSplit))
 	copy(currentBlocks, blocksToSplit)
 
-	if err := queries.DeleteParentNodesTx(ctx, tx, mtreeTableName); err != nil {
+	if err := queries.DeleteParentNodes(ctx, tx, mtreeTableName); err != nil {
 		return nil, fmt.Errorf("failed to delete parent nodes: %w", err)
 	}
 
@@ -933,10 +954,10 @@ func (m *MerkleTreeTask) splitBlocks(tx pgx.Tx, blocksToSplit []types.BlockRange
 			var maxVal []any
 			var err error
 			if isComposite {
-				maxVal, err = queries.GetMaxValCompositeTx(ctx, tx, m.Schema, m.Table, m.Key, start)
+				maxVal, err = queries.GetMaxValComposite(ctx, tx, m.Schema, m.Table, m.Key, start)
 			} else {
 				var simpleMaxVal any
-				simpleMaxVal, err = queries.GetMaxValSimpleTx(ctx, tx, m.Schema, m.Table, m.Key[0], start[0])
+				simpleMaxVal, err = queries.GetMaxValSimple(ctx, tx, m.Schema, m.Table, m.Key[0], start[0])
 				if err == nil && simpleMaxVal != nil {
 					maxVal = []any{simpleMaxVal}
 				}
@@ -955,7 +976,11 @@ func (m *MerkleTreeTask) splitBlocks(tx pgx.Tx, blocksToSplit []types.BlockRange
 			continue
 		}
 
-		splitPoints, err := queries.GetBulkSplitPointsTx(ctx, tx, m.Schema, m.Table, m.Key, isComposite, start, end, m.BlockSize)
+		pkeyType, err := queries.GetPkeyType(ctx, tx, m.Schema, m.Table, m.Key[0])
+		if err != nil {
+			return nil, fmt.Errorf("failed to get pkey type: %w", err)
+		}
+		splitPoints, err := queries.GetBulkSplitPoints(ctx, tx, m.Schema, m.Table, m.Key, pkeyType, isComposite, start, end, m.BlockSize)
 		if err != nil {
 			return nil, fmt.Errorf("failed to get bulk split points for block %d: %w", pos, err)
 		}
@@ -978,22 +1003,22 @@ func (m *MerkleTreeTask) splitBlocks(tx pgx.Tx, blocksToSplit []types.BlockRange
 
 		for _, sp := range splitPoints {
 			if isComposite {
-				err = queries.UpdateBlockRangeEndCompositeTx(ctx, tx, mtreeTableName, compositeTypeName, sp, pos)
+				err = queries.UpdateBlockRangeEndComposite(ctx, tx, mtreeTableName, compositeTypeName, sp, pos)
 			} else {
-				err = queries.UpdateBlockRangeEndTx(ctx, tx, mtreeTableName, sp[0], pos)
+				err = queries.UpdateBlockRangeEnd(ctx, tx, mtreeTableName, sp[0], pos)
 			}
 			if err != nil {
 				return nil, err
 			}
 
-			newPos, err := queries.GetMaxNodePositionTx(ctx, tx, mtreeTableName)
+			newPos, err := queries.GetMaxNodePosition(ctx, tx, mtreeTableName)
 			if err != nil {
 				return nil, err
 			}
 			if isComposite {
-				err = queries.InsertCompositeBlockRangesTx(ctx, tx, mtreeTableName, newPos, sp, nil)
+				err = queries.InsertCompositeBlockRanges(ctx, tx, mtreeTableName, newPos, sp, nil)
 			} else {
-				err = queries.InsertBlockRangesTx(ctx, tx, mtreeTableName, newPos, sp[0], nil)
+				err = queries.InsertBlockRanges(ctx, tx, mtreeTableName, newPos, sp[0], nil)
 			}
 			if err != nil {
 				return nil, err
@@ -1004,15 +1029,15 @@ func (m *MerkleTreeTask) splitBlocks(tx pgx.Tx, blocksToSplit []types.BlockRange
 
 		if originallyUnbounded {
 			if isComposite {
-				err = queries.UpdateBlockRangeEndCompositeTx(ctx, tx, mtreeTableName, compositeTypeName, nil, pos)
+				err = queries.UpdateBlockRangeEndComposite(ctx, tx, mtreeTableName, compositeTypeName, nil, pos)
 			} else {
-				err = queries.UpdateBlockRangeEndTx(ctx, tx, mtreeTableName, nil, pos)
+				err = queries.UpdateBlockRangeEnd(ctx, tx, mtreeTableName, nil, pos)
 			}
 		} else {
 			if isComposite {
-				err = queries.UpdateBlockRangeEndCompositeTx(ctx, tx, mtreeTableName, compositeTypeName, end, pos)
+				err = queries.UpdateBlockRangeEndComposite(ctx, tx, mtreeTableName, compositeTypeName, end, pos)
 			} else {
-				err = queries.UpdateBlockRangeEndTx(ctx, tx, mtreeTableName, end[0], pos)
+				err = queries.UpdateBlockRangeEnd(ctx, tx, mtreeTableName, end[0], pos)
 			}
 		}
 		if err != nil {
@@ -1029,7 +1054,7 @@ func (m *MerkleTreeTask) performMerges(tx pgx.Tx) ([]int64, error) {
 	mtreeTableName := fmt.Sprintf("ace_mtree_%s_%s", m.Schema, m.Table)
 
 	for {
-		blocksToMerge, err := queries.FindBlocksToMergeTx(context.Background(), tx, mtreeTableName, m.SimplePrimaryKey, m.Schema, m.Table, m.Key, 0.25, []int64{})
+		blocksToMerge, err := queries.FindBlocksToMerge(context.Background(), tx, mtreeTableName, m.SimplePrimaryKey, m.Schema, m.Table, m.Key, 0.25, []int64{})
 		if err != nil {
 			return nil, fmt.Errorf("query to find blocks to merge for '%s' failed: %w", mtreeTableName, err)
 		}
@@ -1051,7 +1076,7 @@ func (m *MerkleTreeTask) performMerges(tx pgx.Tx) ([]int64, error) {
 		allModifiedPositions = append(allModifiedPositions, modified...)
 
 		// Reset positions after each pass to ensure pos+1 logic works correctly in the next iteration.
-		if err := queries.ResetPositionsByStartTx(context.Background(), tx, mtreeTableName, m.Key, !m.SimplePrimaryKey); err != nil {
+		if err := queries.ResetPositionsByStart(context.Background(), tx, mtreeTableName, m.Key, !m.SimplePrimaryKey); err != nil {
 			return nil, fmt.Errorf("failed to reset positions after merges: %w", err)
 		}
 	}
@@ -1335,7 +1360,7 @@ func (m *MerkleTreeTask) mergeBlocks(tx pgx.Tx, blocksToMerge []types.BlockRange
 
 	compositeTypeName := fmt.Sprintf("%s_%s_key_type", m.Schema, m.Table)
 
-	if err := queries.DeleteParentNodesTx(ctx, tx, mtreeTableName); err != nil {
+	if err := queries.DeleteParentNodes(ctx, tx, mtreeTableName); err != nil {
 		return nil, fmt.Errorf("failed to delete parent nodes: %w", err)
 	}
 
@@ -1348,7 +1373,7 @@ func (m *MerkleTreeTask) mergeBlocks(tx pgx.Tx, blocksToMerge []types.BlockRange
 			continue
 		}
 
-		currentBlock, err := queries.GetBlockWithCountTx(ctx, tx, mtreeTableName, m.Schema, m.Table, m.Key, isComposite, pos)
+		currentBlock, err := queries.GetBlockWithCount(ctx, tx, mtreeTableName, m.Schema, m.Table, m.Key, isComposite, pos)
 		if err != nil {
 			return nil, fmt.Errorf("failed to get current block %d with count: %w", pos, err)
 		}
@@ -1357,22 +1382,22 @@ func (m *MerkleTreeTask) mergeBlocks(tx pgx.Tx, blocksToMerge []types.BlockRange
 		}
 
 		// Attempt to merge with the next block
-		nextBlock, err := queries.GetBlockWithCountTx(ctx, tx, mtreeTableName, m.Schema, m.Table, m.Key, isComposite, pos+1)
+		nextBlock, err := queries.GetBlockWithCount(ctx, tx, mtreeTableName, m.Schema, m.Table, m.Key, isComposite, pos+1)
 		if err != nil {
 			return nil, fmt.Errorf("failed to get next block for %d: %w", pos, err)
 		}
 
 		if nextBlock != nil && (currentBlock.Count+nextBlock.Count < int64(float64(m.BlockSize)*1.5)) {
 			if isComposite {
-				err = queries.UpdateBlockRangeEndCompositeTx(ctx, tx, mtreeTableName, compositeTypeName, nextBlock.RangeEnd, currentBlock.NodePosition)
+				err = queries.UpdateBlockRangeEndComposite(ctx, tx, mtreeTableName, compositeTypeName, nextBlock.RangeEnd, currentBlock.NodePosition)
 			} else {
-				err = queries.UpdateBlockRangeEndTx(ctx, tx, mtreeTableName, valueOrNil(nextBlock.RangeEnd), currentBlock.NodePosition)
+				err = queries.UpdateBlockRangeEnd(ctx, tx, mtreeTableName, valueOrNil(nextBlock.RangeEnd), currentBlock.NodePosition)
 			}
 			if err != nil {
 				return nil, err
 			}
 
-			if err := queries.DeleteBlockTx(ctx, tx, mtreeTableName, nextBlock.NodePosition); err != nil {
+			if err := queries.DeleteBlock(ctx, tx, mtreeTableName, nextBlock.NodePosition); err != nil {
 				return nil, err
 			}
 			modifiedPositions = append(modifiedPositions, currentBlock.NodePosition)
@@ -1382,12 +1407,12 @@ func (m *MerkleTreeTask) mergeBlocks(tx pgx.Tx, blocksToMerge []types.BlockRange
 	return modifiedPositions, nil
 }
 
-func (m *MerkleTreeTask) buildParentNodes(conn queries.DBTX) error {
+func (m *MerkleTreeTask) buildParentNodes(conn queries.DBQuerier) error {
 	mtreeTableName := fmt.Sprintf("ace_mtree_%s_%s", m.Schema, m.Table)
 
 	var err error
 	if tx, ok := conn.(pgx.Tx); ok {
-		err = queries.DeleteParentNodesTx(context.Background(), tx, mtreeTableName)
+		err = queries.DeleteParentNodes(context.Background(), tx, mtreeTableName)
 	} else if pool, ok := conn.(*pgxpool.Pool); ok {
 		err = queries.DeleteParentNodes(context.Background(), pool, mtreeTableName)
 	} else {
@@ -1403,7 +1428,7 @@ func (m *MerkleTreeTask) buildParentNodes(conn queries.DBTX) error {
 		var count int
 		var buildErr error
 		if tx, ok := conn.(pgx.Tx); ok {
-			count, buildErr = queries.BuildParentNodesTx(context.Background(), tx, mtreeTableName, level)
+			count, buildErr = queries.BuildParentNodes(context.Background(), tx, mtreeTableName, level)
 		} else if pool, ok := conn.(*pgxpool.Pool); ok {
 			count, buildErr = queries.BuildParentNodes(context.Background(), pool, mtreeTableName, level)
 		} else {
@@ -1428,7 +1453,8 @@ type LeafHashResult struct {
 	Err     error
 }
 
-func (m *MerkleTreeTask) computeLeafHashes(pool *pgxpool.Pool, ranges []types.BlockRange) error {
+func (m *MerkleTreeTask) computeLeafHashes(pool *pgxpool.Pool, tx pgx.Tx, ranges []types.BlockRange) error {
+	mtreeTableName := fmt.Sprintf("ace_mtree_%s_%s", m.Schema, m.Table)
 
 	numWorkers := int(float64(runtime.NumCPU()) * m.MaxCpuRatio)
 	if numWorkers < 1 {
@@ -1475,36 +1501,13 @@ func (m *MerkleTreeTask) computeLeafHashes(pool *pgxpool.Pool, ranges []types.Bl
 		leafHashes[result.BlockID] = result.Hash
 	}
 
-	mtreeTableName := fmt.Sprintf("ace_mtree_%s_%s", m.Schema, m.Table)
-
-	batch := &pgx.Batch{}
 	for blockID, hash := range leafHashes {
-		_, err := queries.UpdateLeafHashes(context.Background(), pool, mtreeTableName, hash, blockID)
+		_, err := queries.UpdateLeafHashes(context.Background(), tx, mtreeTableName, hash, blockID)
 		if err != nil {
 			return err
 		}
 	}
-
-	tx, err := pool.Begin(context.Background())
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback(context.Background())
-
-	br := tx.SendBatch(context.Background(), batch)
-	defer br.Close()
-
-	for i := 0; i < batch.Len(); i++ {
-		if _, err := br.Exec(); err != nil {
-			return fmt.Errorf("failed to execute batch update for leaf hashes: %w", err)
-		}
-	}
-
-	if err := br.Close(); err != nil {
-		return fmt.Errorf("failed to close batch: %w", err)
-	}
-
-	return tx.Commit(context.Background())
+	return nil
 }
 
 func (m *MerkleTreeTask) leafHashWorker(wg *sync.WaitGroup, jobs <-chan types.BlockRange, results chan<- LeafHashResult, pool *pgxpool.Pool, bar *mpb.Bar) {
@@ -1522,16 +1525,16 @@ func (m *MerkleTreeTask) leafHashWorker(wg *sync.WaitGroup, jobs <-chan types.Bl
 	}
 }
 
-func (m *MerkleTreeTask) insertBlockRanges(pool *pgxpool.Pool, ranges []types.BlockRange) error {
+func (m *MerkleTreeTask) insertBlockRanges(conn queries.DBQuerier, ranges []types.BlockRange) error {
 	mtreeTableName := fmt.Sprintf("ace_mtree_%s_%s", m.Schema, m.Table)
 	mtreeTableIdent := pgx.Identifier{mtreeTableName}
 
 	if m.SimplePrimaryKey {
-		if err := queries.InsertBlockRangesBatchSimple(context.Background(), pool, mtreeTableIdent.Sanitize(), ranges); err != nil {
+		if err := queries.InsertBlockRangesBatchSimple(context.Background(), conn, mtreeTableIdent.Sanitize(), ranges); err != nil {
 			return err
 		}
 	} else {
-		if err := queries.InsertBlockRangesBatchComposite(context.Background(), pool, mtreeTableIdent.Sanitize(), ranges, len(m.Key)); err != nil {
+		if err := queries.InsertBlockRangesBatchComposite(context.Background(), conn, mtreeTableIdent.Sanitize(), ranges, len(m.Key)); err != nil {
 			return err
 		}
 	}
@@ -1539,47 +1542,42 @@ func (m *MerkleTreeTask) insertBlockRanges(pool *pgxpool.Pool, ranges []types.Bl
 	return nil
 }
 
-func (m *MerkleTreeTask) createMtreeObjects(pool *pgxpool.Pool, totalRows int64, numBlocks int) error {
-	tx, err := pool.Begin(context.Background())
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback(context.Background())
+func (m *MerkleTreeTask) createMtreeObjects(tx pgx.Tx, totalRows int64, numBlocks int) error {
 
-	err = queries.CreateXORFunction(context.Background(), pool)
+	err := queries.CreateXORFunction(context.Background(), tx)
 	if err != nil {
 		return fmt.Errorf("failed to create xor function: %w", err)
 	}
 
-	err = queries.CreateMetadataTable(context.Background(), pool)
+	err = queries.CreateMetadataTable(context.Background(), tx)
 	if err != nil {
 		return fmt.Errorf("failed to create metadata table: %w", err)
 	}
 
-	err = queries.UpdateMetadata(context.Background(), pool, m.Schema, m.Table, totalRows, m.BlockSize, numBlocks, !m.SimplePrimaryKey)
+	err = queries.UpdateMetadata(context.Background(), tx, m.Schema, m.Table, totalRows, m.BlockSize, numBlocks, !m.SimplePrimaryKey)
 	if err != nil {
 		return fmt.Errorf("failed to update metadata: %w", err)
 	}
 
 	mtreeTableName := fmt.Sprintf("ace_mtree_%s_%s", m.Schema, m.Table)
-	err = queries.DropMtreeTable(context.Background(), pool, mtreeTableName)
+	err = queries.DropMtreeTable(context.Background(), tx, mtreeTableName)
 	if err != nil {
 		return fmt.Errorf("failed to render drop mtree table sql: %w", err)
 	}
 
 	if m.SimplePrimaryKey {
-		pkeyType, err := queries.GetPkeyType(context.Background(), pool, m.Schema, m.Table, m.Key[0])
+		pkeyType, err := queries.GetPkeyType(context.Background(), tx, m.Schema, m.Table, m.Key[0])
 		if err != nil {
 			return err
 		}
-		err = queries.CreateSimpleMtreeTable(context.Background(), pool, mtreeTableName, pkeyType)
+		err = queries.CreateSimpleMtreeTable(context.Background(), tx, mtreeTableName, pkeyType)
 		if err != nil {
 			return fmt.Errorf("failed to render create simple mtree table sql: %w", err)
 		}
 	} else {
 		keyTypeColumns := make([]string, len(m.Key))
 		for i, col := range m.Key {
-			colType, err := queries.GetPkeyType(context.Background(), pool, m.Schema, m.Table, col)
+			colType, err := queries.GetPkeyType(context.Background(), tx, m.Schema, m.Table, col)
 			if err != nil {
 				return err
 			}
@@ -1588,27 +1586,27 @@ func (m *MerkleTreeTask) createMtreeObjects(pool *pgxpool.Pool, totalRows int64,
 
 		compositeTypeName := fmt.Sprintf("%s_%s_key_type", m.Schema, m.Table)
 
-		err = queries.DropCompositeType(context.Background(), pool, compositeTypeName)
+		err = queries.DropCompositeType(context.Background(), tx, compositeTypeName)
 		if err != nil {
 			return fmt.Errorf("failed to render drop composite type sql: %w", err)
 		}
 
-		err = queries.CreateCompositeType(context.Background(), pool, compositeTypeName, strings.Join(keyTypeColumns, ", "))
+		err = queries.CreateCompositeType(context.Background(), tx, compositeTypeName, strings.Join(keyTypeColumns, ", "))
 		if err != nil {
 			return fmt.Errorf("failed to render create composite type sql: %w", err)
 		}
 
-		err = queries.CreateCompositeMtreeTable(context.Background(), pool, mtreeTableName, compositeTypeName)
+		err = queries.CreateCompositeMtreeTable(context.Background(), tx, mtreeTableName, compositeTypeName)
 		if err != nil {
 			return fmt.Errorf("failed to render create composite mtree table sql: %w", err)
 		}
 	}
-	err = m.buildParentNodes(pool)
+	err = m.buildParentNodes(tx)
 	if err != nil {
 		return err
 	}
 
-	return tx.Commit(context.Background())
+	return nil
 }
 
 func computeSamplingParameters(rowCount int64) (string, float64) {

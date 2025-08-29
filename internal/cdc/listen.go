@@ -57,9 +57,24 @@ func processReplicationStream(nodeInfo map[string]any, continuous bool) {
 	cfg := config.Cfg.MTree.CDC
 	publication := cfg.PublicationName
 	slotName := cfg.SlotName
-	_, startLSNStr, _, err := queries.GetCDCMetadata(context.Background(), pool, publication)
-	if err != nil {
-		logger.Error("failed to get cdc metadata: %v", err)
+	var startLSNStr string
+	func() {
+		tx, err := pool.Begin(context.Background())
+		if err != nil {
+			logger.Error("failed to begin transaction: %v", err)
+			return
+		}
+		defer tx.Rollback(context.Background())
+		_, startLSNStr, _, err = queries.GetCDCMetadata(context.Background(), tx, publication)
+		if err != nil {
+			logger.Error("failed to get cdc metadata: %v", err)
+			startLSNStr = ""
+		}
+	}()
+
+	if startLSNStr == "" {
+		logger.Error("Could not retrieve LSN. Aborting CDC processing for this node.")
+		return
 	}
 
 	startLSN, err := pglogrepl.ParseLSN(startLSNStr)
@@ -268,6 +283,13 @@ var quotedOIDs = map[uint32]bool{
 }
 
 func processChanges(pool *pgxpool.Pool, changes []cdcMsg) {
+	tx, err := pool.Begin(context.Background())
+	if err != nil {
+		logger.Error("failed to begin transaction for processing changes: %v", err)
+		return
+	}
+	defer tx.Rollback(context.Background())
+
 	tables := make(map[string][]cdcMsg)
 	for _, change := range changes {
 		key := fmt.Sprintf("%s.%s", change.schema, change.table)
@@ -307,11 +329,15 @@ func processChanges(pool *pgxpool.Pool, changes []cdcMsg) {
 				}
 			}
 
-			err := queries.UpdateMtreeCounters(context.Background(), pool, mtreeTable, isComposite, compositeTypeName, inserts, deletes, updates)
+			err := queries.UpdateMtreeCounters(context.Background(), tx, mtreeTable, isComposite, compositeTypeName, inserts, deletes, updates)
 			if err != nil {
 				logger.Error("failed to update mtree counters for %s: %v", mtreeTable, err)
+				return
 			}
 		}
+	}
+	if err := tx.Commit(context.Background()); err != nil {
+		logger.Error("failed to commit CDC changes: %v", err)
 	}
 }
 

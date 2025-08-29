@@ -143,9 +143,7 @@ func (c *SchemaDiffCmd) RunChecks(skipValidation bool) error {
 	}
 
 	c.tableList = []string{}
-	for _, table := range tables {
-		c.tableList = append(c.tableList, table)
-	}
+	c.tableList = append(c.tableList, tables...)
 
 	if len(c.tableList) == 0 {
 		return fmt.Errorf("no tables found in schema %s", c.SchemaName)
@@ -309,36 +307,28 @@ func getObjectsForSchema(pool *pgxpool.Pool, schemaName string) (*SchemaObjects,
 		return nil, fmt.Errorf("could not query tables: %w", err)
 	}
 	var tableNames []string
-	for _, t := range tables {
-		tableNames = append(tableNames, t)
-	}
+	tableNames = append(tableNames, tables...)
 
 	views, err := queries.GetViewsInSchema(context.Background(), pool, schemaName)
 	if err != nil {
 		return nil, fmt.Errorf("could not query views: %w", err)
 	}
 	var viewNames []string
-	for _, v := range views {
-		viewNames = append(viewNames, v)
-	}
+	viewNames = append(viewNames, views...)
 
 	functions, err := queries.GetFunctionsInSchema(context.Background(), pool, schemaName)
 	if err != nil {
 		return nil, fmt.Errorf("could not query functions: %w", err)
 	}
 	var functionSignatures []string
-	for _, f := range functions {
-		functionSignatures = append(functionSignatures, f)
-	}
+	functionSignatures = append(functionSignatures, functions...)
 
 	indices, err := queries.GetIndicesInSchema(context.Background(), pool, schemaName)
 	if err != nil {
 		return nil, fmt.Errorf("could not query indices: %w", err)
 	}
 	var indexNames []string
-	for _, i := range indices {
-		indexNames = append(indexNames, i)
-	}
+	indexNames = append(indexNames, indices...)
 
 	return &SchemaObjects{
 		Tables:    tableNames,

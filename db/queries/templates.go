@@ -220,7 +220,7 @@ var SQLTemplates = Templates{
 				{{if .IsComposite}}
 					p.pkey::{{.CompositeTypeName}} < (SELECT range_start FROM first_block)
 				{{else}}
-					p.pkey < (SELECT range_start FROM first_block)
+					p.pkey::{{.PkeyType}} < (SELECT range_start FROM first_block)
 				{{end}}
 			)
 		),
@@ -236,14 +236,14 @@ var SQLTemplates = Templates{
 					{{if .IsComposite}}
 						p.pkey::{{.CompositeTypeName}} >= mt.range_start AND (mt.range_end IS NULL OR p.pkey::{{.CompositeTypeName}} <= mt.range_end)
 					{{else}}
-						p.pkey >= mt.range_start AND (mt.range_end IS NULL OR p.pkey <= mt.range_end)
+						p.pkey::{{.PkeyType}} >= mt.range_start AND (mt.range_end IS NULL OR p.pkey::{{.PkeyType}} <= mt.range_end)
 					{{end}}
 				) OR (
 					mt.node_position = (SELECT node_position FROM first_block) AND
 					{{if .IsComposite}}
 						p.pkey::{{.CompositeTypeName}} < (SELECT range_start FROM first_block)
 					{{else}}
-						p.pkey < (SELECT range_start FROM first_block)
+						p.pkey::{{.PkeyType}} < (SELECT range_start FROM first_block)
 					{{end}}
 				)
 			WHERE
