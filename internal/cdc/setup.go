@@ -4,11 +4,11 @@
 //
 // Copyright (C) 2023 - 2025, pgEdge (https://www.pgedge.com/)
 //
-// This software is released under the pgEdge Community License:
-//
-//	https://www.pgedge.com/communitylicense
+// This software is released under the PostgreSQL License:
+// https://opensource.org/license/postgresql
 //
 // ///////////////////////////////////////////////////////////////////////////
+
 package cdc
 
 import (
