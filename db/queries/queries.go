@@ -18,6 +18,7 @@ import (
 	"regexp"
 	"strings"
 	"text/template"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -2586,9 +2587,54 @@ func DropPublication(ctx context.Context, db DBQuerier, publicationName string) 
 }
 
 func DropReplicationSlot(ctx context.Context, db DBQuerier, slotName string) error {
+	var pid *int32
+	pidSQL, err := RenderSQL(SQLTemplates.GetReplicationSlotPID, nil)
+	if err != nil {
+		return fmt.Errorf("failed to render GetReplicationSlotPID SQL: %w", err)
+	}
+
+	err = db.QueryRow(ctx, pidSQL, slotName).Scan(&pid)
+	if err != nil && err != pgx.ErrNoRows {
+		return fmt.Errorf("query to get replication slot PID failed for slot %s: %w", slotName, err)
+	}
+
+	if pid != nil {
+		terminateSQL, err := RenderSQL(SQLTemplates.TerminateBackend, nil)
+		if err != nil {
+			return fmt.Errorf("failed to render TerminateBackend SQL: %w", err)
+		}
+		_, err = db.Exec(ctx, terminateSQL, *pid)
+		if err != nil {
+			return fmt.Errorf("failed to terminate backend (pid: %d) for replication slot %s: %w", *pid, slotName, err)
+		}
+
+		checkPidSQL, err := RenderSQL(SQLTemplates.CheckPIDExists, nil)
+		if err != nil {
+			return fmt.Errorf("failed to render CheckPIDExists SQL: %w", err)
+		}
+
+		for i := 0; i < 20; i++ {
+			var checkPid int32
+			err := db.QueryRow(ctx, checkPidSQL, *pid).Scan(&checkPid)
+			if err == pgx.ErrNoRows {
+				pid = nil // PID is gone.
+				break
+			}
+			if err != nil {
+				return fmt.Errorf("failed to check for PID %d: %w", *pid, err)
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
+
+		if pid != nil {
+			return fmt.Errorf("timed out waiting for backend (pid: %d) to terminate", *pid)
+		}
+	}
+
 	data := map[string]interface{}{
 		"SlotName": slotName,
 	}
+
 	sql, err := RenderSQL(SQLTemplates.DropReplicationSlot, data)
 	if err != nil {
 		return fmt.Errorf("failed to render DropReplicationSlot SQL: %w", err)
@@ -2630,15 +2676,17 @@ func GetCDCMetadata(ctx context.Context, db DBQuerier, publicationName string) (
 	return slotName, startLSN, tables, nil
 }
 
-func UpdateMtreeCounters(ctx context.Context, db DBQuerier, mtreeTable string, isComposite bool, compositeTypeName string, inserts, deletes, updates []string) error {
+func UpdateMtreeCounters(ctx context.Context, db DBQuerier, mtreeTable string, isComposite bool, compositeTypeName string, pkeyType string, inserts, deletes, updates []string) error {
 	sql, err := RenderSQL(SQLTemplates.UpdateMtreeCounters, struct {
 		MtreeTable        string
 		IsComposite       bool
 		CompositeTypeName string
+		PkeyType          string
 	}{
 		MtreeTable:        mtreeTable,
 		IsComposite:       isComposite,
 		CompositeTypeName: compositeTypeName,
+		PkeyType:          pkeyType,
 	})
 	if err != nil {
 		return err
