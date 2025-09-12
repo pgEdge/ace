@@ -1053,13 +1053,27 @@ func ComputeLeafHashes(ctx context.Context, db DBQuerier, schema, table string, 
 		return nil, err
 	}
 
-	args := make([]any, 0, 2+len(start)+len(end))
+	args := make([]any, 0, 2+len(key)*2)
+
 	skipMin := len(start) == 0 || start[0] == nil
 	args = append(args, skipMin)
-	args = append(args, start...)
+	if len(start) > 0 {
+		args = append(args, start...)
+	} else {
+		for i := 0; i < len(key); i++ {
+			args = append(args, nil)
+		}
+	}
+
 	skipMax := len(end) == 0 || end[0] == nil
 	args = append(args, skipMax)
-	args = append(args, end...)
+	if len(end) > 0 {
+		args = append(args, end...)
+	} else {
+		for i := 0; i < len(key); i++ {
+			args = append(args, nil)
+		}
+	}
 
 	var leafHash []byte
 	if err := db.QueryRow(ctx, sql, args...).Scan(&leafHash); err != nil {
