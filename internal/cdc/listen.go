@@ -307,6 +307,20 @@ func processChanges(pool *pgxpool.Pool, changes []cdcMsg) {
 			relation := firstChange.relation
 			isComposite := len(getPrimaryKeyColumns(relation)) > 1
 			compositeTypeName := fmt.Sprintf("%s_%s_key_type", schema, table)
+			var pkeyType string
+			if !isComposite {
+				for _, col := range relation.Columns {
+					if col.Flags == 1 { // Primary key
+						typeName, err := getTypeNameFromOID(pool, col.DataType)
+						if err != nil {
+							logger.Error("failed to get type name for oid %d: %v", col.DataType, err)
+						} else {
+							pkeyType = typeName
+						}
+						break
+					}
+				}
+			}
 
 			for _, change := range tableChanges {
 				pks := getPKs(relation, change.tuple)
@@ -329,7 +343,7 @@ func processChanges(pool *pgxpool.Pool, changes []cdcMsg) {
 				}
 			}
 
-			err := queries.UpdateMtreeCounters(context.Background(), tx, mtreeTable, isComposite, compositeTypeName, inserts, deletes, updates)
+			err := queries.UpdateMtreeCounters(context.Background(), tx, mtreeTable, isComposite, compositeTypeName, pkeyType, inserts, deletes, updates)
 			if err != nil {
 				logger.Error("failed to update mtree counters for %s: %v", mtreeTable, err)
 				return
@@ -385,4 +399,13 @@ func tupleValueToString(tupCol *pglogrepl.TupleDataColumn, relCol *pglogrepl.Rel
 	default:
 		return string(tupCol.Data)
 	}
+}
+
+func getTypeNameFromOID(pool *pgxpool.Pool, oid uint32) (string, error) {
+	var typeName string
+	err := pool.QueryRow(context.Background(), "SELECT typname FROM pg_type WHERE oid = $1", oid).Scan(&typeName)
+	if err != nil {
+		return "", err
+	}
+	return typeName, nil
 }

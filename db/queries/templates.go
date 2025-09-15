@@ -107,6 +107,9 @@ type Templates struct {
 	DropCDCMetadataTable            *template.Template
 	GetCDCMetadata                  *template.Template
 	UpdateMtreeCounters             *template.Template
+	GetReplicationSlotPID           *template.Template
+	TerminateBackend                *template.Template
+	CheckPIDExists                  *template.Template
 }
 
 var SQLTemplates = Templates{
@@ -177,6 +180,15 @@ var SQLTemplates = Templates{
 	`)),
 	DropReplicationSlot: template.Must(template.New("dropReplicationSlot").Parse(`
 		SELECT pg_drop_replication_slot(slot_name) FROM pg_replication_slots WHERE slot_name = '{{.SlotName}}'
+	`)),
+	GetReplicationSlotPID: template.Must(template.New("getReplicationSlotPID").Parse(`
+		SELECT active_pid FROM pg_replication_slots WHERE slot_name = $1 AND active = true
+	`)),
+	TerminateBackend: template.Must(template.New("terminateBackend").Parse(`
+		SELECT pg_terminate_backend($1)
+	`)),
+	CheckPIDExists: template.Must(template.New("checkPIDExists").Parse(`
+		SELECT pid FROM pg_stat_activity WHERE pid = $1
 	`)),
 	DropCDCMetadataTable: template.Must(template.New("dropCDCMetadataTable").Parse(`
 		DROP TABLE IF EXISTS ace_mtree_cdc_metadata
@@ -264,7 +276,7 @@ var SQLTemplates = Templates{
 					{{if .IsComposite}}
 						(SELECT pkey FROM new_min_pkey)::{{.CompositeTypeName}}
 					{{else}}
-						(SELECT pkey FROM new_min_pkey)
+						(SELECT pkey FROM new_min_pkey)::{{.PkeyType}}
 					{{end}}
 				ELSE mt.range_start
 			END

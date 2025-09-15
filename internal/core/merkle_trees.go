@@ -315,6 +315,12 @@ func (m *MerkleTreeTask) MtreeInit() error {
 
 	for _, nodeInfo := range m.ClusterNodes {
 		logger.Info("Initialising Merkle tree objects on node: %s", nodeInfo["Name"])
+
+		lsn, err := cdc.SetupReplicationSlot(nodeInfo)
+		if err != nil {
+			return fmt.Errorf("failed to set up replication slot on node %s: %w", nodeInfo["Name"], err)
+		}
+
 		pool, err := auth.GetClusterNodeConnection(nodeInfo, "")
 		if err != nil {
 			return fmt.Errorf("failed to get connection pool for node %s: %w", nodeInfo["Name"], err)
@@ -337,9 +343,8 @@ func (m *MerkleTreeTask) MtreeInit() error {
 			return fmt.Errorf("failed to create cdc metadata table: %w", err)
 		}
 
-		lsn, err := cdc.SetupCDC(nodeInfo)
-		if err != nil {
-			return fmt.Errorf("failed to setup replication: %w", err)
+		if err := cdc.SetupPublication(context.Background(), tx, cfg.PublicationName); err != nil {
+			return fmt.Errorf("failed to setup publication on node %s: %w", nodeInfo["Name"], err)
 		}
 
 		err = queries.UpdateCDCMetadata(context.Background(), tx, cfg.PublicationName, cfg.SlotName, lsn.String(), []string{})
@@ -350,6 +355,7 @@ func (m *MerkleTreeTask) MtreeInit() error {
 		if err := tx.Commit(context.Background()); err != nil {
 			return fmt.Errorf("failed to commit transaction on node %s: %w", nodeInfo["Name"], err)
 		}
+
 		logger.Info("Merkle tree objects initialised on node: %s", nodeInfo["Name"])
 	}
 	return nil
