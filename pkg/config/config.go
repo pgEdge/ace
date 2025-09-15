@@ -54,7 +54,8 @@ type MTreeConfig struct {
 		SlotName        string `yaml:"slot_name"`
 		PublicationName string `yaml:"publication_name"`
 	} `yaml:"cdc"`
-	Diff struct {
+	Schema string `yaml:"schema"`
+	Diff   struct {
 		MinBlockSize int `yaml:"min_block_size"`
 		BlockSize    int `yaml:"block_size"`
 		MaxBlockSize int `yaml:"max_block_size"`

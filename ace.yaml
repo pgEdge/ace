@@ -27,6 +27,7 @@ mtree:
   cdc:
     slot_name: "ace_mtree_slot"
     publication_name: "ace_mtree_pub"
+  schema: "spock"
 
   diff:
     min_block_size: 1000

@@ -2715,3 +2715,20 @@ func UpdateMtreeCounters(ctx context.Context, db DBQuerier, mtreeTable string, i
 	_, err = db.Exec(ctx, sql, args)
 	return err
 }
+
+func CreateSchema(ctx context.Context, db DBQuerier, schemaName string) error {
+	data := map[string]interface{}{
+		"SchemaName": schemaName,
+	}
+	sql, err := RenderSQL(SQLTemplates.CreateSchema, data)
+	if err != nil {
+		return fmt.Errorf("failed to render CreateSchema SQL: %w", err)
+	}
+
+	_, err = db.Exec(ctx, sql)
+	if err != nil {
+		return fmt.Errorf("query to create schema failed: %w", err)
+	}
+
+	return nil
+}
