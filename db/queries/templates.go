@@ -110,12 +110,13 @@ type Templates struct {
 	GetReplicationSlotPID           *template.Template
 	TerminateBackend                *template.Template
 	CheckPIDExists                  *template.Template
+	CreateSchema                    *template.Template
 }
 
 var SQLTemplates = Templates{
 	// A template isn't needed for this query; just keeping the struct uniform
 	CreateMetadataTable: template.Must(template.New("createMetadataTable").Parse(`
-		CREATE TABLE IF NOT EXISTS ace_mtree_metadata (
+		CREATE TABLE IF NOT EXISTS spock.ace_mtree_metadata (
 			schema_name text,
 			table_name text,
 			total_rows bigint,
@@ -151,7 +152,7 @@ var SQLTemplates = Templates{
 
 	UpdateCDCMetadata: template.Must(template.New("updateCdcMetadata").Parse(`
 		INSERT INTO
-			ace_mtree_cdc_metadata (
+			spock.ace_mtree_cdc_metadata (
 				publication_name,
 				slot_name,
 				start_lsn,
@@ -191,7 +192,7 @@ var SQLTemplates = Templates{
 		SELECT pid FROM pg_stat_activity WHERE pid = $1
 	`)),
 	DropCDCMetadataTable: template.Must(template.New("dropCDCMetadataTable").Parse(`
-		DROP TABLE IF EXISTS ace_mtree_cdc_metadata
+		DROP TABLE IF EXISTS spock.ace_mtree_cdc_metadata
 	`)),
 
 	GetCDCMetadata: template.Must(template.New("getCDCMetadata").Parse(`
@@ -200,7 +201,7 @@ var SQLTemplates = Templates{
 			start_lsn,
 			tables
 		FROM
-			ace_mtree_cdc_metadata
+			spock.ace_mtree_cdc_metadata
 		WHERE
 			publication_name = $1
 	`)),
@@ -288,7 +289,7 @@ var SQLTemplates = Templates{
 	`)),
 
 	CreateCDCMetadataTable: template.Must(template.New("createCDCMetadataTable").Parse(`
-		CREATE TABLE IF NOT EXISTS ace_mtree_cdc_metadata (
+		CREATE TABLE IF NOT EXISTS spock.ace_mtree_cdc_metadata (
 			publication_name text PRIMARY KEY,
 			slot_name text,
 			start_lsn text,
@@ -719,7 +720,7 @@ var SQLTemplates = Templates{
 	`)),
 	CreateXORFunction: template.Must(template.New("createXORFunction").Parse(`
 		CREATE
-		OR REPLACE FUNCTION bytea_xor(a bytea, b bytea) RETURNS bytea AS $$
+		OR REPLACE FUNCTION spock.bytea_xor(a bytea, b bytea) RETURNS bytea AS $$
 		DECLARE
 			result bytea;
 			len int;
@@ -750,7 +751,7 @@ var SQLTemplates = Templates{
 			CREATE OPERATOR # (
 				LEFTARG = bytea,
 				RIGHTARG = bytea,
-				PROCEDURE = bytea_xor
+				PROCEDURE = spock.bytea_xor
 			);
 			END IF;
 		END $$;
@@ -787,7 +788,7 @@ var SQLTemplates = Templates{
 	`)),
 	UpdateMetadata: template.Must(template.New("updateMetadata").Parse(`
 		INSERT INTO
-			ace_mtree_metadata (
+			spock.ace_mtree_metadata (
 				schema_name,
 				table_name,
 				total_rows,
@@ -1001,7 +1002,7 @@ var SQLTemplates = Templates{
 		SELECT
 			total_rows
 		FROM
-			ace_mtree_metadata
+			spock.ace_mtree_metadata
 		WHERE
 			schema_name = $1
 			AND table_name = $2
@@ -1272,7 +1273,7 @@ var SQLTemplates = Templates{
 		SELECT
 			block_size
 		FROM
-			ace_mtree_metadata
+			spock.ace_mtree_metadata
 		WHERE
 			schema_name = $1
 			AND table_name = $2
@@ -1292,10 +1293,10 @@ var SQLTemplates = Templates{
 			{{.WhereClause}}
 	`)),
 	DropXORFunction: template.Must(template.New("dropXORFunction").Parse(`
-		DROP FUNCTION IF EXISTS bytea_xor(bytea, bytea) CASCADE
+		DROP FUNCTION IF EXISTS spock.bytea_xor(bytea, bytea) CASCADE
 	`)),
 	DropMetadataTable: template.Must(template.New("dropMetadataTable").Parse(`
-		DROP TABLE IF EXISTS ace_mtree_metadata CASCADE
+		DROP TABLE IF EXISTS spock.ace_mtree_metadata CASCADE
 	`)),
 	DropMtreeTable: template.Must(template.New("dropMtreeTable").Parse(`
 		DROP TABLE IF EXISTS {{.MtreeTable}} CASCADE
@@ -1451,5 +1452,8 @@ var SQLTemplates = Templates{
 	`)),
 	UpdateNodePositionsWithOffset: template.Must(template.New("updateNodePositionsWithOffset").Parse(`
 		UPDATE {{.MtreeTable}} SET node_position = node_position + $1 WHERE node_level = 0
+	`)),
+	CreateSchema: template.Must(template.New("createSchema").Parse(`
+		CREATE SCHEMA IF NOT EXISTS {{.SchemaName}}
 	`)),
 }

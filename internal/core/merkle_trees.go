@@ -42,6 +42,10 @@ import (
 	"github.com/vbauerster/mpb/v8/decor"
 )
 
+func aceSchema() string {
+	return config.Cfg.MTree.Schema
+}
+
 const tableAlreadyInPublicationError = "42710"
 
 type MerkleTreeTask struct {
@@ -326,6 +330,11 @@ func (m *MerkleTreeTask) MtreeInit() error {
 			return fmt.Errorf("failed to get connection pool for node %s: %w", nodeInfo["Name"], err)
 		}
 		defer pool.Close()
+
+		err = queries.CreateSchema(context.Background(), pool, aceSchema())
+		if err != nil {
+			return fmt.Errorf("failed to create schema '%s': %w", aceSchema(), err)
+		}
 
 		tx, err := pool.Begin(context.Background())
 		if err != nil {
@@ -818,7 +827,8 @@ func (m *MerkleTreeTask) UpdateMtree(skipAllChecks bool) error {
 		var compositeTypeName string
 
 		if !m.SimplePrimaryKey {
-			compositeTypeName = fmt.Sprintf("%s_%s_key_type", m.Schema, m.Table)
+			compositeTypeIdentifier := pgx.Identifier{aceSchema(), fmt.Sprintf("%s_%s_key_type", m.Schema, m.Table)}
+			compositeTypeName = compositeTypeIdentifier.Sanitize()
 			dt, err := conn.Conn().LoadType(context.Background(), compositeTypeName)
 			if err != nil {
 				return fmt.Errorf("failed to load composite type %s: %w", compositeTypeName, err)
@@ -832,7 +842,8 @@ func (m *MerkleTreeTask) UpdateMtree(skipAllChecks bool) error {
 		}
 		defer tx.Rollback(context.Background())
 
-		mtreeTableName := fmt.Sprintf("ace_mtree_%s_%s", m.Schema, m.Table)
+		mtreeTableIdentifier := pgx.Identifier{aceSchema(), fmt.Sprintf("ace_mtree_%s_%s", m.Schema, m.Table)}
+		mtreeTableName := mtreeTableIdentifier.Sanitize()
 
 		blocksToUpdate, err := queries.GetDirtyAndNewBlocks(context.Background(), tx, mtreeTableName, m.SimplePrimaryKey, m.Key)
 		if err != nil {
@@ -936,12 +947,14 @@ func (m *MerkleTreeTask) UpdateMtree(skipAllChecks bool) error {
 }
 
 func (m *MerkleTreeTask) splitBlocks(tx pgx.Tx, blocksToSplit []types.BlockRange) ([]int64, error) {
-	mtreeTableName := fmt.Sprintf("ace_mtree_%s_%s", m.Schema, m.Table)
+	mtreeTableIdentifier := pgx.Identifier{aceSchema(), fmt.Sprintf("ace_mtree_%s_%s", m.Schema, m.Table)}
+	mtreeTableName := mtreeTableIdentifier.Sanitize()
 	isComposite := !m.SimplePrimaryKey
 	ctx := context.Background()
 	var modifiedPositions []int64
 
-	compositeTypeName := fmt.Sprintf("%s_%s_key_type", m.Schema, m.Table)
+	compositeTypeIdentifier := pgx.Identifier{aceSchema(), fmt.Sprintf("%s_%s_key_type", m.Schema, m.Table)}
+	compositeTypeName := compositeTypeIdentifier.Sanitize()
 
 	currentBlocks := make([]types.BlockRange, len(blocksToSplit))
 	copy(currentBlocks, blocksToSplit)
@@ -1057,7 +1070,8 @@ func (m *MerkleTreeTask) splitBlocks(tx pgx.Tx, blocksToSplit []types.BlockRange
 
 func (m *MerkleTreeTask) performMerges(tx pgx.Tx) ([]int64, error) {
 	var allModifiedPositions []int64
-	mtreeTableName := fmt.Sprintf("ace_mtree_%s_%s", m.Schema, m.Table)
+	mtreeTableIdentifier := pgx.Identifier{aceSchema(), fmt.Sprintf("ace_mtree_%s_%s", m.Schema, m.Table)}
+	mtreeTableName := mtreeTableIdentifier.Sanitize()
 
 	for {
 		blocksToMerge, err := queries.FindBlocksToMerge(context.Background(), tx, mtreeTableName, m.SimplePrimaryKey, m.Schema, m.Table, m.Key, 0.25, []int64{})
@@ -1105,7 +1119,8 @@ func (m *MerkleTreeTask) DiffMtree() error {
 		return fmt.Errorf("failed to update merkle tree before diff: %w", err)
 	}
 	nodePairs := getNodePairs(m.ClusterNodes)
-	mtreeTableName := fmt.Sprintf("ace_mtree_%s_%s", m.Schema, m.Table)
+	mtreeTableIdentifier := pgx.Identifier{aceSchema(), fmt.Sprintf("ace_mtree_%s_%s", m.Schema, m.Table)}
+	mtreeTableName := mtreeTableIdentifier.Sanitize()
 
 	allNodePairBatches := make(map[string]CompareRangesWorkItem)
 
@@ -1216,7 +1231,8 @@ func (m *MerkleTreeTask) DiffMtree() error {
 
 func (m *MerkleTreeTask) findMismatchedLeaves(pool1, pool2 *pgxpool.Pool, parentLevel int, parentPosition int64) (map[int64]bool, error) {
 	mismatched := make(map[int64]bool)
-	mtreeTableName := fmt.Sprintf("ace_mtree_%s_%s", m.Schema, m.Table)
+	mtreeTableIdentifier := pgx.Identifier{aceSchema(), fmt.Sprintf("ace_mtree_%s_%s", m.Schema, m.Table)}
+	mtreeTableName := mtreeTableIdentifier.Sanitize()
 
 	children1, err := queries.GetNodeChildren(context.Background(), pool1, mtreeTableName, parentLevel, int(parentPosition))
 	if err != nil {
@@ -1279,7 +1295,8 @@ func (m *MerkleTreeTask) findMismatchedLeaves(pool1, pool2 *pgxpool.Pool, parent
 }
 
 func (m *MerkleTreeTask) getPkeyBatches(pool1, pool2 *pgxpool.Pool, mismatchedPositions []int64) ([][2][]any, error) {
-	mtreeTableName := fmt.Sprintf("ace_mtree_%s_%s", m.Schema, m.Table)
+	mtreeTableIdentifier := pgx.Identifier{aceSchema(), fmt.Sprintf("ace_mtree_%s_%s", m.Schema, m.Table)}
+	mtreeTableName := mtreeTableIdentifier.Sanitize()
 
 	leafRanges1, err := queries.GetLeafRanges(context.Background(), pool1, mtreeTableName, mismatchedPositions, m.SimplePrimaryKey, m.Key)
 	if err != nil {
@@ -1359,12 +1376,14 @@ func intervalIntersects(start, end any, allRanges []types.LeafRange) bool {
 }
 
 func (m *MerkleTreeTask) mergeBlocks(tx pgx.Tx, blocksToMerge []types.BlockRange) ([]int64, error) {
-	mtreeTableName := fmt.Sprintf("ace_mtree_%s_%s", m.Schema, m.Table)
+	mtreeTableIdentifier := pgx.Identifier{aceSchema(), fmt.Sprintf("ace_mtree_%s_%s", m.Schema, m.Table)}
+	mtreeTableName := mtreeTableIdentifier.Sanitize()
 	isComposite := !m.SimplePrimaryKey
 	ctx := context.Background()
 	var modifiedPositions []int64
 
-	compositeTypeName := fmt.Sprintf("%s_%s_key_type", m.Schema, m.Table)
+	compositeTypeIdentifier := pgx.Identifier{aceSchema(), fmt.Sprintf("%s_%s_key_type", m.Schema, m.Table)}
+	compositeTypeName := compositeTypeIdentifier.Sanitize()
 
 	if err := queries.DeleteParentNodes(ctx, tx, mtreeTableName); err != nil {
 		return nil, fmt.Errorf("failed to delete parent nodes: %w", err)
@@ -1414,7 +1433,8 @@ func (m *MerkleTreeTask) mergeBlocks(tx pgx.Tx, blocksToMerge []types.BlockRange
 }
 
 func (m *MerkleTreeTask) buildParentNodes(conn queries.DBQuerier) error {
-	mtreeTableName := fmt.Sprintf("ace_mtree_%s_%s", m.Schema, m.Table)
+	mtreeTableIdentifier := pgx.Identifier{aceSchema(), fmt.Sprintf("ace_mtree_%s_%s", m.Schema, m.Table)}
+	mtreeTableName := mtreeTableIdentifier.Sanitize()
 
 	var err error
 	if tx, ok := conn.(pgx.Tx); ok {
@@ -1460,7 +1480,8 @@ type LeafHashResult struct {
 }
 
 func (m *MerkleTreeTask) computeLeafHashes(pool *pgxpool.Pool, tx pgx.Tx, ranges []types.BlockRange) error {
-	mtreeTableName := fmt.Sprintf("ace_mtree_%s_%s", m.Schema, m.Table)
+	mtreeTableIdentifier := pgx.Identifier{aceSchema(), fmt.Sprintf("ace_mtree_%s_%s", m.Schema, m.Table)}
+	mtreeTableName := mtreeTableIdentifier.Sanitize()
 
 	numWorkers := int(float64(runtime.NumCPU()) * m.MaxCpuRatio)
 	if numWorkers < 1 {
@@ -1532,15 +1553,14 @@ func (m *MerkleTreeTask) leafHashWorker(wg *sync.WaitGroup, jobs <-chan types.Bl
 }
 
 func (m *MerkleTreeTask) insertBlockRanges(conn queries.DBQuerier, ranges []types.BlockRange) error {
-	mtreeTableName := fmt.Sprintf("ace_mtree_%s_%s", m.Schema, m.Table)
-	mtreeTableIdent := pgx.Identifier{mtreeTableName}
+	mtreeTableIdentifier := pgx.Identifier{aceSchema(), fmt.Sprintf("ace_mtree_%s_%s", m.Schema, m.Table)}
 
 	if m.SimplePrimaryKey {
-		if err := queries.InsertBlockRangesBatchSimple(context.Background(), conn, mtreeTableIdent.Sanitize(), ranges); err != nil {
+		if err := queries.InsertBlockRangesBatchSimple(context.Background(), conn, mtreeTableIdentifier.Sanitize(), ranges); err != nil {
 			return err
 		}
 	} else {
-		if err := queries.InsertBlockRangesBatchComposite(context.Background(), conn, mtreeTableIdent.Sanitize(), ranges, len(m.Key)); err != nil {
+		if err := queries.InsertBlockRangesBatchComposite(context.Background(), conn, mtreeTableIdentifier.Sanitize(), ranges, len(m.Key)); err != nil {
 			return err
 		}
 	}
@@ -1550,7 +1570,12 @@ func (m *MerkleTreeTask) insertBlockRanges(conn queries.DBQuerier, ranges []type
 
 func (m *MerkleTreeTask) createMtreeObjects(tx pgx.Tx, totalRows int64, numBlocks int) error {
 
-	err := queries.CreateXORFunction(context.Background(), tx)
+	err := queries.CreateSchema(context.Background(), tx, aceSchema())
+	if err != nil {
+		return fmt.Errorf("failed to create schema '%s': %w", aceSchema(), err)
+	}
+
+	err = queries.CreateXORFunction(context.Background(), tx)
 	if err != nil {
 		return fmt.Errorf("failed to create xor function: %w", err)
 	}
@@ -1565,7 +1590,8 @@ func (m *MerkleTreeTask) createMtreeObjects(tx pgx.Tx, totalRows int64, numBlock
 		return fmt.Errorf("failed to update metadata: %w", err)
 	}
 
-	mtreeTableName := fmt.Sprintf("ace_mtree_%s_%s", m.Schema, m.Table)
+	mtreeTableIdentifier := pgx.Identifier{aceSchema(), fmt.Sprintf("ace_mtree_%s_%s", m.Schema, m.Table)}
+	mtreeTableName := mtreeTableIdentifier.Sanitize()
 	err = queries.DropMtreeTable(context.Background(), tx, mtreeTableName)
 	if err != nil {
 		return fmt.Errorf("failed to render drop mtree table sql: %w", err)
@@ -1590,7 +1616,8 @@ func (m *MerkleTreeTask) createMtreeObjects(tx pgx.Tx, totalRows int64, numBlock
 			keyTypeColumns[i] = fmt.Sprintf("%s %s", pgx.Identifier{col}.Sanitize(), colType)
 		}
 
-		compositeTypeName := fmt.Sprintf("%s_%s_key_type", m.Schema, m.Table)
+		compositeTypeIdentifier := pgx.Identifier{aceSchema(), fmt.Sprintf("%s_%s_key_type", m.Schema, m.Table)}
+		compositeTypeName := compositeTypeIdentifier.Sanitize()
 
 		err = queries.DropCompositeType(context.Background(), tx, compositeTypeName)
 		if err != nil {
