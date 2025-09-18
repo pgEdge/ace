@@ -1377,6 +1377,12 @@ func (m *MerkleTreeTask) compareBoundaries(b1, b2 any) int {
 	}
 
 	for k := range m.Key {
+		if k >= len(b1Slice) {
+			return -1
+		}
+		if k >= len(b2Slice) {
+			return 1
+		}
 		val1 := b1Slice[k]
 		val2 := b2Slice[k]
 
@@ -1434,6 +1440,12 @@ func (m *MerkleTreeTask) compareBoundaries(b1, b2 any) int {
 				return 1
 			}
 		}
+	}
+	if len(b1Slice) < len(b2Slice) {
+		return -1
+	}
+	if len(b1Slice) > len(b2Slice) {
+		return 1
 	}
 	return 0
 }
