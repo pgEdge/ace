@@ -17,7 +17,6 @@ import (
 	"fmt"
 	"log"
 	"os"
-	"reflect"
 	"slices"
 	"sort"
 	"strings"
@@ -355,35 +354,16 @@ func IsKnownScalarType(colType string) bool {
 	return false
 }
 
-func StringifyKey(row map[string]any, pKeyCols []string) (string, error) {
-	if len(pKeyCols) == 0 {
-		return "", nil
-	}
-	// if len(pkValues) != len(pkCols) {
-	// 	return "", fmt.Errorf("mismatch between pk value count (%d) and pk column count (%d)", len(pkValues), len(pkCols))
-	// }
-
-	if len(pKeyCols) == 1 {
-		val, ok := row[pKeyCols[0]]
+func StringifyKey(row map[string]any, pkeyCols []string) (string, error) {
+	var pkeyParts []string
+	for _, pkeyCol := range pkeyCols {
+		val, ok := row[pkeyCol]
 		if !ok {
-			return "", fmt.Errorf("pk column '%s' not found in pk values map", pKeyCols[0])
+			return "", fmt.Errorf("pkey column %s not found in row", pkeyCol)
 		}
-		return fmt.Sprintf("%v", val), nil
+		pkeyParts = append(pkeyParts, fmt.Sprintf("%v", val))
 	}
-
-	sortedPkCols := make([]string, len(pKeyCols))
-	copy(sortedPkCols, pKeyCols)
-	sort.Strings(sortedPkCols)
-
-	var parts []string
-	for _, col := range sortedPkCols {
-		val, ok := row[col]
-		if !ok {
-			return "", fmt.Errorf("pk column '%s' not found in pk values map", col)
-		}
-		parts = append(parts, fmt.Sprintf("%v", val))
-	}
-	return strings.Join(parts, "||"), nil
+	return strings.Join(pkeyParts, "|"), nil
 }
 
 func AddSpockMetadata(row map[string]any) map[string]any {
@@ -404,10 +384,13 @@ func AddSpockMetadata(row map[string]any) map[string]any {
 }
 
 func StripSpockMetadata(row map[string]any) map[string]any {
-	if row != nil {
-		delete(row, "_spock_metadata_")
+	newRow := make(map[string]any)
+	for k, v := range row {
+		if k != "_spock_metadata_" && k != "node_origin" && k != "commit_ts" {
+			newRow[k] = v
+		}
 	}
-	return row
+	return newRow
 }
 
 func DiffStringSlices(a, b []string) (missing, extra []string) {
@@ -439,75 +422,142 @@ func DiffStringSlices(a, b []string) (missing, extra []string) {
 	return missing, extra
 }
 
-func CompareRowSets(rows1, rows2 []map[string]any, key, cols []string) (*types.NodePairDiff, error) {
-	lookupN1 := make(map[string]map[string]any)
-	for _, row := range rows1 {
-		pkVal := make(map[string]any)
-		for _, pkCol := range key {
-			pkVal[pkCol] = row[pkCol]
-		}
-		pkStr, err := StringifyKey(pkVal, key)
-		if err != nil {
-			return nil, fmt.Errorf("failed to stringify n1 pkey: %w", err)
-		}
-		lookupN1[pkStr] = row
+type DiffResult struct {
+	Node1OnlyRows []types.OrderedMap
+	Node2OnlyRows []types.OrderedMap
+	ModifiedRows  []ModifiedRow
+}
+
+type ModifiedRow struct {
+	PKey      string
+	Node1Data types.OrderedMap
+	Node2Data types.OrderedMap
+}
+
+func CompareRowSets(rows1, rows2 []types.OrderedMap, pkeyCols []string, dataCols []string) (DiffResult, error) {
+	map1, err := rowsToMap(rows1, pkeyCols)
+	if err != nil {
+		return DiffResult{}, fmt.Errorf("failed to convert rows1 to map: %w", err)
+	}
+	map2, err := rowsToMap(rows2, pkeyCols)
+	if err != nil {
+		return DiffResult{}, fmt.Errorf("failed to convert rows2 to map: %w", err)
 	}
 
-	lookupN2 := make(map[string]map[string]any)
-	for _, row := range rows2 {
-		pkVal := make(map[string]any)
-		for _, pkCol := range key {
-			pkVal[pkCol] = row[pkCol]
-		}
-		pkStr, err := StringifyKey(pkVal, key)
-		if err != nil {
-			return nil, fmt.Errorf("failed to stringify n2 pkey: %w", err)
-		}
-		lookupN2[pkStr] = row
-	}
+	var result DiffResult
 
-	diffResult := &types.NodePairDiff{}
-
-	for pkStr, n1Row := range lookupN1 {
-		n2Row, existsInN2 := lookupN2[pkStr]
-		if !existsInN2 {
-			diffResult.Node1OnlyRows = append(diffResult.Node1OnlyRows, n1Row)
+	for pkey, row1 := range map1 {
+		row2, ok := map2[pkey]
+		if !ok {
+			result.Node1OnlyRows = append(result.Node1OnlyRows, row1)
 		} else {
-			var mismatch bool
-			for _, colName := range cols {
-				val1, ok1 := n1Row[colName]
-				val2, ok2 := n2Row[colName]
-
-				if ok1 != ok2 {
-					mismatch = true
-					break
-				}
-				if !ok1 && !ok2 {
-					continue
-				}
-
-				if !reflect.DeepEqual(val1, val2) {
-					mismatch = true
-					break
-				}
+			isModified, err := areRowsModified(row1, row2, dataCols)
+			if err != nil {
+				return DiffResult{}, fmt.Errorf("failed to compare rows for pkey %s: %w", pkey, err)
 			}
-
-			if mismatch {
-				diffResult.ModifiedRows = append(diffResult.ModifiedRows, struct {
-					Pkey      string
-					Node1Data map[string]any
-					Node2Data map[string]any
-				}{Pkey: pkStr, Node1Data: n1Row, Node2Data: n2Row})
+			if isModified {
+				result.ModifiedRows = append(result.ModifiedRows, ModifiedRow{PKey: pkey, Node1Data: row1, Node2Data: row2})
 			}
-			delete(lookupN2, pkStr)
 		}
 	}
 
-	for _, n2Row := range lookupN2 {
-		diffResult.Node2OnlyRows = append(diffResult.Node2OnlyRows, n2Row)
+	for pkey, row2 := range map2 {
+		if _, ok := map1[pkey]; !ok {
+			result.Node2OnlyRows = append(result.Node2OnlyRows, row2)
+		}
+	}
+	return result, nil
+}
+
+func rowsToMap(rows []types.OrderedMap, pkeyCols []string) (map[string]types.OrderedMap, error) {
+	rowMap := make(map[string]types.OrderedMap, len(rows))
+	for _, row := range rows {
+		pkey, err := buildPKey(row, pkeyCols)
+		if err != nil {
+			return nil, fmt.Errorf("failed to build pkey for row: %w", err)
+		}
+		rowMap[pkey] = row
+	}
+	return rowMap, nil
+}
+
+func areRowsModified(row1, row2 types.OrderedMap, dataCols []string) (bool, error) {
+	row1Map := OrderedMapToMap(row1)
+	row2Map := OrderedMapToMap(row2)
+
+	for _, col := range dataCols {
+		val1, ok1 := row1Map[col]
+		val2, ok2 := row2Map[col]
+
+		if !ok1 || !ok2 {
+			return false, fmt.Errorf("column %s not found in one of the rows", col)
+		}
+
+		sVal1 := fmt.Sprintf("%v", val1)
+		sVal2 := fmt.Sprintf("%v", val2)
+
+		if sVal1 != sVal2 {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func buildPKey(row types.OrderedMap, pkeyCols []string) (string, error) {
+	rowMap := OrderedMapToMap(row)
+	var pkeyParts []string
+	for _, pkeyCol := range pkeyCols {
+		val, ok := rowMap[pkeyCol]
+		if !ok {
+			return "", fmt.Errorf("pkey column %s not found in row", pkeyCol)
+		}
+		pkeyParts = append(pkeyParts, fmt.Sprintf("%v", val))
+	}
+	return strings.Join(pkeyParts, "|"), nil
+}
+
+func OrderedMapToMap(om types.OrderedMap) map[string]any {
+	m := make(map[string]any, len(om))
+	for _, kv := range om {
+		m[kv.Key] = kv.Value
+	}
+	return m
+}
+
+func StringifyOrderedMapKey(row types.OrderedMap, pkeyCols []string) (string, error) {
+	var pkeyParts []string
+	for _, pkeyCol := range pkeyCols {
+		val, ok := row.Get(pkeyCol)
+		if !ok {
+			return "", fmt.Errorf("pkey column %s not found in row", pkeyCol)
+		}
+		pkeyParts = append(pkeyParts, fmt.Sprintf("%v", val))
+	}
+	return strings.Join(pkeyParts, "|"), nil
+}
+
+func MapToOrderedMap(m map[string]any, cols []string) types.OrderedMap {
+	om := make(types.OrderedMap, 0, len(cols))
+	colFound := make(map[string]bool, len(cols))
+	for _, col := range cols {
+		if val, ok := m[col]; ok {
+			om = append(om, types.KVPair{Key: col, Value: val})
+			colFound[col] = true
+		}
 	}
 
-	return diffResult, nil
+	var extraKeys []string
+	for k := range m {
+		if !colFound[k] {
+			extraKeys = append(extraKeys, k)
+		}
+	}
+	sort.Strings(extraKeys)
+	for _, k := range extraKeys {
+		om = append(om, types.KVPair{Key: k, Value: m[k]})
+	}
+
+	return om
 }
 
 func WriteDiffReport(diffResult types.DiffOutput, schema, table string) error {

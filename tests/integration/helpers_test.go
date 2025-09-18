@@ -18,11 +18,15 @@ import (
 	"io"
 	"log"
 	"os"
+	"path/filepath"
+	"sort"
 	"strings"
+	"testing"
 	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/pgedge/ace/internal/core"
 )
 
 func createTestTable(ctx context.Context, pool *pgxpool.Pool, schemaName, tableName string) error {
@@ -235,4 +239,55 @@ func loadDataFromCSV(
 		tableName,
 	)
 	return nil
+}
+
+func newTestTableRepairTask(sourceOfTruthNode, qualifiedTableName, diffFilePath string) *core.TableRepairTask {
+	task := core.NewTableRepairTask()
+	task.ClusterName = "test_cluster"
+	task.DBName = dbName
+	task.SourceOfTruth = sourceOfTruthNode
+	task.QualifiedTableName = qualifiedTableName
+	task.DiffFilePath = diffFilePath
+	task.Nodes = "all"
+	return task
+}
+
+func repairTable(t *testing.T, qualifiedTableName, sourceOfTruthNode string) {
+	t.Helper()
+
+	files, err := filepath.Glob("*_diffs-*.json")
+	if err != nil {
+		t.Fatalf("Failed to find diff files: %v", err)
+	}
+	if len(files) == 0 {
+		log.Println("No diff file found to repair from, skipping repair.")
+		return
+	}
+
+	sort.Slice(files, func(i, j int) bool {
+		fi, errI := os.Stat(files[i])
+		if errI != nil {
+			t.Logf("Warning: could not stat file %s: %v", files[i], errI)
+			return false
+		}
+		fj, errJ := os.Stat(files[j])
+		if errJ != nil {
+			t.Logf("Warning: could not stat file %s: %v", files[j], errJ)
+			return false
+		}
+		return fi.ModTime().After(fj.ModTime())
+	})
+
+	latestDiffFile := files[0]
+	log.Printf("Using latest diff file for repair: %s", latestDiffFile)
+
+	repairTask := newTestTableRepairTask(sourceOfTruthNode, qualifiedTableName, latestDiffFile)
+
+	time.Sleep(2 * time.Second)
+
+	if err := repairTask.Run(false); err != nil {
+		t.Fatalf("Failed to repair table: %v", err)
+	}
+
+	log.Printf("Table '%s' repaired successfully using %s as source of truth.", qualifiedTableName, sourceOfTruthNode)
 }

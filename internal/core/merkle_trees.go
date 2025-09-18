@@ -18,6 +18,7 @@ import (
 	"maps"
 	"math"
 	"os"
+	"reflect"
 	"sort"
 	"strings"
 	"time"
@@ -236,15 +237,15 @@ func (m *MerkleTreeTask) compareRangesWorker(wg *sync.WaitGroup, jobs <-chan Com
 
 		if _, ok := m.DiffResult.NodeDiffs[nodePairKey]; !ok {
 			m.DiffResult.NodeDiffs[nodePairKey] = types.DiffByNodePair{
-				Rows: make(map[string][]map[string]any),
+				Rows: make(map[string][]types.OrderedMap),
 			}
 		}
 
 		if _, ok := m.DiffResult.NodeDiffs[nodePairKey].Rows[work.Node1["Name"].(string)]; !ok {
-			m.DiffResult.NodeDiffs[nodePairKey].Rows[work.Node1["Name"].(string)] = []map[string]any{}
+			m.DiffResult.NodeDiffs[nodePairKey].Rows[work.Node1["Name"].(string)] = []types.OrderedMap{}
 		}
 		if _, ok := m.DiffResult.NodeDiffs[nodePairKey].Rows[work.Node2["Name"].(string)]; !ok {
-			m.DiffResult.NodeDiffs[nodePairKey].Rows[work.Node2["Name"].(string)] = []map[string]any{}
+			m.DiffResult.NodeDiffs[nodePairKey].Rows[work.Node2["Name"].(string)] = []types.OrderedMap{}
 		}
 
 		var currentDiffRowsForPair int
@@ -270,8 +271,8 @@ func (m *MerkleTreeTask) compareRangesWorker(wg *sync.WaitGroup, jobs <-chan Com
 	}
 }
 
-func processRows(rows pgx.Rows) ([]map[string]any, error) {
-	var results []map[string]any
+func processRows(rows pgx.Rows) ([]types.OrderedMap, error) {
+	var results []types.OrderedMap
 	defer rows.Close()
 	fields := rows.FieldDescriptions()
 	for rows.Next() {
@@ -279,9 +280,9 @@ func processRows(rows pgx.Rows) ([]map[string]any, error) {
 		if err != nil {
 			return nil, err
 		}
-		rowMap := make(map[string]any)
+		rowMap := make(types.OrderedMap, len(fields))
 		for i, field := range fields {
-			rowMap[string(field.Name)] = values[i]
+			rowMap[i] = types.KVPair{Key: string(field.Name), Value: values[i]}
 		}
 		results = append(results, rowMap)
 	}
@@ -419,7 +420,8 @@ func NewMerkleTreeTask() *MerkleTreeTask {
 			StartedAt: time.Now(),
 		},
 		DerivedFields: types.DerivedFields{
-			ColTypes: make(map[string]map[string]string),
+			ColTypes:  make(map[string]map[string]string),
+			PKeyTypes: make(map[string]string),
 		},
 	}
 }
@@ -584,6 +586,11 @@ func (m *MerkleTreeTask) RunChecks(skipValidation bool) error {
 
 		if localCols == nil && localKey == nil {
 			localCols, localKey = currentColsSlice, currentKeySlice
+			pkeyTypes, err := queries.GetPkeyColumnTypes(context.Background(), tx, m.Schema, m.Table, currentKeySlice)
+			if err != nil {
+				return fmt.Errorf("failed to get pkey column types on node %s: %w", nodeInfo["Name"], err)
+			}
+			m.PKeyTypes = pkeyTypes
 		}
 
 		if strings.Join(currentColsSlice, ",") != strings.Join(localCols, ",") || strings.Join(currentKeySlice, ",") != strings.Join(localKey, ",") {
@@ -1243,12 +1250,9 @@ func (m *MerkleTreeTask) findMismatchedLeaves(pool1, pool2 *pgxpool.Pool, parent
 		return nil, err
 	}
 
-	maxLen := len(children1)
-	if len(children2) > maxLen {
-		maxLen = len(children2)
-	}
+	maxLen := max(len(children1), len(children2))
 
-	for i := 0; i < maxLen; i++ {
+	for i := range maxLen {
 		var child1, child2 *types.NodeChild
 		if i < len(children1) {
 			child1 = &children1[i]
@@ -1328,49 +1332,126 @@ func (m *MerkleTreeTask) getPkeyBatches(pool1, pool2 *pgxpool.Pool, mismatchedPo
 	}
 
 	sort.Slice(sortedBoundaries, func(i, j int) bool {
-		// TODO: This needs to be a proper comparison of the types.
-		return fmt.Sprint(sortedBoundaries[i]) < fmt.Sprint(sortedBoundaries[j])
+		return m.compareBoundaries(sortedBoundaries[i], sortedBoundaries[j]) < 0
 	})
 
 	var batches [][2][]any
-	for i := 0; i < len(sortedBoundaries)-1; i++ {
-		start := sortedBoundaries[i]
-		end := sortedBoundaries[i+1]
-		if intervalIntersects(start, end, allRanges) {
-			var startSlice, endSlice []any
-			if s, ok := start.([]any); ok {
-				startSlice = s
-			} else {
-				startSlice = []any{start}
+
+	if len(sortedBoundaries) > 0 {
+		for i := 0; i < len(sortedBoundaries)-1; i++ {
+			start := sortedBoundaries[i]
+			end := sortedBoundaries[i+1]
+			if m.intervalIntersects(start, end, allRanges) {
+				var startSlice, endSlice []any
+				if s, ok := start.([]any); ok {
+					startSlice = s
+				} else {
+					startSlice = []any{start}
+				}
+				if e, ok := end.([]any); ok {
+					endSlice = e
+				} else {
+					endSlice = []any{end}
+				}
+				batches = append(batches, [2][]any{startSlice, endSlice})
 			}
-			if e, ok := end.([]any); ok {
-				endSlice = e
-			} else {
-				endSlice = []any{end}
-			}
-			batches = append(batches, [2][]any{startSlice, endSlice})
 		}
 	}
 
 	return batches, nil
 }
 
-func intervalIntersects(start, end any, allRanges []types.LeafRange) bool {
-	// Simplified intersection logic
-	s := fmt.Sprint(start)
-	e := fmt.Sprint(end)
-	for _, r := range allRanges {
-		var rs, re string
-		if r.RangeStart != nil {
-			rs = fmt.Sprint(r.RangeStart)
+func (m *MerkleTreeTask) compareBoundaries(b1, b2 any) int {
+	b1Slice, ok1 := b1.([]any)
+	b2Slice, ok2 := b2.([]any)
+	if !ok1 || !ok2 {
+		s1 := fmt.Sprintf("%v", b1)
+		s2 := fmt.Sprintf("%v", b2)
+		if s1 < s2 {
+			return -1
 		}
-		if r.RangeEnd != nil {
-			re = fmt.Sprint(r.RangeEnd)
+		if s1 > s2 {
+			return 1
+		}
+		return 0
+	}
+
+	for k := range m.Key {
+		val1 := b1Slice[k]
+		val2 := b2Slice[k]
+
+		if val1 == nil && val2 == nil {
+			continue
+		}
+		// TODO: Is it okay to consider nil as smaller here?
+		if val1 == nil {
+			return -1
+		}
+		if val2 == nil {
+			return 1
 		}
 
-		if e > rs && s < re {
-			return true
+		switch v1 := val1.(type) {
+		case int, int8, int16, int32, int64, uint, uint8, uint16, uint32, uint64:
+			v1Int := reflect.ValueOf(v1).Int()
+			v2Int := reflect.ValueOf(val2).Int()
+			if v1Int < v2Int {
+				return -1
+			}
+			if v1Int > v2Int {
+				return 1
+			}
+		case float32, float64:
+			v1Float := reflect.ValueOf(v1).Float()
+			v2Float := reflect.ValueOf(val2).Float()
+			if v1Float < v2Float {
+				return -1
+			}
+			if v1Float > v2Float {
+				return 1
+			}
+		case string:
+			if v1 < val2.(string) {
+				return -1
+			}
+			if v1 > val2.(string) {
+				return 1
+			}
+		case time.Time:
+			if v1.Before(val2.(time.Time)) {
+				return -1
+			}
+			if v1.After(val2.(time.Time)) {
+				return 1
+			}
+		default:
+			s1 := fmt.Sprintf("%v", val1)
+			s2 := fmt.Sprintf("%v", val2)
+			if s1 < s2 {
+				return -1
+			}
+			if s1 > s2 {
+				return 1
+			}
 		}
+	}
+	return 0
+}
+
+func (m *MerkleTreeTask) intervalIntersects(start, end any, allRanges []types.LeafRange) bool {
+	for _, r := range allRanges {
+		rangeStart := r.RangeStart
+		rangeEnd := r.RangeEnd
+
+		// Case 1: The interval is completely before the range
+		if rangeEnd != nil && m.compareBoundaries(end, rangeStart) <= 0 {
+			continue
+		}
+		// Case 2: The interval is completely after the range
+		if rangeStart != nil && m.compareBoundaries(start, rangeEnd) >= 0 {
+			continue
+		}
+		return true
 	}
 	return false
 }

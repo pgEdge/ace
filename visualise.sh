@@ -25,7 +25,8 @@
 
 set -euo pipefail
 
-schema="public"
+ace_schema="spock"
+table_schema="public"
 table=""
 host=""
 user="${PGUSER:-admin}"
@@ -34,7 +35,7 @@ orientation="vertical"   # default
 
 while getopts ":s:t:H:U:d:hv" opt; do
   case "$opt" in
-    s) schema="$OPTARG" ;;
+    s) table_schema="$OPTARG" ;;
     t) table="$OPTARG" ;;
     H) host="$OPTARG" ;;
     U) user="$OPTARG" ;;
@@ -51,7 +52,7 @@ if [[ -z "$table" ]]; then
   exit 2
 fi
 
-fq_table="ace_mtree_${schema}_${table}"
+fq_table="ace_mtree_${table_schema}_${table}"
 
 SQL=$(cat <<SQL_EOF
 WITH RECURSIVE
@@ -63,7 +64,7 @@ nodes AS (
     encode(leaf_hash, 'hex')  AS leaf_hash_hex,
     (range_start)::text       AS range_start_txt,
     (range_end)::text         AS range_end_txt
-  FROM "$schema"."$fq_table"
+  FROM "$ace_schema"."$fq_table"
 ),
 maxl AS (
   SELECT max(node_level) AS max_level FROM nodes
@@ -133,7 +134,7 @@ psql "${psql_args[@]}" \
   }' > "$tmp"
 
 if [[ ! -s "$tmp" ]]; then
-  echo "[visualise] No rows produced. Check PG* env/connection and table: \"$schema\".\"$fq_table\"" >&2
+  echo "[visualise] No rows produced. Check PG* env/connection and table: \"$ace_schema\".\"$fq_table\"" >&2
   exit 3
 fi
 

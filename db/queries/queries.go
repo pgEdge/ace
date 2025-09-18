@@ -689,7 +689,7 @@ func GetColumnTypes(ctx context.Context, db DBQuerier, schema, table string) (ma
 		return nil, err
 	}
 
-	rows, err := db.Query(ctx, sql, table)
+	rows, err := db.Query(ctx, sql, schema, table)
 	if err != nil {
 		return nil, err
 	}
@@ -1241,8 +1241,13 @@ func GetLeafRanges(ctx context.Context, db DBQuerier, mtreeTable string, nodePos
 		var ranges []types.LeafRange
 		for rows.Next() {
 			var r types.LeafRange
-			if err := rows.Scan(&r.RangeStart, &r.RangeEnd); err != nil {
+			var start, end any
+			if err := rows.Scan(&start, &end); err != nil {
 				return nil, fmt.Errorf("failed to scan leaf range: %w", err)
+			}
+			r.RangeStart = []any{start}
+			if end != nil {
+				r.RangeEnd = []any{end}
 			}
 			ranges = append(ranges, r)
 		}
@@ -1262,7 +1267,7 @@ func GetLeafRanges(ctx context.Context, db DBQuerier, mtreeTable string, nodePos
 		endAttrs[i] = fmt.Sprintf("(range_end).%s", attr)
 	}
 	data := map[string]any{
-		"MtreeTable": pgx.Identifier{mtreeTable}.Sanitize(),
+		"MtreeTable": mtreeTable,
 		"StartAttrs": strings.Join(startAttrs, ", "),
 		"EndAttrs":   strings.Join(endAttrs, ", "),
 	}
@@ -1513,6 +1518,7 @@ func GetDirtyAndNewBlocks(ctx context.Context, db DBQuerier, mtreeTable string, 
 		if err != nil {
 			return nil, fmt.Errorf("failed to render GetDirtyAndNewBlocks SQL: %w", err)
 		}
+
 		rows, err := db.Query(ctx, sql)
 		if err != nil {
 			return nil, fmt.Errorf("query to get dirty and new blocks for '%s' failed: %w", mtreeTable, err)
@@ -1550,7 +1556,7 @@ func GetDirtyAndNewBlocks(ctx context.Context, db DBQuerier, mtreeTable string, 
 		endAttrs[i] = fmt.Sprintf("(range_end).%s", attr)
 	}
 	data := map[string]any{
-		"MtreeTable": pgx.Identifier{mtreeTable}.Sanitize(),
+		"MtreeTable": mtreeTable,
 		"StartAttrs": strings.Join(startAttrs, ", "),
 		"EndAttrs":   strings.Join(endAttrs, ", "),
 	}
@@ -1650,7 +1656,7 @@ func FindBlocksToSplit(ctx context.Context, db DBQuerier, mtreeTable string, ins
 		endAttrs[i] = fmt.Sprintf("(range_end).%s", attr)
 	}
 	data := map[string]any{
-		"MtreeTable": pgx.Identifier{mtreeTable}.Sanitize(),
+		"MtreeTable": mtreeTable,
 		"StartAttrs": strings.Join(startAttrs, ", "),
 		"EndAttrs":   strings.Join(endAttrs, ", "),
 	}

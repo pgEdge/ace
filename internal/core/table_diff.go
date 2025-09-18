@@ -122,7 +122,7 @@ func NewTableDiffTask() *TableDiffTask {
 	}
 }
 
-func (t *TableDiffTask) fetchRows(ctx context.Context, nodeName string, r Range) ([]map[string]any, error) {
+func (t *TableDiffTask) fetchRows(ctx context.Context, nodeName string, r Range) ([]types.OrderedMap, error) {
 	pool, ok := t.Pools[nodeName]
 	if !ok {
 		return nil, fmt.Errorf("no pool for node %s", nodeName)
@@ -261,7 +261,7 @@ func (t *TableDiffTask) fetchRows(ctx context.Context, nodeName string, r Range)
 	}
 	defer pgRows.Close()
 
-	var results []map[string]any
+	var results []types.OrderedMap
 	colsDesc := pgRows.FieldDescriptions()
 
 	for pgRows.Next() {
@@ -275,65 +275,65 @@ func (t *TableDiffTask) fetchRows(ctx context.Context, nodeName string, r Range)
 			return nil, fmt.Errorf("failed to scan row on node %s: %w", nodeName, err)
 		}
 
-		rowData := make(map[string]any)
+		rowData := make(types.OrderedMap, len(colsDesc))
 		for i, colD := range colsDesc {
 			val := rowValues[i]
+			var processedVal any
 			switch v := val.(type) {
 			case pgtype.Numeric:
 				var fValue float64
 				if v.Status == pgtype.Present {
 					v.AssignTo(&fValue)
-					rowData[string(colD.Name)] = fValue
+					processedVal = fValue
 				} else {
-					rowData[string(colD.Name)] = nil
+					processedVal = nil
 				}
 			case pgtype.Timestamp:
 				if v.Status == pgtype.Present {
-					rowData[string(colD.Name)] = v.Time
+					processedVal = v.Time
 				} else {
-					rowData[string(colD.Name)] = nil
+					processedVal = nil
 				}
 			case pgtype.Timestamptz:
 				if v.Status == pgtype.Present {
-					rowData[string(colD.Name)] = v.Time
+					processedVal = v.Time
 				} else {
-					rowData[string(colD.Name)] = nil
+					processedVal = nil
 				}
 			case pgtype.Date:
 				if v.Status == pgtype.Present {
-					rowData[string(colD.Name)] = v.Time
+					processedVal = v.Time
 				} else {
-					rowData[string(colD.Name)] = nil
+					processedVal = nil
 				}
 			case pgtype.Bytea:
 				if v.Status == pgtype.Present {
-					rowData[string(colD.Name)] = v.Bytes
+					processedVal = v.Bytes
 				} else {
-					rowData[string(colD.Name)] = nil
+					processedVal = nil
 				}
 			case string:
-				// This case handles the TEXT columns we casted earlier.
-				// The original type info is lost, but the string representation is sufficient for diffing.
-				rowData[string(colD.Name)] = v
+				processedVal = v
 			case pgtype.JSON, pgtype.JSONB:
 				if v == nil || v.(interface{ GetStatus() pgtype.Status }).GetStatus() != pgtype.Present {
-					rowData[string(colD.Name)] = nil
+					processedVal = nil
 				} else {
 					var dataHolder any
 					if assignable, ok := v.(interface{ AssignTo(dst any) error }); ok {
 						err := assignable.AssignTo(&dataHolder)
 						if err != nil {
-							rowData[string(colD.Name)] = nil
+							processedVal = nil
 						} else {
-							rowData[string(colD.Name)] = dataHolder
+							processedVal = dataHolder
 						}
 					} else {
-						rowData[string(colD.Name)] = nil
+						processedVal = nil
 					}
 				}
 			default:
-				rowData[string(colD.Name)] = val
+				processedVal = val
 			}
+			rowData[i] = types.KVPair{Key: string(colD.Name), Value: processedVal}
 		}
 		results = append(results, rowData)
 	}
@@ -347,19 +347,19 @@ func (t *TableDiffTask) compareBlocks(
 	ctx context.Context,
 	node1, node2 string,
 	r Range,
-) (*types.NodePairDiff, error) {
+) (utils.DiffResult, error) {
 	n1Rows, err := t.fetchRows(ctx, node1, r)
 	if err != nil {
-		return nil, fmt.Errorf("failed to fetch rows for node %s in range %v-%v: %w", node1, r.Start, r.End, err)
+		return utils.DiffResult{}, fmt.Errorf("failed to fetch rows for node %s in range %v-%v: %w", node1, r.Start, r.End, err)
 	}
 	n2Rows, err := t.fetchRows(ctx, node2, r)
 	if err != nil {
-		return nil, fmt.Errorf("failed to fetch rows for node %s in range %v-%v: %w", node2, r.Start, r.End, err)
+		return utils.DiffResult{}, fmt.Errorf("failed to fetch rows for node %s in range %v-%v: %w", node2, r.Start, r.End, err)
 	}
 
 	diffResult, err := utils.CompareRowSets(n1Rows, n2Rows, t.Key, t.Cols)
 	if err != nil {
-		return nil, fmt.Errorf("failed to compare row sets for %s vs %s: %w", node1, node2, err)
+		return utils.DiffResult{}, fmt.Errorf("failed to compare row sets for %s vs %s: %w", node1, node2, err)
 	}
 
 	if len(diffResult.Node1OnlyRows) > 0 || len(diffResult.Node2OnlyRows) > 0 || len(diffResult.ModifiedRows) > 0 {
@@ -1296,33 +1296,46 @@ func (t *TableDiffTask) recursiveDiff(
 		}
 
 		var currentDiffRowsForPair int
-		if diffInfo != nil && (len(diffInfo.Node1OnlyRows) > 0 || len(diffInfo.Node2OnlyRows) > 0 || len(diffInfo.ModifiedRows) > 0) {
+		if len(diffInfo.Node1OnlyRows) > 0 || len(diffInfo.Node2OnlyRows) > 0 || len(diffInfo.ModifiedRows) > 0 {
 			t.diffMutex.Lock()
 
 			if _, ok := t.DiffResult.NodeDiffs[pairKey]; !ok {
 				t.DiffResult.NodeDiffs[pairKey] = types.DiffByNodePair{
-					Rows: make(map[string][]map[string]any),
+					Rows: make(map[string][]types.OrderedMap),
 				}
 			}
 
 			if _, ok := t.DiffResult.NodeDiffs[pairKey].Rows[node1Name]; !ok {
-				t.DiffResult.NodeDiffs[pairKey].Rows[node1Name] = []map[string]any{}
+				t.DiffResult.NodeDiffs[pairKey].Rows[node1Name] = []types.OrderedMap{}
 			}
 			if _, ok := t.DiffResult.NodeDiffs[pairKey].Rows[node2Name]; !ok {
-				t.DiffResult.NodeDiffs[pairKey].Rows[node2Name] = []map[string]any{}
+				t.DiffResult.NodeDiffs[pairKey].Rows[node2Name] = []types.OrderedMap{}
 			}
 
 			for _, row := range diffInfo.Node1OnlyRows {
-				t.DiffResult.NodeDiffs[pairKey].Rows[node1Name] = append(t.DiffResult.NodeDiffs[pairKey].Rows[node1Name], utils.AddSpockMetadata(row))
+				rowAsMap := utils.OrderedMapToMap(row)
+				rowWithMeta := utils.AddSpockMetadata(rowAsMap)
+				rowAsOrderedMap := utils.MapToOrderedMap(rowWithMeta, t.Cols)
+				t.DiffResult.NodeDiffs[pairKey].Rows[node1Name] = append(t.DiffResult.NodeDiffs[pairKey].Rows[node1Name], rowAsOrderedMap)
 				currentDiffRowsForPair++
 			}
 			for _, row := range diffInfo.Node2OnlyRows {
-				t.DiffResult.NodeDiffs[pairKey].Rows[node2Name] = append(t.DiffResult.NodeDiffs[pairKey].Rows[node2Name], utils.AddSpockMetadata(row))
+				rowAsMap := utils.OrderedMapToMap(row)
+				rowWithMeta := utils.AddSpockMetadata(rowAsMap)
+				rowAsOrderedMap := utils.MapToOrderedMap(rowWithMeta, t.Cols)
+				t.DiffResult.NodeDiffs[pairKey].Rows[node2Name] = append(t.DiffResult.NodeDiffs[pairKey].Rows[node2Name], rowAsOrderedMap)
 				currentDiffRowsForPair++
 			}
 			for _, modRow := range diffInfo.ModifiedRows {
-				t.DiffResult.NodeDiffs[pairKey].Rows[node1Name] = append(t.DiffResult.NodeDiffs[pairKey].Rows[node1Name], utils.AddSpockMetadata(modRow.Node1Data))
-				t.DiffResult.NodeDiffs[pairKey].Rows[node2Name] = append(t.DiffResult.NodeDiffs[pairKey].Rows[node2Name], utils.AddSpockMetadata(modRow.Node2Data))
+				node1DataAsMap := utils.OrderedMapToMap(modRow.Node1Data)
+				node1DataWithMeta := utils.AddSpockMetadata(node1DataAsMap)
+				node1DataAsOrderedMap := utils.MapToOrderedMap(node1DataWithMeta, t.Cols)
+				t.DiffResult.NodeDiffs[pairKey].Rows[node1Name] = append(t.DiffResult.NodeDiffs[pairKey].Rows[node1Name], node1DataAsOrderedMap)
+
+				node2DataAsMap := utils.OrderedMapToMap(modRow.Node2Data)
+				node2DataWithMeta := utils.AddSpockMetadata(node2DataAsMap)
+				node2DataAsOrderedMap := utils.MapToOrderedMap(node2DataWithMeta, t.Cols)
+				t.DiffResult.NodeDiffs[pairKey].Rows[node2Name] = append(t.DiffResult.NodeDiffs[pairKey].Rows[node2Name], node2DataAsOrderedMap)
 				currentDiffRowsForPair++
 			}
 

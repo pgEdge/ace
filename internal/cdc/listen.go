@@ -301,12 +301,12 @@ func processChanges(pool *pgxpool.Pool, changes []cdcMsg) {
 			firstChange := tableChanges[0]
 			schema := firstChange.schema
 			table := firstChange.table
-			mtreeTable := fmt.Sprintf("ace_mtree_%s_%s", schema, table)
+			mtreeTable := fmt.Sprintf("%s.ace_mtree_%s_%s", config.Cfg.MTree.Schema, schema, table)
 
 			var inserts, deletes, updates []string
 			relation := firstChange.relation
 			isComposite := len(getPrimaryKeyColumns(relation)) > 1
-			compositeTypeName := fmt.Sprintf("%s_%s_key_type", schema, table)
+			compositeTypeName := fmt.Sprintf("%s.%s_%s_key_type", config.Cfg.MTree.Schema, schema, table)
 			var pkeyType string
 			if !isComposite {
 				for _, col := range relation.Columns {

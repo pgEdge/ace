@@ -17,7 +17,6 @@ import (
 	"log"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -54,55 +53,6 @@ func newTestTableDiffTask(
 	}
 
 	return task
-}
-
-func newTestTableRepairTask(sourceOfTruthNode, qualifiedTableName, diffFilePath string) *core.TableRepairTask {
-	task := core.NewTableRepairTask()
-	task.ClusterName = "test_cluster"
-	task.DBName = dbName
-	task.SourceOfTruth = sourceOfTruthNode
-	task.QualifiedTableName = qualifiedTableName
-	task.DiffFilePath = diffFilePath
-	task.Nodes = "all"
-	return task
-}
-
-func repairTable(t *testing.T, qualifiedTableName, sourceOfTruthNode string) {
-	t.Helper()
-
-	files, err := filepath.Glob("*_diffs-*.json")
-	if err != nil {
-		t.Fatalf("Failed to find diff files: %v", err)
-	}
-	if len(files) == 0 {
-		log.Println("No diff file found to repair from, skipping repair.")
-		return
-	}
-
-	sort.Slice(files, func(i, j int) bool {
-		fi, errI := os.Stat(files[i])
-		if errI != nil {
-			t.Logf("Warning: could not stat file %s: %v", files[i], errI)
-			return false
-		}
-		fj, errJ := os.Stat(files[j])
-		if errJ != nil {
-			t.Logf("Warning: could not stat file %s: %v", files[j], errJ)
-			return false
-		}
-		return fi.ModTime().After(fj.ModTime())
-	})
-
-	latestDiffFile := files[0]
-	log.Printf("Using latest diff file for repair: %s", latestDiffFile)
-
-	repairTask := newTestTableRepairTask(sourceOfTruthNode, qualifiedTableName, latestDiffFile)
-
-	if err := repairTask.Run(false); err != nil {
-		t.Fatalf("Failed to repair table: %v", err)
-	}
-
-	log.Printf("Table '%s' repaired successfully using %s as source of truth.", qualifiedTableName, sourceOfTruthNode)
 }
 
 func TestTableDiff_NoDifferences(t *testing.T) {
@@ -467,9 +417,9 @@ func TestTableDiff_ModifiedRows(t *testing.T) {
 	for _, mod := range modifications {
 		found := false
 		for _, rowN2 := range nodeDiffs.Rows[serviceN2] {
-			if indexVal, ok := rowN2["index"]; ok &&
+			if indexVal, ok := rowN2.Get("index"); ok &&
 				indexVal == int32(mod.indexVal) {
-				actualModifiedValue := fmt.Sprintf("%v", rowN2[mod.field])
+				actualModifiedValue, _ := rowN2.Get(mod.field)
 				if actualModifiedValue != mod.value {
 					t.Errorf(
 						"For Index %d, field %s: expected modified value '%s', got '%s'",
@@ -825,7 +775,7 @@ CREATE TABLE IF NOT EXISTS %s.%s (
 
 	foundRow2N1Only := false
 	for _, r := range nodeDiffs.Rows[serviceN1] {
-		if r["id"] == int32(2) {
+		if id, ok := r.Get("id"); ok && id == int32(2) {
 			foundRow2N1Only = true
 			break
 		}
@@ -836,7 +786,7 @@ CREATE TABLE IF NOT EXISTS %s.%s (
 
 	foundRow3N2Only := false
 	for _, r := range nodeDiffs.Rows[serviceN2] {
-		if r["id"] == int32(3) {
+		if id, ok := r.Get("id"); ok && id == int32(3) {
 			foundRow3N2Only = true
 			break
 		}
@@ -848,12 +798,16 @@ CREATE TABLE IF NOT EXISTS %s.%s (
 	foundRow4OriginalN1 := false
 	foundRow4ModifiedN2 := false
 	for _, r := range nodeDiffs.Rows[serviceN1] {
-		if r["id"] == int32(4) && r["col_varchar"] == "original_varchar_row4" {
+		id, _ := r.Get("id")
+		varchar, _ := r.Get("col_varchar")
+		if id == int32(4) && varchar == "original_varchar_row4" {
 			foundRow4OriginalN1 = true
 		}
 	}
 	for _, r := range nodeDiffs.Rows[serviceN2] {
-		if r["id"] == int32(4) && r["col_varchar"] == "MODIFIED_varchar_row4" {
+		id, _ := r.Get("id")
+		varchar, _ := r.Get("col_varchar")
+		if id == int32(4) && varchar == "MODIFIED_varchar_row4" {
 			foundRow4ModifiedN2 = true
 		}
 	}
@@ -996,17 +950,17 @@ func TestTableDiff_TableFiltering(t *testing.T) {
 	foundIndex2 := false
 	foundIndex3 := false
 	for _, row := range nodeDiffs.Rows[serviceN2] {
-		indexVal, _ := row["index"].(int32)
-		email, _ := row["email"].(string)
-		firstName, _ := row["first_name"].(string)
+		indexVal, _ := row.Get("index")
+		email, _ := row.Get("email")
+		firstName, _ := row.Get("first_name")
 
-		if indexVal == 1 && email == "mikhailtal@example.com" {
+		if indexVal == int32(1) && email == "mikhailtal@example.com" {
 			foundIndex1 = true
 		}
-		if indexVal == 2 && email == "emmanuel.lasker@example.com" {
+		if indexVal == int32(2) && email == "emmanuel.lasker@example.com" {
 			foundIndex2 = true
 		}
-		if indexVal == 3 && firstName == "Paul Morphy" {
+		if indexVal == int32(3) && firstName == "Paul Morphy" {
 			foundIndex3 = true
 		}
 	}
@@ -1134,32 +1088,73 @@ func TestTableDiff_WithSpockMetadata(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Failed to create table %s on node %s: %v", qualifiedTableName, nodeName, err)
 		}
+		addToRepSetSQL := fmt.Sprintf(`SELECT spock.repset_add_table('default', '%s');`, qualifiedTableName)
+		_, err = pool.Exec(ctx, addToRepSetSQL)
+		if err != nil {
+			t.Fatalf("Failed to add table to replication set on %s: %v", nodeName, err)
+		}
 	}
 
 	t.Cleanup(func() {
 		for _, pool := range []*pgxpool.Pool{pgCluster.Node1Pool, pgCluster.Node2Pool} {
-			_, err := pool.Exec(ctx, fmt.Sprintf("DROP TABLE IF EXISTS %s CASCADE;", qualifiedTableName))
+			removeFromRepSetSQL := fmt.Sprintf(`SELECT spock.repset_remove_table('default', '%s');`, qualifiedTableName)
+			_, err := pool.Exec(ctx, removeFromRepSetSQL)
+			if err != nil {
+				t.Logf("cleanup: failed to remove table from replication set: %v", err)
+			}
+			_, err = pool.Exec(ctx, fmt.Sprintf("DROP TABLE IF EXISTS %s CASCADE;", qualifiedTableName))
 			if err != nil {
 				t.Logf("cleanup: failed to drop table: %v", err)
 			}
 		}
-		// Also clean up diff files
 		files, _ := filepath.Glob("*_diffs-*.json")
 		for _, f := range files {
 			os.Remove(f)
 		}
 	})
 
-	time.Sleep(1 * time.Second)
+	time.Sleep(5 * time.Second)
 
-	// 2. Insert data on node1 and wait for replication
-	insertSQL := fmt.Sprintf("INSERT INTO %s (id, data) VALUES (1, 'replicated data')", qualifiedTableName)
+	insertSQL := fmt.Sprintf("INSERT INTO %s (id, data) VALUES (1, 'original data')", qualifiedTableName)
 	_, err := pgCluster.Node1Pool.Exec(ctx, insertSQL)
 	if err != nil {
 		t.Fatalf("Failed to insert data on node1: %v", err)
 	}
 
-	// 3. Run table-diff and check for metadata in the result
+	var dataOnNode2 string
+	for i := 0; i < 10; i++ {
+		err = pgCluster.Node2Pool.QueryRow(ctx, fmt.Sprintf("SELECT data FROM %s WHERE id = 1", qualifiedTableName)).Scan(&dataOnNode2)
+		if err == nil && dataOnNode2 == "original data" {
+			break
+		}
+		time.Sleep(1 * time.Second)
+	}
+	if dataOnNode2 != "original data" {
+		t.Fatalf("Replication of initial insert failed or timed out")
+	}
+
+	updateSQL := fmt.Sprintf("UPDATE %s SET data = 'modified data on n1' WHERE id = 1", qualifiedTableName)
+	tx, err := pgCluster.Node1Pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("Failed to begin transaction on node1: %v", err)
+	}
+	defer tx.Rollback(ctx)
+	_, err = tx.Exec(ctx, "SELECT spock.repair_mode(true)")
+	if err != nil {
+		t.Fatalf("Failed to enable repair mode on node1: %v", err)
+	}
+	_, err = tx.Exec(ctx, updateSQL)
+	if err != nil {
+		t.Fatalf("Failed to update data on node1: %v", err)
+	}
+	_, err = tx.Exec(ctx, "SELECT spock.repair_mode(false)")
+	if err != nil {
+		t.Fatalf("Failed to disable repair mode on node1: %v", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatalf("Failed to commit transaction on node1: %v", err)
+	}
+
 	nodesToCompare := []string{serviceN1, serviceN2}
 	tdTask := newTestTableDiffTask(t, qualifiedTableName, nodesToCompare)
 	err = tdTask.RunChecks(false)
@@ -1170,7 +1165,6 @@ func TestTableDiff_WithSpockMetadata(t *testing.T) {
 		t.Fatalf("ExecuteTask failed: %v", err)
 	}
 
-	// 6. Assertions for the diff result
 	pairKey := serviceN1 + "/" + serviceN2
 	if strings.Compare(serviceN1, serviceN2) > 0 {
 		pairKey = serviceN2 + "/" + serviceN1
@@ -1182,28 +1176,38 @@ func TestTableDiff_WithSpockMetadata(t *testing.T) {
 	}
 
 	if len(nodeDiffs.Rows[serviceN1]) != 1 {
-		t.Errorf("Expected 1 row only on %s, but got %d", serviceN1, len(nodeDiffs.Rows[serviceN1]))
+		t.Errorf("Expected 1 diff row for %s, but got %d", serviceN1, len(nodeDiffs.Rows[serviceN1]))
 	}
-	if len(nodeDiffs.Rows[serviceN2]) != 0 {
-		t.Errorf("Expected 0 rows only on %s, but got %d", serviceN2, len(nodeDiffs.Rows[serviceN2]))
+	if len(nodeDiffs.Rows[serviceN2]) != 1 {
+		t.Errorf("Expected 1 diff row for %s, but got %d", serviceN2, len(nodeDiffs.Rows[serviceN2]))
 	}
 
-	diffRow := nodeDiffs.Rows[serviceN1][0]
-	metadata, ok := diffRow["_spock_metadata_"]
+	diffRowN1 := nodeDiffs.Rows[serviceN1][0]
+	dataN1, _ := diffRowN1.Get("data")
+	if dataN1 != "modified data on n1" {
+		t.Errorf("Expected modified data on node1, got %v", dataN1)
+	}
+	metaN1, ok := diffRowN1.Get("_spock_metadata_")
 	if !ok {
-		t.Fatal("Expected '_spock_metadata_' key in the diff row, but it was not found")
+		t.Fatal("Expected '_spock_metadata_' key in the diff row for node1")
+	}
+	metaMapN1, _ := metaN1.(map[string]any)
+	if val, ok := metaMapN1["node_origin"]; ok && val != nil && fmt.Sprintf("%v", val) != "0" {
+		t.Errorf("Expected 'node_origin' to be 0 for local update on node1, but got %v", val)
 	}
 
-	metadataMap, ok := metadata.(map[string]any)
+	diffRowN2 := nodeDiffs.Rows[serviceN2][0]
+	dataN2, _ := diffRowN2.Get("data")
+	if dataN2 != "original data" {
+		t.Errorf("Expected original data on node2, got %v", dataN2)
+	}
+	metaN2, ok := diffRowN2.Get("_spock_metadata_")
 	if !ok {
-		t.Fatalf("Expected '_spock_metadata_' to be a map, but got %T", metadata)
+		t.Fatal("Expected '_spock_metadata_' key in the diff row for node2")
 	}
-
-	if _, ok := metadataMap["commit_ts"]; !ok {
-		t.Error("Expected 'commit_ts' in spock metadata, but it was not found")
-	}
-	if val, ok := metadataMap["node_origin"]; !ok || val == nil || val == "" {
-		t.Errorf("Expected 'node_origin' in spock metadata to have a valid value, but got %v", val)
+	metaMapN2, _ := metaN2.(map[string]any)
+	if val, ok := metaMapN2["node_origin"]; !ok || val == nil || val == "" {
+		t.Errorf("Expected 'node_origin' in spock metadata for node2 to have a valid value, but got %v", val)
 	}
 
 	log.Println("TestTableDiff_WithSpockMetadata completed successfully.")

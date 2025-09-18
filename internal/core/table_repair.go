@@ -716,9 +716,9 @@ func (t *TableRepairTask) runBidirectionalRepair() error {
 		node1Rows := diffs.Rows[node1Name]
 		node2Rows := diffs.Rows[node2Name]
 
-		node1RowsByPKey := make(map[string]map[string]any)
+		node1RowsByPKey := make(map[string]types.OrderedMap)
 		for _, row := range node1Rows {
-			pkeyStr, err := utils.StringifyKey(row, t.Key)
+			pkeyStr, err := utils.StringifyOrderedMapKey(row, t.Key)
 			if err != nil {
 				repairErrors = append(repairErrors, fmt.Sprintf("stringify pkey failed for %s: %v", node1Name, err))
 				continue
@@ -726,9 +726,9 @@ func (t *TableRepairTask) runBidirectionalRepair() error {
 			node1RowsByPKey[pkeyStr] = row
 		}
 
-		node2RowsByPKey := make(map[string]map[string]any)
+		node2RowsByPKey := make(map[string]types.OrderedMap)
 		for _, row := range node2Rows {
-			pkeyStr, err := utils.StringifyKey(row, t.Key)
+			pkeyStr, err := utils.StringifyOrderedMapKey(row, t.Key)
 			if err != nil {
 				repairErrors = append(repairErrors, fmt.Sprintf("stringify pkey failed for %s: %v", node2Name, err))
 				continue
@@ -739,14 +739,14 @@ func (t *TableRepairTask) runBidirectionalRepair() error {
 		insertsForNode1 := make(map[string]map[string]any)
 		for pkey, row := range node2RowsByPKey {
 			if _, exists := node1RowsByPKey[pkey]; !exists {
-				insertsForNode1[pkey] = utils.StripSpockMetadata(row)
+				insertsForNode1[pkey] = utils.StripSpockMetadata(utils.OrderedMapToMap(row))
 			}
 		}
 
 		insertsForNode2 := make(map[string]map[string]any)
 		for pkey, row := range node1RowsByPKey {
 			if _, exists := node2RowsByPKey[pkey]; !exists {
-				insertsForNode2[pkey] = utils.StripSpockMetadata(row)
+				insertsForNode2[pkey] = utils.StripSpockMetadata(utils.OrderedMapToMap(row))
 			}
 		}
 
@@ -1147,32 +1147,32 @@ func getDryRunOutput(task *TableRepairTask) (string, error) {
 			node1Rows := diffs.Rows[node1Name]
 			node2Rows := diffs.Rows[node2Name]
 
-			node1RowsByPKey := make(map[string]map[string]any)
+			node1RowsByPKey := make(map[string]types.OrderedMap)
 			for _, row := range node1Rows {
-				pkeyStr, err := utils.StringifyKey(row, task.Key)
+				pkeyStr, err := utils.StringifyOrderedMapKey(row, task.Key)
 				if err != nil {
 					return "", fmt.Errorf("error stringifying pkey for row on %s: %w", node1Name, err)
 				}
 				node1RowsByPKey[pkeyStr] = row
 			}
 
-			node2RowsByPKey := make(map[string]map[string]any)
+			node2RowsByPKey := make(map[string]types.OrderedMap)
 			for _, row := range node2Rows {
-				pkeyStr, err := utils.StringifyKey(row, task.Key)
+				pkeyStr, err := utils.StringifyOrderedMapKey(row, task.Key)
 				if err != nil {
 					return "", fmt.Errorf("error stringifying pkey for row on %s: %w", node2Name, err)
 				}
 				node2RowsByPKey[pkeyStr] = row
 			}
 
-			insertsForNode1 := make(map[string]map[string]any)
+			insertsForNode1 := make(map[string]types.OrderedMap)
 			for pkey, row := range node2RowsByPKey {
 				if _, exists := node1RowsByPKey[pkey]; !exists {
 					insertsForNode1[pkey] = row
 				}
 			}
 
-			insertsForNode2 := make(map[string]map[string]any)
+			insertsForNode2 := make(map[string]types.OrderedMap)
 			for pkey, row := range node1RowsByPKey {
 				if _, exists := node2RowsByPKey[pkey]; !exists {
 					insertsForNode2[pkey] = row
@@ -1194,14 +1194,14 @@ func getDryRunOutput(task *TableRepairTask) (string, error) {
 					if len(insertsForNode2) > 0 {
 						rows := make([]map[string]any, 0, len(insertsForNode2))
 						for _, row := range insertsForNode2 {
-							rows = append(rows, row)
+							rows = append(rows, utils.OrderedMapToMap(row))
 						}
 						reportChanges[fmt.Sprintf("would_insert_into_%s", node2Name)] = rows
 					}
 					if len(insertsForNode1) > 0 {
 						rows := make([]map[string]any, 0, len(insertsForNode1))
 						for _, row := range insertsForNode1 {
-							rows = append(rows, row)
+							rows = append(rows, utils.OrderedMapToMap(row))
 						}
 						reportChanges[fmt.Sprintf("would_insert_into_%s", node1Name)] = rows
 					}
@@ -1302,8 +1302,8 @@ func calculateRepairSets(task *TableRepairTask) (map[string]map[string]map[strin
 		node1Name := nodes[0]
 		node2Name := nodes[1]
 
-		var sourceRows []map[string]any
-		var targetRows []map[string]any
+		var sourceRows []types.OrderedMap
+		var targetRows []types.OrderedMap
 		var targetNode string
 
 		if node1Name == task.SourceOfTruth {
@@ -1327,22 +1327,22 @@ func calculateRepairSets(task *TableRepairTask) (map[string]map[string]map[strin
 
 		sourceRowsByPKey := make(map[string]map[string]any)
 		for _, row := range sourceRows {
-			pkeyStr, err := utils.StringifyKey(row, task.Key)
+			pkeyStr, err := utils.StringifyOrderedMapKey(row, task.Key)
 			if err != nil {
 				return nil, nil, fmt.Errorf("error stringifying pkey for source row on %s: %w", task.SourceOfTruth, err)
 			}
-			cleanRow := utils.StripSpockMetadata(row)
+			cleanRow := utils.StripSpockMetadata(utils.OrderedMapToMap(row))
 			sourceRowsByPKey[pkeyStr] = cleanRow
 			fullRowsToUpsert[targetNode][pkeyStr] = cleanRow
 		}
 
 		targetRowsByPKey := make(map[string]map[string]any)
 		for _, row := range targetRows {
-			pkeyStr, err := utils.StringifyKey(row, task.Key)
+			pkeyStr, err := utils.StringifyOrderedMapKey(row, task.Key)
 			if err != nil {
 				return nil, nil, fmt.Errorf("error stringifying pkey for target row on %s: %w", targetNode, err)
 			}
-			cleanRow := utils.StripSpockMetadata(row)
+			cleanRow := utils.StripSpockMetadata(utils.OrderedMapToMap(row))
 			targetRowsByPKey[pkeyStr] = cleanRow
 			if _, existsInSource := sourceRowsByPKey[pkeyStr]; !existsInSource {
 				fullRowsToDelete[targetNode][pkeyStr] = cleanRow

@@ -319,7 +319,8 @@ var SQLTemplates = Templates{
 			JOIN pg_catalog.pg_type t ON a.atttypid = t.oid
 			LEFT JOIN pg_catalog.pg_namespace n ON c.relnamespace = n.oid
 		WHERE
-			c.relname = $1
+			c.relname = $2
+			AND n.nspname = $1
 			AND a.attnum > 0
 			AND NOT a.attisdropped
 		ORDER BY
@@ -332,7 +333,9 @@ var SQLTemplates = Templates{
 			information_schema.columns
 		WHERE
 			table_schema = $1
-			AND table_name = $2;
+			AND table_name = $2
+		ORDER BY
+			ordinal_position;
 	`)),
 	CheckUserPrivileges: template.Must(template.New("checkUserPrivileges").Parse(`
 		WITH params AS (
