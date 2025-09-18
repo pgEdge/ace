@@ -152,7 +152,7 @@ var SQLTemplates = Templates{
 
 	UpdateCDCMetadata: template.Must(template.New("updateCdcMetadata").Parse(`
 		INSERT INTO
-			spock.ace_mtree_cdc_metadata (
+			spock.ace_cdc_metadata (
 				publication_name,
 				slot_name,
 				start_lsn,
@@ -192,7 +192,7 @@ var SQLTemplates = Templates{
 		SELECT pid FROM pg_stat_activity WHERE pid = $1
 	`)),
 	DropCDCMetadataTable: template.Must(template.New("dropCDCMetadataTable").Parse(`
-		DROP TABLE IF EXISTS spock.ace_mtree_cdc_metadata
+		DROP TABLE IF EXISTS spock.ace_cdc_metadata
 	`)),
 
 	GetCDCMetadata: template.Must(template.New("getCDCMetadata").Parse(`
@@ -201,7 +201,7 @@ var SQLTemplates = Templates{
 			start_lsn,
 			tables
 		FROM
-			spock.ace_mtree_cdc_metadata
+			spock.ace_cdc_metadata
 		WHERE
 			publication_name = $1
 	`)),
@@ -289,7 +289,7 @@ var SQLTemplates = Templates{
 	`)),
 
 	CreateCDCMetadataTable: template.Must(template.New("createCDCMetadataTable").Parse(`
-		CREATE TABLE IF NOT EXISTS spock.ace_mtree_cdc_metadata (
+		CREATE TABLE IF NOT EXISTS spock.ace_cdc_metadata (
 			publication_name text PRIMARY KEY,
 			slot_name text,
 			start_lsn text,
@@ -319,7 +319,8 @@ var SQLTemplates = Templates{
 			JOIN pg_catalog.pg_type t ON a.atttypid = t.oid
 			LEFT JOIN pg_catalog.pg_namespace n ON c.relnamespace = n.oid
 		WHERE
-			c.relname = $1
+			c.relname = $2
+			AND n.nspname = $1
 			AND a.attnum > 0
 			AND NOT a.attisdropped
 		ORDER BY
@@ -332,7 +333,9 @@ var SQLTemplates = Templates{
 			information_schema.columns
 		WHERE
 			table_schema = $1
-			AND table_name = $2;
+			AND table_name = $2
+		ORDER BY
+			ordinal_position;
 	`)),
 	CheckUserPrivileges: template.Must(template.New("checkUserPrivileges").Parse(`
 		WITH params AS (

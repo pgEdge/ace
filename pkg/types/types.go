@@ -12,6 +12,9 @@
 package types
 
 import (
+	"bytes"
+	"encoding/json"
+	"fmt"
 	"time"
 )
 
@@ -77,6 +80,7 @@ type DerivedFields struct {
 	TableList        []string
 	ColTypes         map[string]map[string]string
 	SimplePrimaryKey bool
+	PKeyTypes        map[string]string
 }
 
 // DiffOutput holds the structured diff data.
@@ -89,7 +93,7 @@ type DiffOutput struct {
 // The keys in the DiffOutput.Diffs map will be "nodeX/nodeY",
 // and the Node1/Node2 fields here will store rows corresponding to nodeX and nodeY respectively.
 type DiffByNodePair struct {
-	Rows map[string][]map[string]any `json:"rows"` // Keyed by actual node name e.g. "n1", "n2"
+	Rows map[string][]OrderedMap `json:"rows"` // Keyed by actual node name e.g. "n1", "n2"
 }
 
 // DiffSummary provides metadata about the diff operation.
@@ -108,6 +112,91 @@ type DiffSummary struct {
 	InitialRangesCount    int            `json:"initial_ranges_count"`
 	MismatchedRangesCount int            `json:"mismatched_ranges_count"`
 	PrimaryKey            []string       `json:"primary_key"`
+}
+
+type KVPair struct {
+	Key   string
+	Value any
+}
+
+type OrderedMap []KVPair
+
+func (om OrderedMap) MarshalJSON() ([]byte, error) {
+	var buf bytes.Buffer
+	buf.WriteString("{")
+	for i, kv := range om {
+		if i != 0 {
+			buf.WriteString(",")
+		}
+
+		key, err := json.Marshal(kv.Key)
+		if err != nil {
+			return nil, err
+		}
+		buf.Write(key)
+		buf.WriteString(":")
+
+		val, err := json.Marshal(kv.Value)
+		if err != nil {
+			return nil, err
+		}
+		buf.Write(val)
+	}
+	buf.WriteString("}")
+	return buf.Bytes(), nil
+}
+
+func (om *OrderedMap) UnmarshalJSON(data []byte) error {
+	if string(data) == "null" {
+		return nil
+	}
+	dec := json.NewDecoder(bytes.NewReader(data))
+
+	t, err := dec.Token()
+	if err != nil {
+		return err
+	}
+	if d, ok := t.(json.Delim); !ok || d != '{' {
+		return fmt.Errorf("expected '{' at start of JSON object, got %v", t)
+	}
+
+	var kvs []KVPair
+	for dec.More() {
+		t, err := dec.Token()
+		if err != nil {
+			return err
+		}
+		key, ok := t.(string)
+		if !ok {
+			return fmt.Errorf("expected string key, got %v", t)
+		}
+
+		var value any
+		if err := dec.Decode(&value); err != nil {
+			return err
+		}
+		kvs = append(kvs, KVPair{Key: key, Value: value})
+	}
+
+	t, err = dec.Token()
+	if err != nil {
+		return err
+	}
+	if d, ok := t.(json.Delim); !ok || d != '}' {
+		return fmt.Errorf("expected '}' at end of JSON object, got %v", t)
+	}
+
+	*om = kvs
+	return nil
+}
+
+func (om OrderedMap) Get(key string) (any, bool) {
+	for _, kv := range om {
+		if kv.Key == key {
+			return kv.Value, true
+		}
+	}
+	return nil, false
 }
 
 // NodePairDiff is a more detailed breakdown of differences for a single pair, often used internally during comparison.

@@ -103,7 +103,7 @@ func (t *TableDiffTask) ExecuteRerunTask() error {
 		pkeyValues = append(pkeyValues, pkVals)
 	}
 
-	fetchedRowsByNode := make(map[string]map[string]map[string]any)
+	fetchedRowsByNode := make(map[string]map[string]types.OrderedMap)
 	var wg sync.WaitGroup
 	var mu sync.Mutex
 	errs := make(chan error, len(t.NodeList))
@@ -207,8 +207,7 @@ func (t *TableDiffTask) collectPkeysFromDiff() (map[string]map[string]any, error
 			for _, row := range rows {
 				pkVal := make(map[string]any)
 				for _, pkCol := range t.Key {
-					// The row from the diff file might have a "_spock_metadata_" key.
-					if pkData, ok := row[pkCol]; ok {
+					if pkData, ok := row.Get(pkCol); ok {
 						pkVal[pkCol] = pkData
 					} else {
 						return nil, fmt.Errorf("primary key column '%s' not found in a diff row", pkCol)
@@ -228,9 +227,9 @@ func (t *TableDiffTask) collectPkeysFromDiff() (map[string]map[string]any, error
 // fetchRowsByPkeys efficiently fetches a list of rows from a node by their primary keys.
 // It uses a temporary table and a JOIN for high performance with large numbers of keys.
 // TODO: Can this be separated out into a common function that can be used by other tasks?
-func fetchRowsByPkeys(ctx context.Context, pool *pgxpool.Pool, t *TableDiffTask, pkeyVals [][]any) (map[string]map[string]any, error) {
+func fetchRowsByPkeys(ctx context.Context, pool *pgxpool.Pool, t *TableDiffTask, pkeyVals [][]any) (map[string]types.OrderedMap, error) {
 	if len(pkeyVals) == 0 {
-		return make(map[string]map[string]any), nil
+		return make(map[string]types.OrderedMap), nil
 	}
 
 	pkColTypes, err := queries.GetPkeyColumnTypes(ctx, pool, t.Schema, t.Table, t.Key)
@@ -293,17 +292,14 @@ func fetchRowsByPkeys(ctx context.Context, pool *pgxpool.Pool, t *TableDiffTask,
 	}
 	defer pgRows.Close()
 
-	results := make(map[string]map[string]any)
+	results := make(map[string]types.OrderedMap)
 	for pgRows.Next() {
 		rowData, err := scanRow(pgRows)
 		if err != nil {
 			return nil, fmt.Errorf("failed to scan re-run row: %w", err)
 		}
-		pkMap := make(map[string]any)
-		for _, pkCol := range t.Key {
-			pkMap[pkCol] = rowData[pkCol]
-		}
-		pkStr, err := utils.StringifyKey(pkMap, t.Key)
+
+		pkStr, err := utils.StringifyOrderedMapKey(rowData, t.Key)
 		if err != nil {
 			return nil, fmt.Errorf("failed to stringify fetched row key: %w", err)
 		}
@@ -321,7 +317,7 @@ func fetchRowsByPkeys(ctx context.Context, pool *pgxpool.Pool, t *TableDiffTask,
 	return results, nil
 }
 
-func (t *TableDiffTask) reCompareDiffs(fetchedRowsByNode map[string]map[string]map[string]any) (*types.DiffOutput, error) {
+func (t *TableDiffTask) reCompareDiffs(fetchedRowsByNode map[string]map[string]types.OrderedMap) (*types.DiffOutput, error) {
 	newDiffResult := &types.DiffOutput{
 		NodeDiffs: make(map[string]types.DiffByNodePair),
 		Summary:   t.DiffResult.Summary,
@@ -339,31 +335,23 @@ func (t *TableDiffTask) reCompareDiffs(fetchedRowsByNode map[string]map[string]m
 		}
 		node1, node2 := nodes[0], nodes[1]
 
-		originalNode1Rows := make(map[string]map[string]any)
-		originalNode2Rows := make(map[string]map[string]any)
+		originalNode1Rows := make(map[string]types.OrderedMap)
+		originalNode2Rows := make(map[string]types.OrderedMap)
 		allPkeysForPair := make(map[string]bool)
 
 		for _, row := range nodePairDiff.Rows[node1] {
-			pkMap := make(map[string]any)
-			for _, pkCol := range t.Key {
-				pkMap[pkCol] = row[pkCol]
-			}
-			pkStr, _ := utils.StringifyKey(pkMap, t.Key)
+			pkStr, _ := utils.StringifyOrderedMapKey(row, t.Key)
 			originalNode1Rows[pkStr] = row
 			allPkeysForPair[pkStr] = true
 		}
 		for _, row := range nodePairDiff.Rows[node2] {
-			pkMap := make(map[string]any)
-			for _, pkCol := range t.Key {
-				pkMap[pkCol] = row[pkCol]
-			}
-			pkStr, _ := utils.StringifyKey(pkMap, t.Key)
+			pkStr, _ := utils.StringifyOrderedMapKey(row, t.Key)
 			originalNode2Rows[pkStr] = row
 			allPkeysForPair[pkStr] = true
 		}
 
 		newDiffsForPair := types.DiffByNodePair{
-			Rows: make(map[string][]map[string]any),
+			Rows: make(map[string][]types.OrderedMap),
 		}
 		persistentDiffCount := 0
 
@@ -375,23 +363,24 @@ func (t *TableDiffTask) reCompareDiffs(fetchedRowsByNode map[string]map[string]m
 			if !nowOnNode1 || !nowOnNode2 {
 				isDifferent = true
 			} else {
-				for _, colName := range t.Cols {
-					val1 := newRow1[colName]
-					val2 := newRow2[colName]
-					if !reflect.DeepEqual(val1, val2) {
-						isDifferent = true
-						break
-					}
+				var err error
+				isDifferent, err = areRowsDifferent(newRow1, newRow2, t.Cols)
+				if err != nil {
+					return nil, fmt.Errorf("failed to compare rows for pkey %s: %w", pkStr, err)
 				}
 			}
 
 			if isDifferent {
 				persistentDiffCount++
 				if nowOnNode1 {
-					newDiffsForPair.Rows[node1] = append(newDiffsForPair.Rows[node1], utils.AddSpockMetadata(newRow1))
+					rowAsMap := utils.OrderedMapToMap(newRow1)
+					rowWithMeta := utils.AddSpockMetadata(rowAsMap)
+					newDiffsForPair.Rows[node1] = append(newDiffsForPair.Rows[node1], utils.MapToOrderedMap(rowWithMeta, t.Cols))
 				}
 				if nowOnNode2 {
-					newDiffsForPair.Rows[node2] = append(newDiffsForPair.Rows[node2], utils.AddSpockMetadata(newRow2))
+					rowAsMap := utils.OrderedMapToMap(newRow2)
+					rowWithMeta := utils.AddSpockMetadata(rowAsMap)
+					newDiffsForPair.Rows[node2] = append(newDiffsForPair.Rows[node2], utils.MapToOrderedMap(rowWithMeta, t.Cols))
 				}
 			}
 		}
@@ -404,7 +393,23 @@ func (t *TableDiffTask) reCompareDiffs(fetchedRowsByNode map[string]map[string]m
 	return newDiffResult, nil
 }
 
-func scanRow(pgRows pgx.Rows) (map[string]any, error) {
+func areRowsDifferent(row1, row2 types.OrderedMap, dataCols []string) (bool, error) {
+	for _, col := range dataCols {
+		val1, ok1 := row1.Get(col)
+		val2, ok2 := row2.Get(col)
+
+		if !ok1 || !ok2 {
+			return false, fmt.Errorf("column %s not found in one of the rows", col)
+		}
+
+		if !reflect.DeepEqual(val1, val2) {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func scanRow(pgRows pgx.Rows) (types.OrderedMap, error) {
 	colsDesc := pgRows.FieldDescriptions()
 	rowValues := make([]any, len(colsDesc))
 	rowValPtrs := make([]any, len(colsDesc))
@@ -416,63 +421,65 @@ func scanRow(pgRows pgx.Rows) (map[string]any, error) {
 		return nil, fmt.Errorf("failed to scan row: %w", err)
 	}
 
-	rowData := make(map[string]any)
+	rowData := make(types.OrderedMap, len(colsDesc))
 	for i, colD := range colsDesc {
 		val := rowValues[i]
+		var processedVal any
 		switch v := val.(type) {
 		case pgtype.Numeric:
 			var fValue float64
 			if v.Status == pgtype.Present {
 				v.AssignTo(&fValue)
-				rowData[string(colD.Name)] = fValue
+				processedVal = fValue
 			} else {
-				rowData[string(colD.Name)] = nil
+				processedVal = nil
 			}
 		case pgtype.Timestamp:
 			if v.Status == pgtype.Present {
-				rowData[string(colD.Name)] = v.Time
+				processedVal = v.Time
 			} else {
-				rowData[string(colD.Name)] = nil
+				processedVal = nil
 			}
 		case pgtype.Timestamptz:
 			if v.Status == pgtype.Present {
-				rowData[string(colD.Name)] = v.Time
+				processedVal = v.Time
 			} else {
-				rowData[string(colD.Name)] = nil
+				processedVal = nil
 			}
 		case pgtype.Date:
 			if v.Status == pgtype.Present {
-				rowData[string(colD.Name)] = v.Time
+				processedVal = v.Time
 			} else {
-				rowData[string(colD.Name)] = nil
+				processedVal = nil
 			}
 		case pgtype.Bytea:
 			if v.Status == pgtype.Present {
-				rowData[string(colD.Name)] = v.Bytes
+				processedVal = v.Bytes
 			} else {
-				rowData[string(colD.Name)] = nil
+				processedVal = nil
 			}
 		case string:
-			rowData[string(colD.Name)] = v
+			processedVal = v
 		case pgtype.JSON, pgtype.JSONB:
 			if v == nil || v.(interface{ GetStatus() pgtype.Status }).GetStatus() != pgtype.Present {
-				rowData[string(colD.Name)] = nil
+				processedVal = nil
 			} else {
 				var dataHolder any
 				if assignable, ok := v.(interface{ AssignTo(dst any) error }); ok {
 					err := assignable.AssignTo(&dataHolder)
 					if err != nil {
-						rowData[string(colD.Name)] = nil
+						processedVal = nil
 					} else {
-						rowData[string(colD.Name)] = dataHolder
+						processedVal = dataHolder
 					}
 				} else {
-					rowData[string(colD.Name)] = nil
+					processedVal = nil
 				}
 			}
 		default:
-			rowData[string(colD.Name)] = val
+			processedVal = val
 		}
+		rowData[i] = types.KVPair{Key: string(colD.Name), Value: processedVal}
 	}
 	return rowData, nil
 }
