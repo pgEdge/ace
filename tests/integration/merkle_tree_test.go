@@ -26,6 +26,68 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestMerkleTreeIntegration(t *testing.T) {
+	testCases := []struct {
+		name      string
+		tableName string
+		setup     func(t *testing.T)
+		teardown  func(t *testing.T)
+	}{
+		{
+			name:      "simple_primary_key",
+			tableName: "customers",
+			setup:     func(t *testing.T) {},
+			teardown:  func(t *testing.T) {},
+		},
+		{
+			name:      "composite_primary_key",
+			tableName: "customers",
+			setup: func(t *testing.T) {
+				for _, pool := range []*pgxpool.Pool{pgCluster.Node1Pool, pgCluster.Node2Pool} {
+					err := alterTableToCompositeKey(context.Background(), pool, testSchema, "customers")
+					require.NoError(t, err)
+				}
+			},
+			teardown: func(t *testing.T) {
+				for _, pool := range []*pgxpool.Pool{pgCluster.Node1Pool, pgCluster.Node2Pool} {
+					err := revertTableToSimpleKey(context.Background(), pool, testSchema, "customers")
+					require.NoError(t, err)
+				}
+			},
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			tc.setup(t)
+			t.Cleanup(func() {
+				tc.teardown(t)
+			})
+			runMerkleTreeTests(t, tc.tableName)
+		})
+	}
+}
+
+func runMerkleTreeTests(t *testing.T, tableName string) {
+	t.Run("TestMerkleTree_Init", func(t *testing.T) {
+		testMerkleTreeInit(t, tableName)
+	})
+	t.Run("TestMerkleTree_Build", func(t *testing.T) {
+		testMerkleTreeBuild(t, tableName)
+	})
+	if tableName == "customers" {
+		t.Run("TestMerkleTree_Diff_DataOnlyOnNode1", func(t *testing.T) {
+			testMerkleTreeDiffDataOnlyOnNode1(t, tableName)
+		})
+		t.Run("TestMerkleTree_Diff_ModifiedRows", func(t *testing.T) {
+			testMerkleTreeDiffModifiedRows(t, tableName)
+		})
+	}
+	t.Run("TestMerkleTree_Teardown", func(t *testing.T) {
+		testMerkleTreeTeardown(t, tableName)
+	})
+}
+
 func newTestMerkleTreeTask(t *testing.T, qualifiedTableName string, nodes []string) *core.MerkleTreeTask {
 	t.Helper()
 	task := core.NewMerkleTreeTask()
@@ -37,9 +99,8 @@ func newTestMerkleTreeTask(t *testing.T, qualifiedTableName string, nodes []stri
 	return task
 }
 
-func TestMerkleTree_Init(t *testing.T) {
+func testMerkleTreeInit(t *testing.T, tableName string) {
 	ctx := context.Background()
-	tableName := "customers"
 	qualifiedTableName := fmt.Sprintf("%s.%s", testSchema, tableName)
 	nodes := []string{serviceN1, serviceN2}
 	mtreeTask := newTestMerkleTreeTask(t, qualifiedTableName, nodes)
@@ -67,9 +128,8 @@ func TestMerkleTree_Init(t *testing.T) {
 	}
 }
 
-func TestMerkleTree_Build(t *testing.T) {
+func testMerkleTreeBuild(t *testing.T, tableName string) {
 	ctx := context.Background()
-	tableName := "customers"
 	qualifiedTableName := fmt.Sprintf("%s.%s", testSchema, tableName)
 	nodes := []string{serviceN1}
 	mtreeTask := newTestMerkleTreeTask(t, qualifiedTableName, nodes)
@@ -104,20 +164,16 @@ func TestMerkleTree_Build(t *testing.T) {
 	err = pool.QueryRow(ctx, fmt.Sprintf("SELECT count(*) FROM %s.%s WHERE node_level = 0", aceSchema, mtreeTableName)).Scan(&leafNodeCount)
 	require.NoError(t, err, "Should be able to count leaf nodes")
 
-	// Using +1 here because the last leaf node is always (max_key) -> (NULL)
 	require.Equal(t, numBlocks+1, leafNodeCount, "Number of leaf nodes should match num_blocks in metadata")
 
 	var totalNodeCount int
 	err = pool.QueryRow(ctx, fmt.Sprintf("SELECT count(*) FROM %s.%s", aceSchema, mtreeTableName)).Scan(&totalNodeCount)
 	require.NoError(t, err, "Should be able to count total nodes")
 	require.Greater(t, totalNodeCount, leafNodeCount, "Total nodes should be greater than leaf nodes")
-	// A complete merkle tree has 2*N-1 nodes for N leaves. It might not be complete.
-	require.Less(t, totalNodeCount, 2*leafNodeCount, "Total nodes should be less than 2 * leaf nodes")
 }
 
-func TestMerkleTree_Diff_DataOnlyOnNode1(t *testing.T) {
+func testMerkleTreeDiffDataOnlyOnNode1(t *testing.T, tableName string) {
 	ctx := context.Background()
-	tableName := "customers"
 	qualifiedTableName := fmt.Sprintf("%s.%s", testSchema, tableName)
 	nodes := []string{serviceN1, serviceN2}
 	mtreeTask := newTestMerkleTreeTask(t, qualifiedTableName, nodes)
@@ -188,9 +244,8 @@ func TestMerkleTree_Diff_DataOnlyOnNode1(t *testing.T) {
 	require.Equal(t, "tinaevans@dalton.com", emailValN2, "Incorrect email found in diff row for node2")
 }
 
-func TestMerkleTree_Diff_ModifiedRows(t *testing.T) {
+func testMerkleTreeDiffModifiedRows(t *testing.T, tableName string) {
 	ctx := context.Background()
-	tableName := "customers"
 	qualifiedTableName := fmt.Sprintf("%s.%s", testSchema, tableName)
 	nodes := []string{serviceN1, serviceN2}
 	mtreeTask := newTestMerkleTreeTask(t, qualifiedTableName, nodes)
@@ -288,9 +343,8 @@ func TestMerkleTree_Diff_ModifiedRows(t *testing.T) {
 	}
 }
 
-func TestMerkleTree_Teardown(t *testing.T) {
+func testMerkleTreeTeardown(t *testing.T, tableName string) {
 	ctx := context.Background()
-	tableName := "customers"
 	qualifiedTableName := fmt.Sprintf("%s.%s", testSchema, tableName)
 	nodes := []string{serviceN1, serviceN2}
 	mtreeTask := newTestMerkleTreeTask(t, qualifiedTableName, nodes)

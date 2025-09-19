@@ -703,14 +703,8 @@ func (m *MerkleTreeTask) BuildMtree() error {
 			return fmt.Errorf("failed to connect to node %s for mtree build: %w", nodeInfo["Name"], err)
 		}
 
-		tx, err := pool.Begin(context.Background())
-		if err != nil {
-			return fmt.Errorf("failed to begin transaction on node %s: %w", nodeInfo["Name"], err)
-		}
-		defer tx.Rollback(context.Background())
-
 		publicationName := cfg.PublicationName
-		err = queries.AlterPublicationAddTable(context.Background(), tx, publicationName, m.QualifiedTableName)
+		err = queries.AlterPublicationAddTable(context.Background(), pool, publicationName, m.QualifiedTableName)
 		if err != nil {
 			var pgErr *pgconn.PgError
 			if errors.As(err, &pgErr) && pgErr.Code == tableAlreadyInPublicationError {
@@ -722,6 +716,12 @@ func (m *MerkleTreeTask) BuildMtree() error {
 		} else {
 			logger.Info("Added table %s to publication %s on node %s", m.QualifiedTableName, publicationName, nodeInfo["Name"])
 		}
+
+		tx, err := pool.Begin(context.Background())
+		if err != nil {
+			return fmt.Errorf("failed to begin transaction on node %s: %w", nodeInfo["Name"], err)
+		}
+		defer tx.Rollback(context.Background())
 
 		slotName, startLSN, tables, err := queries.GetCDCMetadata(context.Background(), tx, publicationName)
 		if err != nil {
@@ -1377,6 +1377,12 @@ func (m *MerkleTreeTask) compareBoundaries(b1, b2 any) int {
 	}
 
 	for k := range m.Key {
+		if k >= len(b1Slice) {
+			return -1
+		}
+		if k >= len(b2Slice) {
+			return 1
+		}
 		val1 := b1Slice[k]
 		val2 := b2Slice[k]
 
@@ -1434,6 +1440,12 @@ func (m *MerkleTreeTask) compareBoundaries(b1, b2 any) int {
 				return 1
 			}
 		}
+	}
+	if len(b1Slice) < len(b2Slice) {
+		return -1
+	}
+	if len(b1Slice) > len(b2Slice) {
+		return 1
 	}
 	return 0
 }
