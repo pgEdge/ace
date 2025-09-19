@@ -2477,8 +2477,6 @@ func GetBulkSplitPoints(ctx context.Context, db DBQuerier, schema, table string,
 		return nil, fmt.Errorf("failed to render GetBulkSplitPoints SQL: %w", err)
 	}
 
-	fmt.Println(query)
-
 	rows, err := db.Query(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to execute bulk split points query: %w", err)

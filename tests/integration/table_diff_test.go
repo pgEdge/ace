@@ -24,6 +24,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/pgedge/ace/internal/core"
 	"github.com/pgedge/ace/pkg/types"
+	"github.com/stretchr/testify/require"
 )
 
 func newTestTableDiffTask(
@@ -55,7 +56,90 @@ func newTestTableDiffTask(
 	return task
 }
 
-func TestTableDiff_NoDifferences(t *testing.T) {
+func TestTableDiffIntegration(t *testing.T) {
+	t.Run("CustomersTable", func(t *testing.T) {
+		testCases := []struct {
+			name     string
+			setup    func(t *testing.T)
+			teardown func(t *testing.T)
+		}{
+			{
+				name:     "simple_primary_key",
+				setup:    func(t *testing.T) {},
+				teardown: func(t *testing.T) {},
+			},
+			{
+				name: "composite_primary_key",
+				setup: func(t *testing.T) {
+					for _, pool := range []*pgxpool.Pool{pgCluster.Node1Pool, pgCluster.Node2Pool} {
+						err := alterTableToCompositeKey(context.Background(), pool, testSchema, "customers")
+						require.NoError(t, err)
+					}
+				},
+				teardown: func(t *testing.T) {
+					for _, pool := range []*pgxpool.Pool{pgCluster.Node1Pool, pgCluster.Node2Pool} {
+						err := revertTableToSimpleKey(context.Background(), pool, testSchema, "customers")
+						require.NoError(t, err)
+					}
+				},
+			},
+		}
+
+		for _, tc := range testCases {
+			t.Run(tc.name, func(t *testing.T) {
+				tc.setup(t)
+				t.Cleanup(func() { tc.teardown(t) })
+				runCustomerTableDiffTests(t)
+			})
+		}
+	})
+
+	t.Run("MixedCaseIdentifiers", func(t *testing.T) {
+		t.Run("simple_primary_key", func(t *testing.T) {
+			testTableDiff_MixedCaseIdentifiers(t, false)
+		})
+		t.Run("composite_primary_key", func(t *testing.T) {
+			testTableDiff_MixedCaseIdentifiers(t, true)
+		})
+	})
+
+	t.Run("VariousDataTypes", func(t *testing.T) {
+		t.Run("simple_primary_key", func(t *testing.T) {
+			testTableDiff_VariousDataTypes(t, false)
+		})
+		t.Run("composite_primary_key", func(t *testing.T) {
+			testTableDiff_VariousDataTypes(t, true)
+		})
+	})
+
+	t.Run("ByteaColumnSizeCheck", func(t *testing.T) {
+		t.Run("simple_primary_key", func(t *testing.T) {
+			testTableDiff_ByteaColumnSizeCheck(t, false)
+		})
+		t.Run("composite_primary_key", func(t *testing.T) {
+			testTableDiff_ByteaColumnSizeCheck(t, true)
+		})
+	})
+
+	t.Run("WithSpockMetadata", func(t *testing.T) {
+		t.Run("simple_primary_key", func(t *testing.T) {
+			testTableDiff_WithSpockMetadata(t, false)
+		})
+		t.Run("composite_primary_key", func(t *testing.T) {
+			testTableDiff_WithSpockMetadata(t, true)
+		})
+	})
+}
+
+func runCustomerTableDiffTests(t *testing.T) {
+	t.Run("NoDifferences", testTableDiff_NoDifferences)
+	t.Run("DataOnlyOnNode1", testTableDiff_DataOnlyOnNode1)
+	t.Run("DataOnlyOnNode2", testTableDiff_DataOnlyOnNode2)
+	t.Run("ModifiedRows", testTableDiff_ModifiedRows)
+	t.Run("TableFiltering", testTableDiff_TableFiltering)
+}
+
+func testTableDiff_NoDifferences(t *testing.T) {
 	tableName := "customers"
 	qualifiedTableName := fmt.Sprintf("%s.%s", testSchema, tableName)
 	nodesToCompare := []string{serviceN1, serviceN2}
@@ -93,7 +177,7 @@ func TestTableDiff_NoDifferences(t *testing.T) {
 	log.Println("TestTableDiff_NoDifferences completed.")
 }
 
-func TestTableDiff_DataOnlyOnNode1(t *testing.T) {
+func testTableDiff_DataOnlyOnNode1(t *testing.T) {
 	ctx := context.Background()
 	tableName := "customers"
 	qualifiedTableName := fmt.Sprintf("%s.%s", testSchema, tableName)
@@ -190,7 +274,7 @@ func TestTableDiff_DataOnlyOnNode1(t *testing.T) {
 	log.Println("TestTableDiff_DataOnlyOnNode1 completed.")
 }
 
-func TestTableDiff_DataOnlyOnNode2(t *testing.T) {
+func testTableDiff_DataOnlyOnNode2(t *testing.T) {
 	ctx := context.Background()
 	tableName := "customers"
 	qualifiedTableName := fmt.Sprintf("%s.%s", testSchema, tableName)
@@ -286,7 +370,7 @@ func TestTableDiff_DataOnlyOnNode2(t *testing.T) {
 	log.Println("TestTableDiff_DataOnlyOnNode2 completed.")
 }
 
-func TestTableDiff_ModifiedRows(t *testing.T) {
+func testTableDiff_ModifiedRows(t *testing.T) {
 	ctx := context.Background()
 	tableName := "customers"
 	qualifiedTableName := fmt.Sprintf("%s.%s", testSchema, tableName)
@@ -445,19 +529,25 @@ func TestTableDiff_ModifiedRows(t *testing.T) {
 	log.Println("TestTableDiff_ModifiedRows completed.")
 }
 
-func TestTableDiff_MixedCaseIdentifiers(t *testing.T) {
+func testTableDiff_MixedCaseIdentifiers(t *testing.T, compositeKey bool) {
 	ctx := context.Background()
 	tableName := "CustomersMixedCase"
 	qualifiedTableName := fmt.Sprintf("%s.\"%s\"", testSchema, tableName)
 
+	compositeKeyPart := ""
+	if compositeKey {
+		compositeKeyPart = `, "FirstName"`
+	}
+
 	createMixedCaseTableSQL := fmt.Sprintf(`
-CREATE SCHEMA IF NOT EXISTS "%s";
-CREATE TABLE IF NOT EXISTS %s (
-    "ID" INT PRIMARY KEY,
+	CREATE SCHEMA IF NOT EXISTS "%s";
+	CREATE TABLE IF NOT EXISTS %s (
+    "ID" INT,
     "FirstName" VARCHAR(100),
     "LastName" VARCHAR(100),
-    "EmailAddress" VARCHAR(100)
-);`, testSchema, qualifiedTableName)
+    "EmailAddress" VARCHAR(100),
+	PRIMARY KEY("ID"%s)
+);`, testSchema, qualifiedTableName, compositeKeyPart)
 
 	for i, pool := range []*pgxpool.Pool{pgCluster.Node1Pool, pgCluster.Node2Pool} {
 		nodeName := pgCluster.ClusterNodes[i]["Name"].(string)
@@ -569,15 +659,20 @@ CREATE TABLE IF NOT EXISTS %s (
 	log.Println("TestTableDiff_MixedCaseIdentifiers completed.")
 }
 
-func TestTableDiff_VariousDataTypes(t *testing.T) {
+func testTableDiff_VariousDataTypes(t *testing.T, compositeKey bool) {
 	ctx := context.Background()
 	tableName := "data_type_test_table"
 	qualifiedTableName := fmt.Sprintf("%s.%s", testSchema, tableName)
 
+	compositeKeyPart := ""
+	if compositeKey {
+		compositeKeyPart = ", col_smallint"
+	}
+
 	createDataTypeTableSQL := fmt.Sprintf(`
 CREATE SCHEMA IF NOT EXISTS "%s";
 CREATE TABLE IF NOT EXISTS %s.%s (
-    id INT PRIMARY KEY,
+    id INT,
     col_smallint SMALLINT,
     col_integer INTEGER,
     col_bigint BIGINT,
@@ -594,8 +689,9 @@ CREATE TABLE IF NOT EXISTS %s.%s (
     col_jsonb JSONB,
     col_json JSON,
     col_bytea BYTEA,
-    col_int_array INT[]
-);`, testSchema, testSchema, tableName)
+    col_int_array INT[],
+	PRIMARY KEY(id%s)
+);`, testSchema, testSchema, tableName, compositeKeyPart)
 
 	for i, pool := range []*pgxpool.Pool{pgCluster.Node1Pool, pgCluster.Node2Pool} {
 		nodeName := pgCluster.ClusterNodes[i]["Name"].(string)
@@ -821,7 +917,7 @@ CREATE TABLE IF NOT EXISTS %s.%s (
 	log.Println("TestTableDiff_VariousDataTypes completed.")
 }
 
-func TestTableDiff_TableFiltering(t *testing.T) {
+func testTableDiff_TableFiltering(t *testing.T) {
 	ctx := context.Background()
 	tableName := "customers"
 	qualifiedTableName := fmt.Sprintf("%s.%s", testSchema, tableName)
@@ -977,16 +1073,23 @@ func TestTableDiff_TableFiltering(t *testing.T) {
 	log.Println("TestTableDiff_TableFiltering completed.")
 }
 
-func TestTableDiff_ByteaColumnSizeCheck(t *testing.T) {
+func testTableDiff_ByteaColumnSizeCheck(t *testing.T, compositeKey bool) {
 	ctx := context.Background()
 	tableName := "bytea_size_test"
 	qualifiedTableName := fmt.Sprintf("%s.%s", testSchema, tableName)
 
+	compositeKeyPart := ""
+	if compositeKey {
+		compositeKeyPart = ", name"
+	}
+
 	createTableSQL := fmt.Sprintf(`
 CREATE TABLE IF NOT EXISTS %s (
-    id INT PRIMARY KEY,
-    data BYTEA
-);`, qualifiedTableName)
+    id INT,
+	name TEXT,
+    data BYTEA,
+	PRIMARY KEY(id%s)
+);`, qualifiedTableName, compositeKeyPart)
 
 	// Create table on both nodes and add cleanup to drop it
 	for _, pool := range []*pgxpool.Pool{pgCluster.Node1Pool, pgCluster.Node2Pool} {
@@ -1025,7 +1128,7 @@ CREATE TABLE IF NOT EXISTS %s (
 		}
 
 		smallData := make([]byte, 500*1024) // 500 KB
-		_, err := pgCluster.Node1Pool.Exec(ctx, fmt.Sprintf("INSERT INTO %s (id, data) VALUES (1, $1)", qualifiedTableName), smallData)
+		_, err := pgCluster.Node1Pool.Exec(ctx, fmt.Sprintf("INSERT INTO %s (id, name, data) VALUES (1, 'small', $1)", qualifiedTableName), smallData)
 		if err != nil {
 			t.Fatalf("Failed to insert small data: %v", err)
 		}
@@ -1051,7 +1154,7 @@ CREATE TABLE IF NOT EXISTS %s (
 			}
 		}
 		largeData := make([]byte, 1024*1024+1) // > 1 MB
-		_, err := pgCluster.Node1Pool.Exec(ctx, fmt.Sprintf("INSERT INTO %s (id, data) VALUES (1, $1)", qualifiedTableName), largeData)
+		_, err := pgCluster.Node1Pool.Exec(ctx, fmt.Sprintf("INSERT INTO %s (id, name, data) VALUES (1, 'large', $1)", qualifiedTableName), largeData)
 		if err != nil {
 			t.Fatalf("Failed to insert large data: %v", err)
 		}
@@ -1074,13 +1177,18 @@ CREATE TABLE IF NOT EXISTS %s (
 	})
 }
 
-func TestTableDiff_WithSpockMetadata(t *testing.T) {
+func testTableDiff_WithSpockMetadata(t *testing.T, compositeKey bool) {
 	ctx := context.Background()
 	tableName := "metadata_test"
 	qualifiedTableName := fmt.Sprintf("%s.%s", testSchema, tableName)
 
+	compositeKeyPart := ""
+	if compositeKey {
+		compositeKeyPart = ", name"
+	}
+
 	// 1. Create table and add to replication set
-	createTableSQL := fmt.Sprintf(`CREATE TABLE IF NOT EXISTS %s (id INT PRIMARY KEY, data TEXT);`, qualifiedTableName)
+	createTableSQL := fmt.Sprintf(`CREATE TABLE IF NOT EXISTS %s (id INT, name TEXT, data TEXT, PRIMARY KEY(id%s));`, qualifiedTableName, compositeKeyPart)
 
 	for i, pool := range []*pgxpool.Pool{pgCluster.Node1Pool, pgCluster.Node2Pool} {
 		nodeName := pgCluster.ClusterNodes[i]["Name"].(string)
@@ -1115,7 +1223,7 @@ func TestTableDiff_WithSpockMetadata(t *testing.T) {
 
 	time.Sleep(5 * time.Second)
 
-	insertSQL := fmt.Sprintf("INSERT INTO %s (id, data) VALUES (1, 'original data')", qualifiedTableName)
+	insertSQL := fmt.Sprintf("INSERT INTO %s (id, name, data) VALUES (1, 'test', 'original data')", qualifiedTableName)
 	_, err := pgCluster.Node1Pool.Exec(ctx, insertSQL)
 	if err != nil {
 		t.Fatalf("Failed to insert data on node1: %v", err)
@@ -1133,7 +1241,7 @@ func TestTableDiff_WithSpockMetadata(t *testing.T) {
 		t.Fatalf("Replication of initial insert failed or timed out")
 	}
 
-	updateSQL := fmt.Sprintf("UPDATE %s SET data = 'modified data on n1' WHERE id = 1", qualifiedTableName)
+	updateSQL := fmt.Sprintf("UPDATE %s SET data = 'modified data on n1' WHERE id = 1 AND name = 'test'", qualifiedTableName)
 	tx, err := pgCluster.Node1Pool.Begin(ctx)
 	if err != nil {
 		t.Fatalf("Failed to begin transaction on node1: %v", err)

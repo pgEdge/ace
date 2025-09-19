@@ -241,7 +241,7 @@ func (t *TableDiffTask) fetchRows(ctx context.Context, nodeName string, r Range)
 			}
 			placeholderTupleStr := fmt.Sprintf("ROW(%s)", strings.Join(placeholders, ", "))
 
-			conditions = append(conditions, fmt.Sprintf("%s <= %s", pkTupleStr, placeholderTupleStr))
+			conditions = append(conditions, fmt.Sprintf("%s < %s", pkTupleStr, placeholderTupleStr))
 			args = append(args, endVals...)
 		}
 	}
@@ -253,7 +253,7 @@ func (t *TableDiffTask) fetchRows(ctx context.Context, nodeName string, r Range)
 
 	querySQL = fmt.Sprintf("SELECT %s FROM %s %s %s", selectColsStr, quotedSchemaTable, whereClause, orderByClause)
 
-	logger.Log.Debug("[%s] Fetching rows for range: Start=%v, End=%v. SQL: %s, Args: %v", nodeName, r.Start, r.End, querySQL, args)
+	logger.Debug("[%s] Fetching rows for range: Start=%v, End=%v. SQL: %s, Args: %v", nodeName, r.Start, r.End, querySQL, args)
 
 	pgRows, err := pool.Query(ctx, querySQL, args...)
 	if err != nil {
@@ -869,7 +869,18 @@ func (t *TableDiffTask) ExecuteTask() error {
 
 			endKeyParts := make([]any, numPKCols)
 			copy(endKeyParts, scanDest[numPKCols:2*numPKCols])
-			rEnd = endKeyParts
+			allNil := true
+			for _, v := range endKeyParts {
+				if v != nil {
+					allNil = false
+					break
+				}
+			}
+			if allNil {
+				rEnd = nil
+			} else {
+				rEnd = endKeyParts
+			}
 		}
 		ranges = append(ranges, Range{Start: rStart, End: rEnd})
 	}
