@@ -17,6 +17,8 @@ import (
 	"math/rand"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -81,6 +83,9 @@ func runMerkleTreeTests(t *testing.T, tableName string) {
 		})
 		t.Run("TestMerkleTree_Diff_ModifiedRows", func(t *testing.T) {
 			testMerkleTreeDiffModifiedRows(t, tableName)
+		})
+		t.Run("TestMerkleTree_Diff_BoundaryModifications", func(t *testing.T) {
+			testMerkleTreeDiffBoundaryModifications(t, tableName)
 		})
 	}
 	t.Run("TestMerkleTree_Teardown", func(t *testing.T) {
@@ -242,6 +247,196 @@ func testMerkleTreeDiffDataOnlyOnNode1(t *testing.T, tableName string) {
 	emailValN2, ok := diffRowN2.Get("email")
 	require.True(t, ok, "email not found in diff row for node2")
 	require.Equal(t, "tinaevans@dalton.com", emailValN2, "Incorrect email found in diff row for node2")
+}
+
+type compositeBoundaryKey struct {
+	Index      int32
+	CustomerID string
+}
+
+func testMerkleTreeDiffBoundaryModifications(t *testing.T, tableName string) {
+	ctx := context.Background()
+	qualifiedTableName := fmt.Sprintf("%s.%s", testSchema, tableName)
+	nodes := []string{serviceN1, serviceN2}
+	mtreeTask := newTestMerkleTreeTask(t, qualifiedTableName, nodes)
+
+	err := mtreeTask.RunChecks(false)
+	require.NoError(t, err, "RunChecks should succeed")
+	err = mtreeTask.MtreeInit()
+	require.NoError(t, err, "MtreeInit should succeed")
+	t.Cleanup(func() {
+		err := mtreeTask.MtreeTeardown()
+		if err != nil {
+			t.Logf("Warning: MtreeTeardown failed during cleanup: %v", err)
+		}
+		if mtreeTask.SimplePrimaryKey {
+			repairTable(t, qualifiedTableName, serviceN1)
+		} else {
+			// Repair logic might be different or need careful handling for composite keys
+			t.Logf("Skipping repair for composite key table '%s'", qualifiedTableName)
+		}
+		files, _ := filepath.Glob("*_diffs-*.json")
+		for _, f := range files {
+			os.Remove(f)
+		}
+	})
+	err = mtreeTask.BuildMtree()
+	require.NoError(t, err, "BuildMtree should succeed")
+
+	aceSchema := config.Cfg.MTree.Schema
+	mtreeTableName := fmt.Sprintf("ace_mtree_%s_%s", testSchema, tableName)
+
+	var boundaryPkeys []any
+	if mtreeTask.SimplePrimaryKey {
+		query := fmt.Sprintf("SELECT range_start FROM %s.%s WHERE node_level = 0 AND range_start IS NOT NULL UNION SELECT range_end FROM %s.%s WHERE node_level=0 AND range_end IS NOT NULL", aceSchema, mtreeTableName, aceSchema, mtreeTableName)
+		rows, err := pgCluster.Node1Pool.Query(ctx, query)
+		require.NoError(t, err)
+		defer rows.Close()
+		for rows.Next() {
+			var pkey int32
+			err := rows.Scan(&pkey)
+			require.NoError(t, err)
+			boundaryPkeys = append(boundaryPkeys, pkey)
+		}
+	} else {
+		// For composite keys, we get the text representation and parse it.
+		query := fmt.Sprintf("SELECT range_start::text FROM %s.%s WHERE node_level = 0 AND range_start IS NOT NULL UNION SELECT range_end::text FROM %s.%s WHERE node_level=0 AND range_end IS NOT NULL", aceSchema, mtreeTableName, aceSchema, mtreeTableName)
+		rows, err := pgCluster.Node1Pool.Query(ctx, query)
+		require.NoError(t, err)
+		defer rows.Close()
+		re := regexp.MustCompile(`^\((\d+),"?([^",]+)"?\)$`)
+
+		for rows.Next() {
+			var pkeyStr string
+			err := rows.Scan(&pkeyStr)
+			require.NoError(t, err)
+			matches := re.FindStringSubmatch(pkeyStr)
+			if len(matches) == 3 {
+				index, err := strconv.Atoi(matches[1])
+				require.NoError(t, err)
+				boundaryPkeys = append(boundaryPkeys, compositeBoundaryKey{
+					Index:      int32(index),
+					CustomerID: matches[2],
+				})
+			}
+		}
+	}
+
+	require.NotEmpty(t, boundaryPkeys, "Should have found some boundary pkeys")
+
+	// Sample up to 5 keys to modify
+	var pkeysToModify []any
+	if len(boundaryPkeys) > 5 {
+		for i := 0; i < 5; i++ {
+			pkeysToModify = append(pkeysToModify, boundaryPkeys[rand.Intn(len(boundaryPkeys))])
+		}
+	} else {
+		pkeysToModify = boundaryPkeys
+	}
+
+	// Make pkeysToModify unique
+	uniquePkeys := make(map[any]bool)
+	var uniquePkeysList []any
+	for _, pkey := range pkeysToModify {
+		if !uniquePkeys[pkey] {
+			uniquePkeys[pkey] = true
+			uniquePkeysList = append(uniquePkeysList, pkey)
+		}
+	}
+	pkeysToModify = uniquePkeysList
+
+	tx, err := pgCluster.Node2Pool.Begin(ctx)
+	require.NoError(t, err)
+	defer tx.Rollback(ctx)
+
+	_, err = tx.Exec(ctx, "SELECT spock.repair_mode(true)")
+	require.NoError(t, err)
+
+	if mtreeTask.SimplePrimaryKey {
+		for _, pkey := range pkeysToModify {
+			updateSQL := fmt.Sprintf("UPDATE %s SET email = 'boundary.update.%v@example.com' WHERE index = $1", qualifiedTableName, pkey)
+			_, err := tx.Exec(ctx, updateSQL, pkey)
+			require.NoError(t, err)
+		}
+	} else {
+		for _, pkey := range pkeysToModify {
+			ckey := pkey.(compositeBoundaryKey)
+			updateSQL := fmt.Sprintf("UPDATE %s SET email = 'boundary.update.%v@example.com' WHERE index = $1 AND customer_id = $2", qualifiedTableName, ckey.Index)
+			_, err := tx.Exec(ctx, updateSQL, ckey.Index, ckey.CustomerID)
+			require.NoError(t, err)
+		}
+	}
+
+	_, err = tx.Exec(ctx, "SELECT spock.repair_mode(false)")
+	require.NoError(t, err)
+	require.NoError(t, tx.Commit(ctx))
+
+	err = mtreeTask.DiffMtree()
+	require.NoError(t, err, "DiffMtree should succeed")
+
+	pairKey := serviceN1 + "/" + serviceN2
+	if strings.Compare(serviceN1, serviceN2) > 0 {
+		pairKey = serviceN2 + "/" + serviceN1
+	}
+
+	nodeDiffs, ok := mtreeTask.DiffResult.NodeDiffs[pairKey]
+	require.True(t, ok, "Expected diffs for pair %s, but none found.", pairKey)
+
+	expectedDiffCount := len(pkeysToModify)
+	require.Equal(t, expectedDiffCount, len(nodeDiffs.Rows[serviceN1]), "Expected %d modified rows on %s", expectedDiffCount, serviceN1)
+	require.Equal(t, expectedDiffCount, len(nodeDiffs.Rows[serviceN2]), "Expected %d modified rows on %s", expectedDiffCount, serviceN2)
+	require.Equal(t, expectedDiffCount, mtreeTask.DiffResult.Summary.DiffRowsCount[pairKey], "Expected summary diff count to be %d", expectedDiffCount)
+
+	if mtreeTask.SimplePrimaryKey {
+		for _, pkey := range pkeysToModify {
+			foundN1 := false
+			foundN2 := false
+			for _, row := range nodeDiffs.Rows[serviceN1] {
+				if rIndex, ok := row.Get("index"); ok && rIndex == pkey {
+					foundN1 = true
+					break
+				}
+			}
+			for _, row := range nodeDiffs.Rows[serviceN2] {
+				if rIndex, ok := row.Get("index"); ok && rIndex == pkey {
+					foundN2 = true
+					emailVal, _ := row.Get("email")
+					expectedEmail := fmt.Sprintf("boundary.update.%v@example.com", pkey)
+					require.Equal(t, expectedEmail, emailVal)
+					break
+				}
+			}
+			require.True(t, foundN1, "Did not find original row for index %v on node1", pkey)
+			require.True(t, foundN2, "Did not find modified row for index %v on node2", pkey)
+		}
+	} else {
+		for _, pkey := range pkeysToModify {
+			ckey := pkey.(compositeBoundaryKey)
+			foundN1 := false
+			foundN2 := false
+			for _, row := range nodeDiffs.Rows[serviceN1] {
+				rIndex, _ := row.Get("index")
+				rCustomerID, _ := row.Get("customer_id")
+				if rIndex == ckey.Index && rCustomerID == ckey.CustomerID {
+					foundN1 = true
+					break
+				}
+			}
+			for _, row := range nodeDiffs.Rows[serviceN2] {
+				rIndex, _ := row.Get("index")
+				rCustomerID, _ := row.Get("customer_id")
+				if rIndex == ckey.Index && rCustomerID == ckey.CustomerID {
+					foundN2 = true
+					emailVal, _ := row.Get("email")
+					expectedEmail := fmt.Sprintf("boundary.update.%v@example.com", ckey.Index)
+					require.Equal(t, expectedEmail, emailVal)
+					break
+				}
+			}
+			require.True(t, foundN1, "Did not find original row for index %v on node1", ckey)
+			require.True(t, foundN2, "Did not find modified row for index %v on node2", ckey)
+		}
+	}
 }
 
 func testMerkleTreeDiffModifiedRows(t *testing.T, tableName string) {

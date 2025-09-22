@@ -184,6 +184,10 @@ func testTableDiff_DataOnlyOnNode1(t *testing.T) {
 
 	t.Cleanup(func() {
 		repairTable(t, qualifiedTableName, serviceN1)
+		files, _ := filepath.Glob("*_diffs-*.json")
+		for _, f := range files {
+			os.Remove(f)
+		}
 	})
 
 	// Truncate the table on the second node to create the diff
@@ -281,6 +285,10 @@ func testTableDiff_DataOnlyOnNode2(t *testing.T) {
 
 	t.Cleanup(func() {
 		repairTable(t, qualifiedTableName, serviceN2)
+		files, _ := filepath.Glob("*_diffs-*.json")
+		for _, f := range files {
+			os.Remove(f)
+		}
 	})
 
 	tx, err := pgCluster.Node1Pool.Begin(ctx)
@@ -377,6 +385,10 @@ func testTableDiff_ModifiedRows(t *testing.T) {
 
 	t.Cleanup(func() {
 		repairTable(t, qualifiedTableName, serviceN1)
+		files, _ := filepath.Glob("*_diffs-*.json")
+		for _, f := range files {
+			os.Remove(f)
+		}
 	})
 
 	modifications := []struct {
@@ -579,6 +591,10 @@ func testTableDiff_MixedCaseIdentifiers(t *testing.T, compositeKey bool) {
 				t.Logf("Failed to drop test table %s: %v", qualifiedTableName, err)
 			}
 		}
+		files, _ := filepath.Glob("*_diffs-*.json")
+		for _, f := range files {
+			os.Remove(f)
+		}
 	})
 
 	commonRows := []map[string]any{
@@ -722,6 +738,10 @@ CREATE TABLE IF NOT EXISTS %s.%s (
 			if err != nil {
 				t.Logf("Failed to drop test table %s: %v", qualifiedTableName, err)
 			}
+		}
+		files, _ := filepath.Glob("*_diffs-*.json")
+		for _, f := range files {
+			os.Remove(f)
 		}
 	})
 
@@ -924,6 +944,10 @@ func testTableDiff_TableFiltering(t *testing.T) {
 
 	t.Cleanup(func() {
 		repairTable(t, qualifiedTableName, serviceN1)
+		files, _ := filepath.Glob("*_diffs-*.json")
+		for _, f := range files {
+			os.Remove(f)
+		}
 	})
 
 	updatesNode2 := []struct {
@@ -1114,6 +1138,10 @@ CREATE TABLE IF NOT EXISTS %s (
 			if err != nil {
 				t.Logf("Failed to drop test table %s: %v", qualifiedTableName, err)
 			}
+		}
+		files, _ := filepath.Glob("*_diffs-*.json")
+		for _, f := range files {
+			os.Remove(f)
 		}
 	})
 
