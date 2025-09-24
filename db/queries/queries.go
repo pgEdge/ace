@@ -1745,9 +1745,9 @@ func UpdateBlockRangeEndComposite(ctx context.Context, db DBQuerier, mtreeTable 
 	isNull := len(endVals) == 0
 
 	data := map[string]any{
-		"MtreeTable":              pgx.Identifier{mtreeTable}.Sanitize(),
+		"MtreeTable":              mtreeTable,
 		"IsNull":                  isNull,
-		"CompositeTypeName":       pgx.Identifier{compositeTypeName}.Sanitize(),
+		"CompositeTypeName":       compositeTypeName,
 		"NodePositionPlaceholder": fmt.Sprintf("$%d", len(endVals)+1),
 	}
 
@@ -1793,9 +1793,9 @@ func UpdateBlockRangeStartComposite(ctx context.Context, db DBQuerier, mtreeTabl
 	isNull := len(startVals) == 0
 
 	data := map[string]any{
-		"MtreeTable":              pgx.Identifier{mtreeTable}.Sanitize(),
+		"MtreeTable":              mtreeTable,
 		"IsNull":                  isNull,
-		"CompositeTypeName":       pgx.Identifier{compositeTypeName}.Sanitize(),
+		"CompositeTypeName":       compositeTypeName,
 		"NodePositionPlaceholder": fmt.Sprintf("$%d", len(startVals)+1),
 	}
 
@@ -2052,7 +2052,7 @@ func findBlocksToMerge(ctx context.Context, db DBQuerier, mtreeTable, schema, ta
 		endAttrs[i] = fmt.Sprintf("(range_end).%s", attr)
 	}
 	data := map[string]any{
-		"MtreeTable":          pgx.Identifier{mtreeTable}.Sanitize(),
+		"MtreeTable":          mtreeTable,
 		"SchemaIdent":         pgx.Identifier{schema}.Sanitize(),
 		"TableIdent":          pgx.Identifier{table}.Sanitize(),
 		"Key":                 sanitizedKeys,
@@ -2258,7 +2258,7 @@ func GetBlockWithCount(ctx context.Context, db DBQuerier, mtreeTable, schema, ta
 	}
 
 	data := map[string]interface{}{
-		"MtreeTable":  pgx.Identifier{mtreeTable}.Sanitize(),
+		"MtreeTable":  mtreeTable,
 		"SchemaIdent": pgx.Identifier{schema}.Sanitize(),
 		"TableIdent":  pgx.Identifier{table}.Sanitize(),
 		"IsComposite": isComposite,
@@ -2346,7 +2346,7 @@ func GetBlockWithCount(ctx context.Context, db DBQuerier, mtreeTable, schema, ta
 
 func UpdateNodePosition(ctx context.Context, db DBQuerier, mtreeTable string, oldPosition, newPosition int64) error {
 	data := map[string]interface{}{
-		"MtreeTable": pgx.Identifier{mtreeTable}.Sanitize(),
+		"MtreeTable": mtreeTable,
 	}
 	query, err := RenderSQL(SQLTemplates.UpdateNodePosition, data)
 	if err != nil {
@@ -2358,7 +2358,7 @@ func UpdateNodePosition(ctx context.Context, db DBQuerier, mtreeTable string, ol
 
 func DeleteBlock(ctx context.Context, db DBQuerier, mtreeTable string, position int64) error {
 	data := map[string]interface{}{
-		"MtreeTable": pgx.Identifier{mtreeTable}.Sanitize(),
+		"MtreeTable": mtreeTable,
 	}
 	query, err := RenderSQL(SQLTemplates.DeleteBlock, data)
 	if err != nil {
@@ -2370,7 +2370,7 @@ func DeleteBlock(ctx context.Context, db DBQuerier, mtreeTable string, position 
 
 func UpdateNodePositionsSequential(ctx context.Context, db DBQuerier, mtreeTable string, startPosition int64) error {
 	data := map[string]interface{}{
-		"MtreeTable": pgx.Identifier{mtreeTable}.Sanitize(),
+		"MtreeTable": mtreeTable,
 	}
 	query, err := RenderSQL(SQLTemplates.UpdateNodePositionsSequential, data)
 	if err != nil {
@@ -2382,7 +2382,7 @@ func UpdateNodePositionsSequential(ctx context.Context, db DBQuerier, mtreeTable
 
 func ResetPositionsByStart(ctx context.Context, db DBQuerier, mtreeTable string, key []string, isComposite bool) error {
 	data := map[string]any{
-		"MtreeTable": pgx.Identifier{mtreeTable}.Sanitize(),
+		"MtreeTable": mtreeTable,
 	}
 	var query string
 	var err error
@@ -2396,20 +2396,6 @@ func ResetPositionsByStart(ctx context.Context, db DBQuerier, mtreeTable string,
 	}
 	if _, err := db.Exec(ctx, query); err != nil {
 		return fmt.Errorf("query to reset positions failed: %w", err)
-	}
-	return nil
-}
-
-func UpdateNodePositionsTemp(ctx context.Context, db DBQuerier, mtreeTable string, offset int64) error {
-	data := map[string]any{
-		"MtreeTable": pgx.Identifier{mtreeTable}.Sanitize(),
-	}
-	sql, err := RenderSQL(SQLTemplates.UpdateNodePositionsWithOffset, data)
-	if err != nil {
-		return fmt.Errorf("failed to render UpdateNodePositionsTempTx SQL: %w", err)
-	}
-	if _, err := db.Exec(ctx, sql, offset); err != nil {
-		return fmt.Errorf("query to update node positions to temp failed: %w", err)
 	}
 	return nil
 }
@@ -2734,5 +2720,33 @@ func CreateSchema(ctx context.Context, db DBQuerier, schemaName string) error {
 		return fmt.Errorf("query to create schema failed: %w", err)
 	}
 
+	return nil
+}
+
+func ResetPositionsByStartFromTemp(ctx context.Context, db DBQuerier, mtreeTable string, offset int64) error {
+	data := map[string]any{
+		"MtreeTable": mtreeTable,
+	}
+	query, err := RenderSQL(SQLTemplates.ResetPositionsByStartFromTemp, data)
+	if err != nil {
+		return fmt.Errorf("failed to render ResetPositionsByStartFromTemp SQL: %w", err)
+	}
+	if _, err := db.Exec(ctx, query, offset); err != nil {
+		return fmt.Errorf("query to reset positions from temp failed: %w", err)
+	}
+	return nil
+}
+
+func UpdateAllLeafNodePositionsToTemp(ctx context.Context, db DBQuerier, mtreeTable string, offset int64) error {
+	data := map[string]any{
+		"MtreeTable": mtreeTable,
+	}
+	sql, err := RenderSQL(SQLTemplates.UpdateAllLeafNodePositionsToTemp, data)
+	if err != nil {
+		return fmt.Errorf("failed to render UpdateAllLeafNodePositionsToTemp SQL: %w", err)
+	}
+	if _, err := db.Exec(ctx, sql, offset); err != nil {
+		return fmt.Errorf("query to update all leaf node positions to temp failed: %w", err)
+	}
 	return nil
 }
