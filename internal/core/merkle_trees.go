@@ -807,12 +807,35 @@ func (m *MerkleTreeTask) UpdateMtree(rebalance bool) error {
 		return err
 	}
 	if !m.NoCDC {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		cdcCfg := config.Cfg.MTree.CDC
+		timeout := 30 * time.Second
+		if cdcCfg.CDCProcessingTimeout > 0 {
+			timeout = time.Duration(cdcCfg.CDCProcessingTimeout) * time.Second
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), timeout)
 		defer cancel()
-		if err := cdc.UpdateFromCDC(ctx, m); err != nil {
-			if !errors.Is(err, context.DeadlineExceeded) && err.Error() != "context canceled" {
-				return err
-			}
+
+		var wg sync.WaitGroup
+		for _, nodeInfo := range m.ClusterNodes {
+			wg.Add(1)
+			go func(nodeInfo map[string]any) {
+				defer wg.Done()
+				cdc.UpdateFromCDC(nodeInfo)
+			}(nodeInfo)
+		}
+
+		waitCh := make(chan struct{})
+		go func() {
+			wg.Wait()
+			close(waitCh)
+		}()
+
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("context canceled: %w", ctx.Err())
+		case <-waitCh:
+			// All CDC updates finished successfully.
 		}
 	}
 
@@ -1030,7 +1053,7 @@ func (m *MerkleTreeTask) splitBlocks(tx pgx.Tx, blocksToSplit []types.BlockRange
 			return nil, fmt.Errorf("failed to get block row count for block %d: %w", pos, err)
 		}
 
-		if count < int64(m.BlockSize*2) {
+		if count <= int64(m.BlockSize) {
 			continue
 		}
 
@@ -1050,7 +1073,7 @@ func (m *MerkleTreeTask) splitBlocks(tx pgx.Tx, blocksToSplit []types.BlockRange
 				return nil, fmt.Errorf("failed to get row count for sliver block: %w", err)
 			}
 
-			if sliverCount < int64(float64(m.BlockSize)*0.25) {
+			if sliverCount < int64(float64(m.BlockSize)*0.25) && !originallyUnbounded {
 				splitPoints = splitPoints[:len(splitPoints)-1]
 			}
 		}
@@ -1410,6 +1433,16 @@ func (m *MerkleTreeTask) compareBoundaries(b1, b2 any) int {
 
 	b1Slice := boundaryToSlice(b1)
 	b2Slice := boundaryToSlice(b2)
+
+	if b1Slice == nil && b2Slice == nil {
+		return 0
+	}
+	if b1Slice == nil {
+		return -1
+	}
+	if b2Slice == nil {
+		return 1
+	}
 
 	for k := range m.Key {
 		if k >= len(b1Slice) {

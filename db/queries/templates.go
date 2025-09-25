@@ -1449,7 +1449,7 @@ var SQLTemplates = Templates{
 		FROM
 			numbered
 		WHERE
-			rn % {{.BlockSizePlaceholder}} = 0
+			(rn - 1) % {{.BlockSizePlaceholder}} = 0 AND rn > 1
 		ORDER BY
 			{{.PkeyColsStr}}
 	`)),

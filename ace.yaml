@@ -27,6 +27,7 @@ mtree:
   cdc:
     slot_name: "ace_mtree_slot"
     publication_name: "ace_mtree_pub"
+    cdc_processing_timeout: 30
   schema: "spock"
 
   diff:
