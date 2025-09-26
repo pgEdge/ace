@@ -40,15 +40,15 @@ type cdcMsg struct {
 	tuple     *pglogrepl.TupleData
 }
 
-func ListenForChanges(nodeInfo map[string]any) {
-	processReplicationStream(nodeInfo, true)
+func ListenForChanges(ctx context.Context, nodeInfo map[string]any) {
+	processReplicationStream(ctx, nodeInfo, true)
 }
 
 func UpdateFromCDC(nodeInfo map[string]any) {
-	processReplicationStream(nodeInfo, false)
+	processReplicationStream(context.Background(), nodeInfo, false)
 }
 
-func processReplicationStream(nodeInfo map[string]any, continuous bool) {
+func processReplicationStream(ctx context.Context, nodeInfo map[string]any, continuous bool) {
 	pool, err := auth.GetClusterNodeConnection(nodeInfo, "")
 	if err != nil {
 		logger.Error("failed to get connection pool: %v", err)
@@ -111,8 +111,6 @@ func processReplicationStream(nodeInfo map[string]any, continuous bool) {
 		logger.Error("initial connection failed: %v", err)
 	}
 
-	ctx := context.Background()
-
 	relations := make(map[uint32]*pglogrepl.RelationMessage)
 	nextStandbyMessageDeadline := time.Now().Add(10 * time.Second)
 
@@ -120,6 +118,13 @@ func processReplicationStream(nodeInfo map[string]any, continuous bool) {
 	var currentXID uint32
 
 	for {
+		if err := ctx.Err(); err != nil {
+			logger.Info("CDC listener stopping due to context error: %v", err)
+			if conn != nil {
+				conn.Close(context.Background())
+			}
+			return
+		}
 		if conn == nil {
 			logger.Info("No connection, trying to reconnect...")
 			conn, err = connect()
@@ -142,7 +147,7 @@ func processReplicationStream(nodeInfo map[string]any, continuous bool) {
 
 		if time.Now().After(nextStandbyMessageDeadline) {
 			if err := pglogrepl.SendStandbyStatusUpdate(ctx, conn, pglogrepl.StandbyStatusUpdate{WALWritePosition: lastLSN}); err != nil {
-				conn.Close(ctx)
+				conn.Close(context.Background())
 				conn = nil
 				logger.Error("SendStandbyStatusUpdate failed: %v", err)
 				continue
@@ -172,12 +177,12 @@ func processReplicationStream(nodeInfo map[string]any, continuous bool) {
 					if err := pglogrepl.SendStandbyStatusUpdate(ctx, conn, pglogrepl.StandbyStatusUpdate{WALWritePosition: lastLSN}); err != nil {
 						logger.Error("failed to send final standby status update: %v", err)
 					}
-					conn.Close(ctx)
+					conn.Close(context.Background())
 					return
 				}
 				continue
 			}
-			conn.Close(ctx)
+			conn.Close(context.Background())
 			conn = nil
 			logger.Error("ReceiveMessage failed: %v", err)
 			continue
@@ -196,7 +201,7 @@ func processReplicationStream(nodeInfo map[string]any, continuous bool) {
 
 				if pkm.ReplyRequested {
 					if err := pglogrepl.SendStandbyStatusUpdate(ctx, conn, pglogrepl.StandbyStatusUpdate{WALWritePosition: lastLSN}); err != nil {
-						conn.Close(ctx)
+						conn.Close(context.Background())
 						conn = nil
 						logger.Error("SendStandbyStatusUpdate failed on keepalive: %v", err)
 					} else {

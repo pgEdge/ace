@@ -20,11 +20,14 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/pgedge/ace/internal/cdc"
 	"github.com/pgedge/ace/internal/core"
 	"github.com/pgedge/ace/pkg/config"
 	"github.com/stretchr/testify/require"
@@ -85,6 +88,9 @@ func runMerkleTreeTests(t *testing.T, tableName string) {
 		})
 		t.Run("SplitLastRanges", func(t *testing.T) {
 			testMerkleTreeSplitLastRanges(t, tableName)
+		})
+		t.Run("ContinuousCDC", func(t *testing.T) {
+			testMerkleTreeContinuousCDC(t, tableName)
 		})
 	}
 	t.Run("Teardown", func(t *testing.T) {
@@ -440,6 +446,162 @@ func testMerkleTreeDiffBoundaryModifications(t *testing.T, tableName string) {
 			require.True(t, foundN2, "Did not find modified row for index %v on node2", ckey)
 		}
 	}
+}
+
+func testMerkleTreeContinuousCDC(t *testing.T, tableName string) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	largeTableName := "customers_1M"
+	qualifiedTableName := fmt.Sprintf("%s.%s", testSchema, tableName)
+	nodes := []string{serviceN1}
+	mtreeTask := newTestMerkleTreeTask(t, qualifiedTableName, nodes)
+
+	err := mtreeTask.RunChecks(false)
+	require.NoError(t, err, "RunChecks should succeed")
+	err = mtreeTask.MtreeInit()
+	require.NoError(t, err, "MtreeInit should succeed")
+	t.Cleanup(func() {
+		err := mtreeTask.MtreeTeardown()
+		if err != nil {
+			t.Logf("Warning: MtreeTeardown failed during cleanup: %v", err)
+		}
+		repairTable(t, qualifiedTableName, serviceN1)
+	})
+
+	err = mtreeTask.BuildMtree()
+	require.NoError(t, err, "BuildMtree should succeed")
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		nodeInfo := pgCluster.ClusterNodes[0]
+		cdc.ListenForChanges(ctx, nodeInfo)
+	}()
+
+	time.Sleep(3 * time.Second)
+
+	aceSchema := config.Cfg.MTree.Schema
+	mtreeTableName := fmt.Sprintf("ace_mtree_%s_%s", testSchema, tableName)
+	pool := pgCluster.Node1Pool
+
+	var leafNodeCount int
+	err = pool.QueryRow(context.Background(), fmt.Sprintf("SELECT count(*) FROM %s.%s WHERE node_level = 0", aceSchema, mtreeTableName)).Scan(&leafNodeCount)
+	require.NoError(t, err)
+	require.Greater(t, leafNodeCount, 3, "Not enough leaf nodes for CDC test")
+
+	firstBlockPos := 0
+	middleBlockPos := leafNodeCount / 2
+	lastBlockPos := leafNodeCount - 2
+
+	tx, err := pool.Begin(context.Background())
+	require.NoError(t, err)
+	defer tx.Rollback(context.Background())
+
+	_, err = tx.Exec(context.Background(), "SELECT spock.repair_mode(true)")
+	require.NoError(t, err)
+
+	if mtreeTask.SimplePrimaryKey {
+		var firstBlockStart, middleBlockStart, lastBlockStart int32
+		err = tx.QueryRow(context.Background(), fmt.Sprintf("SELECT range_start FROM %s.%s WHERE node_level = 0 AND node_position = $1", aceSchema, mtreeTableName), firstBlockPos).Scan(&firstBlockStart)
+		require.NoError(t, err)
+		err = tx.QueryRow(context.Background(), fmt.Sprintf("SELECT range_start FROM %s.%s WHERE node_level = 0 AND node_position = $1", aceSchema, mtreeTableName), middleBlockPos).Scan(&middleBlockStart)
+		require.NoError(t, err)
+		err = tx.QueryRow(context.Background(), fmt.Sprintf("SELECT range_start FROM %s.%s WHERE node_level = 0 AND node_position = $1", aceSchema, mtreeTableName), lastBlockPos).Scan(&lastBlockStart)
+		require.NoError(t, err)
+
+		// DELETE + INSERT in first block
+		_, err = tx.Exec(context.Background(), fmt.Sprintf("DELETE FROM %s WHERE index = $1", qualifiedTableName), firstBlockStart)
+		require.NoError(t, err)
+		insertSQL := fmt.Sprintf("INSERT INTO %s  SELECT * FROM %s WHERE index = $1", qualifiedTableName, pgx.Identifier{largeTableName}.Sanitize())
+		_, err = tx.Exec(context.Background(), insertSQL, firstBlockStart)
+		require.NoError(t, err)
+
+		// UPDATE in middle block
+		updateSQL := fmt.Sprintf("UPDATE %s SET email = 'cdc.update.test@example.com' WHERE index = $1", qualifiedTableName)
+		_, err = tx.Exec(context.Background(), updateSQL, middleBlockStart)
+		require.NoError(t, err)
+
+		// DELETE in last block
+		_, err = tx.Exec(context.Background(), fmt.Sprintf("DELETE FROM %s WHERE index = $1", qualifiedTableName), lastBlockStart)
+		require.NoError(t, err)
+
+	} else { // Composite Primary Key
+		re := regexp.MustCompile(`^\((\d+),"?([^",]+)"?\)$`)
+		parseKey := func(keyStr string) (int32, string) {
+			matches := re.FindStringSubmatch(keyStr)
+			require.Len(t, matches, 3, "could not parse composite key: %s", keyStr)
+			index, err := strconv.Atoi(matches[1])
+			require.NoError(t, err)
+			return int32(index), matches[2]
+		}
+
+		var firstKeyStr, middleKeyStr, lastKeyStr string
+		err = tx.QueryRow(context.Background(), fmt.Sprintf("SELECT range_start::text FROM %s.%s WHERE node_level = 0 AND node_position = $1", aceSchema, mtreeTableName), firstBlockPos).Scan(&firstKeyStr)
+		require.NoError(t, err)
+		err = tx.QueryRow(context.Background(), fmt.Sprintf("SELECT range_start::text FROM %s.%s WHERE node_level = 0 AND node_position = $1", aceSchema, mtreeTableName), middleBlockPos).Scan(&middleKeyStr)
+		require.NoError(t, err)
+		err = tx.QueryRow(context.Background(), fmt.Sprintf("SELECT range_start::text FROM %s.%s WHERE node_level = 0 AND node_position = $1", aceSchema, mtreeTableName), lastBlockPos).Scan(&lastKeyStr)
+		require.NoError(t, err)
+
+		firstIdx, firstCustId := parseKey(firstKeyStr)
+		middleIdx, middleCustId := parseKey(middleKeyStr)
+		lastIdx, lastCustId := parseKey(lastKeyStr)
+
+		// DELETE + INSERT in first block
+		_, err = tx.Exec(context.Background(), fmt.Sprintf("DELETE FROM %s WHERE index = $1 AND customer_id = $2", qualifiedTableName), firstIdx, firstCustId)
+		require.NoError(t, err)
+		insertSQL := fmt.Sprintf("INSERT INTO %s SELECT * FROM %s WHERE index = $1 AND customer_id = $2", qualifiedTableName, pgx.Identifier{largeTableName}.Sanitize())
+		_, err = tx.Exec(context.Background(), insertSQL, firstIdx, firstCustId)
+		require.NoError(t, err)
+
+		// UPDATE in middle block
+		updateSQL := fmt.Sprintf("UPDATE %s SET email = 'cdc.update.test.composite@example.com' WHERE index = $1 AND customer_id = $2", qualifiedTableName)
+		_, err = tx.Exec(context.Background(), updateSQL, middleIdx, middleCustId)
+		require.NoError(t, err)
+
+		// DELETE in last block
+		_, err = tx.Exec(context.Background(), fmt.Sprintf("DELETE FROM %s WHERE index = $1 AND customer_id = $2", qualifiedTableName), lastIdx, lastCustId)
+		require.NoError(t, err)
+	}
+
+	_, err = tx.Exec(context.Background(), "SELECT spock.repair_mode(false)")
+	require.NoError(t, err)
+	require.NoError(t, tx.Commit(context.Background()))
+
+	time.Sleep(5 * time.Second)
+
+	type blockCounters struct {
+		Inserts int
+		Deletes int
+		Dirty   bool
+	}
+	var counters blockCounters
+
+	// Verify first block (DELETE + INSERT)
+	err = pool.QueryRow(context.Background(), fmt.Sprintf("SELECT inserts_since_tree_update, deletes_since_tree_update, dirty FROM %s.%s WHERE node_level = 0 AND node_position = $1", aceSchema, mtreeTableName), firstBlockPos).Scan(&counters.Inserts, &counters.Deletes, &counters.Dirty)
+	require.NoError(t, err, "failed to query counters for first block")
+	require.Equal(t, 1, counters.Inserts, "Expected 1 insert in first block")
+	require.Equal(t, 1, counters.Deletes, "Expected 1 delete in first block")
+	require.True(t, counters.Dirty, "First block should be dirty")
+
+	// Verify middle block (UPDATE)
+	err = pool.QueryRow(context.Background(), fmt.Sprintf("SELECT inserts_since_tree_update, deletes_since_tree_update, dirty FROM %s.%s WHERE node_level = 0 AND node_position = $1", aceSchema, mtreeTableName), middleBlockPos).Scan(&counters.Inserts, &counters.Deletes, &counters.Dirty)
+	require.NoError(t, err, "failed to query counters for middle block")
+	require.Equal(t, 0, counters.Inserts, "Expected 0 inserts in middle block")
+	require.Equal(t, 0, counters.Deletes, "Expected 0 deletes in middle block")
+	require.True(t, counters.Dirty, "Middle block should be dirty after update")
+
+	// Verify last block (DELETE)
+	err = pool.QueryRow(context.Background(), fmt.Sprintf("SELECT inserts_since_tree_update, deletes_since_tree_update, dirty FROM %s.%s WHERE node_level = 0 AND node_position = $1", aceSchema, mtreeTableName), lastBlockPos).Scan(&counters.Inserts, &counters.Deletes, &counters.Dirty)
+	require.NoError(t, err, "failed to query counters for last block")
+	require.Equal(t, 0, counters.Inserts, "Expected 0 inserts in last block")
+	require.Equal(t, 1, counters.Deletes, "Expected 1 delete in last block")
+	require.True(t, counters.Dirty, "Last block should be dirty")
+
+	cancel()
+	wg.Wait()
 }
 
 type mergeCase string
