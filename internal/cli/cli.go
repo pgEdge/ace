@@ -12,8 +12,13 @@
 package cli
 
 import (
+	"context"
 	"fmt"
+	"os"
+	"os/signal"
 	"strconv"
+	"sync"
+	"syscall"
 
 	"github.com/charmbracelet/log"
 	"github.com/google/uuid"
@@ -567,11 +572,34 @@ func MtreeListenCLI(ctx *cli.Context) error {
 		return fmt.Errorf("validation failed: %w", err)
 	}
 
-	for _, nodeInfo := range task.GetClusterNodes() {
-		go cdc.ListenForChanges(nodeInfo)
+	appCtx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Handle graceful shutdown
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
+	go func() {
+		<-sigChan
+		logger.Info("Shutdown signal received, stopping listeners...")
+		cancel()
+	}()
+
+	var wg sync.WaitGroup
+	clusterNodes := task.GetClusterNodes()
+	wg.Add(len(clusterNodes))
+
+	for _, nodeInfo := range clusterNodes {
+		go func(ni map[string]any) {
+			defer wg.Done()
+			cdc.ListenForChanges(appCtx, ni)
+		}(nodeInfo)
 	}
 
-	select {}
+	logger.Info("CDC listeners started. Press Ctrl+C to stop.")
+	wg.Wait()
+	logger.Info("All CDC listeners stopped.")
+
+	return nil
 }
 
 func MtreeTeardownCLI(ctx *cli.Context) error {

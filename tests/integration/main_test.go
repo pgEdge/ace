@@ -45,7 +45,7 @@ const (
 	startupTimeout  = 3 * time.Minute
 	testSchema      = "public"
 	// TODO: Add tests to trigger lower table sample rates -- i.e., use the 1M rows csv file
-	defaultCsvFile = "../../test-data/customers.csv"
+	defaultCsvFilePath = "../../test-data/"
 )
 
 var pgCluster struct {
@@ -332,10 +332,16 @@ func TestMain(m *testing.M) {
 	log.Println("PostgreSQL cluster setup complete.")
 
 	log.Println("Creating and loading shared customers table...")
-	if err := setupSharedCustomersTable(&testing.T{}); err != nil {
+	if err := setupSharedCustomersTable("customers"); err != nil {
 		log.Fatalf("Failed to setup shared customers table: %v", err)
 	}
 	log.Println("Shared customers table setup complete.")
+
+	log.Println("Creating and loading shared customers_1M table...")
+	if err := setupSharedCustomersTable("customers_1M"); err != nil {
+		log.Fatalf("Failed to setup shared customers_1M table: %v", err)
+	}
+	log.Println("Shared customers_1M table setup complete.")
 
 	exitCode := m.Run()
 
@@ -378,9 +384,8 @@ func connectToNode(host, port, user, password, dbname string) (*pgxpool.Pool, er
 	)
 }
 
-func setupSharedCustomersTable(t *testing.T) error {
+func setupSharedCustomersTable(tableName string) error {
 	ctx := context.Background()
-	tableName := "customers"
 	qualifiedTableName := fmt.Sprintf("%s.%s", testSchema, tableName)
 
 	for _, pool := range []*pgxpool.Pool{pgCluster.Node1Pool, pgCluster.Node2Pool} {
@@ -389,9 +394,11 @@ func setupSharedCustomersTable(t *testing.T) error {
 		}
 	}
 
-	csvPath, err := filepath.Abs(defaultCsvFile)
+	csvFilePath := defaultCsvFilePath + tableName + ".csv"
+
+	csvPath, err := filepath.Abs(csvFilePath)
 	if err != nil {
-		return fmt.Errorf("failed to get absolute path for CSV file %s: %w", defaultCsvFile, err)
+		return fmt.Errorf("failed to get absolute path for CSV file %s: %w", csvFilePath, err)
 	}
 
 	for i, pool := range []*pgxpool.Pool{pgCluster.Node1Pool, pgCluster.Node2Pool} {

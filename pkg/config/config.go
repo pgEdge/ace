@@ -51,8 +51,9 @@ type DiffConfig struct {
 
 type MTreeConfig struct {
 	CDC struct {
-		SlotName        string `yaml:"slot_name"`
-		PublicationName string `yaml:"publication_name"`
+		SlotName             string `yaml:"slot_name"`
+		PublicationName      string `yaml:"publication_name"`
+		CDCProcessingTimeout int    `yaml:"cdc_processing_timeout"`
 	} `yaml:"cdc"`
 	Schema string `yaml:"schema"`
 	Diff   struct {
