@@ -56,78 +56,51 @@ func newTestTableDiffTask(
 	return task
 }
 
-func TestTableDiffIntegration(t *testing.T) {
-	t.Run("CustomersTable", func(t *testing.T) {
-		testCases := []struct {
-			name     string
-			setup    func(t *testing.T)
-			teardown func(t *testing.T)
-		}{
-			{
-				name:     "simple_primary_key",
-				setup:    func(t *testing.T) {},
-				teardown: func(t *testing.T) {},
-			},
-			{
-				name: "composite_primary_key",
-				setup: func(t *testing.T) {
-					for _, pool := range []*pgxpool.Pool{pgCluster.Node1Pool, pgCluster.Node2Pool} {
-						err := alterTableToCompositeKey(context.Background(), pool, testSchema, "customers")
-						require.NoError(t, err)
-					}
-				},
-				teardown: func(t *testing.T) {
-					for _, pool := range []*pgxpool.Pool{pgCluster.Node1Pool, pgCluster.Node2Pool} {
-						err := revertTableToSimpleKey(context.Background(), pool, testSchema, "customers")
-						require.NoError(t, err)
-					}
-				},
-			},
-		}
-
-		for _, tc := range testCases {
-			t.Run(tc.name, func(t *testing.T) {
-				tc.setup(t)
-				t.Cleanup(func() { tc.teardown(t) })
-				runCustomerTableDiffTests(t)
-			})
-		}
+func TestTableDiffSimplePK(t *testing.T) {
+	t.Run("Customers", func(t *testing.T) {
+		runCustomerTableDiffTests(t)
 	})
-
 	t.Run("MixedCaseIdentifiers", func(t *testing.T) {
-		t.Run("simple_primary_key", func(t *testing.T) {
-			testTableDiff_MixedCaseIdentifiers(t, false)
-		})
-		t.Run("composite_primary_key", func(t *testing.T) {
-			testTableDiff_MixedCaseIdentifiers(t, true)
-		})
+		testTableDiff_MixedCaseIdentifiers(t, false)
 	})
-
 	t.Run("VariousDataTypes", func(t *testing.T) {
-		t.Run("simple_primary_key", func(t *testing.T) {
-			testTableDiff_VariousDataTypes(t, false)
-		})
-		t.Run("composite_primary_key", func(t *testing.T) {
-			testTableDiff_VariousDataTypes(t, true)
-		})
+		testTableDiff_VariousDataTypes(t, false)
 	})
-
 	t.Run("ByteaColumnSizeCheck", func(t *testing.T) {
-		t.Run("simple_primary_key", func(t *testing.T) {
-			testTableDiff_ByteaColumnSizeCheck(t, false)
-		})
-		t.Run("composite_primary_key", func(t *testing.T) {
-			testTableDiff_ByteaColumnSizeCheck(t, true)
-		})
+		testTableDiff_ByteaColumnSizeCheck(t, false)
 	})
-
 	t.Run("WithSpockMetadata", func(t *testing.T) {
-		t.Run("simple_primary_key", func(t *testing.T) {
-			testTableDiff_WithSpockMetadata(t, false)
+		testTableDiff_WithSpockMetadata(t, false)
+	})
+}
+
+func TestTableDiffCompositePK(t *testing.T) {
+	t.Run("Customers", func(t *testing.T) {
+		ctx := context.Background()
+		tableName := "customers"
+		for _, pool := range []*pgxpool.Pool{pgCluster.Node1Pool, pgCluster.Node2Pool} {
+			err := alterTableToCompositeKey(ctx, pool, testSchema, tableName)
+			require.NoError(t, err)
+		}
+		t.Cleanup(func() {
+			for _, pool := range []*pgxpool.Pool{pgCluster.Node1Pool, pgCluster.Node2Pool} {
+				err := revertTableToSimpleKey(ctx, pool, testSchema, tableName)
+				require.NoError(t, err)
+			}
 		})
-		t.Run("composite_primary_key", func(t *testing.T) {
-			testTableDiff_WithSpockMetadata(t, true)
-		})
+		runCustomerTableDiffTests(t)
+	})
+	t.Run("MixedCaseIdentifiers", func(t *testing.T) {
+		testTableDiff_MixedCaseIdentifiers(t, true)
+	})
+	t.Run("VariousDataTypes", func(t *testing.T) {
+		testTableDiff_VariousDataTypes(t, true)
+	})
+	t.Run("ByteaColumnSizeCheck", func(t *testing.T) {
+		testTableDiff_ByteaColumnSizeCheck(t, true)
+	})
+	t.Run("WithSpockMetadata", func(t *testing.T) {
+		testTableDiff_WithSpockMetadata(t, true)
 	})
 }
 
@@ -156,9 +129,8 @@ func testTableDiff_NoDifferences(t *testing.T) {
 
 	if len(tdTask.DiffResult.NodeDiffs) != 0 {
 		t.Errorf(
-			"Expected no differences, but got %d node pair diffs. Result: %+v",
+			"Expected no differences, but got %d node pair diffs.",
 			len(tdTask.DiffResult.NodeDiffs),
-			tdTask.DiffResult,
 		)
 	}
 

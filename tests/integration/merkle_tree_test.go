@@ -466,7 +466,11 @@ func testMerkleTreeContinuousCDC(t *testing.T, tableName string) {
 		if err != nil {
 			t.Logf("Warning: MtreeTeardown failed during cleanup: %v", err)
 		}
-		repairTable(t, qualifiedTableName, serviceN1)
+		repairTable(t, qualifiedTableName, serviceN2)
+		files, _ := filepath.Glob("*_diffs-*.json")
+		for _, f := range files {
+			os.Remove(f)
+		}
 	})
 
 	err = mtreeTask.BuildMtree()
@@ -602,6 +606,15 @@ func testMerkleTreeContinuousCDC(t *testing.T, tableName string) {
 
 	cancel()
 	wg.Wait()
+
+	nodes = []string{serviceN1, serviceN2}
+	newMtreeTask := newTestMerkleTreeTask(t, qualifiedTableName, nodes)
+	err = newMtreeTask.RunChecks(true)
+	require.NoError(t, err, "RunChecks after CDC should succeed")
+	newMtreeTask.NoCDC = true // Skip CDC in DiffMtree since changes are already flushed
+	err = newMtreeTask.DiffMtree()
+	require.NoError(t, err, "DiffMtree should succeed")
+
 }
 
 type mergeCase string

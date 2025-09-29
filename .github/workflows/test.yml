@@ -19,5 +19,11 @@ jobs:
       with:
         go-version: '1.24'
 
-    - name: Run tests
-      run: go test -v ./tests/integration 
+    - name: Run table-diff tests
+      run: go test -count=1 -v ./tests/integration -run 'TableDiff'
+
+    - name: Run table-repair tests
+      run: go test -count=1 -v ./tests/integration -run 'TableRepair'
+
+    - name: Run Merkle Tree tests
+      run: go test -count=1 -v ./tests/integration -run 'MerkleTree'
