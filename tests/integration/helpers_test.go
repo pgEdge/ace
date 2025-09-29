@@ -55,6 +55,35 @@ CREATE TABLE IF NOT EXISTS "%s"."%s" (
 	return nil
 }
 
+func alterTableToCompositeKey(ctx context.Context, pool *pgxpool.Pool, schemaName, tableName string) error {
+	alterSQL := fmt.Sprintf(`
+		ALTER TABLE "%s"."%s" DROP CONSTRAINT IF EXISTS customers_pkey;
+		ALTER TABLE "%s"."%s" ADD PRIMARY KEY (index, customer_id);
+	`, schemaName, tableName, schemaName, tableName)
+
+	_, err := pool.Exec(ctx, alterSQL)
+	if err != nil {
+		return fmt.Errorf("failed to alter table %s.%s to composite key: %w", schemaName, tableName, err)
+	}
+	log.Printf("Table %s.%s altered to composite key.", schemaName, tableName)
+	return nil
+}
+
+func revertTableToSimpleKey(ctx context.Context, pool *pgxpool.Pool, schemaName, tableName string) error {
+	alterSQL := fmt.Sprintf(`
+		ALTER TABLE "%s"."%s" DROP CONSTRAINT IF EXISTS customers_pkey;
+		ALTER TABLE "%s"."%s" ALTER COLUMN customer_id DROP NOT NULL;
+		ALTER TABLE "%s"."%s" ADD PRIMARY KEY (index);
+	`, schemaName, tableName, schemaName, tableName, schemaName, tableName)
+
+	_, err := pool.Exec(ctx, alterSQL)
+	if err != nil {
+		return fmt.Errorf("failed to revert table %s.%s to simple key: %w", schemaName, tableName, err)
+	}
+	log.Printf("Table %s.%s reverted to simple key.", schemaName, tableName)
+	return nil
+}
+
 func loadDataFromCSV(
 	ctx context.Context,
 	pool *pgxpool.Pool,

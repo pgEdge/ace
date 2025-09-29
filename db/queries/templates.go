@@ -30,87 +30,88 @@ type Templates struct {
 	GetTablesInRepSet    *template.Template
 	GetPkeyColumnTypes   *template.Template
 
-	CreateMetadataTable             *template.Template
-	GetPkeyOffsets                  *template.Template
-	CreateSimpleMtreeTable          *template.Template
-	CreateIndex                     *template.Template
-	CreateCompositeType             *template.Template
-	DropCompositeType               *template.Template
-	CreateCompositeMtreeTable       *template.Template
-	InsertCompositeBlockRanges      *template.Template
-	CreateXORFunction               *template.Template
-	GetPkeyType                     *template.Template
-	UpdateMetadata                  *template.Template
-	InsertBlockRanges               *template.Template
-	InsertBlockRangesBatchSimple    *template.Template
-	InsertBlockRangesBatchComposite *template.Template
-	TDBlockHashSQL                  *template.Template
-	MtreeLeafHashSQL                *template.Template
-	UpdateLeafHashes                *template.Template
-	GetBlockRanges                  *template.Template
-	GetDirtyAndNewBlocks            *template.Template
-	ClearDirtyFlags                 *template.Template
-	BuildParentNodes                *template.Template
-	GetRootNode                     *template.Template
-	GetNodeChildren                 *template.Template
-	GetLeafRanges                   *template.Template
-	GetLeafRangesExpanded           *template.Template
-	GetRowCountEstimate             *template.Template
-	GetMaxValComposite              *template.Template
-	UpdateMaxVal                    *template.Template
-	GetMaxValSimple                 *template.Template
-	GetCountComposite               *template.Template
-	GetCountSimple                  *template.Template
-	GetSplitPointComposite          *template.Template
-	GetSplitPointSimple             *template.Template
-	DeleteParentNodes               *template.Template
-	GetMaxNodePosition              *template.Template
-	UpdateBlockRangeEnd             *template.Template
-	UpdateNodePositionsTemp         *template.Template
-	DeleteBlock                     *template.Template
-	UpdateNodePositionsSequential   *template.Template
-	FindBlocksToSplit               *template.Template
-	FindBlocksToMerge               *template.Template
-	FindBlocksToMergeExpanded       *template.Template
-	GetBlockCountComposite          *template.Template
-	GetBlockCountSimple             *template.Template
-	GetBlockSizeFromMetadata        *template.Template
-	GetMaxNodeLevel                 *template.Template
-	CompareBlocksSQL                *template.Template
-	DropXORFunction                 *template.Template
-	DropMetadataTable               *template.Template
-	DropMtreeTable                  *template.Template
-	GetBlockRowCount                *template.Template
-	GetBlockWithCount               *template.Template
-	GetBlockWithCountExpanded       *template.Template
-	UpdateNodePosition              *template.Template
-	GetMaxColumnSize                *template.Template
-	UpdateBlockRangeStart           *template.Template
-	GetMinValComposite              *template.Template
-	GetMinValSimple                 *template.Template
-	GetDirtyAndNewBlocksExpanded    *template.Template
-	FindBlocksToSplitExpanded       *template.Template
-	ResetPositionsByStart           *template.Template
-	ResetPositionsByStartExpanded   *template.Template
-	GetBulkSplitPoints              *template.Template
-	UpdateBlockRangeStartComposite  *template.Template
-	UpdateBlockRangeEndComposite    *template.Template
-	UpdateNodePositionsWithOffset   *template.Template
-	MarkBlockDirty                  *template.Template
-	CreateCDCMetadataTable          *template.Template
-	UpdateCDCMetadata               *template.Template
-	AlterPublicationAddTable        *template.Template
-	CreatePublication               *template.Template
-	CreateReplicationSlot           *template.Template
-	DropPublication                 *template.Template
-	DropReplicationSlot             *template.Template
-	DropCDCMetadataTable            *template.Template
-	GetCDCMetadata                  *template.Template
-	UpdateMtreeCounters             *template.Template
-	GetReplicationSlotPID           *template.Template
-	TerminateBackend                *template.Template
-	CheckPIDExists                  *template.Template
-	CreateSchema                    *template.Template
+	CreateMetadataTable              *template.Template
+	GetPkeyOffsets                   *template.Template
+	CreateSimpleMtreeTable           *template.Template
+	CreateIndex                      *template.Template
+	CreateCompositeType              *template.Template
+	DropCompositeType                *template.Template
+	CreateCompositeMtreeTable        *template.Template
+	InsertCompositeBlockRanges       *template.Template
+	CreateXORFunction                *template.Template
+	GetPkeyType                      *template.Template
+	UpdateMetadata                   *template.Template
+	InsertBlockRanges                *template.Template
+	InsertBlockRangesBatchSimple     *template.Template
+	InsertBlockRangesBatchComposite  *template.Template
+	TDBlockHashSQL                   *template.Template
+	MtreeLeafHashSQL                 *template.Template
+	UpdateLeafHashes                 *template.Template
+	GetBlockRanges                   *template.Template
+	GetDirtyAndNewBlocks             *template.Template
+	ClearDirtyFlags                  *template.Template
+	BuildParentNodes                 *template.Template
+	GetRootNode                      *template.Template
+	GetNodeChildren                  *template.Template
+	GetLeafRanges                    *template.Template
+	GetLeafRangesExpanded            *template.Template
+	GetRowCountEstimate              *template.Template
+	GetMaxValComposite               *template.Template
+	UpdateMaxVal                     *template.Template
+	GetMaxValSimple                  *template.Template
+	GetCountComposite                *template.Template
+	GetCountSimple                   *template.Template
+	GetSplitPointComposite           *template.Template
+	GetSplitPointSimple              *template.Template
+	DeleteParentNodes                *template.Template
+	GetMaxNodePosition               *template.Template
+	UpdateBlockRangeEnd              *template.Template
+	UpdateNodePositionsTemp          *template.Template
+	DeleteBlock                      *template.Template
+	UpdateNodePositionsSequential    *template.Template
+	FindBlocksToSplit                *template.Template
+	FindBlocksToMerge                *template.Template
+	FindBlocksToMergeExpanded        *template.Template
+	GetBlockCountComposite           *template.Template
+	GetBlockCountSimple              *template.Template
+	GetBlockSizeFromMetadata         *template.Template
+	GetMaxNodeLevel                  *template.Template
+	CompareBlocksSQL                 *template.Template
+	DropXORFunction                  *template.Template
+	DropMetadataTable                *template.Template
+	DropMtreeTable                   *template.Template
+	GetBlockRowCount                 *template.Template
+	GetBlockWithCount                *template.Template
+	GetBlockWithCountExpanded        *template.Template
+	UpdateNodePosition               *template.Template
+	GetMaxColumnSize                 *template.Template
+	UpdateBlockRangeStart            *template.Template
+	GetMinValComposite               *template.Template
+	GetMinValSimple                  *template.Template
+	GetDirtyAndNewBlocksExpanded     *template.Template
+	FindBlocksToSplitExpanded        *template.Template
+	ResetPositionsByStart            *template.Template
+	ResetPositionsByStartFromTemp    *template.Template
+	ResetPositionsByStartExpanded    *template.Template
+	GetBulkSplitPoints               *template.Template
+	UpdateBlockRangeStartComposite   *template.Template
+	UpdateBlockRangeEndComposite     *template.Template
+	UpdateAllLeafNodePositionsToTemp *template.Template
+	MarkBlockDirty                   *template.Template
+	CreateCDCMetadataTable           *template.Template
+	UpdateCDCMetadata                *template.Template
+	AlterPublicationAddTable         *template.Template
+	CreatePublication                *template.Template
+	CreateReplicationSlot            *template.Template
+	DropPublication                  *template.Template
+	DropReplicationSlot              *template.Template
+	DropCDCMetadataTable             *template.Template
+	GetCDCMetadata                   *template.Template
+	UpdateMtreeCounters              *template.Template
+	GetReplicationSlotPID            *template.Template
+	TerminateBackend                 *template.Template
+	CheckPIDExists                   *template.Template
+	CreateSchema                     *template.Template
 }
 
 var SQLTemplates = Templates{
@@ -1342,6 +1343,19 @@ var SQLTemplates = Templates{
 		WHERE mt.node_level = 0 AND mt.node_position = s.node_position
 	`)),
 
+	ResetPositionsByStartFromTemp: template.Must(template.New("resetPositionsByStartFromTemp").Parse(`
+		WITH seq AS (
+			SELECT node_position,
+				   row_number() OVER (ORDER BY range_start) - 1 AS pos_seq
+			FROM {{.MtreeTable}}
+			WHERE node_level = 0 AND node_position >= $1
+		)
+		UPDATE {{.MtreeTable}} mt
+		SET node_position = s.pos_seq
+		FROM seq s
+		WHERE mt.node_level = 0 AND mt.node_position = s.node_position
+`)),
+
 	ResetPositionsByStartExpanded: template.Must(template.New("resetPositionsByStartExpanded").Parse(`
 		WITH seq AS (
 			SELECT node_position,
@@ -1435,7 +1449,7 @@ var SQLTemplates = Templates{
 		FROM
 			numbered
 		WHERE
-			rn % {{.BlockSizePlaceholder}} = 0
+			(rn - 1) % {{.BlockSizePlaceholder}} = 0 AND rn > 1
 		ORDER BY
 			{{.PkeyColsStr}}
 	`)),
@@ -1453,7 +1467,7 @@ var SQLTemplates = Templates{
 			last_modified = current_timestamp
 		WHERE node_position = {{.NodePositionPlaceholder}} AND node_level = 0
 	`)),
-	UpdateNodePositionsWithOffset: template.Must(template.New("updateNodePositionsWithOffset").Parse(`
+	UpdateAllLeafNodePositionsToTemp: template.Must(template.New("updateAllLeafNodePositionsToTemp").Parse(`
 		UPDATE {{.MtreeTable}} SET node_position = node_position + $1 WHERE node_level = 0
 	`)),
 	CreateSchema: template.Must(template.New("createSchema").Parse(`
