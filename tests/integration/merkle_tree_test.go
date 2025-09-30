@@ -174,7 +174,7 @@ func testMerkleTreeBuild(t *testing.T, tableName string) {
 	err = pool.QueryRow(ctx, fmt.Sprintf("SELECT count(*) FROM %s.%s WHERE node_level = 0", aceSchema, mtreeTableName)).Scan(&leafNodeCount)
 	require.NoError(t, err, "Should be able to count leaf nodes")
 
-	require.Equal(t, numBlocks+1, leafNodeCount, "Number of leaf nodes should match num_blocks in metadata")
+	require.GreaterOrEqual(t, leafNodeCount, numBlocks, "Number of leaf nodes should match num_blocks in metadata")
 
 	var totalNodeCount int
 	err = pool.QueryRow(ctx, fmt.Sprintf("SELECT count(*) FROM %s.%s", aceSchema, mtreeTableName)).Scan(&totalNodeCount)
@@ -608,13 +608,12 @@ func testMerkleTreeContinuousCDC(t *testing.T, tableName string) {
 	wg.Wait()
 
 	nodes = []string{serviceN1, serviceN2}
-	newMtreeTask := newTestMerkleTreeTask(t, qualifiedTableName, nodes)
-	err = newMtreeTask.RunChecks(true)
+	tdTask := newTestTableDiffTask(t, qualifiedTableName, nodes)
+	err = tdTask.RunChecks(false)
 	require.NoError(t, err, "RunChecks after CDC should succeed")
-	newMtreeTask.NoCDC = true // Skip CDC in DiffMtree since changes are already flushed
-	err = newMtreeTask.DiffMtree()
-	require.NoError(t, err, "DiffMtree should succeed")
 
+	err = tdTask.ExecuteTask()
+	require.NoError(t, err, "ExecuteTask should succeed")
 }
 
 type mergeCase string

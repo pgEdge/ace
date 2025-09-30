@@ -114,8 +114,39 @@ func (m *MerkleTreeTask) CompareRanges(workItems []CompareRangesWorkItem) {
 
 func (m *MerkleTreeTask) compareRangesWorker(wg *sync.WaitGroup, jobs <-chan CompareRangesWorkItem) {
 	defer wg.Done()
+	pools := make(map[string]*pgxpool.Pool)
+	defer func() {
+		for _, pool := range pools {
+			pool.Close()
+		}
+	}()
+
 	for work := range jobs {
-		err := m.processWorkItem(work)
+		node1Name := work.Node1["Name"].(string)
+		pool1, ok := pools[node1Name]
+		if !ok {
+			var err error
+			pool1, err = auth.GetClusterNodeConnection(work.Node1, "")
+			if err != nil {
+				logger.Error("worker failed to connect to %s: %v", node1Name, err)
+				continue
+			}
+			pools[node1Name] = pool1
+		}
+
+		node2Name := work.Node2["Name"].(string)
+		pool2, ok := pools[node2Name]
+		if !ok {
+			var err error
+			pool2, err = auth.GetClusterNodeConnection(work.Node2, "")
+			if err != nil {
+				logger.Error("worker failed to connect to %s: %v", node2Name, err)
+				continue
+			}
+			pools[node2Name] = pool2
+		}
+
+		err := m.processWorkItem(work, pool1, pool2)
 		if err != nil {
 			nodePairKey := fmt.Sprintf("%s/%s", work.Node1["Name"], work.Node2["Name"])
 			logger.Error("failed to process work item for %s: %v", nodePairKey, err)
@@ -123,19 +154,8 @@ func (m *MerkleTreeTask) compareRangesWorker(wg *sync.WaitGroup, jobs <-chan Com
 	}
 }
 
-func (m *MerkleTreeTask) processWorkItem(work CompareRangesWorkItem) error {
-	pool1, err := auth.GetClusterNodeConnection(work.Node1, "")
-	if err != nil {
-		return fmt.Errorf("worker failed to connect to %s: %v", work.Node1["Name"], err)
-	}
-	defer pool1.Close()
-
-	pool2, err := auth.GetClusterNodeConnection(work.Node2, "")
-	if err != nil {
-		return fmt.Errorf("worker failed to connect to %s: %v", work.Node2["Name"], err)
-	}
-	defer pool2.Close()
-
+func (m *MerkleTreeTask) processWorkItem(work CompareRangesWorkItem, pool1, pool2 *pgxpool.Pool) error {
+	logger.Debug("Processing work item %v for %s and %s", work.Ranges, work.Node1["Name"], work.Node2["Name"])
 	var whereClause string
 	var args []any
 	paramIndex := 1
@@ -217,6 +237,7 @@ func (m *MerkleTreeTask) processWorkItem(work CompareRangesWorkItem) error {
 	if err != nil {
 		return fmt.Errorf("failed to build compare-blocks SQL: %v", err)
 	}
+	logger.Debug("Query: %s, Args: %v", query, args)
 
 	rows1, err := pool1.Query(context.Background(), query, args...)
 	if err != nil {
@@ -802,10 +823,13 @@ func (m *MerkleTreeTask) BuildMtree() error {
 	return nil
 }
 
-func (m *MerkleTreeTask) UpdateMtree(rebalance bool) error {
-	if err := m.RunChecks(!m.NoCDC); err != nil {
-		return err
+func (m *MerkleTreeTask) UpdateMtree(skipAllChecks bool) error {
+	if !skipAllChecks {
+		if err := m.RunChecks(true); err != nil {
+			return err
+		}
 	}
+
 	if !m.NoCDC {
 		cdcCfg := config.Cfg.MTree.CDC
 		timeout := 30 * time.Second
@@ -1372,18 +1396,25 @@ func (m *MerkleTreeTask) getPkeyBatches(pool1, pool2 *pgxpool.Pool, mismatchedPo
 	}
 
 	allRanges := append(leafRanges1, leafRanges2...)
-	boundarySet := make(map[string]any)
+
+	boundaries := []any{}
 	for _, r := range allRanges {
-		if r.RangeStart != nil && !allNil(r.RangeStart) {
-			boundarySet[fmt.Sprint(r.RangeStart)] = r.RangeStart
+		if r.RangeStart != nil {
+			boundaries = append(boundaries, r.RangeStart)
 		}
-		if r.RangeEnd != nil && !allNil(r.RangeEnd) {
-			boundarySet[fmt.Sprint(r.RangeEnd)] = r.RangeEnd
+		if r.RangeEnd != nil {
+			boundaries = append(boundaries, r.RangeEnd)
 		}
 	}
 
-	sortedBoundaries := make([]any, 0, len(boundarySet))
-	for _, b := range boundarySet {
+	uniqueBoundaries := make(map[string]any)
+	for _, b := range boundaries {
+		key := fmt.Sprint(b)
+		uniqueBoundaries[key] = b
+	}
+
+	sortedBoundaries := make([]any, 0, len(uniqueBoundaries))
+	for _, b := range uniqueBoundaries {
 		sortedBoundaries = append(sortedBoundaries, b)
 	}
 
@@ -1391,30 +1422,29 @@ func (m *MerkleTreeTask) getPkeyBatches(pool1, pool2 *pgxpool.Pool, mismatchedPo
 		return m.compareBoundaries(sortedBoundaries[i], sortedBoundaries[j]) < 0
 	})
 
-	var batches [][2][]any
+	if len(sortedBoundaries) == 0 {
+		return [][2][]any{}, nil
+	}
 
-	if len(sortedBoundaries) > 0 {
-		firstBoundary := sortedBoundaries[0]
-		if m.intervalIntersects(nil, firstBoundary, allRanges) {
-			batches = append(batches, [2][]any{nil, boundaryToSlice(firstBoundary)})
-		}
-
+	var slices [][2]any
+	if len(sortedBoundaries) == 1 {
+		s := sortedBoundaries[0]
+		slices = append(slices, [2]any{s, s})
+	} else {
 		for i := 0; i < len(sortedBoundaries)-1; i++ {
-			start := sortedBoundaries[i]
-			end := sortedBoundaries[i+1]
-			if m.compareBoundaries(start, end) < 0 && m.intervalIntersects(start, end, allRanges) {
-				batches = append(batches, [2][]any{boundaryToSlice(start), boundaryToSlice(end)})
+			s := sortedBoundaries[i]
+			e := sortedBoundaries[i+1]
+			if m.intervalInUnion(s, e, allRanges) {
+				slices = append(slices, [2]any{s, e})
 			}
 		}
+	}
 
-		lastBoundary := sortedBoundaries[len(sortedBoundaries)-1]
-		if m.intervalIntersects(lastBoundary, nil, allRanges) {
-			batches = append(batches, [2][]any{boundaryToSlice(lastBoundary), nil})
-		}
-	} else {
-		if m.intervalIntersects(nil, nil, allRanges) {
-			batches = append(batches, [2][]any{nil, nil})
-		}
+	var batches [][2][]any
+	for _, slice := range slices {
+		start := boundaryToSlice(slice[0])
+		end := boundaryToSlice(slice[1])
+		batches = append(batches, [2][]any{start, end})
 	}
 
 	return batches, nil
@@ -1515,6 +1545,28 @@ func (m *MerkleTreeTask) compareBoundaries(b1, b2 any) int {
 		return 1
 	}
 	return 0
+}
+
+func (m *MerkleTreeTask) intervalInUnion(s, e any, intervals []types.LeafRange) bool {
+	for _, interval := range intervals {
+		start := interval.RangeStart
+		end := interval.RangeEnd
+
+		eBeforeOrEqualStart := false
+		if start != nil {
+			eBeforeOrEqualStart = m.compareBoundaries(e, start) <= 0
+		}
+
+		sAfterOrEqualEnd := false
+		if end != nil {
+			sAfterOrEqualEnd = m.compareBoundaries(s, end) >= 0
+		}
+
+		if !eBeforeOrEqualStart && !sAfterOrEqualEnd {
+			return true
+		}
+	}
+	return false
 }
 
 func (m *MerkleTreeTask) intervalIntersects(start, end any, allRanges []types.LeafRange) bool {

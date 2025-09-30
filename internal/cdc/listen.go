@@ -15,6 +15,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/jackc/pglogrepl"
@@ -116,6 +117,7 @@ func processReplicationStream(ctx context.Context, nodeInfo map[string]any, cont
 
 	txChanges := make(map[uint32][]cdcMsg)
 	var currentXID uint32
+	var wg sync.WaitGroup
 
 	for {
 		if err := ctx.Err(); err != nil {
@@ -174,6 +176,7 @@ func processReplicationStream(ctx context.Context, nodeInfo map[string]any, cont
 			if pgconn.Timeout(err) {
 				if !continuous {
 					logger.Info("Replication stream drained.")
+					wg.Wait()
 					if err := pglogrepl.SendStandbyStatusUpdate(ctx, conn, pglogrepl.StandbyStatusUpdate{WALWritePosition: lastLSN}); err != nil {
 						logger.Error("failed to send final standby status update: %v", err)
 					}
@@ -230,7 +233,11 @@ func processReplicationStream(ctx context.Context, nodeInfo map[string]any, cont
 				case *pglogrepl.CommitMessage:
 					if changes, ok := txChanges[currentXID]; ok {
 						if len(changes) > 0 {
-							go processChanges(pool, changes)
+							wg.Add(1)
+							go func(c []cdcMsg) {
+								defer wg.Done()
+								processChanges(pool, c)
+							}(changes)
 							logger.Info("Processed %d changes for XID %d", len(changes), currentXID)
 						}
 						delete(txChanges, currentXID)
@@ -288,6 +295,7 @@ var quotedOIDs = map[uint32]bool{
 }
 
 func processChanges(pool *pgxpool.Pool, changes []cdcMsg) {
+	logger.Debug("processChanges called with %d changes", len(changes))
 	tx, err := pool.Begin(context.Background())
 	if err != nil {
 		logger.Error("failed to begin transaction for processing changes: %v", err)
@@ -300,6 +308,7 @@ func processChanges(pool *pgxpool.Pool, changes []cdcMsg) {
 		key := fmt.Sprintf("%s.%s", change.schema, change.table)
 		tables[key] = append(tables[key], change)
 	}
+	logger.Debug("Processing changes for %d tables", len(tables))
 
 	for _, tableChanges := range tables {
 		if len(tableChanges) > 0 {
@@ -308,6 +317,8 @@ func processChanges(pool *pgxpool.Pool, changes []cdcMsg) {
 			table := firstChange.table
 			mtreeTable := fmt.Sprintf("%s.ace_mtree_%s_%s", config.Cfg.MTree.Schema, schema, table)
 
+			logger.Debug("Processing %d changes for table %s.%s (mtree: %s)", len(tableChanges), schema, table, mtreeTable)
+
 			var inserts, deletes, updates []string
 			relation := firstChange.relation
 			isComposite := len(getPrimaryKeyColumns(relation)) > 1
@@ -315,7 +326,7 @@ func processChanges(pool *pgxpool.Pool, changes []cdcMsg) {
 			var pkeyType string
 			if !isComposite {
 				for _, col := range relation.Columns {
-					if col.Flags == 1 { // Primary key
+					if col.Flags == 1 {
 						typeName, err := getTypeNameFromOID(pool, col.DataType)
 						if err != nil {
 							logger.Error("failed to get type name for oid %d: %v", col.DataType, err)
@@ -348,15 +359,19 @@ func processChanges(pool *pgxpool.Pool, changes []cdcMsg) {
 				}
 			}
 
+			logger.Debug("Calling UpdateMtreeCounters: inserts=%d, updates=%d, deletes=%d", len(inserts), len(updates), len(deletes))
 			err := queries.UpdateMtreeCounters(context.Background(), tx, mtreeTable, isComposite, compositeTypeName, pkeyType, inserts, deletes, updates)
 			if err != nil {
 				logger.Error("failed to update mtree counters for %s: %v", mtreeTable, err)
 				return
 			}
+			logger.Debug("Successfully updated mtree counters for %s", mtreeTable)
 		}
 	}
 	if err := tx.Commit(context.Background()); err != nil {
 		logger.Error("failed to commit CDC changes: %v", err)
+	} else {
+		logger.Debug("Successfully committed CDC changes")
 	}
 }
 

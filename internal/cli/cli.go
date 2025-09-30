@@ -249,6 +249,12 @@ func SetupCLI() *cli.App {
 			Usage:   "Output format",
 			Value:   "json",
 		},
+		&cli.BoolFlag{
+			Name:    "skip-update",
+			Aliases: []string{"s"},
+			Usage:   "Skip updating the Merkle tree",
+			Value:   false,
+		},
 	}
 	mtreeDiffFlags = append(mtreeDiffFlags, commonFlags...)
 
@@ -669,10 +675,10 @@ func MtreeUpdateCLI(ctx *cli.Context) error {
 		return fmt.Errorf("validation failed: %w", err)
 	}
 
-	if err := task.RunChecks(true); err != nil {
+	if err := task.RunChecks(true /* skipValidation */); err != nil {
 		return fmt.Errorf("checks failed: %w", err)
 	}
-	if err := task.UpdateMtree(true); err != nil {
+	if err := task.UpdateMtree(true /* skipAllChecks */); err != nil {
 		return fmt.Errorf("error during merkle tree update: %w", err)
 	}
 
@@ -689,6 +695,7 @@ func MtreeDiffCLI(ctx *cli.Context) error {
 	task.MaxCpuRatio = ctx.Float64("max-cpu-ratio")
 	task.BatchSize = ctx.Int("batch-size")
 	task.Output = ctx.String("output")
+	task.NoCDC = ctx.Bool("skip-update")
 	task.Mode = "diff"
 
 	if err := task.Validate(); err != nil {
