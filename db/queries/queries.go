@@ -683,15 +683,23 @@ func GetPrimaryKey(ctx context.Context, db DBQuerier, schema, table string) ([]s
 	return keys, nil
 }
 
+func GetSimplePrimaryKey(ctx context.Context, db DBQuerier, schema, table string) (bool, error) {
+	keys, err := GetPrimaryKey(ctx, db, schema, table)
+	if err != nil {
+		return false, err
+	}
+	return len(keys) == 1, nil
+}
+
 func GetColumnTypes(ctx context.Context, db DBQuerier, schema, table string) (map[string]string, error) {
 	sql, err := RenderSQL(SQLTemplates.GetColumnTypes, nil)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to render GetColumnTypes SQL: %w", err)
 	}
 
 	rows, err := db.Query(ctx, sql, schema, table)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("query to get column types failed for %s.%s: %w", schema, table, err)
 	}
 	defer rows.Close()
 
@@ -699,13 +707,13 @@ func GetColumnTypes(ctx context.Context, db DBQuerier, schema, table string) (ma
 	for rows.Next() {
 		var columnName, dataType string
 		if err := rows.Scan(&columnName, &dataType); err != nil {
-			return nil, err
+			return nil, fmt.Errorf("failed to scan column type: %w", err)
 		}
 		types[columnName] = dataType
 	}
 
 	if err := rows.Err(); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("error iterating over column types: %w", err)
 	}
 
 	if len(types) == 0 {
@@ -2748,5 +2756,49 @@ func UpdateAllLeafNodePositionsToTemp(ctx context.Context, db DBQuerier, mtreeTa
 	if _, err := db.Exec(ctx, sql, offset); err != nil {
 		return fmt.Errorf("query to update all leaf node positions to temp failed: %w", err)
 	}
+	return nil
+}
+
+func AlterPublicationDropTable(ctx context.Context, db DBQuerier, publicationName, tableName string) error {
+	data := map[string]interface{}{
+		"PublicationName": publicationName,
+		"TableName":       tableName,
+	}
+	sql, err := RenderSQL(SQLTemplates.AlterPublicationDropTable, data)
+	if err != nil {
+		return fmt.Errorf("failed to render AlterPublicationDropTable SQL: %w", err)
+	}
+
+	_, err = db.Exec(ctx, sql)
+	if err != nil {
+		return fmt.Errorf("query to alter publication failed: %w", err)
+	}
+
+	return nil
+}
+
+func DeleteMetadata(ctx context.Context, db DBQuerier, schema, table string) error {
+	sql, err := RenderSQL(SQLTemplates.DeleteMetadata, nil)
+	if err != nil {
+		return fmt.Errorf("failed to render DeleteMetadata SQL: %w", err)
+	}
+	_, err = db.Exec(ctx, sql, schema, table)
+	if err != nil {
+		return fmt.Errorf("query to delete metadata for '%s.%s' failed: %w", schema, table, err)
+	}
+	return nil
+}
+
+func RemoveTableFromCDCMetadata(ctx context.Context, db DBQuerier, tableName, publicationName string) error {
+	sql, err := RenderSQL(SQLTemplates.RemoveTableFromCDCMetadata, nil)
+	if err != nil {
+		return fmt.Errorf("failed to render RemoveTableFromCDCMetadata SQL: %w", err)
+	}
+
+	_, err = db.Exec(ctx, sql, tableName, publicationName)
+	if err != nil {
+		return fmt.Errorf("query to remove table '%s' from cdc metadata for publication '%s' failed: %w", tableName, publicationName, err)
+	}
+
 	return nil
 }

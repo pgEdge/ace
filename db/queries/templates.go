@@ -112,6 +112,9 @@ type Templates struct {
 	TerminateBackend                 *template.Template
 	CheckPIDExists                   *template.Template
 	CreateSchema                     *template.Template
+	AlterPublicationDropTable        *template.Template
+	DeleteMetadata                   *template.Template
+	RemoveTableFromCDCMetadata       *template.Template
 }
 
 var SQLTemplates = Templates{
@@ -137,6 +140,16 @@ var SQLTemplates = Templates{
 
 	AlterPublicationAddTable: template.Must(template.New("alterPublicationAddTable").Parse(`
 		ALTER PUBLICATION {{.PublicationName}} ADD TABLE {{.TableName}}
+	`)),
+
+	AlterPublicationDropTable: template.Must(template.New("alterPublicationDropTable").Parse(`
+		ALTER PUBLICATION {{.PublicationName}} DROP TABLE {{.TableName}}
+	`)),
+
+	RemoveTableFromCDCMetadata: template.Must(template.New("removeTableFromCDCMetadata").Parse(`
+		UPDATE spock.ace_cdc_metadata
+		SET tables = array_remove(tables, $1)
+		WHERE publication_name = $2
 	`)),
 
 	MarkBlockDirty: template.Must(template.New("markBlockDirty").Parse(`
@@ -819,6 +832,9 @@ var SQLTemplates = Templates{
 			num_blocks = EXCLUDED.num_blocks,
 			is_composite = EXCLUDED.is_composite,
 			last_updated = EXCLUDED.last_updated
+	`)),
+	DeleteMetadata: template.Must(template.New("deleteMetadata").Parse(`
+		DELETE FROM spock.ace_mtree_metadata WHERE schema_name = $1 AND table_name = $2
 	`)),
 	InsertBlockRanges: template.Must(template.New("insertBlockRanges").Parse(`
 		INSERT INTO

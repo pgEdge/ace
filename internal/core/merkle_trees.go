@@ -28,6 +28,8 @@ import (
 
 	"bytes"
 
+	"encoding/json"
+
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -114,8 +116,39 @@ func (m *MerkleTreeTask) CompareRanges(workItems []CompareRangesWorkItem) {
 
 func (m *MerkleTreeTask) compareRangesWorker(wg *sync.WaitGroup, jobs <-chan CompareRangesWorkItem) {
 	defer wg.Done()
+	pools := make(map[string]*pgxpool.Pool)
+	defer func() {
+		for _, pool := range pools {
+			pool.Close()
+		}
+	}()
+
 	for work := range jobs {
-		err := m.processWorkItem(work)
+		node1Name := work.Node1["Name"].(string)
+		pool1, ok := pools[node1Name]
+		if !ok {
+			var err error
+			pool1, err = auth.GetClusterNodeConnection(work.Node1, "")
+			if err != nil {
+				logger.Error("worker failed to connect to %s: %v", node1Name, err)
+				continue
+			}
+			pools[node1Name] = pool1
+		}
+
+		node2Name := work.Node2["Name"].(string)
+		pool2, ok := pools[node2Name]
+		if !ok {
+			var err error
+			pool2, err = auth.GetClusterNodeConnection(work.Node2, "")
+			if err != nil {
+				logger.Error("worker failed to connect to %s: %v", node2Name, err)
+				continue
+			}
+			pools[node2Name] = pool2
+		}
+
+		err := m.processWorkItem(work, pool1, pool2)
 		if err != nil {
 			nodePairKey := fmt.Sprintf("%s/%s", work.Node1["Name"], work.Node2["Name"])
 			logger.Error("failed to process work item for %s: %v", nodePairKey, err)
@@ -123,19 +156,8 @@ func (m *MerkleTreeTask) compareRangesWorker(wg *sync.WaitGroup, jobs <-chan Com
 	}
 }
 
-func (m *MerkleTreeTask) processWorkItem(work CompareRangesWorkItem) error {
-	pool1, err := auth.GetClusterNodeConnection(work.Node1, "")
-	if err != nil {
-		return fmt.Errorf("worker failed to connect to %s: %v", work.Node1["Name"], err)
-	}
-	defer pool1.Close()
-
-	pool2, err := auth.GetClusterNodeConnection(work.Node2, "")
-	if err != nil {
-		return fmt.Errorf("worker failed to connect to %s: %v", work.Node2["Name"], err)
-	}
-	defer pool2.Close()
-
+func (m *MerkleTreeTask) processWorkItem(work CompareRangesWorkItem, pool1, pool2 *pgxpool.Pool) error {
+	logger.Debug("Processing work item %v for %s and %s", work.Ranges, work.Node1["Name"], work.Node2["Name"])
 	var whereClause string
 	var args []any
 	paramIndex := 1
@@ -217,6 +239,7 @@ func (m *MerkleTreeTask) processWorkItem(work CompareRangesWorkItem) error {
 	if err != nil {
 		return fmt.Errorf("failed to build compare-blocks SQL: %v", err)
 	}
+	logger.Debug("Query: %s, Args: %v", query, args)
 
 	rows1, err := pool1.Query(context.Background(), query, args...)
 	if err != nil {
@@ -409,6 +432,113 @@ func (m *MerkleTreeTask) MtreeTeardown() error {
 		}
 		logger.Info("CDC metadata table dropped on node: %s", nodeInfo["Name"])
 	}
+	return nil
+}
+
+func (m *MerkleTreeTask) MtreeTeardownTable() error {
+	if err := m.validateTeardownTable(); err != nil {
+		return fmt.Errorf("validation failed: %w", err)
+	}
+
+	cfg := config.Cfg.MTree.CDC
+
+	for _, nodeInfo := range m.ClusterNodes {
+		logger.Info("Tearing down Merkle tree objects for table '%s' on node: %s", m.QualifiedTableName, nodeInfo["Name"])
+
+		pool, err := auth.GetClusterNodeConnection(nodeInfo, "")
+		if err != nil {
+			return fmt.Errorf("failed to get connection pool for node %s: %w", nodeInfo["Name"], err)
+		}
+		defer pool.Close()
+
+		isSimple, err := queries.GetSimplePrimaryKey(context.Background(), pool, m.Schema, m.Table)
+		if err != nil {
+			logger.Warn("could not determine primary key type for table %s on node %s, assuming composite: %v", m.QualifiedTableName, nodeInfo["Name"], err)
+		} else {
+			m.SimplePrimaryKey = isSimple
+		}
+
+		err = queries.AlterPublicationDropTable(context.Background(), pool, cfg.PublicationName, m.QualifiedTableName)
+		if err != nil {
+			var pgErr *pgconn.PgError
+			if errors.As(err, &pgErr) && pgErr.Code == "42704" { // undefined_object
+				logger.Warn("Publication %s not found on node %s, continuing...", cfg.PublicationName, nodeInfo["Name"])
+			} else {
+				logger.Warn("Could not remove table %s from publication %s on node %s: %v", m.QualifiedTableName, cfg.PublicationName, nodeInfo["Name"], err)
+			}
+		} else {
+			logger.Info("Table %s removed from publication %s on node %s", m.QualifiedTableName, cfg.PublicationName, nodeInfo["Name"])
+		}
+
+		tx, err := pool.Begin(context.Background())
+		if err != nil {
+			return fmt.Errorf("failed to begin transaction on node %s: %w", nodeInfo["Name"], err)
+		}
+		defer tx.Rollback(context.Background())
+
+		mtreeTableIdentifier := pgx.Identifier{aceSchema(), fmt.Sprintf("ace_mtree_%s_%s", m.Schema, m.Table)}
+		mtreeTableName := mtreeTableIdentifier.Sanitize()
+		err = queries.DropMtreeTable(context.Background(), tx, mtreeTableName)
+		if err != nil {
+			logger.Warn("Could not drop merkle tree table '%s' on node %s (may not exist): %v", mtreeTableName, nodeInfo["Name"], err)
+		} else {
+			logger.Info("Merkle tree table '%s' dropped on node %s", mtreeTableName, nodeInfo["Name"])
+		}
+
+		err = queries.RemoveTableFromCDCMetadata(context.Background(), tx, m.QualifiedTableName, cfg.PublicationName)
+		if err != nil {
+			logger.Warn("Could not update CDC metadata on node %s, skipping update: %v", nodeInfo["Name"], err)
+		} else {
+			logger.Info("CDC metadata updated to remove table %s on node %s", m.QualifiedTableName, nodeInfo["Name"])
+		}
+
+		err = queries.DeleteMetadata(context.Background(), tx, m.Schema, m.Table)
+		if err != nil {
+			return fmt.Errorf("failed to delete metadata for table %s on node %s: %w", m.QualifiedTableName, nodeInfo["Name"], err)
+		}
+		logger.Info("Metadata for table %s deleted on node %s", m.QualifiedTableName, nodeInfo["Name"])
+
+		if !m.SimplePrimaryKey {
+			compositeTypeIdentifier := pgx.Identifier{aceSchema(), fmt.Sprintf("%s_%s_key_type", m.Schema, m.Table)}
+			compositeTypeName := compositeTypeIdentifier.Sanitize()
+			err = queries.DropCompositeType(context.Background(), tx, compositeTypeName)
+			if err != nil {
+				logger.Warn("Could not drop composite type '%s' on node %s (may not exist): %v", compositeTypeName, nodeInfo["Name"], err)
+			} else {
+				logger.Info("Composite type '%s' dropped on node %s", compositeTypeName, nodeInfo["Name"])
+			}
+		}
+
+		if err := tx.Commit(context.Background()); err != nil {
+			return fmt.Errorf("failed to commit transaction on node %s: %w", nodeInfo["Name"], err)
+		}
+
+		logger.Info("Merkle tree objects for table '%s' torn down on node: %s", m.QualifiedTableName, nodeInfo["Name"])
+	}
+	return nil
+}
+
+func (m *MerkleTreeTask) validateTeardownTable() error {
+	if err := m.validateCommon(); err != nil {
+		return err
+	}
+	if m.QualifiedTableName == "" {
+		return fmt.Errorf("table_name is a required argument")
+	}
+	parts := strings.Split(m.QualifiedTableName, ".")
+	if len(parts) != 2 {
+		return fmt.Errorf("tableName %s must be of form 'schema.table_name'", m.QualifiedTableName)
+	}
+	schema, table := parts[0], parts[1]
+
+	if err := queries.SanitiseIdentifier(schema); err != nil {
+		return err
+	}
+	if err := queries.SanitiseIdentifier(table); err != nil {
+		return err
+	}
+	m.Schema = schema
+	m.Table = table
 	return nil
 }
 
@@ -630,6 +760,17 @@ func (m *MerkleTreeTask) BuildMtree() error {
 	var numBlocks int
 	cfg := config.Cfg.MTree.CDC
 
+	if m.RangesFile != "" {
+		logger.Info("Reading block ranges from %s", m.RangesFile)
+		data, err := os.ReadFile(m.RangesFile)
+		if err != nil {
+			return fmt.Errorf("failed to read ranges file: %w", err)
+		}
+		if err := json.Unmarshal(data, &blockRanges); err != nil {
+			return fmt.Errorf("failed to unmarshal ranges file: %w", err)
+		}
+	}
+
 	logger.Info("Getting row estimates from all nodes...")
 	var maxRows int64
 	var refNode map[string]any
@@ -712,6 +853,19 @@ func (m *MerkleTreeTask) BuildMtree() error {
 			return fmt.Errorf("error iterating over pkey offset rows: %w", rows.Err())
 		}
 		refPool.Close()
+
+		if m.WriteRanges {
+			now := time.Now().Format("20060102_150405")
+			filename := fmt.Sprintf("%s_%s_%s_ranges.json", now, m.Schema, m.Table)
+			data, err := json.MarshalIndent(blockRanges, "", "  ")
+			if err != nil {
+				return fmt.Errorf("failed to marshal block ranges: %w", err)
+			}
+			if err := os.WriteFile(filename, data, 0644); err != nil {
+				return fmt.Errorf("failed to write block ranges to file: %w", err)
+			}
+			logger.Info("Block ranges written to %s", filename)
+		}
 	}
 
 	for _, nodeInfo := range m.ClusterNodes {
@@ -802,10 +956,13 @@ func (m *MerkleTreeTask) BuildMtree() error {
 	return nil
 }
 
-func (m *MerkleTreeTask) UpdateMtree(rebalance bool) error {
-	if err := m.RunChecks(!m.NoCDC); err != nil {
-		return err
+func (m *MerkleTreeTask) UpdateMtree(skipAllChecks bool) error {
+	if !skipAllChecks {
+		if err := m.RunChecks(true); err != nil {
+			return err
+		}
 	}
+
 	if !m.NoCDC {
 		cdcCfg := config.Cfg.MTree.CDC
 		timeout := 30 * time.Second
@@ -1372,18 +1529,25 @@ func (m *MerkleTreeTask) getPkeyBatches(pool1, pool2 *pgxpool.Pool, mismatchedPo
 	}
 
 	allRanges := append(leafRanges1, leafRanges2...)
-	boundarySet := make(map[string]any)
+
+	boundaries := []any{}
 	for _, r := range allRanges {
-		if r.RangeStart != nil && !allNil(r.RangeStart) {
-			boundarySet[fmt.Sprint(r.RangeStart)] = r.RangeStart
+		if r.RangeStart != nil {
+			boundaries = append(boundaries, r.RangeStart)
 		}
-		if r.RangeEnd != nil && !allNil(r.RangeEnd) {
-			boundarySet[fmt.Sprint(r.RangeEnd)] = r.RangeEnd
+		if r.RangeEnd != nil {
+			boundaries = append(boundaries, r.RangeEnd)
 		}
 	}
 
-	sortedBoundaries := make([]any, 0, len(boundarySet))
-	for _, b := range boundarySet {
+	uniqueBoundaries := make(map[string]any)
+	for _, b := range boundaries {
+		key := fmt.Sprint(b)
+		uniqueBoundaries[key] = b
+	}
+
+	sortedBoundaries := make([]any, 0, len(uniqueBoundaries))
+	for _, b := range uniqueBoundaries {
 		sortedBoundaries = append(sortedBoundaries, b)
 	}
 
@@ -1391,30 +1555,29 @@ func (m *MerkleTreeTask) getPkeyBatches(pool1, pool2 *pgxpool.Pool, mismatchedPo
 		return m.compareBoundaries(sortedBoundaries[i], sortedBoundaries[j]) < 0
 	})
 
-	var batches [][2][]any
+	if len(sortedBoundaries) == 0 {
+		return [][2][]any{}, nil
+	}
 
-	if len(sortedBoundaries) > 0 {
-		firstBoundary := sortedBoundaries[0]
-		if m.intervalIntersects(nil, firstBoundary, allRanges) {
-			batches = append(batches, [2][]any{nil, boundaryToSlice(firstBoundary)})
-		}
-
+	var slices [][2]any
+	if len(sortedBoundaries) == 1 {
+		s := sortedBoundaries[0]
+		slices = append(slices, [2]any{s, s})
+	} else {
 		for i := 0; i < len(sortedBoundaries)-1; i++ {
-			start := sortedBoundaries[i]
-			end := sortedBoundaries[i+1]
-			if m.compareBoundaries(start, end) < 0 && m.intervalIntersects(start, end, allRanges) {
-				batches = append(batches, [2][]any{boundaryToSlice(start), boundaryToSlice(end)})
+			s := sortedBoundaries[i]
+			e := sortedBoundaries[i+1]
+			if m.intervalInUnion(s, e, allRanges) {
+				slices = append(slices, [2]any{s, e})
 			}
 		}
+	}
 
-		lastBoundary := sortedBoundaries[len(sortedBoundaries)-1]
-		if m.intervalIntersects(lastBoundary, nil, allRanges) {
-			batches = append(batches, [2][]any{boundaryToSlice(lastBoundary), nil})
-		}
-	} else {
-		if m.intervalIntersects(nil, nil, allRanges) {
-			batches = append(batches, [2][]any{nil, nil})
-		}
+	var batches [][2][]any
+	for _, slice := range slices {
+		start := boundaryToSlice(slice[0])
+		end := boundaryToSlice(slice[1])
+		batches = append(batches, [2][]any{start, end})
 	}
 
 	return batches, nil
@@ -1515,6 +1678,28 @@ func (m *MerkleTreeTask) compareBoundaries(b1, b2 any) int {
 		return 1
 	}
 	return 0
+}
+
+func (m *MerkleTreeTask) intervalInUnion(s, e any, intervals []types.LeafRange) bool {
+	for _, interval := range intervals {
+		start := interval.RangeStart
+		end := interval.RangeEnd
+
+		eBeforeOrEqualStart := false
+		if start != nil {
+			eBeforeOrEqualStart = m.compareBoundaries(e, start) <= 0
+		}
+
+		sAfterOrEqualEnd := false
+		if end != nil {
+			sAfterOrEqualEnd = m.compareBoundaries(s, end) >= 0
+		}
+
+		if !eBeforeOrEqualStart && !sAfterOrEqualEnd {
+			return true
+		}
+	}
+	return false
 }
 
 func (m *MerkleTreeTask) intervalIntersects(start, end any, allRanges []types.LeafRange) bool {

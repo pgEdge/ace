@@ -249,6 +249,12 @@ func SetupCLI() *cli.App {
 			Usage:   "Output format",
 			Value:   "json",
 		},
+		&cli.BoolFlag{
+			Name:    "skip-update",
+			Aliases: []string{"s"},
+			Usage:   "Skip updating the Merkle tree",
+			Value:   false,
+		},
 	}
 	mtreeDiffFlags = append(mtreeDiffFlags, commonFlags...)
 
@@ -443,6 +449,26 @@ func SetupCLI() *cli.App {
 						},
 					},
 					{
+						Name:      "teardown-table",
+						Usage:     "Teardown Merkle tree objects for a specific table",
+						ArgsUsage: "<cluster> <table>",
+						Flags:     commonFlags,
+						Action: func(ctx *cli.Context) error {
+							if ctx.Args().Len() < 2 {
+								return fmt.Errorf("missing required arguments for mtree teardown-table: needs <cluster> and <table>")
+							}
+							return MtreeTeardownTableCLI(ctx)
+						},
+						Before: func(ctx *cli.Context) error {
+							if ctx.Bool("debug") {
+								logger.SetLevel(log.DebugLevel)
+							} else {
+								logger.SetLevel(log.InfoLevel)
+							}
+							return nil
+						},
+					},
+					{
 						Name:      "build",
 						Usage:     "Build a new Merkle tree for a table",
 						ArgsUsage: "<cluster> <table>",
@@ -617,6 +643,22 @@ func MtreeTeardownCLI(ctx *cli.Context) error {
 	return nil
 }
 
+func MtreeTeardownTableCLI(ctx *cli.Context) error {
+	task := core.NewMerkleTreeTask()
+	task.ClusterName = ctx.Args().Get(0)
+	task.QualifiedTableName = ctx.Args().Get(1)
+	task.DBName = ctx.String("dbname")
+	task.Nodes = ctx.String("nodes")
+	task.QuietMode = ctx.Bool("quiet")
+	task.Mode = "teardown-table"
+
+	if err := task.MtreeTeardownTable(); err != nil {
+		return fmt.Errorf("error during mtree table teardown: %w", err)
+	}
+
+	return nil
+}
+
 func MtreeBuildCLI(ctx *cli.Context) error {
 	blockSizeStr := ctx.String("block-size")
 	blockSizeInt, err := strconv.ParseInt(blockSizeStr, 10, 64)
@@ -669,10 +711,10 @@ func MtreeUpdateCLI(ctx *cli.Context) error {
 		return fmt.Errorf("validation failed: %w", err)
 	}
 
-	if err := task.RunChecks(true); err != nil {
+	if err := task.RunChecks(true /* skipValidation */); err != nil {
 		return fmt.Errorf("checks failed: %w", err)
 	}
-	if err := task.UpdateMtree(true); err != nil {
+	if err := task.UpdateMtree(true /* skipAllChecks */); err != nil {
 		return fmt.Errorf("error during merkle tree update: %w", err)
 	}
 
@@ -689,6 +731,7 @@ func MtreeDiffCLI(ctx *cli.Context) error {
 	task.MaxCpuRatio = ctx.Float64("max-cpu-ratio")
 	task.BatchSize = ctx.Int("batch-size")
 	task.Output = ctx.String("output")
+	task.NoCDC = ctx.Bool("skip-update")
 	task.Mode = "diff"
 
 	if err := task.Validate(); err != nil {

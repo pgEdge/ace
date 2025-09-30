@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"reflect"
 	"slices"
 	"sort"
 	"strings"
@@ -562,6 +563,17 @@ func MapToOrderedMap(m map[string]any, cols []string) types.OrderedMap {
 
 func WriteDiffReport(diffResult types.DiffOutput, schema, table string) error {
 	if len(diffResult.NodeDiffs) > 0 {
+		for _, nodePairDiff := range diffResult.NodeDiffs {
+			for nodeName, rows := range nodePairDiff.Rows {
+				sort.SliceStable(rows, func(i, j int) bool {
+					pkValuesI := getPKValues(rows[i], diffResult.Summary.PrimaryKey)
+					pkValuesJ := getPKValues(rows[j], diffResult.Summary.PrimaryKey)
+					return comparePKValues(pkValuesI, pkValuesJ) < 0
+				})
+				nodePairDiff.Rows[nodeName] = rows
+			}
+		}
+
 		outputFileName := fmt.Sprintf("%s_%s_diffs-%s.json",
 			strings.ReplaceAll(schema, ".", "_"),
 			strings.ReplaceAll(table, ".", "_"),
@@ -591,4 +603,109 @@ func WriteDiffReport(diffResult types.DiffOutput, schema, table string) error {
 		logger.Info("%s TABLES MATCH", CheckMark)
 	}
 	return nil
+}
+
+func getPKValues(row types.OrderedMap, pkey []string) []any {
+	var values []any
+	for _, keyCol := range pkey {
+		for _, kv := range row {
+			if kv.Key == keyCol {
+				values = append(values, kv.Value)
+				break
+			}
+		}
+	}
+	return values
+}
+
+func comparePKValues(valuesA, valuesB []any) int {
+	for i := 0; i < len(valuesA); i++ {
+		valA := valuesA[i]
+		valB := valuesB[i]
+
+		if valA == nil && valB == nil {
+			continue
+		}
+		if valA == nil {
+			return -1 // nil is considered smaller
+		}
+		if valB == nil {
+			return 1
+		}
+
+		valAKind := reflect.TypeOf(valA).Kind()
+		valBKind := reflect.TypeOf(valB).Kind()
+
+		if isNumeric(valAKind) && isNumeric(valBKind) {
+			floatA, errA := toFloat64(valA)
+			floatB, errB := toFloat64(valB)
+
+			if errA == nil && errB == nil {
+				if floatA < floatB {
+					return -1
+				}
+				if floatA > floatB {
+					return 1
+				}
+				continue
+			}
+		}
+
+		switch vA := valA.(type) {
+		case string:
+			if vB, ok := valB.(string); ok {
+				if vA < vB {
+					return -1
+				}
+				if vA > vB {
+					return 1
+				}
+			}
+		case time.Time:
+			if vB, ok := valB.(time.Time); ok {
+				if vA.Before(vB) {
+					return -1
+				}
+				if vA.After(vB) {
+					return 1
+				}
+			}
+		}
+
+		// Fallback to string comparison for other types or if type assertion fails
+		sA := fmt.Sprintf("%v", valA)
+		sB := fmt.Sprintf("%v", valB)
+		if sA < sB {
+			return -1
+		}
+		if sA > sB {
+			return 1
+		}
+	}
+	return 0
+}
+
+func isNumeric(kind reflect.Kind) bool {
+	switch kind {
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
+		reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64,
+		reflect.Float32, reflect.Float64:
+		return true
+	default:
+		return false
+	}
+}
+
+func toFloat64(v any) (float64, error) {
+	val := reflect.ValueOf(v)
+	switch val.Kind() {
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+		return float64(val.Int()), nil
+	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+		return float64(val.Uint()), nil
+	case reflect.Float32, reflect.Float64:
+		return val.Float(), nil
+	default:
+		return 0, fmt.Errorf("unsupported type for numeric conversion: %T", v)
+	}
 }
