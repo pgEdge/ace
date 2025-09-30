@@ -435,6 +435,113 @@ func (m *MerkleTreeTask) MtreeTeardown() error {
 	return nil
 }
 
+func (m *MerkleTreeTask) MtreeTeardownTable() error {
+	if err := m.validateTeardownTable(); err != nil {
+		return fmt.Errorf("validation failed: %w", err)
+	}
+
+	cfg := config.Cfg.MTree.CDC
+
+	for _, nodeInfo := range m.ClusterNodes {
+		logger.Info("Tearing down Merkle tree objects for table '%s' on node: %s", m.QualifiedTableName, nodeInfo["Name"])
+
+		pool, err := auth.GetClusterNodeConnection(nodeInfo, "")
+		if err != nil {
+			return fmt.Errorf("failed to get connection pool for node %s: %w", nodeInfo["Name"], err)
+		}
+		defer pool.Close()
+
+		isSimple, err := queries.GetSimplePrimaryKey(context.Background(), pool, m.Schema, m.Table)
+		if err != nil {
+			logger.Warn("could not determine primary key type for table %s on node %s, assuming composite: %v", m.QualifiedTableName, nodeInfo["Name"], err)
+		} else {
+			m.SimplePrimaryKey = isSimple
+		}
+
+		err = queries.AlterPublicationDropTable(context.Background(), pool, cfg.PublicationName, m.QualifiedTableName)
+		if err != nil {
+			var pgErr *pgconn.PgError
+			if errors.As(err, &pgErr) && pgErr.Code == "42704" { // undefined_object
+				logger.Warn("Publication %s not found on node %s, continuing...", cfg.PublicationName, nodeInfo["Name"])
+			} else {
+				logger.Warn("Could not remove table %s from publication %s on node %s: %v", m.QualifiedTableName, cfg.PublicationName, nodeInfo["Name"], err)
+			}
+		} else {
+			logger.Info("Table %s removed from publication %s on node %s", m.QualifiedTableName, cfg.PublicationName, nodeInfo["Name"])
+		}
+
+		tx, err := pool.Begin(context.Background())
+		if err != nil {
+			return fmt.Errorf("failed to begin transaction on node %s: %w", nodeInfo["Name"], err)
+		}
+		defer tx.Rollback(context.Background())
+
+		mtreeTableIdentifier := pgx.Identifier{aceSchema(), fmt.Sprintf("ace_mtree_%s_%s", m.Schema, m.Table)}
+		mtreeTableName := mtreeTableIdentifier.Sanitize()
+		err = queries.DropMtreeTable(context.Background(), tx, mtreeTableName)
+		if err != nil {
+			logger.Warn("Could not drop merkle tree table '%s' on node %s (may not exist): %v", mtreeTableName, nodeInfo["Name"], err)
+		} else {
+			logger.Info("Merkle tree table '%s' dropped on node %s", mtreeTableName, nodeInfo["Name"])
+		}
+
+		err = queries.RemoveTableFromCDCMetadata(context.Background(), tx, m.QualifiedTableName, cfg.PublicationName)
+		if err != nil {
+			logger.Warn("Could not update CDC metadata on node %s, skipping update: %v", nodeInfo["Name"], err)
+		} else {
+			logger.Info("CDC metadata updated to remove table %s on node %s", m.QualifiedTableName, nodeInfo["Name"])
+		}
+
+		err = queries.DeleteMetadata(context.Background(), tx, m.Schema, m.Table)
+		if err != nil {
+			return fmt.Errorf("failed to delete metadata for table %s on node %s: %w", m.QualifiedTableName, nodeInfo["Name"], err)
+		}
+		logger.Info("Metadata for table %s deleted on node %s", m.QualifiedTableName, nodeInfo["Name"])
+
+		if !m.SimplePrimaryKey {
+			compositeTypeIdentifier := pgx.Identifier{aceSchema(), fmt.Sprintf("%s_%s_key_type", m.Schema, m.Table)}
+			compositeTypeName := compositeTypeIdentifier.Sanitize()
+			err = queries.DropCompositeType(context.Background(), tx, compositeTypeName)
+			if err != nil {
+				logger.Warn("Could not drop composite type '%s' on node %s (may not exist): %v", compositeTypeName, nodeInfo["Name"], err)
+			} else {
+				logger.Info("Composite type '%s' dropped on node %s", compositeTypeName, nodeInfo["Name"])
+			}
+		}
+
+		if err := tx.Commit(context.Background()); err != nil {
+			return fmt.Errorf("failed to commit transaction on node %s: %w", nodeInfo["Name"], err)
+		}
+
+		logger.Info("Merkle tree objects for table '%s' torn down on node: %s", m.QualifiedTableName, nodeInfo["Name"])
+	}
+	return nil
+}
+
+func (m *MerkleTreeTask) validateTeardownTable() error {
+	if err := m.validateCommon(); err != nil {
+		return err
+	}
+	if m.QualifiedTableName == "" {
+		return fmt.Errorf("table_name is a required argument")
+	}
+	parts := strings.Split(m.QualifiedTableName, ".")
+	if len(parts) != 2 {
+		return fmt.Errorf("tableName %s must be of form 'schema.table_name'", m.QualifiedTableName)
+	}
+	schema, table := parts[0], parts[1]
+
+	if err := queries.SanitiseIdentifier(schema); err != nil {
+		return err
+	}
+	if err := queries.SanitiseIdentifier(table); err != nil {
+		return err
+	}
+	m.Schema = schema
+	m.Table = table
+	return nil
+}
+
 func (m *MerkleTreeTask) GetClusterName() string              { return m.ClusterName }
 func (m *MerkleTreeTask) GetDBName() string                   { return m.DBName }
 func (m *MerkleTreeTask) SetDBName(name string)               { m.DBName = name }

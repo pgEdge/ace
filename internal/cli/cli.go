@@ -449,6 +449,26 @@ func SetupCLI() *cli.App {
 						},
 					},
 					{
+						Name:      "teardown-table",
+						Usage:     "Teardown Merkle tree objects for a specific table",
+						ArgsUsage: "<cluster> <table>",
+						Flags:     commonFlags,
+						Action: func(ctx *cli.Context) error {
+							if ctx.Args().Len() < 2 {
+								return fmt.Errorf("missing required arguments for mtree teardown-table: needs <cluster> and <table>")
+							}
+							return MtreeTeardownTableCLI(ctx)
+						},
+						Before: func(ctx *cli.Context) error {
+							if ctx.Bool("debug") {
+								logger.SetLevel(log.DebugLevel)
+							} else {
+								logger.SetLevel(log.InfoLevel)
+							}
+							return nil
+						},
+					},
+					{
 						Name:      "build",
 						Usage:     "Build a new Merkle tree for a table",
 						ArgsUsage: "<cluster> <table>",
@@ -618,6 +638,22 @@ func MtreeTeardownCLI(ctx *cli.Context) error {
 
 	if err := task.MtreeTeardown(); err != nil {
 		return fmt.Errorf("error during mtree teardown: %w", err)
+	}
+
+	return nil
+}
+
+func MtreeTeardownTableCLI(ctx *cli.Context) error {
+	task := core.NewMerkleTreeTask()
+	task.ClusterName = ctx.Args().Get(0)
+	task.QualifiedTableName = ctx.Args().Get(1)
+	task.DBName = ctx.String("dbname")
+	task.Nodes = ctx.String("nodes")
+	task.QuietMode = ctx.Bool("quiet")
+	task.Mode = "teardown-table"
+
+	if err := task.MtreeTeardownTable(); err != nil {
+		return fmt.Errorf("error during mtree table teardown: %w", err)
 	}
 
 	return nil
