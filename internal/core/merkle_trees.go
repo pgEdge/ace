@@ -28,6 +28,8 @@ import (
 
 	"bytes"
 
+	"encoding/json"
+
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -651,6 +653,17 @@ func (m *MerkleTreeTask) BuildMtree() error {
 	var numBlocks int
 	cfg := config.Cfg.MTree.CDC
 
+	if m.RangesFile != "" {
+		logger.Info("Reading block ranges from %s", m.RangesFile)
+		data, err := os.ReadFile(m.RangesFile)
+		if err != nil {
+			return fmt.Errorf("failed to read ranges file: %w", err)
+		}
+		if err := json.Unmarshal(data, &blockRanges); err != nil {
+			return fmt.Errorf("failed to unmarshal ranges file: %w", err)
+		}
+	}
+
 	logger.Info("Getting row estimates from all nodes...")
 	var maxRows int64
 	var refNode map[string]any
@@ -733,6 +746,19 @@ func (m *MerkleTreeTask) BuildMtree() error {
 			return fmt.Errorf("error iterating over pkey offset rows: %w", rows.Err())
 		}
 		refPool.Close()
+
+		if m.WriteRanges {
+			now := time.Now().Format("20060102_150405")
+			filename := fmt.Sprintf("%s_%s_%s_ranges.json", now, m.Schema, m.Table)
+			data, err := json.MarshalIndent(blockRanges, "", "  ")
+			if err != nil {
+				return fmt.Errorf("failed to marshal block ranges: %w", err)
+			}
+			if err := os.WriteFile(filename, data, 0644); err != nil {
+				return fmt.Errorf("failed to write block ranges to file: %w", err)
+			}
+			logger.Info("Block ranges written to %s", filename)
+		}
 	}
 
 	for _, nodeInfo := range m.ClusterNodes {
