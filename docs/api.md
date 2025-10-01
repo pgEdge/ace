@@ -166,3 +166,185 @@ Compares spock metadata across cluster nodes.
 ```sh
 ./ace spock-diff --dbname=mydatabase my-cluster
 ``` 
+
+### Merkle Tree Commands
+
+The `mtree` commands provide a more advanced and efficient way to compare tables using Merkle trees. This method is suitable for very large tables where a full table scan is too slow.
+
+#### `mtree init`
+
+Initialises the required database objects for Merkle tree operations on all nodes in a cluster. This includes creating a dedicated schema, tables for metadata, and setting up publications and replication slots for change data capture (CDC).
+
+**Usage:**
+`./ace mtree init [flags] <cluster>`
+
+**Arguments:**
+-   `<cluster>`: The name of the cluster to connect to.
+
+**Flags:**
+| Flag                  | Alias | Description                                                        | Default  |
+| --------------------- | ----- | ------------------------------------------------------------------ | -------- |
+| `--dbname`            | `-d`  | Name of the database                                               |          |
+| `--nodes`             | `-n`  | Nodes to include (comma-separated, or "all")                       | all      |
+| `--quiet`             |       | Suppress output                                                    | false    |
+| `--debug`             | `-v`  | Enable debug logging                                               | false    |
+
+**Example:**
+```sh
+./ace mtree init --dbname=mydatabase my-cluster
+```
+
+#### `mtree build`
+
+Builds a Merkle tree for a specific table on all nodes in the cluster. This command should be run after `mtree init`.
+
+**Usage:**
+`./ace mtree build [flags] <cluster> <schema.table>`
+
+**Arguments:**
+-   `<cluster>`: The name of the cluster.
+-   `<schema.table>`: The fully qualified name of the table.
+
+**Flags:**
+| Flag                  | Alias | Description                                                        | Default  |
+| --------------------- | ----- | ------------------------------------------------------------------ | -------- |
+| `--dbname`            | `-d`  | Name of the database                                               |          |
+| `--nodes`             | `-n`  | Nodes to include (comma-separated, or "all")                       | all      |
+| `--block-size`        | `-b`  | Number of rows per leaf block                                      | 10000    |
+| `--max-cpu-ratio`     |       | Max CPU ratio for parallel operations                              | 0.5      |
+| `--override-block-size`|      | Skip block size check and allow potentially unsafe block sizes     | false    |
+| `--analyse`           |       | Run `ANALYZE` on the table before building the tree                | false    |
+| `--recreate-objects`  |       | Drop and recreate Merkle tree objects if they already exist        | false    |
+| `--write-ranges`      |       | Write the calculated block ranges to a JSON file                   | false    |
+| `--ranges-file`       |       | Path to a file with pre-computed block ranges to use for the build |          |
+| `--quiet`             |       | Suppress output                                                    | false    |
+| `--debug`             | `-v`  | Enable debug logging                                               | false    |
+
+**Example:**
+```sh
+./ace mtree build --dbname=mydatabase my-cluster public.my_table
+```
+
+#### `mtree table-diff`
+
+Compares the Merkle trees of a table across nodes to find inconsistencies. It generates a diff report similar to the standard `table-diff` command. By default, it first updates the Merkle trees with the latest changes using CDC before performing the diff.
+
+**Usage:**
+`./ace mtree table-diff [flags] <cluster> <schema.table>`
+
+**Arguments:**
+-   `<cluster>`: The name of the cluster.
+-   `<schema.table>`: The fully qualified name of the table.
+
+**Flags:**
+| Flag                  | Alias | Description                                                        | Default  |
+| --------------------- | ----- | ------------------------------------------------------------------ | -------- |
+| `--dbname`            | `-d`  | Name of the database                                               |          |
+| `--nodes`             | `-n`  | Nodes to include (comma-separated, or "all")                       | all      |
+| `--max-cpu-ratio`     |       | Max CPU ratio for parallel operations                              | 0.5      |
+| `--batch-size`        |       | Number of ranges to process in a batch when diffing                | 100      |
+| `--output`            | `-o`  | Output format for the diff report                                  | json     |
+| `--skip-update`       | `-s`  | Skip updating the Merkle tree with CDC changes before the diff     | false    |
+| `--quiet`             |       | Suppress output                                                    | false    |
+| `--debug`             | `-v`  | Enable debug logging                                               | false    |
+
+**Example:**
+```sh
+./ace mtree table-diff --dbname=mydatabase my-cluster public.my_table
+```
+
+#### `mtree update`
+
+Manually triggers an update of a Merkle tree for a table using the captured changes from CDC. This can also be used to rebalance the tree.
+
+**Usage:**
+`./ace mtree update [flags] <cluster> <schema.table>`
+
+**Arguments:**
+-   `<cluster>`: The name of the cluster.
+-   `<schema.table>`: The fully qualified name of the table.
+
+**Flags:**
+| Flag                  | Alias | Description                                                        | Default  |
+| --------------------- | ----- | ------------------------------------------------------------------ | -------- |
+| `--dbname`            | `-d`  | Name of the database                                               |          |
+| `--nodes`             | `-n`  | Nodes to include (comma-separated, or "all")                       | all      |
+| `--max-cpu-ratio`     |       | Max CPU ratio for parallel operations                              | 0.5      |
+| `--rebalance`         |       | Rebalance the tree by merging small blocks                         | false    |
+| `--quiet`             |       | Suppress output                                                    | false    |
+| `--debug`             | `-v`  | Enable debug logging                                               | false    |
+
+**Example:**
+```sh
+./ace mtree update --rebalance --dbname=mydatabase my-cluster public.my_table
+```
+
+#### `mtree listen`
+
+Starts a long-running process that listens for database changes via CDC and automatically updates the Merkle trees for all tracked tables.
+
+**Usage:**
+`./ace mtree listen [flags] <cluster>`
+
+**Arguments:**
+-   `<cluster>`: The name of the cluster.
+
+**Flags:**
+| Flag                  | Alias | Description                                                        | Default  |
+| --------------------- | ----- | ------------------------------------------------------------------ | -------- |
+| `--dbname`            | `-d`  | Name of the database                                               |          |
+| `--nodes`             | `-n`  | Nodes to include (comma-separated, or "all")                       | all      |
+| `--quiet`             |       | Suppress output                                                    | false    |
+| `--debug`             | `-v`  | Enable debug logging                                               | false    |
+
+**Example:**
+```sh
+./ace mtree listen --dbname=mydatabase my-cluster
+```
+
+#### `mtree teardown-table`
+
+Removes all database objects associated with a Merkle tree for a specific table. This includes the tree data, metadata, and removing the table from the CDC publication.
+
+**Usage:**
+`./ace mtree teardown-table [flags] <cluster> <schema.table>`
+
+**Arguments:**
+-   `<cluster>`: The name of the cluster.
+-   `<schema.table>`: The fully qualified name of the table.
+
+**Flags:**
+| Flag                  | Alias | Description                                                        | Default  |
+| --------------------- | ----- | ------------------------------------------------------------------ | -------- |
+| `--dbname`            | `-d`  | Name of the database                                               |          |
+| `--nodes`             | `-n`  | Nodes to include (comma-separated, or "all")                       | all      |
+| `--quiet`             |       | Suppress output                                                    | false    |
+| `--debug`             | `-v`  | Enable debug logging                                               | false    |
+
+**Example:**
+```sh
+./ace mtree teardown-table --dbname=mydatabase my-cluster public.my_table
+```
+
+#### `mtree teardown`
+
+Removes all database objects created by `mtree init` from all nodes in the cluster. This will drop the dedicated schema, all Merkle tree data, and stop CDC.
+
+**Usage:**
+`./ace mtree teardown [flags] <cluster>`
+
+**Arguments:**
+-   `<cluster>`: The name of the cluster.
+
+**Flags:**
+| Flag                  | Alias | Description                                                        | Default  |
+| --------------------- | ----- | ------------------------------------------------------------------ | -------- |
+| `--dbname`            | `-d`  | Name of the database                                               |          |
+| `--nodes`             | `-n`  | Nodes to include (comma-separated, or "all")                       | all      |
+| `--quiet`             |       | Suppress output                                                    | false    |
+| `--debug`             | `-v`  | Enable debug logging                                               | false    |
+
+**Example:**
+```sh
+./ace mtree teardown --dbname=mydatabase my-cluster
+``` 
