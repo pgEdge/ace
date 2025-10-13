@@ -29,6 +29,7 @@ type DBQuerier interface {
 	Exec(context.Context, string, ...interface{}) (pgconn.CommandTag, error)
 	Query(context.Context, string, ...interface{}) (pgx.Rows, error)
 	QueryRow(context.Context, string, ...interface{}) pgx.Row
+	SendBatch(context.Context, *pgx.Batch) pgx.BatchResults
 }
 
 var validIdentifierRegex = regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_]*$`)
@@ -1107,6 +1108,35 @@ func UpdateLeafHashes(ctx context.Context, db DBQuerier, mtreeTable string, leaf
 	}
 
 	return updatedNodePosition, nil
+}
+
+func UpdateLeafHashesBatch(ctx context.Context, db DBQuerier, mtreeTable string, leafHashes map[int64][]byte) error {
+	tx, ok := db.(pgx.Tx)
+	if !ok {
+		return fmt.Errorf("UpdateLeafHashesBatch expects a pgx.Tx transaction object")
+	}
+
+	batch := &pgx.Batch{}
+	updateQuery, err := RenderSQL(SQLTemplates.UpdateLeafHashesBatch, map[string]interface{}{"MtreeTable": mtreeTable})
+	if err != nil {
+		return fmt.Errorf("failed to render UpdateLeafHashesBatch SQL: %w", err)
+	}
+
+	for blockID, hash := range leafHashes {
+		batch.Queue(updateQuery, hash, blockID)
+	}
+
+	br := tx.SendBatch(ctx, batch)
+	defer br.Close()
+
+	for i := 0; i < len(leafHashes); i++ {
+		_, err := br.Exec()
+		if err != nil {
+			return fmt.Errorf("failed to execute update in batch: %w", err)
+		}
+	}
+
+	return nil
 }
 
 func GetBlockRanges(ctx context.Context, db DBQuerier, mtreeTable string) ([]types.BlockRange, error) {

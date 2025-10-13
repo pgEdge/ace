@@ -47,6 +47,7 @@ type Templates struct {
 	TDBlockHashSQL                   *template.Template
 	MtreeLeafHashSQL                 *template.Template
 	UpdateLeafHashes                 *template.Template
+	UpdateLeafHashesBatch            *template.Template
 	GetBlockRanges                   *template.Template
 	GetDirtyAndNewBlocks             *template.Template
 	ClearDirtyFlags                  *template.Template
@@ -886,6 +887,17 @@ var SQLTemplates = Templates{
 			AND mt.node_level = 0
 		RETURNING
 			mt.node_position
+	`)),
+	UpdateLeafHashesBatch: template.Must(template.New("updateLeafHashesBatch").Parse(`
+		UPDATE
+			{{.MtreeTable}} mt
+		SET
+			leaf_hash = $1,
+			node_hash = $1,
+			last_modified = current_timestamp
+		WHERE
+			node_position = $2
+			AND mt.node_level = 0
 	`)),
 	GetBlockRanges: template.Must(template.New("getBlockRanges").Parse(`
 		SELECT

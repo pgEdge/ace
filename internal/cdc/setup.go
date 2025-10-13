@@ -38,17 +38,17 @@ func SetupPublication(ctx context.Context, db queries.DBQuerier, publicationName
 	return nil
 }
 
-func SetupReplicationSlot(nodeInfo map[string]any) (pglogrepl.LSN, error) {
+func SetupReplicationSlot(ctx context.Context, nodeInfo map[string]any) (pglogrepl.LSN, error) {
 	cfg := config.Cfg.MTree.CDC
 	slot := cfg.SlotName
 
-	pool, err := auth.GetClusterNodeConnection(nodeInfo, "")
+	pool, err := auth.GetClusterNodeConnection(ctx, nodeInfo, "")
 	if err != nil {
 		return 0, fmt.Errorf("failed to get connection pool: %w", err)
 	}
 	defer pool.Close()
 
-	err = queries.DropReplicationSlot(context.Background(), pool, slot)
+	err = queries.DropReplicationSlot(ctx, pool, slot)
 	if err != nil {
 		return 0, fmt.Errorf("failed to drop replication slot: %w", err)
 	}

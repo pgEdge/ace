@@ -47,6 +47,7 @@ type SchemaDiffCmd struct {
 	Output            string
 	TableFilter       string
 	OverrideBlockSize bool
+	Ctx               context.Context
 }
 
 type SchemaObjects struct {
@@ -123,13 +124,13 @@ func (c *SchemaDiffCmd) RunChecks(skipValidation bool) error {
 		}
 	}
 
-	pool, err := auth.GetClusterNodeConnection(nodeWithDBInfo, "")
+	pool, err := auth.GetClusterNodeConnection(c.Ctx, nodeWithDBInfo, "")
 	if err != nil {
 		return fmt.Errorf("could not connect to database: %w", err)
 	}
 	defer pool.Close()
 
-	schemaExists, err := queries.CheckSchemaExists(context.Background(), pool, c.SchemaName)
+	schemaExists, err := queries.CheckSchemaExists(c.Ctx, pool, c.SchemaName)
 	if err != nil {
 		return fmt.Errorf("could not check if schema exists: %w", err)
 	}
@@ -137,7 +138,7 @@ func (c *SchemaDiffCmd) RunChecks(skipValidation bool) error {
 		return fmt.Errorf("schema %s not found", c.SchemaName)
 	}
 
-	tables, err := queries.GetTablesInSchema(context.Background(), pool, c.SchemaName)
+	tables, err := queries.GetTablesInSchema(c.Ctx, pool, c.SchemaName)
 	if err != nil {
 		return fmt.Errorf("could not get tables in schema: %w", err)
 	}
@@ -168,14 +169,14 @@ func (task *SchemaDiffCmd) schemaObjectDiff() error {
 			}
 		}
 
-		pool, err := auth.GetClusterNodeConnection(nodeWithDBInfo, "")
+		pool, err := auth.GetClusterNodeConnection(task.Ctx, nodeWithDBInfo, "")
 		if err != nil {
 			logger.Warn("could not connect to node %s: %v. Skipping.", nodeName, err)
 			continue
 		}
 		defer pool.Close()
 
-		objects, err := getObjectsForSchema(pool, task.SchemaName)
+		objects, err := getObjectsForSchema(task.Ctx, pool, task.SchemaName)
 		if err != nil {
 			logger.Warn("could not get schema objects for node %s: %v. Skipping.", nodeName, err)
 			continue
@@ -281,6 +282,7 @@ func (task *SchemaDiffCmd) SchemaTableDiff() error {
 		tdTask.TableFilter = task.TableFilter
 		tdTask.OverrideBlockSize = task.OverrideBlockSize
 		tdTask.QuietMode = task.Quiet
+		tdTask.Ctx = task.Ctx
 
 		if err := tdTask.Validate(); err != nil {
 			logger.Warn("validation for table %s failed: %v", qualifiedTableName, err)
@@ -301,29 +303,29 @@ func (task *SchemaDiffCmd) SchemaTableDiff() error {
 	return nil
 }
 
-func getObjectsForSchema(pool *pgxpool.Pool, schemaName string) (*SchemaObjects, error) {
-	tables, err := queries.GetTablesInSchema(context.Background(), pool, schemaName)
+func getObjectsForSchema(ctx context.Context, pool *pgxpool.Pool, schemaName string) (*SchemaObjects, error) {
+	tables, err := queries.GetTablesInSchema(ctx, pool, schemaName)
 	if err != nil {
 		return nil, fmt.Errorf("could not query tables: %w", err)
 	}
 	var tableNames []string
 	tableNames = append(tableNames, tables...)
 
-	views, err := queries.GetViewsInSchema(context.Background(), pool, schemaName)
+	views, err := queries.GetViewsInSchema(ctx, pool, schemaName)
 	if err != nil {
 		return nil, fmt.Errorf("could not query views: %w", err)
 	}
 	var viewNames []string
 	viewNames = append(viewNames, views...)
 
-	functions, err := queries.GetFunctionsInSchema(context.Background(), pool, schemaName)
+	functions, err := queries.GetFunctionsInSchema(ctx, pool, schemaName)
 	if err != nil {
 		return nil, fmt.Errorf("could not query functions: %w", err)
 	}
 	var functionSignatures []string
 	functionSignatures = append(functionSignatures, functions...)
 
-	indices, err := queries.GetIndicesInSchema(context.Background(), pool, schemaName)
+	indices, err := queries.GetIndicesInSchema(ctx, pool, schemaName)
 	if err != nil {
 		return nil, fmt.Errorf("could not query indices: %w", err)
 	}

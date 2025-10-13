@@ -555,6 +555,7 @@ func TableDiffCLI(ctx *cli.Context) error {
 	task.TableFilter = ctx.String("table-filter")
 	task.QuietMode = ctx.Bool("quiet")
 	task.OverrideBlockSize = ctx.Bool("override-block-size")
+	task.Ctx = context.Background()
 
 	if err := task.Validate(); err != nil {
 		return fmt.Errorf("validation failed: %w", err)
@@ -578,6 +579,7 @@ func MtreeInitCLI(ctx *cli.Context) error {
 	task.Nodes = ctx.String("nodes")
 	task.QuietMode = ctx.Bool("quiet")
 	task.Mode = "init"
+	task.Ctx = context.Background()
 
 	if err := task.MtreeInit(); err != nil {
 		return fmt.Errorf("error during mtree init: %w", err)
@@ -593,6 +595,7 @@ func MtreeListenCLI(ctx *cli.Context) error {
 	task.Nodes = ctx.String("nodes")
 	task.QuietMode = ctx.Bool("quiet")
 	task.Mode = "listen"
+	task.Ctx = context.Background()
 
 	if err := task.Validate(); err != nil {
 		return fmt.Errorf("validation failed: %w", err)
@@ -635,6 +638,7 @@ func MtreeTeardownCLI(ctx *cli.Context) error {
 	task.Nodes = ctx.String("nodes")
 	task.QuietMode = ctx.Bool("quiet")
 	task.Mode = "teardown"
+	task.Ctx = context.Background()
 
 	if err := task.MtreeTeardown(); err != nil {
 		return fmt.Errorf("error during mtree teardown: %w", err)
@@ -651,6 +655,7 @@ func MtreeTeardownTableCLI(ctx *cli.Context) error {
 	task.Nodes = ctx.String("nodes")
 	task.QuietMode = ctx.Bool("quiet")
 	task.Mode = "teardown-table"
+	task.Ctx = context.Background()
 
 	if err := task.MtreeTeardownTable(); err != nil {
 		return fmt.Errorf("error during mtree table teardown: %w", err)
@@ -680,6 +685,7 @@ func MtreeBuildCLI(ctx *cli.Context) error {
 	task.WriteRanges = ctx.Bool("write-ranges")
 	task.RangesFile = ctx.String("ranges-file")
 	task.Mode = "build"
+	task.Ctx = context.Background()
 
 	if err := task.Validate(); err != nil {
 		return fmt.Errorf("validation failed: %w", err)
@@ -706,6 +712,7 @@ func MtreeUpdateCLI(ctx *cli.Context) error {
 	task.MaxCpuRatio = ctx.Float64("max-cpu-ratio")
 	task.Rebalance = ctx.Bool("rebalance")
 	task.Mode = "update"
+	task.Ctx = context.Background()
 
 	if err := task.Validate(); err != nil {
 		return fmt.Errorf("validation failed: %w", err)
@@ -733,6 +740,7 @@ func MtreeDiffCLI(ctx *cli.Context) error {
 	task.Output = ctx.String("output")
 	task.NoCDC = ctx.Bool("skip-update")
 	task.Mode = "diff"
+	task.Ctx = context.Background()
 
 	if err := task.Validate(); err != nil {
 		return fmt.Errorf("validation failed: %w", err)
@@ -758,6 +766,7 @@ func TableRerunCLI(ctx *cli.Context) error {
 	task.DBName = ctx.String("dbname")
 	task.Nodes = ctx.String("nodes")
 	task.QuietMode = ctx.Bool("quiet")
+	task.Ctx = context.Background()
 
 	if err := task.ExecuteRerunTask(); err != nil {
 		return fmt.Errorf("error during table-rerun: %w", err)
@@ -775,6 +784,7 @@ func TableRepairCLI(ctx *cli.Context) error {
 	task.Nodes = ctx.String("nodes")
 	task.SourceOfTruth = ctx.String("source-of-truth")
 	task.QuietMode = ctx.Bool("quiet")
+	task.Ctx = context.Background()
 
 	task.DryRun = ctx.Bool("dry-run")
 	task.InsertOnly = ctx.Bool("insert-only")
@@ -801,6 +811,7 @@ func SpockDiffCLI(ctx *cli.Context) error {
 	task.DBName = ctx.String("dbname")
 	task.Nodes = ctx.String("nodes")
 	task.Output = ctx.String("output")
+	task.Ctx = context.Background()
 
 	if err := task.Validate(); err != nil {
 		return fmt.Errorf("validation failed: %w", err)
@@ -832,6 +843,7 @@ func SchemaDiffCLI(ctx *cli.Context) error {
 		SkipFile:    ctx.String("skip-file"),
 		Quiet:       ctx.Bool("quiet"),
 		DDLOnly:     ctx.Bool("ddl-only"),
+		Ctx:         context.Background(),
 	}
 
 	task.BlockSize = int(blockSizeInt)
@@ -861,6 +873,7 @@ func RepsetDiffCLI(ctx *cli.Context) error {
 		SkipTables:  ctx.String("skip-tables"),
 		SkipFile:    ctx.String("skip-file"),
 		Quiet:       ctx.Bool("quiet"),
+		Ctx:         context.Background(),
 	}
 
 	task.BlockSize = int(blockSizeInt)
