@@ -77,9 +77,10 @@ type MerkleTreeTask struct {
 	Mode              string
 	NoCDC             bool
 
-	DiffResult types.DiffOutput
-	diffMutex  sync.Mutex
-	StartTime  time.Time
+	DiffResult     types.DiffOutput
+	diffMutex      sync.Mutex
+	diffRowKeySets map[string]map[string]map[string]struct{}
+	StartTime      time.Time
 
 	Ctx context.Context
 }
@@ -98,6 +99,9 @@ type CompareRangesResult struct {
 
 func (m *MerkleTreeTask) CompareRanges(workItems []CompareRangesWorkItem) {
 	numWorkers := int(float64(runtime.NumCPU()) * m.MaxCpuRatio)
+	if numWorkers < 1 {
+		numWorkers = 1
+	}
 	jobs := make(chan CompareRangesWorkItem, len(workItems))
 
 	p := mpb.New(mpb.WithOutput(os.Stderr))
@@ -389,26 +393,46 @@ func (m *MerkleTreeTask) appendDiffs(nodePairKey string, work CompareRangesWorkI
 			Rows: make(map[string][]types.OrderedMap),
 		}
 	}
-	if _, ok := m.DiffResult.NodeDiffs[nodePairKey].Rows[work.Node1["Name"].(string)]; !ok {
-		m.DiffResult.NodeDiffs[nodePairKey].Rows[work.Node1["Name"].(string)] = []types.OrderedMap{}
+	node1Name := work.Node1["Name"].(string)
+	node2Name := work.Node2["Name"].(string)
+	if _, ok := m.DiffResult.NodeDiffs[nodePairKey].Rows[node1Name]; !ok {
+		m.DiffResult.NodeDiffs[nodePairKey].Rows[node1Name] = []types.OrderedMap{}
 	}
-	if _, ok := m.DiffResult.NodeDiffs[nodePairKey].Rows[work.Node2["Name"].(string)]; !ok {
-		m.DiffResult.NodeDiffs[nodePairKey].Rows[work.Node2["Name"].(string)] = []types.OrderedMap{}
+	if _, ok := m.DiffResult.NodeDiffs[nodePairKey].Rows[node2Name]; !ok {
+		m.DiffResult.NodeDiffs[nodePairKey].Rows[node2Name] = []types.OrderedMap{}
 	}
 
 	var currentDiffRowsForPair int
 	for _, row := range diffResult.Node1OnlyRows {
-		m.DiffResult.NodeDiffs[nodePairKey].Rows[work.Node1["Name"].(string)] = append(m.DiffResult.NodeDiffs[nodePairKey].Rows[work.Node1["Name"].(string)], row)
-		currentDiffRowsForPair++
+		added, err := m.addRowToDiff(nodePairKey, node1Name, row)
+		if err != nil {
+			return err
+		}
+		if added {
+			currentDiffRowsForPair++
+		}
 	}
 	for _, row := range diffResult.Node2OnlyRows {
-		m.DiffResult.NodeDiffs[nodePairKey].Rows[work.Node2["Name"].(string)] = append(m.DiffResult.NodeDiffs[nodePairKey].Rows[work.Node2["Name"].(string)], row)
-		currentDiffRowsForPair++
+		added, err := m.addRowToDiff(nodePairKey, node2Name, row)
+		if err != nil {
+			return err
+		}
+		if added {
+			currentDiffRowsForPair++
+		}
 	}
 	for _, modRow := range diffResult.ModifiedRows {
-		m.DiffResult.NodeDiffs[nodePairKey].Rows[work.Node1["Name"].(string)] = append(m.DiffResult.NodeDiffs[nodePairKey].Rows[work.Node1["Name"].(string)], modRow.Node1Data)
-		m.DiffResult.NodeDiffs[nodePairKey].Rows[work.Node2["Name"].(string)] = append(m.DiffResult.NodeDiffs[nodePairKey].Rows[work.Node2["Name"].(string)], modRow.Node2Data)
-		currentDiffRowsForPair++
+		added1, err := m.addRowToDiff(nodePairKey, node1Name, modRow.Node1Data)
+		if err != nil {
+			return err
+		}
+		added2, err := m.addRowToDiff(nodePairKey, node2Name, modRow.Node2Data)
+		if err != nil {
+			return err
+		}
+		if added1 || added2 {
+			currentDiffRowsForPair++
+		}
 	}
 
 	if m.DiffResult.Summary.DiffRowsCount == nil {
@@ -416,6 +440,49 @@ func (m *MerkleTreeTask) appendDiffs(nodePairKey string, work CompareRangesWorkI
 	}
 	m.DiffResult.Summary.DiffRowsCount[nodePairKey] += currentDiffRowsForPair
 	return nil
+}
+
+func (m *MerkleTreeTask) addRowToDiff(nodePairKey, nodeName string, row types.OrderedMap) (bool, error) {
+	if m.diffRowKeySets == nil {
+		m.diffRowKeySets = make(map[string]map[string]map[string]struct{})
+	}
+
+	pairSet, ok := m.diffRowKeySets[nodePairKey]
+	if !ok {
+		pairSet = make(map[string]map[string]struct{})
+		m.diffRowKeySets[nodePairKey] = pairSet
+	}
+
+	nodeSet, ok := pairSet[nodeName]
+	if !ok {
+		nodeSet = make(map[string]struct{})
+		pairSet[nodeName] = nodeSet
+	}
+
+	key, err := m.buildRowKey(row)
+	if err != nil {
+		return false, err
+	}
+
+	if _, exists := nodeSet[key]; exists {
+		return false, nil
+	}
+
+	nodeSet[key] = struct{}{}
+	m.DiffResult.NodeDiffs[nodePairKey].Rows[nodeName] = append(m.DiffResult.NodeDiffs[nodePairKey].Rows[nodeName], row)
+	return true, nil
+}
+
+func (m *MerkleTreeTask) buildRowKey(row types.OrderedMap) (string, error) {
+	values := make([]string, len(m.Key))
+	for i, col := range m.Key {
+		val, ok := row.Get(col)
+		if !ok {
+			return "", fmt.Errorf("primary key column %s not found in diff row", col)
+		}
+		values[i] = fmt.Sprintf("%v", val)
+	}
+	return strings.Join(values, "|"), nil
 }
 
 func buildRowHashQuery(tableName string, key []string, cols []string, whereClause string) (string, string) {
@@ -780,6 +847,7 @@ func NewMerkleTreeTask() *MerkleTreeTask {
 			ColTypes:  make(map[string]map[string]string),
 			PKeyTypes: make(map[string]string),
 		},
+		Ctx: context.Background(),
 	}
 }
 
@@ -974,6 +1042,7 @@ func (m *MerkleTreeTask) BuildMtree() error {
 	if numWorkers < 1 {
 		numWorkers = 1
 	}
+	poolSize := numWorkers + 1
 
 	if m.RangesFile != "" {
 		logger.Info("Reading block ranges from %s", m.RangesFile)
@@ -990,7 +1059,7 @@ func (m *MerkleTreeTask) BuildMtree() error {
 	var maxRows int64
 	var refNode map[string]any
 	for _, nodeInfo := range m.ClusterNodes {
-		pool, err := auth.GetSizedClusterNodeConnection(nodeInfo, "", numWorkers)
+		pool, err := auth.GetSizedClusterNodeConnection(nodeInfo, "", poolSize)
 		if err != nil {
 			for _, p := range pools {
 				p.Close()
@@ -1553,6 +1622,7 @@ func (m *MerkleTreeTask) DiffMtree() error {
 			DiffRowsCount: make(map[string]int),
 		},
 	}
+	m.diffRowKeySets = make(map[string]map[string]map[string]struct{})
 
 	for _, pair := range nodePairs {
 		node1 := pair[0]

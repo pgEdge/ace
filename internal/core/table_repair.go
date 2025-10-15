@@ -89,6 +89,7 @@ func NewTableRepairTask() *TableRepairTask {
 		DerivedFields: types.DerivedFields{
 			HostMap: make(map[string]string),
 		},
+		Ctx: context.Background(),
 	}
 }
 

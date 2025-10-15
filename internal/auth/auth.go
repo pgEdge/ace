@@ -22,11 +22,30 @@ import (
 
 func toConnectionString(node map[string]any, dbName string) string {
 	var parts []string
-	if host, ok := node["Host"].(string); ok && host != "" {
+	var host string
+	if h, ok := node["Host"].(string); ok && strings.TrimSpace(h) != "" {
+		host = strings.TrimSpace(h)
+	} else if h, ok := node["PublicIP"].(string); ok && strings.TrimSpace(h) != "" {
+		host = strings.TrimSpace(h)
+	} else if h, ok := node["PrivateIP"].(string); ok && strings.TrimSpace(h) != "" {
+		host = strings.TrimSpace(h)
+	}
+	if host != "" {
 		parts = append(parts, "host="+host)
 	}
-	if port, ok := node["Port"].(float64); ok && port != 0 {
-		parts = append(parts, fmt.Sprintf("port=%d", int(port)))
+	switch v := node["Port"].(type) {
+	case float64:
+		if v != 0 {
+			parts = append(parts, fmt.Sprintf("port=%d", int(v)))
+		}
+	case int:
+		if v != 0 {
+			parts = append(parts, fmt.Sprintf("port=%d", v))
+		}
+	case string:
+		if strings.TrimSpace(v) != "" {
+			parts = append(parts, "port="+strings.TrimSpace(v))
+		}
 	}
 	if user, ok := node["DBUser"].(string); ok && user != "" {
 		parts = append(parts, "user="+user)

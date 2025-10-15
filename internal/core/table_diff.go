@@ -121,6 +121,7 @@ func NewTableDiffTask() *TableDiffTask {
 		DerivedFields: types.DerivedFields{
 			HostMap: make(map[string]string),
 		},
+		Ctx: context.Background(),
 	}
 }
 
