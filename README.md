@@ -15,6 +15,7 @@ The Active Consistency Engine (ACE) is a tool designed to ensure eventual consis
 - [Using the ACE API](docs/ace_api.md)
 - [API Reference](docs/api.md)
 - [Scheduling ACE](docs/schedule_ace.md)
+- [Building the ACE Documentation](README.md#building-the-documentation)
 
 ## Building
 
@@ -136,3 +137,36 @@ If differences are found, you can repair them using the `table-repair` command, 
 ```
 
 The Merkle trees can be kept up-to-date automatically by running the `mtree listen` command, which uses Change Data Capture (CDC) with the `pgoutput` output plugin to track row changes. Performing the `mtree table-diff` will update the Merkle tree even if `mtree listen` is not used.
+
+### Building the Documentation
+
+The documentation uses [MkDocs](https://www.mkdocs.org) with the [Material theme](https://squidfunk.github.io/mkdocs-material/) to generate styled static HTML documentation from Markdown files in the `docs` directory.
+
+To build the documentation, and run a development server for live previewing:
+
+1) Create a Python virtual environment:
+    ```bash
+    python3 -m venv spock-docs-venv
+    ```
+
+2) Activate the virtual environment:
+    ```bash
+    source spock-docs-venv/bin/activate
+    ```
+
+3) Install MkDocs:
+    ```bash
+    pip install mkdocs mkdocs-material
+    ```
+
+4) Run the local MkDocs server for testing:
+    ```bash
+    mkdocs serve
+    INFO    -  Building documentation...
+    INFO    -  Multirepo plugin importing docs...
+    INFO    -  Cleaning site directory
+    INFO    -  Multirepo plugin is cleaning up temp_dir/
+    INFO    -  Documentation built in 0.18 seconds
+    INFO    -  [14:32:14] Watching paths for changes: 'docs', 'mkdocs.yml'
+    INFO    -  [14:32:14] Serving on http://127.0.0.1:8000/
+    ```
