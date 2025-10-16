@@ -4,13 +4,13 @@
 The Active Consistency Engine (ACE) is a tool designed to ensure eventual consistency between nodes in a pgEdge cluster.
 
 ## Table of Contents
-- [ACE Overview](docs/ace_overview.md)
+- [ACE Overview](docs/index.md)
 - [Understanding ACE Use Cases](docs/ace_use_cases.md)
 - [Building the ACE Extension](README.md#building)
 - [Basic Configuration](README.md#configuration)
 - [ACE Quickstart](README.md#quickstart)
 - [Advanced ACE Configuration](docs/configuring.md)
-- [Using ACE Merkle Trees](docs/merkle.md)
+- [Using Merkle Trees with ACE](docs/merkle.md)
 - [Using ACE Functions](docs/ace_functions.md)
 - [Using the ACE API](docs/ace_api.md)
 - [API Reference](docs/api.md)
