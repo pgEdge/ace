@@ -49,7 +49,7 @@ copyright: Copyright &copy; 2023 - 2025 pgEdge, Inc
 repo_url: https://github.com/pgEdge/ace
 
 nav:
-  - Introduction: index.md
+  - ACE Overview: index.md
   - Understanding ACE Use Cases: ace_use_cases.md
   - Configuring ACE: configuring.md
   - Using Merkle Trees with ACE: merkle.md
