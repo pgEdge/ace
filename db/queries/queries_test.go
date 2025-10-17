@@ -122,6 +122,13 @@ func TestSanitiseIdentifier(t *testing.T) {
 	}
 }
 
+func normalizeSQLWhitespace(s string) string {
+	s = strings.Join(strings.Fields(s), " ")
+	s = strings.ReplaceAll(s, "( ", "(")
+	s = strings.ReplaceAll(s, " )", ")")
+	return s
+}
+
 func TestGeneratePkeyOffsetsQuery(t *testing.T) {
 	tests := []struct {
 		name              string
@@ -231,8 +238,10 @@ func TestGeneratePkeyOffsetsQuery(t *testing.T) {
 				if query == "" {
 					t.Errorf("GeneratePkeyOffsetsQuery() returned an empty query string, expected a query")
 				}
+				normalizedQuery := normalizeSQLWhitespace(query)
 				for _, substr := range tt.wantQueryContains {
-					if !strings.Contains(query, substr) {
+					normalizedNeedle := normalizeSQLWhitespace(substr)
+					if !strings.Contains(normalizedQuery, normalizedNeedle) {
 						t.Errorf("GeneratePkeyOffsetsQuery() query = %q, want to contain %q", query, substr)
 					}
 				}
@@ -247,6 +256,8 @@ func TestBlockHashSQL(t *testing.T) {
 		schema            string
 		table             string
 		primaryKeyCols    []string
+		includeLower      bool
+		includeUpper      bool
 		wantQueryContains []string
 		wantErr           bool
 	}{
@@ -255,12 +266,13 @@ func TestBlockHashSQL(t *testing.T) {
 			schema:         "public",
 			table:          "events",
 			primaryKeyCols: []string{"event_id"},
+			includeLower:   true,
+			includeUpper:   true,
 			wantQueryContains: []string{
 				`FROM "public"."events" AS _tbl_`,
 				`ORDER BY "event_id"`,
-				`WHERE ($1::boolean OR "event_id" >= $2)`,
-				`AND ($3::boolean OR "event_id" < $4)`,
-				`digest(COALESCE(string_agg(_tbl_::text, '|' ORDER BY "event_id"), '[EMPTY_BLOCK]'), 'sha1')`,
+				`WHERE "event_id" >= $1 AND "event_id" < $2`,
+				`encode(digest(COALESCE(string_agg(_tbl_::text, '|' ORDER BY "event_id"), 'EMPTY_BLOCK'), 'sha256'), 'hex')`,
 			},
 			wantErr: false,
 		},
@@ -269,12 +281,13 @@ func TestBlockHashSQL(t *testing.T) {
 			schema:         "commerce",
 			table:          "line_items",
 			primaryKeyCols: []string{"order_id", "item_seq"},
+			includeLower:   true,
+			includeUpper:   true,
 			wantQueryContains: []string{
 				`FROM "commerce"."line_items" AS _tbl_`,
 				`ORDER BY "order_id", "item_seq"`,
-				`WHERE ($1::boolean OR ROW("order_id", "item_seq") >= ROW($2, $3))`,
-				`AND ($4::boolean OR ROW("order_id", "item_seq") < ROW($5, $6))`,
-				`digest(COALESCE(string_agg(_tbl_::text, '|' ORDER BY "order_id", "item_seq"), '[EMPTY_BLOCK]'), 'sha1')`,
+				`WHERE ROW("order_id", "item_seq") >= ROW($1, $2) AND ROW("order_id", "item_seq") < ROW($3, $4)`,
+				`encode(digest(COALESCE(string_agg(_tbl_::text, '|' ORDER BY "order_id", "item_seq"), 'EMPTY_BLOCK'), 'sha256'), 'hex')`,
 			},
 			wantErr: false,
 		},
@@ -310,7 +323,7 @@ func TestBlockHashSQL(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			query, err := BlockHashSQL(tt.schema, tt.table, tt.primaryKeyCols, "TD_BLOCK_HASH" /* mode */)
+			query, err := BlockHashSQL(tt.schema, tt.table, tt.primaryKeyCols, "TD_BLOCK_HASH" /* mode */, tt.includeLower, tt.includeUpper)
 
 			if (err != nil) != tt.wantErr {
 				t.Errorf("BlockHashSQL() error = %v, wantErr %v", err, tt.wantErr)

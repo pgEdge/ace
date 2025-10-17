@@ -536,7 +536,7 @@ func GetPkeyOffsets(ctx context.Context, db DBQuerier, schema, table string, key
 	return offsets, nil
 }
 
-func BlockHashSQL(schema, table string, primaryKeyCols []string, mode string) (string, error) {
+func BlockHashSQL(schema, table string, primaryKeyCols []string, mode string, includeLower, includeUpper bool) (string, error) {
 	if len(primaryKeyCols) == 0 {
 		return "", fmt.Errorf("primaryKeyCols cannot be empty")
 	}
@@ -573,28 +573,45 @@ func BlockHashSQL(schema, table string, primaryKeyCols []string, mode string) (s
 		pkComparisonExpression = fmt.Sprintf("ROW(%s)", strings.Join(quotedPKColIdents, ", "))
 	}
 
-	startPlaceholders := make([]string, len(primaryKeyCols))
-	for i := range primaryKeyCols {
-		startPlaceholders[i] = fmt.Sprintf("$%d", 2+i)
-	}
-	startValueExpression := ""
-	if len(primaryKeyCols) == 1 {
-		startValueExpression = startPlaceholders[0]
-	} else {
-		startValueExpression = fmt.Sprintf("ROW(%s)", strings.Join(startPlaceholders, ", "))
+	paramIndex := 1
+	whereParts := make([]string, 0, 2)
+
+	if includeLower {
+		startPlaceholders := make([]string, len(primaryKeyCols))
+		for i := range primaryKeyCols {
+			startPlaceholders[i] = fmt.Sprintf("$%d", paramIndex)
+			paramIndex++
+		}
+		var lowerExpr string
+		if len(primaryKeyCols) == 1 {
+			lowerExpr = fmt.Sprintf("%s >= %s", pkComparisonExpression, startPlaceholders[0])
+		} else {
+			lowerExpr = fmt.Sprintf("%s >= ROW(%s)", pkComparisonExpression, strings.Join(startPlaceholders, ", "))
+		}
+		whereParts = append(whereParts, lowerExpr)
 	}
 
-	skipMaxCheckPlaceholderIndex := 2 + len(primaryKeyCols)
-
-	endPlaceholders := make([]string, len(primaryKeyCols))
-	for i := range primaryKeyCols {
-		endPlaceholders[i] = fmt.Sprintf("$%d", skipMaxCheckPlaceholderIndex+1+i)
+	if includeUpper {
+		endPlaceholders := make([]string, len(primaryKeyCols))
+		for i := range primaryKeyCols {
+			endPlaceholders[i] = fmt.Sprintf("$%d", paramIndex)
+			paramIndex++
+		}
+		operator := "<="
+		if mode == "TD_BLOCK_HASH" {
+			operator = "<"
+		}
+		var upperExpr string
+		if len(primaryKeyCols) == 1 {
+			upperExpr = fmt.Sprintf("%s %s %s", pkComparisonExpression, operator, endPlaceholders[0])
+		} else {
+			upperExpr = fmt.Sprintf("%s %s ROW(%s)", pkComparisonExpression, operator, strings.Join(endPlaceholders, ", "))
+		}
+		whereParts = append(whereParts, upperExpr)
 	}
-	endValueExpression := ""
-	if len(primaryKeyCols) == 1 {
-		endValueExpression = endPlaceholders[0]
-	} else {
-		endValueExpression = fmt.Sprintf("ROW(%s)", strings.Join(endPlaceholders, ", "))
+
+	if len(whereParts) == 0 {
+		whereParts = append(whereParts, "TRUE")
 	}
 
 	var tmpl *template.Template
@@ -608,14 +625,11 @@ func BlockHashSQL(schema, table string, primaryKeyCols []string, mode string) (s
 	}
 
 	data := map[string]any{
-		"SchemaIdent":            schemaIdent,
-		"TableIdent":             tableIdent,
-		"TableAlias":             tableAlias,
-		"PkOrderByStr":           pkOrderByStr,
-		"PkComparisonExpression": pkComparisonExpression,
-		"StartValueExpression":   startValueExpression,
-		"SkipMaxIdx":             fmt.Sprintf("$%d", skipMaxCheckPlaceholderIndex),
-		"EndValueExpression":     endValueExpression,
+		"SchemaIdent":  schemaIdent,
+		"TableIdent":   tableIdent,
+		"TableAlias":   tableAlias,
+		"PkOrderByStr": pkOrderByStr,
+		"WhereClause":  strings.Join(whereParts, " AND "),
 	}
 	return RenderSQL(tmpl, data)
 }
@@ -1056,32 +1070,21 @@ func UpdateMetadata(ctx context.Context, db DBQuerier, schema, table string, tot
 	return nil
 }
 
-func ComputeLeafHashes(ctx context.Context, db DBQuerier, schema, table string, simpleKey bool, key []string, start []any, end []any) ([]byte, error) {
-	sql, err := BlockHashSQL(schema, table, key, "MTREE_LEAF_HASH")
+func ComputeLeafHashes(ctx context.Context, db DBQuerier, schema, table string, _ bool, key []string, start []any, end []any) ([]byte, error) {
+	hasLower := len(start) > 0 && !sliceAllNil(start)
+	hasUpper := len(end) > 0 && !sliceAllNil(end)
+
+	sql, err := BlockHashSQL(schema, table, key, "MTREE_LEAF_HASH", hasLower, hasUpper)
 	if err != nil {
 		return nil, err
 	}
 
-	args := make([]any, 0, 2+len(key)*2)
-
-	skipMin := len(start) == 0 || start[0] == nil
-	args = append(args, skipMin)
-	if len(start) > 0 {
+	args := make([]any, 0, len(key)*2)
+	if hasLower {
 		args = append(args, start...)
-	} else {
-		for i := 0; i < len(key); i++ {
-			args = append(args, nil)
-		}
 	}
-
-	skipMax := len(end) == 0 || end[0] == nil
-	args = append(args, skipMax)
-	if len(end) > 0 {
+	if hasUpper {
 		args = append(args, end...)
-	} else {
-		for i := 0; i < len(key); i++ {
-			args = append(args, nil)
-		}
 	}
 
 	var leafHash []byte
@@ -1089,6 +1092,18 @@ func ComputeLeafHashes(ctx context.Context, db DBQuerier, schema, table string, 
 		return nil, fmt.Errorf("query to compute leaf hashes for '%s.%s' failed: %w", schema, table, err)
 	}
 	return leafHash, nil
+}
+
+func sliceAllNil(vals []any) bool {
+	if len(vals) == 0 {
+		return true
+	}
+	for _, v := range vals {
+		if v != nil {
+			return false
+		}
+	}
+	return true
 }
 
 func UpdateLeafHashes(ctx context.Context, db DBQuerier, mtreeTable string, leafHash []byte, nodePosition int64) (int64, error) {

@@ -70,7 +70,8 @@ type TableDiffTask struct {
 
 	Pools map[string]*pgxpool.Pool
 
-	BlockHashSQL string
+	blockHashSQLCache map[hashBoundsKey]string
+	blockHashSQLMu    sync.Mutex
 
 	CompareUnitSize int
 
@@ -111,13 +112,41 @@ type HashResult struct {
 	err  error
 }
 
+type hashBoundsKey struct {
+	hasLower bool
+	hasUpper bool
+}
+
 type RangeResults map[string]HashResult
+
+func (t *TableDiffTask) getBlockHashSQL(hasLower, hasUpper bool) (string, error) {
+	key := hashBoundsKey{hasLower: hasLower, hasUpper: hasUpper}
+
+	t.blockHashSQLMu.Lock()
+	defer t.blockHashSQLMu.Unlock()
+
+	if t.blockHashSQLCache == nil {
+		t.blockHashSQLCache = make(map[hashBoundsKey]string)
+	}
+
+	if sql, ok := t.blockHashSQLCache[key]; ok {
+		return sql, nil
+	}
+
+	query, err := queries.BlockHashSQL(t.Schema, t.Table, t.Key, "TD_BLOCK_HASH" /* mode */, hasLower, hasUpper)
+	if err != nil {
+		return "", err
+	}
+	t.blockHashSQLCache[key] = query
+	return query, nil
+}
 
 func NewTableDiffTask() *TableDiffTask {
 	return &TableDiffTask{
-		Mode:         "diff",
-		InvokeMethod: "cli",
-		DiffSummary:  make(map[string]string),
+		Mode:              "diff",
+		InvokeMethod:      "cli",
+		DiffSummary:       make(map[string]string),
+		blockHashSQLCache: make(map[hashBoundsKey]string),
 		DerivedFields: types.DerivedFields{
 			HostMap: make(map[string]string),
 		},
@@ -738,11 +767,10 @@ func (t *TableDiffTask) ExecuteTask() error {
 	}
 	t.Pools = pools
 
-	blockHashSQL, err := queries.BlockHashSQL(t.Schema, t.Table, t.Key, "TD_BLOCK_HASH" /* mode */)
-	if err != nil {
+	var err error
+	if _, err = t.getBlockHashSQL(true, true); err != nil {
 		return fmt.Errorf("failed to build block-hash SQL: %w", err)
 	}
-	t.BlockHashSQL = blockHashSQL
 
 	var maxCount int64
 	var maxNode string
@@ -1056,55 +1084,37 @@ func (t *TableDiffTask) hashRange(
 	startTime := time.Now()
 	var hash string
 
-	skipMinCheck := r.Start == nil
-	skipMaxCheck := r.End == nil
-
 	numPKCols := len(t.Key)
-	sqlArgs := make([]any, 0, 2+2*numPKCols)
 
-	sqlArgs = append(sqlArgs, skipMinCheck)
-
-	if r.Start == nil {
-		for i := 0; i < numPKCols; i++ {
-			sqlArgs = append(sqlArgs, nil)
-		}
-	} else {
-		if numPKCols == 1 {
-			sqlArgs = append(sqlArgs, r.Start)
-		} else {
-			startVals, ok := r.Start.([]any)
-			if !ok || len(startVals) != numPKCols {
-				return "", fmt.Errorf("[%s] r.Start is not a valid composite key for hashing (expected %d values, got %T with value %v)", node, numPKCols, r.Start, r.Start)
-			}
-			sqlArgs = append(sqlArgs, startVals...)
-		}
+	startVals, hasLower, err := extractRangeBoundValues(r.Start, numPKCols)
+	if err != nil {
+		return "", err
+	}
+	endVals, hasUpper, err := extractRangeBoundValues(r.End, numPKCols)
+	if err != nil {
+		return "", err
 	}
 
-	sqlArgs = append(sqlArgs, skipMaxCheck)
-
-	if r.End == nil {
-		for i := 0; i < numPKCols; i++ {
-			sqlArgs = append(sqlArgs, nil)
-		}
-	} else {
-		if numPKCols == 1 {
-			sqlArgs = append(sqlArgs, r.End)
-		} else {
-			endVals, ok := r.End.([]any)
-			if !ok || len(endVals) != numPKCols {
-				return "", fmt.Errorf("[%s] r.End is not a valid composite key for hashing (expected %d values, got %T with value %v)", node, numPKCols, r.End, r.End)
-			}
-			sqlArgs = append(sqlArgs, endVals...)
-		}
+	query, err := t.getBlockHashSQL(hasLower, hasUpper)
+	if err != nil {
+		return "", fmt.Errorf("failed to build block-hash SQL: %w", err)
 	}
 
-	logger.Debug("[%s] Hashing range: Start=%v, End=%v. SQL: %s, Args: %v", node, r.Start, r.End, t.BlockHashSQL, sqlArgs)
+	args := make([]any, 0, len(startVals)+len(endVals))
+	if hasLower {
+		args = append(args, startVals...)
+	}
+	if hasUpper {
+		args = append(args, endVals...)
+	}
 
-	err := pool.QueryRow(ctx, t.BlockHashSQL, sqlArgs...).Scan(&hash)
+	logger.Debug("[%s] Hashing range: Start=%v, End=%v. SQL: %s, Args: %v", node, r.Start, r.End, query, args)
+
+	err = pool.QueryRow(ctx, query, args...).Scan(&hash)
 
 	if err != nil {
 		duration := time.Since(startTime)
-		logger.Info("[%s] ERROR after %v for range Start=%v, End=%v (using query: '%s', args: %v): %v", node, duration, r.Start, r.End, t.BlockHashSQL, sqlArgs, err)
+		logger.Info("[%s] ERROR after %v for range Start=%v, End=%v (using query: '%s', args: %v): %v", node, duration, r.Start, r.End, query, args, err)
 		return "", fmt.Errorf("BlockHash query failed for %s range %v-%v: %w", node, r.Start, r.End, err)
 	}
 
@@ -1115,6 +1125,48 @@ func (t *TableDiffTask) hashRange(
 		logger.Debug("[%s] Range Start=%v, End=%v took %v", node, r.Start, r.End, duration)
 	}
 	return hash, nil
+}
+
+func extractRangeBoundValues(bound any, numPKCols int) ([]any, bool, error) {
+	if bound == nil {
+		return nil, false, nil
+	}
+	if numPKCols == 1 {
+		return []any{bound}, true, nil
+	}
+
+	processSlice := func(vals []any) ([]any, bool, error) {
+		if len(vals) != numPKCols {
+			return nil, false, fmt.Errorf("range bound expected %d values, got %d", numPKCols, len(vals))
+		}
+		if rangeSliceAllNil(vals) {
+			return nil, false, nil
+		}
+		return vals, true, nil
+	}
+
+	if vals, ok := bound.([]any); ok {
+		return processSlice(vals)
+	}
+	if valsIface, ok := bound.([]interface{}); ok {
+		vals := make([]any, len(valsIface))
+		copy(vals, valsIface)
+		return processSlice(vals)
+	}
+
+	return nil, false, fmt.Errorf("unsupported range bound type %T", bound)
+}
+
+func rangeSliceAllNil(vals []any) bool {
+	if len(vals) == 0 {
+		return true
+	}
+	for _, v := range vals {
+		if v != nil {
+			return false
+		}
+	}
+	return true
 }
 
 func (t *TableDiffTask) generateSubRanges(

@@ -866,14 +866,12 @@ var SQLTemplates = Templates{
 	TDBlockHashSQL: template.Must(template.New("tdBlockHashSQL").Parse(`
         SELECT encode(digest(COALESCE(string_agg({{.TableAlias}}::text, '|' ORDER BY {{.PkOrderByStr}}), 'EMPTY_BLOCK'), 'sha256'), 'hex')
         FROM {{.SchemaIdent}}.{{.TableIdent}} AS {{.TableAlias}}
-        WHERE ($1::boolean OR {{.PkComparisonExpression}} >= {{.StartValueExpression}})
-        AND ({{.SkipMaxIdx}}::boolean OR {{.PkComparisonExpression}} < {{.EndValueExpression}})
+        WHERE {{.WhereClause}}
     `)),
 	MtreeLeafHashSQL: template.Must(template.New("mtreeLeafHashSQL").Parse(`
         SELECT digest(COALESCE(string_agg({{.TableAlias}}::text, '|' ORDER BY {{.PkOrderByStr}}), 'EMPTY_BLOCK'), 'sha256')
         FROM {{.SchemaIdent}}.{{.TableIdent}} AS {{.TableAlias}}
-        WHERE ($1::boolean OR {{.PkComparisonExpression}} >= {{.StartValueExpression}})
-        AND ({{.SkipMaxIdx}}::boolean OR {{.PkComparisonExpression}} <= {{.EndValueExpression}})
+        WHERE {{.WhereClause}}
     `)),
 	UpdateLeafHashes: template.Must(template.New("updateLeafHashes").Parse(`
 		UPDATE

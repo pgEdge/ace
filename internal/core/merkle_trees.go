@@ -1038,7 +1038,7 @@ func (m *MerkleTreeTask) BuildMtree() error {
 	cfg := config.Cfg.MTree.CDC
 	pools := make(map[string]*pgxpool.Pool, len(m.ClusterNodes))
 
-	numWorkers := int(float64(runtime.NumCPU()) * m.MaxCpuRatio)
+	numWorkers := int(math.Ceil(float64(runtime.NumCPU()) * m.MaxCpuRatio * 2))
 	if numWorkers < 1 {
 		numWorkers = 1
 	}
@@ -1211,7 +1211,7 @@ func (m *MerkleTreeTask) BuildMtree() error {
 		}
 
 		logger.Info("Computing leaf hashes on %s...", nodeInfo["Name"])
-		err = m.computeLeafHashes(pool, tx, blockRanges, numWorkers)
+		err = m.computeLeafHashes(pool, tx, blockRanges, numWorkers, "Computing leaf hashes:")
 		if err != nil {
 			pool.Close()
 			return fmt.Errorf("failed to compute leaf hashes on node %s: %w", nodeInfo["Name"], err)
@@ -1378,31 +1378,14 @@ func (m *MerkleTreeTask) UpdateMtree(skipAllChecks bool) error {
 		}
 
 		if len(affectedPositions) > 0 {
-			p := mpb.New(mpb.WithOutput(os.Stderr))
-			bar := p.AddBar(int64(len(blocksToUpdate)),
-				mpb.BarRemoveOnComplete(),
-				mpb.PrependDecorators(
-					decor.Name("Recomputing leaf hashes:"),
-					decor.CountersNoUnit(" %d / %d"),
-				),
-				mpb.AppendDecorators(
-					decor.Elapsed(decor.ET_STYLE_GO),
-					decor.Name(" | "),
-					decor.OnComplete(decor.AverageETA(decor.ET_STYLE_GO), "done"),
-				),
-			)
-
-			for _, block := range blocksToUpdate {
-				leafHash, err := queries.ComputeLeafHashes(m.Ctx, tx, m.Schema, m.Table, m.SimplePrimaryKey, m.Key, block.RangeStart, block.RangeEnd)
-				if err != nil {
-					return fmt.Errorf("failed to recompute hash for block %d: %w", block.NodePosition, err)
-				}
-				if _, err := queries.UpdateLeafHashes(m.Ctx, tx, mtreeTableName, leafHash, block.NodePosition); err != nil {
-					return fmt.Errorf("failed to update leaf hash for block %d: %w", block.NodePosition, err)
-				}
-				bar.Increment()
+			numWorkers := int(math.Ceil(float64(runtime.NumCPU()) * m.MaxCpuRatio * 2))
+			if numWorkers < 1 {
+				numWorkers = 1
 			}
-			p.Wait()
+
+			if err := m.computeLeafHashes(pool, tx, blocksToUpdate, numWorkers, "Recomputing leaf hashes:"); err != nil {
+				return fmt.Errorf("failed to recompute leaf hashes: %w", err)
+			}
 
 			fmt.Println("Rebuilding parent nodes")
 			if err := m.buildParentNodes(tx); err != nil {
@@ -2109,7 +2092,7 @@ type LeafHashResult struct {
 	Err     error
 }
 
-func (m *MerkleTreeTask) computeLeafHashes(pool *pgxpool.Pool, tx pgx.Tx, ranges []types.BlockRange, numWorkers int) error {
+func (m *MerkleTreeTask) computeLeafHashes(pool *pgxpool.Pool, tx pgx.Tx, ranges []types.BlockRange, numWorkers int, barMessage string) error {
 	mtreeTableIdentifier := pgx.Identifier{aceSchema(), fmt.Sprintf("ace_mtree_%s_%s", m.Schema, m.Table)}
 	mtreeTableName := mtreeTableIdentifier.Sanitize()
 
@@ -2120,7 +2103,7 @@ func (m *MerkleTreeTask) computeLeafHashes(pool *pgxpool.Pool, tx pgx.Tx, ranges
 	bar := p.AddBar(int64(len(ranges)),
 		mpb.BarRemoveOnComplete(),
 		mpb.PrependDecorators(
-			decor.Name("Computing leaf hashes:", decor.WC{W: 25}),
+			decor.Name(barMessage, decor.WC{W: 25}),
 			decor.CountersNoUnit("%d / %d", decor.WCSyncWidth),
 		),
 		mpb.AppendDecorators(
