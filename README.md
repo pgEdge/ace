@@ -1,10 +1,21 @@
 # Active Consistency Engine (ACE)
 [![Go Integration Tests](https://github.com/pgEdge/ace/actions/workflows/test.yml/badge.svg?branch=main)](https://github.com/pgEdge/ace/actions/workflows/test.yml)
 
-The Active Consistency Engine (ACE) is a tool designed to ensure eventual consistency between nodes in a pgEdge cluster. For more information, please refer to the official [pgEdge docs on ACE](https://docs.pgedge.com/platform/ace).
+The Active Consistency Engine (ACE) is a tool designed to ensure eventual consistency between nodes in a pgEdge cluster.
 
-
-
+## Table of Contents
+- [ACE Overview](docs/index.md)
+- [Understanding ACE Use Cases](docs/ace_use_cases.md)
+- [Building the ACE Extension](README.md#building)
+- [Basic Configuration](README.md#configuration)
+- [ACE Quickstart](README.md#quickstart)
+- [Advanced ACE Configuration](docs/configuring.md)
+- [Using Merkle Trees with ACE](docs/merkle.md)
+- [Using ACE Functions](docs/ace_functions.md)
+- [Using the ACE API](docs/ace_api.md)
+- [API Reference](docs/api.md)
+- [Scheduling ACE](docs/schedule_ace.md)
+- [Building the ACE Documentation](README.md#building-the-documentation)
 
 ## Building
 
@@ -24,7 +35,12 @@ To build ACE, you need to have Go (version 1.18 or higher) installed.
 
 ## Configuration
 
-ACE requires a cluster configuration file to connect to the database nodes. Please refer to the [pgEdge docs](https://docs.pgedge.com/platform/installing_pgedge/json) on how to create this file.
+ACE requires a cluster configuration file to connect to the database nodes. [Create and update a .json file](https://docs.pgedge.com/platform/installing_pgedge/json) that describes the cluster you will be managing with ACE, and place the file in `cluster/cluster_name/cluster_name.json` on the ACE host.  For example, if your cluster name is `us_eu_backend`, the cluster definition file for this should be placed in `/pgedge/cluster/us_eu_backend/us_eu_backend.json`.  The .json file must: 
+
+    * Contain connection information for each node in the cluster.
+    * Identify the user that will be invoking ACE commands in the `db_user` property; this user must also be the table owner.
+
+After ensuring that the .json file describes your cluster connections and identifies the ACE user, you're ready to use [ACE functions](ace_functions.md).
 
 ## Quickstart
 
@@ -121,3 +137,36 @@ If differences are found, you can repair them using the `table-repair` command, 
 ```
 
 The Merkle trees can be kept up-to-date automatically by running the `mtree listen` command, which uses Change Data Capture (CDC) with the `pgoutput` output plugin to track row changes. Performing the `mtree table-diff` will update the Merkle tree even if `mtree listen` is not used.
+
+### Building the Documentation
+
+The documentation uses [MkDocs](https://www.mkdocs.org) with the [Material theme](https://squidfunk.github.io/mkdocs-material/) to generate styled static HTML documentation from Markdown files in the `docs` directory.
+
+To build the documentation, and run a development server for live previewing:
+
+1) Create a Python virtual environment:
+    ```bash
+    python3 -m venv spock-docs-venv
+    ```
+
+2) Activate the virtual environment:
+    ```bash
+    source spock-docs-venv/bin/activate
+    ```
+
+3) Install MkDocs:
+    ```bash
+    pip install mkdocs mkdocs-material
+    ```
+
+4) Run the local MkDocs server for testing:
+    ```bash
+    mkdocs serve
+    INFO    -  Building documentation...
+    INFO    -  Multirepo plugin importing docs...
+    INFO    -  Cleaning site directory
+    INFO    -  Multirepo plugin is cleaning up temp_dir/
+    INFO    -  Documentation built in 0.18 seconds
+    INFO    -  [14:32:14] Watching paths for changes: 'docs', 'mkdocs.yml'
+    INFO    -  [14:32:14] Serving on http://127.0.0.1:8000/
+    ```
