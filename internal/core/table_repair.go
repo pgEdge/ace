@@ -67,6 +67,8 @@ type TableRepairTask struct {
 
 	RawDiffs types.DiffOutput
 	report   *RepairReport
+
+	Ctx context.Context
 }
 
 // Defining these getters and setters to satisfy ClusterConfigProvider interface
@@ -87,6 +89,7 @@ func NewTableRepairTask() *TableRepairTask {
 		DerivedFields: types.DerivedFields{
 			HostMap: make(map[string]string),
 		},
+		Ctx: context.Background(),
 	}
 }
 
@@ -250,7 +253,7 @@ func (t *TableRepairTask) ValidateAndPrepare() error {
 	for _, nodeInfo := range t.ClusterNodes {
 		nodeName, _ := nodeInfo["Name"].(string)
 		if nodeName == t.SourceOfTruth || involvedNodeNames[nodeName] {
-			connPool, err := auth.GetClusterNodeConnection(nodeInfo, t.ClientRole)
+			connPool, err := auth.GetClusterNodeConnection(t.Ctx, nodeInfo, t.ClientRole)
 			if err != nil {
 				logger.Warn("Failed to connect to node %s: %v. Will attempt to proceed if it's not critical or SoT.", nodeName, err)
 				if nodeName == t.SourceOfTruth {
@@ -260,13 +263,13 @@ func (t *TableRepairTask) ValidateAndPrepare() error {
 			}
 			t.Pools[nodeName] = connPool
 
-			cols, err := queries.GetColumns(context.Background(), connPool, t.Schema, t.Table)
+			cols, err := queries.GetColumns(t.Ctx, connPool, t.Schema, t.Table)
 			if err != nil {
 				return fmt.Errorf("failed to get columns for %s.%s on node %s: %w", t.Schema, t.Table, nodeName, err)
 			}
 			t.Cols = cols
 
-			pKey, err := queries.GetPrimaryKey(context.Background(), connPool, t.Schema, t.Table)
+			pKey, err := queries.GetPrimaryKey(t.Ctx, connPool, t.Schema, t.Table)
 			if err != nil {
 				return fmt.Errorf("failed to get primary key for %s.%s on node %s: %w", t.Schema, t.Table, nodeName, err)
 			}
@@ -278,7 +281,7 @@ func (t *TableRepairTask) ValidateAndPrepare() error {
 
 			publicIP, _ := nodeInfo["PublicIP"].(string)
 			port, _ := nodeInfo["Port"].(string)
-			colTypes, err := queries.GetColumnTypes(context.Background(), connPool, t.Schema, t.Table)
+			colTypes, err := queries.GetColumnTypes(t.Ctx, connPool, t.Schema, t.Table)
 			if err != nil {
 				return fmt.Errorf("failed to get column types for %s on node %s: %w", t.Table, nodeName, err)
 			}
@@ -291,7 +294,7 @@ func (t *TableRepairTask) ValidateAndPrepare() error {
 			if dbUser == "" {
 				dbUser = t.Database.DBUser
 			}
-			privs, err := queries.CheckUserPrivileges(context.Background(), connPool, dbUser, t.Schema, t.Table)
+			privs, err := queries.CheckUserPrivileges(t.Ctx, connPool, dbUser, t.Schema, t.Table)
 			if err != nil {
 				return fmt.Errorf("failed to check user privileges on node %s: %w", nodeName, err)
 			}
@@ -491,7 +494,7 @@ func (t *TableRepairTask) runUnidirectionalRepair(startTime time.Time) error {
 			}
 
 			var err error
-			divergentPool, err = auth.GetClusterNodeConnection(nodeInfo, t.ClientRole)
+			divergentPool, err = auth.GetClusterNodeConnection(t.Ctx, nodeInfo, t.ClientRole)
 			if err != nil {
 				logger.Error("Failed to connect to node %s: %v. Skipping repairs for this node.", nodeName, err)
 				repairErrors = append(repairErrors, fmt.Sprintf("connection failed for %s: %v", nodeName, err))
@@ -501,7 +504,7 @@ func (t *TableRepairTask) runUnidirectionalRepair(startTime time.Time) error {
 			logger.Debug("Successfully connected to node %s and created a new connection pool.", nodeName)
 		}
 
-		tx, err := divergentPool.Begin(context.Background())
+		tx, err := divergentPool.Begin(t.Ctx)
 		if err != nil {
 			logger.Error("starting transaction on node %s: %v", nodeName, err)
 			repairErrors = append(repairErrors, fmt.Sprintf("tx begin failed for %s: %v", nodeName, err))
@@ -511,7 +514,7 @@ func (t *TableRepairTask) runUnidirectionalRepair(startTime time.Time) error {
 		var spockRepairModeActive bool = false
 		_, err = tx.Exec(context.Background(), "SELECT spock.repair_mode(true)")
 		if err != nil {
-			tx.Rollback(context.Background())
+			tx.Rollback(t.Ctx)
 			logger.Error("enabling spock.repair_mode(true) on %s: %v", nodeName, err)
 			repairErrors = append(repairErrors, fmt.Sprintf("spock.repair_mode(true) failed for %s: %v", nodeName, err))
 			continue
@@ -525,7 +528,7 @@ func (t *TableRepairTask) runUnidirectionalRepair(startTime time.Time) error {
 			_, err = tx.Exec(context.Background(), "SET session_replication_role = 'replica'")
 		}
 		if err != nil {
-			tx.Rollback(context.Background())
+			tx.Rollback(t.Ctx)
 			logger.Error("setting session_replication_role on %s: %v", nodeName, err)
 			repairErrors = append(repairErrors, fmt.Sprintf("session_replication_role failed for %s: %v", nodeName, err))
 			continue
@@ -538,9 +541,9 @@ func (t *TableRepairTask) runUnidirectionalRepair(startTime time.Time) error {
 		if !t.UpsertOnly && !t.InsertOnly {
 			nodeDeletes := fullDeletes[nodeName]
 			if len(nodeDeletes) > 0 {
-				deletedCount, err := executeDeletes(tx, t, nodeDeletes)
+				deletedCount, err := executeDeletes(t.Ctx, tx, t, nodeDeletes)
 				if err != nil {
-					tx.Rollback(context.Background())
+					tx.Rollback(t.Ctx)
 					logger.Error("executing deletes on node %s: %v", nodeName, err)
 					repairErrors = append(repairErrors, fmt.Sprintf("delete ops failed for %s: %v", nodeName, err))
 					continue
@@ -572,7 +575,7 @@ func (t *TableRepairTask) runUnidirectionalRepair(startTime time.Time) error {
 				}
 			}
 			if targetNodeHostPortKey == "" {
-				tx.Rollback(context.Background())
+				tx.Rollback(t.Ctx)
 				errStr := fmt.Sprintf("could not find host:port key for target node %s to get col types", nodeName)
 				logger.Error("%s", errStr)
 				repairErrors = append(repairErrors, errStr)
@@ -580,7 +583,7 @@ func (t *TableRepairTask) runUnidirectionalRepair(startTime time.Time) error {
 			}
 			targetNodeColTypes, ok := t.ColTypes[targetNodeHostPortKey]
 			if !ok {
-				tx.Rollback(context.Background())
+				tx.Rollback(t.Ctx)
 				errStr := fmt.Sprintf("column types for target node '%s' (key: %s) not found for upserts", nodeName, targetNodeHostPortKey)
 				logger.Error("%s", errStr)
 				repairErrors = append(repairErrors, errStr)
@@ -589,7 +592,7 @@ func (t *TableRepairTask) runUnidirectionalRepair(startTime time.Time) error {
 
 			upsertedCount, err := executeUpserts(tx, t, nodeUpserts, targetNodeColTypes)
 			if err != nil {
-				tx.Rollback(context.Background())
+				tx.Rollback(t.Ctx)
 				logger.Error("executing upserts on node %s: %v", nodeName, err)
 				repairErrors = append(repairErrors, fmt.Sprintf("upsert ops failed for %s: %v", nodeName, err))
 				continue
@@ -618,7 +621,7 @@ func (t *TableRepairTask) runUnidirectionalRepair(startTime time.Time) error {
 			// with pgx transactions and connection pooling.
 			_, err = tx.Exec(context.Background(), "SELECT spock.repair_mode(false)")
 			if err != nil {
-				tx.Rollback(context.Background())
+				tx.Rollback(t.Ctx)
 				logger.Error("disabling spock.repair_mode(false) on %s: %v", nodeName, err)
 				repairErrors = append(repairErrors, fmt.Sprintf("spock.repair_mode(false) failed for %s: %v", nodeName, err))
 				continue
@@ -626,7 +629,7 @@ func (t *TableRepairTask) runUnidirectionalRepair(startTime time.Time) error {
 			logger.Debug("spock.repair_mode(false) set on %s", nodeName)
 		}
 
-		err = tx.Commit(context.Background())
+		err = tx.Commit(t.Ctx)
 		if err != nil {
 			logger.Error("committing transaction on node %s: %v", nodeName, err)
 			repairErrors = append(repairErrors, fmt.Sprintf("commit failed for %s: %v", nodeName, err))
@@ -848,22 +851,22 @@ func (t *TableRepairTask) performBirectionalInserts(nodeName string, inserts map
 		return 0, fmt.Errorf("no connection pool for node %s", nodeName)
 	}
 
-	tx, err := pool.Begin(context.Background())
+	tx, err := pool.Begin(t.Ctx)
 	if err != nil {
 		return 0, fmt.Errorf("failed to begin transaction on %s: %w", nodeName, err)
 	}
-	defer tx.Rollback(context.Background())
+	defer tx.Rollback(t.Ctx)
 
-	_, err = tx.Exec(context.Background(), "SELECT spock.repair_mode(true)")
+	_, err = tx.Exec(t.Ctx, "SELECT spock.repair_mode(true)")
 	if err != nil {
 		return 0, fmt.Errorf("failed to enable spock.repair_mode(true) on %s: %w", nodeName, err)
 	}
 	logger.Info("spock.repair_mode(true) set on %s", nodeName)
 
 	if t.FireTriggers {
-		_, err = tx.Exec(context.Background(), "SET session_replication_role = 'local'")
+		_, err = tx.Exec(t.Ctx, "SET session_replication_role = 'local'")
 	} else {
-		_, err = tx.Exec(context.Background(), "SET session_replication_role = 'replica'")
+		_, err = tx.Exec(t.Ctx, "SET session_replication_role = 'replica'")
 	}
 	if err != nil {
 		return 0, fmt.Errorf("failed to set session_replication_role on %s: %w", nodeName, err)
@@ -896,13 +899,13 @@ func (t *TableRepairTask) performBirectionalInserts(nodeName string, inserts map
 	}
 	logger.Info("Executed %d insert operations on %s", insertedCount, nodeName)
 
-	_, err = tx.Exec(context.Background(), "SELECT spock.repair_mode(false)")
+	_, err = tx.Exec(t.Ctx, "SELECT spock.repair_mode(false)")
 	if err != nil {
 		return 0, fmt.Errorf("failed to disable spock.repair_mode(false) on %s: %w", nodeName, err)
 	}
 	logger.Info("spock.repair_mode(false) set on %s", nodeName)
 
-	if err := tx.Commit(context.Background()); err != nil {
+	if err := tx.Commit(t.Ctx); err != nil {
 		return 0, fmt.Errorf("failed to commit transaction on %s: %w", nodeName, err)
 	}
 	logger.Info("Transaction committed successfully on %s", nodeName)
@@ -911,7 +914,7 @@ func (t *TableRepairTask) performBirectionalInserts(nodeName string, inserts map
 }
 
 // executeDeletes handles deleting rows in batches.
-func executeDeletes(tx pgx.Tx, task *TableRepairTask, deletes map[string]map[string]any) (int, error) {
+func executeDeletes(ctx context.Context, tx pgx.Tx, task *TableRepairTask, deletes map[string]map[string]any) (int, error) {
 	keysToDelete := make([]any, 0, len(deletes))
 
 	for pkeyString := range deletes {
@@ -1002,7 +1005,7 @@ func executeDeletes(tx pgx.Tx, task *TableRepairTask, deletes map[string]map[str
 			deleteSQL.WriteString(")")
 		}
 
-		cmdTag, err := tx.Exec(context.Background(), deleteSQL.String(), args...)
+		cmdTag, err := tx.Exec(ctx, deleteSQL.String(), args...)
 		if err != nil {
 			return totalDeletedCount, fmt.Errorf("error executing delete batch: %w (SQL: %s, Args: %v)", err, deleteSQL.String(), args)
 		}

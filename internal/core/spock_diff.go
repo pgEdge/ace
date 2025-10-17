@@ -50,6 +50,8 @@ type SpockDiffTask struct {
 
 	DiffResult   *types.SpockDiffOutput
 	SkipDBUpdate bool
+
+	Ctx context.Context
 }
 
 // Implement ClusterConfigProvider interface for SpockDiffTask
@@ -165,7 +167,7 @@ func (t *SpockDiffTask) RunChecks(skipValidation bool) error {
 			continue
 		}
 
-		conn, err := auth.GetClusterNodeConnection(nodeInfo, t.ClientRole)
+		conn, err := auth.GetClusterNodeConnection(t.Ctx, nodeInfo, t.ClientRole)
 		if err != nil {
 			return fmt.Errorf("failed to connect to node %s: %w", hostname, err)
 		}
@@ -182,12 +184,10 @@ func (t *SpockDiffTask) RunChecks(skipValidation bool) error {
 func (t *SpockDiffTask) ExecuteTask() error {
 	startTime := time.Now()
 
-	ctx := context.Background()
-
 	pools := make(map[string]*pgxpool.Pool)
 	for _, nodeInfo := range t.ClusterNodes {
 		name := nodeInfo["Name"].(string)
-		pool, err := auth.GetClusterNodeConnection(nodeInfo, t.ClientRole)
+		pool, err := auth.GetClusterNodeConnection(t.Ctx, nodeInfo, t.ClientRole)
 		if err != nil {
 			return fmt.Errorf("failed to connect to node %s: %w", name, err)
 		}
@@ -211,7 +211,7 @@ func (t *SpockDiffTask) ExecuteTask() error {
 		logger.Debug("Fetching Spock config for node: %s", nodeName)
 
 		// Fetch node and subscription info
-		nodeInfos, err := queries.GetSpockNodeAndSubInfo(ctx, pool)
+		nodeInfos, err := queries.GetSpockNodeAndSubInfo(t.Ctx, pool)
 		if err != nil {
 			return fmt.Errorf("querying spock.node and spock.subscription on node %s failed: %w", nodeName, err)
 		}
@@ -238,7 +238,7 @@ func (t *SpockDiffTask) ExecuteTask() error {
 		}
 
 		// Fetch replication set info
-		repRows, err := queries.GetSpockRepSetInfo(ctx, pool)
+		repRows, err := queries.GetSpockRepSetInfo(t.Ctx, pool)
 		if err != nil {
 			return fmt.Errorf("querying spock.tables on node %s failed: %w", nodeName, err)
 		}

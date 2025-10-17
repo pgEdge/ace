@@ -45,12 +45,12 @@ func ListenForChanges(ctx context.Context, nodeInfo map[string]any) {
 	processReplicationStream(ctx, nodeInfo, true)
 }
 
-func UpdateFromCDC(nodeInfo map[string]any) {
-	processReplicationStream(context.Background(), nodeInfo, false)
+func UpdateFromCDC(nodeInfo map[string]any) error {
+	return processReplicationStream(context.Background(), nodeInfo, false)
 }
 
-func processReplicationStream(ctx context.Context, nodeInfo map[string]any, continuous bool) {
-	pool, err := auth.GetClusterNodeConnection(nodeInfo, "")
+func processReplicationStream(ctx context.Context, nodeInfo map[string]any, continuous bool) error {
+	pool, err := auth.GetClusterNodeConnection(ctx, nodeInfo, "")
 	if err != nil {
 		logger.Error("failed to get connection pool: %v", err)
 	}
@@ -60,13 +60,13 @@ func processReplicationStream(ctx context.Context, nodeInfo map[string]any, cont
 	slotName := cfg.SlotName
 	var startLSNStr string
 	func() {
-		tx, err := pool.Begin(context.Background())
+		tx, err := pool.Begin(ctx)
 		if err != nil {
 			logger.Error("failed to begin transaction: %v", err)
 			return
 		}
-		defer tx.Rollback(context.Background())
-		_, startLSNStr, _, err = queries.GetCDCMetadata(context.Background(), tx, publication)
+		defer tx.Rollback(ctx)
+		_, startLSNStr, _, err = queries.GetCDCMetadata(ctx, tx, publication)
 		if err != nil {
 			logger.Error("failed to get cdc metadata: %v", err)
 			startLSNStr = ""
@@ -75,12 +75,13 @@ func processReplicationStream(ctx context.Context, nodeInfo map[string]any, cont
 
 	if startLSNStr == "" {
 		logger.Error("Could not retrieve LSN. Aborting CDC processing for this node.")
-		return
+		return fmt.Errorf("Could not retrieve LSN. Aborting CDC processing for this node.")
 	}
 
 	startLSN, err := pglogrepl.ParseLSN(startLSNStr)
 	if err != nil {
 		logger.Error("failed to parse lsn: %v", err)
+		return fmt.Errorf("failed to parse lsn: %v", err)
 	}
 
 	var lastLSN pglogrepl.LSN = startLSN
@@ -123,9 +124,9 @@ func processReplicationStream(ctx context.Context, nodeInfo map[string]any, cont
 		if err := ctx.Err(); err != nil {
 			logger.Info("CDC listener stopping due to context error: %v", err)
 			if conn != nil {
-				conn.Close(context.Background())
+				conn.Close(ctx)
 			}
-			return
+			return nil
 		}
 		if conn == nil {
 			logger.Info("No connection, trying to reconnect...")
@@ -133,7 +134,7 @@ func processReplicationStream(ctx context.Context, nodeInfo map[string]any, cont
 			if err != nil {
 				logger.Error("reconnect failed: %v", err)
 				if !continuous {
-					return
+					return err
 				}
 				time.Sleep(5 * time.Second)
 			}
@@ -141,7 +142,7 @@ func processReplicationStream(ctx context.Context, nodeInfo map[string]any, cont
 
 			if !continuous {
 				if conn == nil {
-					return
+					return nil
 				}
 			}
 			continue
@@ -149,7 +150,7 @@ func processReplicationStream(ctx context.Context, nodeInfo map[string]any, cont
 
 		if time.Now().After(nextStandbyMessageDeadline) {
 			if err := pglogrepl.SendStandbyStatusUpdate(ctx, conn, pglogrepl.StandbyStatusUpdate{WALWritePosition: lastLSN}); err != nil {
-				conn.Close(context.Background())
+				conn.Close(ctx)
 				conn = nil
 				logger.Error("SendStandbyStatusUpdate failed: %v", err)
 				continue
@@ -180,12 +181,12 @@ func processReplicationStream(ctx context.Context, nodeInfo map[string]any, cont
 					if err := pglogrepl.SendStandbyStatusUpdate(ctx, conn, pglogrepl.StandbyStatusUpdate{WALWritePosition: lastLSN}); err != nil {
 						logger.Error("failed to send final standby status update: %v", err)
 					}
-					conn.Close(context.Background())
-					return
+					conn.Close(ctx)
+					return nil
 				}
 				continue
 			}
-			conn.Close(context.Background())
+			conn.Close(ctx)
 			conn = nil
 			logger.Error("ReceiveMessage failed: %v", err)
 			continue
@@ -204,7 +205,7 @@ func processReplicationStream(ctx context.Context, nodeInfo map[string]any, cont
 
 				if pkm.ReplyRequested {
 					if err := pglogrepl.SendStandbyStatusUpdate(ctx, conn, pglogrepl.StandbyStatusUpdate{WALWritePosition: lastLSN}); err != nil {
-						conn.Close(context.Background())
+						conn.Close(ctx)
 						conn = nil
 						logger.Error("SendStandbyStatusUpdate failed on keepalive: %v", err)
 					} else {

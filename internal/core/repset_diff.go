@@ -48,6 +48,7 @@ type RepsetDiffCmd struct {
 	Output            string
 	TableFilter       string
 	OverrideBlockSize bool
+	Ctx               context.Context
 }
 
 func (c *RepsetDiffCmd) GetClusterName() string              { return c.ClusterName }
@@ -115,13 +116,13 @@ func (c *RepsetDiffCmd) RunChecks(skipValidation bool) error {
 		}
 	}
 
-	pool, err := auth.GetClusterNodeConnection(nodeWithDBInfo, "")
+	pool, err := auth.GetClusterNodeConnection(c.Ctx, nodeWithDBInfo, "")
 	if err != nil {
 		return fmt.Errorf("could not connect to database: %w", err)
 	}
 	defer pool.Close()
 
-	repsetExists, err := queries.CheckRepSetExists(context.Background(), pool, c.RepsetName)
+	repsetExists, err := queries.CheckRepSetExists(c.Ctx, pool, c.RepsetName)
 	if err != nil {
 		return fmt.Errorf("could not check if repset exists: %w", err)
 	}
@@ -129,7 +130,7 @@ func (c *RepsetDiffCmd) RunChecks(skipValidation bool) error {
 		return fmt.Errorf("repset %s not found", c.RepsetName)
 	}
 
-	tables, err := queries.GetTablesInRepSet(context.Background(), pool, c.RepsetName)
+	tables, err := queries.GetTablesInRepSet(c.Ctx, pool, c.RepsetName)
 	if err != nil {
 		return fmt.Errorf("could not get tables in repset: %w", err)
 	}
@@ -189,6 +190,7 @@ func RepsetDiff(task *RepsetDiffCmd) error {
 		tdTask.TableFilter = task.TableFilter
 		tdTask.OverrideBlockSize = task.OverrideBlockSize
 		tdTask.QuietMode = task.Quiet
+		tdTask.Ctx = task.Ctx
 
 		if err := tdTask.Validate(); err != nil {
 			logger.Warn("validation for table %s failed: %v", tableName, err)

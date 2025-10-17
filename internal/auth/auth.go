@@ -14,78 +14,95 @@ package auth
 import (
 	"context"
 	"fmt"
-	"time"
+	"strings"
 
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-func getConnStr(nodeInfo map[string]any) string {
-	user, _ := nodeInfo["DBUser"].(string)
-	password, _ := nodeInfo["DBPassword"].(string)
+func toConnectionString(node map[string]any, dbName string) string {
+	var parts []string
 	var host string
-	if h, ok := nodeInfo["Host"].(string); ok && h != "" {
-		host = h
-	} else if h, ok := nodeInfo["PublicIP"].(string); ok && h != "" {
-		host = h
+	if h, ok := node["Host"].(string); ok && strings.TrimSpace(h) != "" {
+		host = strings.TrimSpace(h)
+	} else if h, ok := node["PublicIP"].(string); ok && strings.TrimSpace(h) != "" {
+		host = strings.TrimSpace(h)
+	} else if h, ok := node["PrivateIP"].(string); ok && strings.TrimSpace(h) != "" {
+		host = strings.TrimSpace(h)
 	}
-	database, _ := nodeInfo["DBName"].(string)
-
-	var port string
-	if p, ok := nodeInfo["Port"].(string); ok {
-		port = p
-	} else if p, ok := nodeInfo["Port"].(float64); ok {
-		port = fmt.Sprintf("%.0f", p)
+	if host != "" {
+		parts = append(parts, "host="+host)
+	}
+	switch v := node["Port"].(type) {
+	case float64:
+		if v != 0 {
+			parts = append(parts, fmt.Sprintf("port=%d", int(v)))
+		}
+	case int:
+		if v != 0 {
+			parts = append(parts, fmt.Sprintf("port=%d", v))
+		}
+	case string:
+		if strings.TrimSpace(v) != "" {
+			parts = append(parts, "port="+strings.TrimSpace(v))
+		}
+	}
+	if user, ok := node["DBUser"].(string); ok && user != "" {
+		parts = append(parts, "user="+user)
+	}
+	if password, ok := node["DBPassword"].(string); ok && password != "" {
+		parts = append(parts, "password="+password)
+	}
+	dbToUse := dbName
+	if dbToUse == "" {
+		if db, ok := node["DBName"].(string); ok && db != "" {
+			dbToUse = db
+		}
+	}
+	if dbToUse != "" {
+		parts = append(parts, "dbname="+dbToUse)
 	}
 
-	if port == "" {
-		port = "5432"
-	}
-
-	return fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=disable", user, password, host, port, database)
+	parts = append(parts, "sslmode=disable")
+	return strings.Join(parts, " ")
 }
-func GetClusterNodeConnection(nodeInfo map[string]any, clientRole string) (*pgxpool.Pool, error) {
-	connStr := getConnStr(nodeInfo)
 
-	pool, err := SetupDBPool(context.Background(), connStr, nodeInfo["Name"].(string))
+func GetClusterNodeConnection(ctx context.Context, node map[string]any, dbName string) (*pgxpool.Pool, error) {
+	connStr := toConnectionString(node, dbName)
+	config, err := pgxpool.ParseConfig(connStr)
 	if err != nil {
 		return nil, err
 	}
+	pool, err := pgxpool.NewWithConfig(ctx, config)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create connection pool: %w", err)
+	}
+	return pool, nil
+}
 
+func GetSizedClusterNodeConnection(node map[string]any, dbName string, poolSize int) (*pgxpool.Pool, error) {
+	connStr := toConnectionString(node, dbName)
+	config, err := pgxpool.ParseConfig(connStr)
+	if err != nil {
+		return nil, err
+	}
+	if poolSize > 0 {
+		config.MaxConns = int32(poolSize)
+	}
+	pool, err := pgxpool.NewWithConfig(context.Background(), config)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create connection pool: %w", err)
+	}
 	return pool, nil
 }
 
 func GetReplModeConnection(nodeInfo map[string]any) (*pgconn.PgConn, error) {
-	connStr := getConnStr(nodeInfo)
-	connStr = connStr + "&replication=database"
+	connStr := toConnectionString(nodeInfo, "")
+	connStr = connStr + " replication=database"
 
 	conn, err := pgconn.Connect(context.Background(), connStr)
 	if err != nil {
 		return nil, err
 	}
 	return conn, nil
-}
-
-func SetupDBPool(ctx context.Context, connStr, name string) (*pgxpool.Pool, error) {
-	config, err := pgxpool.ParseConfig(connStr)
-	if err != nil {
-		return nil, fmt.Errorf("failed to parse config: %w", err)
-	}
-
-	config.MaxConns = 10
-	config.MinConns = 2
-	config.MaxConnLifetime = time.Minute * 5
-	config.MaxConnIdleTime = time.Minute * 2
-
-	pool, err := pgxpool.NewWithConfig(ctx, config)
-	if err != nil {
-		return nil, fmt.Errorf("failed to connect: %w", err)
-	}
-
-	if err := pool.Ping(ctx); err != nil {
-		pool.Close()
-		return nil, fmt.Errorf("failed to ping: %w", err)
-	}
-
-	return pool, nil
 }

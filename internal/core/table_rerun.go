@@ -67,7 +67,7 @@ func (t *TableDiffTask) ExecuteRerunTask() error {
 		if !utils.Contains(t.NodeList, name) {
 			continue
 		}
-		pool, err := auth.GetClusterNodeConnection(nodeInfo, t.ClientRole)
+		pool, err := auth.GetClusterNodeConnection(t.Ctx, nodeInfo, t.ClientRole)
 		if err != nil {
 			for _, p := range pools {
 				p.Close()
@@ -113,7 +113,7 @@ func (t *TableDiffTask) ExecuteRerunTask() error {
 		go func(n string) {
 			defer wg.Done()
 			pool := t.Pools[n]
-			rows, fErr := fetchRowsByPkeys(context.Background(), pool, t, pkeyValues)
+			rows, fErr := fetchRowsByPkeys(t.Ctx, pool, t, pkeyValues)
 			if fErr != nil {
 				errs <- fmt.Errorf("failed to fetch rows for node %s: %w", n, fErr)
 				return

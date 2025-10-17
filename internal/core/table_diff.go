@@ -70,12 +70,15 @@ type TableDiffTask struct {
 
 	Pools map[string]*pgxpool.Pool
 
-	BlockHashSQL string
+	blockHashSQLCache map[hashBoundsKey]string
+	blockHashSQLMu    sync.Mutex
 
 	CompareUnitSize int
 
 	DiffResult types.DiffOutput
 	diffMutex  sync.Mutex
+
+	Ctx context.Context
 }
 
 // Implement ClusterConfigProvider interface for TableDiffTask
@@ -109,20 +112,49 @@ type HashResult struct {
 	err  error
 }
 
+type hashBoundsKey struct {
+	hasLower bool
+	hasUpper bool
+}
+
 type RangeResults map[string]HashResult
+
+func (t *TableDiffTask) getBlockHashSQL(hasLower, hasUpper bool) (string, error) {
+	key := hashBoundsKey{hasLower: hasLower, hasUpper: hasUpper}
+
+	t.blockHashSQLMu.Lock()
+	defer t.blockHashSQLMu.Unlock()
+
+	if t.blockHashSQLCache == nil {
+		t.blockHashSQLCache = make(map[hashBoundsKey]string)
+	}
+
+	if sql, ok := t.blockHashSQLCache[key]; ok {
+		return sql, nil
+	}
+
+	query, err := queries.BlockHashSQL(t.Schema, t.Table, t.Key, "TD_BLOCK_HASH" /* mode */, hasLower, hasUpper)
+	if err != nil {
+		return "", err
+	}
+	t.blockHashSQLCache[key] = query
+	return query, nil
+}
 
 func NewTableDiffTask() *TableDiffTask {
 	return &TableDiffTask{
-		Mode:         "diff",
-		InvokeMethod: "cli",
-		DiffSummary:  make(map[string]string),
+		Mode:              "diff",
+		InvokeMethod:      "cli",
+		DiffSummary:       make(map[string]string),
+		blockHashSQLCache: make(map[hashBoundsKey]string),
 		DerivedFields: types.DerivedFields{
 			HostMap: make(map[string]string),
 		},
+		Ctx: context.Background(),
 	}
 }
 
-func (t *TableDiffTask) fetchRows(ctx context.Context, nodeName string, r Range) ([]types.OrderedMap, error) {
+func (t *TableDiffTask) fetchRows(nodeName string, r Range) ([]types.OrderedMap, error) {
 	pool, ok := t.Pools[nodeName]
 	if !ok {
 		return nil, fmt.Errorf("no pool for node %s", nodeName)
@@ -255,7 +287,7 @@ func (t *TableDiffTask) fetchRows(ctx context.Context, nodeName string, r Range)
 
 	logger.Debug("[%s] Fetching rows for range: Start=%v, End=%v. SQL: %s, Args: %v", nodeName, r.Start, r.End, querySQL, args)
 
-	pgRows, err := pool.Query(ctx, querySQL, args...)
+	pgRows, err := pool.Query(t.Ctx, querySQL, args...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to query rows for range on node %s (SQL: %s, Args: %v): %w", nodeName, querySQL, args, err)
 	}
@@ -344,15 +376,14 @@ func (t *TableDiffTask) fetchRows(ctx context.Context, nodeName string, r Range)
 }
 
 func (t *TableDiffTask) compareBlocks(
-	ctx context.Context,
 	node1, node2 string,
 	r Range,
 ) (utils.DiffResult, error) {
-	n1Rows, err := t.fetchRows(ctx, node1, r)
+	n1Rows, err := t.fetchRows(node1, r)
 	if err != nil {
 		return utils.DiffResult{}, fmt.Errorf("failed to fetch rows for node %s in range %v-%v: %w", node1, r.Start, r.End, err)
 	}
-	n2Rows, err := t.fetchRows(ctx, node2, r)
+	n2Rows, err := t.fetchRows(node2, r)
 	if err != nil {
 		return utils.DiffResult{}, fmt.Errorf("failed to fetch rows for node %s in range %v-%v: %w", node2, r.Start, r.End, err)
 	}
@@ -505,13 +536,13 @@ func (t *TableDiffTask) RunChecks(skipValidation bool) error {
 			continue
 		}
 
-		conn, err := auth.GetClusterNodeConnection(nodeInfo, t.ClientRole)
+		conn, err := auth.GetClusterNodeConnection(t.Ctx, nodeInfo, t.ClientRole)
 		if err != nil {
 			return fmt.Errorf("failed to connect to node %s: %w", hostname, err)
 		}
 		defer conn.Close()
 
-		currCols, err := queries.GetColumns(context.Background(), conn, schema, table)
+		currCols, err := queries.GetColumns(t.Ctx, conn, schema, table)
 		if err != nil {
 			return fmt.Errorf("failed to get columns for table %s.%s on node %s: %w", schema, table, hostname, err)
 		}
@@ -519,7 +550,7 @@ func (t *TableDiffTask) RunChecks(skipValidation bool) error {
 			return fmt.Errorf("table '%s.%s' not found on %s, or the current user does not have adequate privileges", schema, table, hostname)
 		}
 
-		currKey, err := queries.GetPrimaryKey(context.Background(), conn, schema, table)
+		currKey, err := queries.GetPrimaryKey(t.Ctx, conn, schema, table)
 		if err != nil {
 			return fmt.Errorf("failed to get primary key for table %s.%s on node %s: %w", schema, table, hostname, err)
 		}
@@ -539,7 +570,7 @@ func (t *TableDiffTask) RunChecks(skipValidation bool) error {
 		cols = currCols
 		key = currKey
 
-		colTypes, err := queries.GetColumnTypes(context.Background(), conn, schema, table)
+		colTypes, err := queries.GetColumnTypes(t.Ctx, conn, schema, table)
 		if err != nil {
 			return fmt.Errorf("failed to get column types for table %s on node %s: %w", table, hostname, err)
 		}
@@ -551,7 +582,7 @@ func (t *TableDiffTask) RunChecks(skipValidation bool) error {
 		}
 		t.ColTypes[colTypesKey] = colTypes
 
-		actualPrivs, err := queries.CheckUserPrivileges(context.Background(), conn, user, schema, table)
+		actualPrivs, err := queries.CheckUserPrivileges(t.Ctx, conn, user, schema, table)
 		if err != nil {
 			return fmt.Errorf("failed to check user privileges on node %s: %w", hostname, err)
 		}
@@ -571,14 +602,14 @@ func (t *TableDiffTask) RunChecks(skipValidation bool) error {
 			viewSQL := fmt.Sprintf("CREATE MATERIALIZED VIEW IF NOT EXISTS %s AS SELECT * FROM %s.%s WHERE %s",
 				sanitisedViewName, sanitisedSchema, sanitisedTable, t.TableFilter)
 
-			_, err = conn.Exec(context.Background(), viewSQL)
+			_, err = conn.Exec(t.Ctx, viewSQL)
 			if err != nil {
 				return fmt.Errorf("failed to create filtered view: %w", err)
 			}
 
 			hasRowsSQL := fmt.Sprintf("SELECT EXISTS (SELECT 1 FROM %s) AS has_rows", sanitisedViewName)
 			var hasRows bool
-			err = conn.QueryRow(context.Background(), hasRowsSQL).Scan(&hasRows)
+			err = conn.QueryRow(t.Ctx, hasRowsSQL).Scan(&hasRows)
 			if err != nil {
 				return fmt.Errorf("failed to check if view has rows: %w", err)
 			}
@@ -672,7 +703,7 @@ func (t *TableDiffTask) CheckColumnSize() error {
 
 			if nodeHost == host && int(nodePort) == port {
 				var err error
-				pool, err = auth.GetClusterNodeConnection(nodeInfo, t.ClientRole)
+				pool, err = auth.GetClusterNodeConnection(t.Ctx, nodeInfo, t.ClientRole)
 				if err != nil {
 					return fmt.Errorf("failed to connect to node %s:%d: %w", host, port, err)
 				}
@@ -727,7 +758,7 @@ func (t *TableDiffTask) ExecuteTask() error {
 	pools := make(map[string]*pgxpool.Pool)
 	for _, nodeInfo := range t.ClusterNodes {
 		name := nodeInfo["Name"].(string)
-		pool, err := auth.GetClusterNodeConnection(nodeInfo, t.ClientRole)
+		pool, err := auth.GetClusterNodeConnection(t.Ctx, nodeInfo, t.ClientRole)
 		if err != nil {
 			return fmt.Errorf("failed to connect to node %s: %w", name, err)
 		}
@@ -736,11 +767,10 @@ func (t *TableDiffTask) ExecuteTask() error {
 	}
 	t.Pools = pools
 
-	blockHashSQL, err := queries.BlockHashSQL(t.Schema, t.Table, t.Key, "TD_BLOCK_HASH" /* mode */)
-	if err != nil {
+	var err error
+	if _, err = t.getBlockHashSQL(true, true); err != nil {
 		return fmt.Errorf("failed to build block-hash SQL: %w", err)
 	}
-	t.BlockHashSQL = blockHashSQL
 
 	var maxCount int64
 	var maxNode string
@@ -751,7 +781,7 @@ func (t *TableDiffTask) ExecuteTask() error {
 		// TODO: Estimates cannot be used on views. But we can't run a count(*)
 		// on millions of rows either. Need to find a better way to do this.
 		if t.TableFilter == "" {
-			count, err = queries.GetRowCountEstimate(ctx, pool, t.Schema, t.Table)
+			count, err = queries.GetRowCountEstimate(t.Ctx, pool, t.Schema, t.Table)
 			if err != nil {
 				return fmt.Errorf("failed to render estimate row count query: %w", err)
 			}
@@ -760,7 +790,7 @@ func (t *TableDiffTask) ExecuteTask() error {
 			sanitisedTable := pgx.Identifier{t.Table}.Sanitize()
 			countQuerySQL := fmt.Sprintf("SELECT COUNT(*) FROM %s.%s", sanitisedSchema, sanitisedTable)
 			logger.Debug("[%s] Executing count query for filtered table: %s", name, countQuerySQL)
-			err = pool.QueryRow(ctx, countQuerySQL).Scan(&count)
+			err = pool.QueryRow(t.Ctx, countQuerySQL).Scan(&count)
 			if err != nil {
 				return fmt.Errorf("failed to get row count for %s.%s on node %s (query: %s): %w", t.Schema, t.Table, name, countQuerySQL, err)
 			}
@@ -835,7 +865,7 @@ func (t *TableDiffTask) ExecuteTask() error {
 	if err != nil {
 		return fmt.Errorf("failed to generate offsets query: %w", err)
 	}
-	pkRangesRows, err := pools[maxNode].Query(ctx, querySQL)
+	pkRangesRows, err := pools[maxNode].Query(t.Ctx, querySQL)
 	if err != nil {
 		return fmt.Errorf("offsets query execution failed on %s: %w", maxNode, err)
 	}
@@ -938,7 +968,7 @@ func (t *TableDiffTask) ExecuteTask() error {
 			defer initialHashWg.Done()
 			for task := range hashTaskQueue {
 				sem <- struct{}{}
-				queryCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
+				queryCtx, cancel := context.WithTimeout(t.Ctx, 60*time.Second)
 				hashValue, hErr := t.hashRange(queryCtx, task.nodeName, task.r)
 				cancel()
 				<-sem
@@ -1054,55 +1084,37 @@ func (t *TableDiffTask) hashRange(
 	startTime := time.Now()
 	var hash string
 
-	skipMinCheck := r.Start == nil
-	skipMaxCheck := r.End == nil
-
 	numPKCols := len(t.Key)
-	sqlArgs := make([]any, 0, 2+2*numPKCols)
 
-	sqlArgs = append(sqlArgs, skipMinCheck)
-
-	if r.Start == nil {
-		for i := 0; i < numPKCols; i++ {
-			sqlArgs = append(sqlArgs, nil)
-		}
-	} else {
-		if numPKCols == 1 {
-			sqlArgs = append(sqlArgs, r.Start)
-		} else {
-			startVals, ok := r.Start.([]any)
-			if !ok || len(startVals) != numPKCols {
-				return "", fmt.Errorf("[%s] r.Start is not a valid composite key for hashing (expected %d values, got %T with value %v)", node, numPKCols, r.Start, r.Start)
-			}
-			sqlArgs = append(sqlArgs, startVals...)
-		}
+	startVals, hasLower, err := extractRangeBoundValues(r.Start, numPKCols)
+	if err != nil {
+		return "", err
+	}
+	endVals, hasUpper, err := extractRangeBoundValues(r.End, numPKCols)
+	if err != nil {
+		return "", err
 	}
 
-	sqlArgs = append(sqlArgs, skipMaxCheck)
-
-	if r.End == nil {
-		for i := 0; i < numPKCols; i++ {
-			sqlArgs = append(sqlArgs, nil)
-		}
-	} else {
-		if numPKCols == 1 {
-			sqlArgs = append(sqlArgs, r.End)
-		} else {
-			endVals, ok := r.End.([]any)
-			if !ok || len(endVals) != numPKCols {
-				return "", fmt.Errorf("[%s] r.End is not a valid composite key for hashing (expected %d values, got %T with value %v)", node, numPKCols, r.End, r.End)
-			}
-			sqlArgs = append(sqlArgs, endVals...)
-		}
+	query, err := t.getBlockHashSQL(hasLower, hasUpper)
+	if err != nil {
+		return "", fmt.Errorf("failed to build block-hash SQL: %w", err)
 	}
 
-	logger.Debug("[%s] Hashing range: Start=%v, End=%v. SQL: %s, Args: %v", node, r.Start, r.End, t.BlockHashSQL, sqlArgs)
+	args := make([]any, 0, len(startVals)+len(endVals))
+	if hasLower {
+		args = append(args, startVals...)
+	}
+	if hasUpper {
+		args = append(args, endVals...)
+	}
 
-	err := pool.QueryRow(ctx, t.BlockHashSQL, sqlArgs...).Scan(&hash)
+	logger.Debug("[%s] Hashing range: Start=%v, End=%v. SQL: %s, Args: %v", node, r.Start, r.End, query, args)
+
+	err = pool.QueryRow(ctx, query, args...).Scan(&hash)
 
 	if err != nil {
 		duration := time.Since(startTime)
-		logger.Info("[%s] ERROR after %v for range Start=%v, End=%v (using query: '%s', args: %v): %v", node, duration, r.Start, r.End, t.BlockHashSQL, sqlArgs, err)
+		logger.Info("[%s] ERROR after %v for range Start=%v, End=%v (using query: '%s', args: %v): %v", node, duration, r.Start, r.End, query, args, err)
 		return "", fmt.Errorf("BlockHash query failed for %s range %v-%v: %w", node, r.Start, r.End, err)
 	}
 
@@ -1115,8 +1127,49 @@ func (t *TableDiffTask) hashRange(
 	return hash, nil
 }
 
+func extractRangeBoundValues(bound any, numPKCols int) ([]any, bool, error) {
+	if bound == nil {
+		return nil, false, nil
+	}
+	if numPKCols == 1 {
+		return []any{bound}, true, nil
+	}
+
+	processSlice := func(vals []any) ([]any, bool, error) {
+		if len(vals) != numPKCols {
+			return nil, false, fmt.Errorf("range bound expected %d values, got %d", numPKCols, len(vals))
+		}
+		if rangeSliceAllNil(vals) {
+			return nil, false, nil
+		}
+		return vals, true, nil
+	}
+
+	if vals, ok := bound.([]any); ok {
+		return processSlice(vals)
+	}
+	if valsIface, ok := bound.([]interface{}); ok {
+		vals := make([]any, len(valsIface))
+		copy(vals, valsIface)
+		return processSlice(vals)
+	}
+
+	return nil, false, fmt.Errorf("unsupported range bound type %T", bound)
+}
+
+func rangeSliceAllNil(vals []any) bool {
+	if len(vals) == 0 {
+		return true
+	}
+	for _, v := range vals {
+		if v != nil {
+			return false
+		}
+	}
+	return true
+}
+
 func (t *TableDiffTask) generateSubRanges(
-	ctx context.Context,
 	node string,
 	parentRange Range,
 	numSplits int,
@@ -1198,7 +1251,7 @@ func (t *TableDiffTask) generateSubRanges(
 
 	countQuery := fmt.Sprintf("SELECT COUNT(1) FROM %s %s", schemaTable, whereClause)
 	var count int64
-	err := pool.QueryRow(ctx, countQuery, args...).Scan(&count)
+	err := pool.QueryRow(t.Ctx, countQuery, args...).Scan(&count)
 	if err != nil {
 		logger.Debug("[%s] Failed to count rows in parent range %v-%v for splitting: %v. SQL: %s, Args: %v", node, parentRange.Start, parentRange.End, err, countQuery, args)
 		return nil, fmt.Errorf("failed to count for split: %w", err)
@@ -1228,14 +1281,14 @@ func (t *TableDiffTask) generateSubRanges(
 		numPKCols := len(t.Key)
 
 		if numPKCols == 1 {
-			err = pool.QueryRow(ctx, medianQuery, medianQueryArgs...).Scan(&medianPKVal)
+			err = pool.QueryRow(t.Ctx, medianQuery, medianQueryArgs...).Scan(&medianPKVal)
 		} else {
 			scanDest := make([]any, numPKCols)
 			scanDestPtrs := make([]any, numPKCols)
 			for i := range scanDest {
 				scanDestPtrs[i] = &scanDest[i]
 			}
-			err = pool.QueryRow(ctx, medianQuery, medianQueryArgs...).Scan(scanDestPtrs...)
+			err = pool.QueryRow(t.Ctx, medianQuery, medianQueryArgs...).Scan(scanDestPtrs...)
 			if err == nil {
 				medianPKVal = append([]any{}, scanDest...)
 			}
@@ -1295,7 +1348,7 @@ func (t *TableDiffTask) recursiveDiff(
 		logger.Debug("[%s vs %s] Range %v-%v (est. size %d) is <= compare_unit_size %d. Fetching rows.",
 			node1Name, node2Name, currentRange.Start, currentRange.End, currentEstimatedBlockSize, finalCompareUnitSize)
 
-		diffInfo, err := t.compareBlocks(ctx, node1Name, node2Name, currentRange)
+		diffInfo, err := t.compareBlocks(node1Name, node2Name, currentRange)
 		if err != nil {
 			logger.Info("ERROR during fetchAndCompareRows for %s/%s, range %v-%v: %v", node1Name, node2Name, currentRange.Start, currentRange.End, err)
 			return
@@ -1359,7 +1412,7 @@ func (t *TableDiffTask) recursiveDiff(
 		return
 	}
 
-	subRanges, err := t.generateSubRanges(ctx, node1Name, currentRange, 2)
+	subRanges, err := t.generateSubRanges(node1Name, currentRange, 2)
 	if err != nil {
 		logger.Info("ERROR generating sub-ranges for %s/%s, range %v-%v: %v. Stopping recursion for this path.",
 			node1Name, node2Name, currentRange.Start, currentRange.End, err)

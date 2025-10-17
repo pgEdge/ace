@@ -47,6 +47,7 @@ type Templates struct {
 	TDBlockHashSQL                   *template.Template
 	MtreeLeafHashSQL                 *template.Template
 	UpdateLeafHashes                 *template.Template
+	UpdateLeafHashesBatch            *template.Template
 	GetBlockRanges                   *template.Template
 	GetDirtyAndNewBlocks             *template.Template
 	ClearDirtyFlags                  *template.Template
@@ -865,14 +866,12 @@ var SQLTemplates = Templates{
 	TDBlockHashSQL: template.Must(template.New("tdBlockHashSQL").Parse(`
         SELECT encode(digest(COALESCE(string_agg({{.TableAlias}}::text, '|' ORDER BY {{.PkOrderByStr}}), 'EMPTY_BLOCK'), 'sha256'), 'hex')
         FROM {{.SchemaIdent}}.{{.TableIdent}} AS {{.TableAlias}}
-        WHERE ($1::boolean OR {{.PkComparisonExpression}} >= {{.StartValueExpression}})
-        AND ({{.SkipMaxIdx}}::boolean OR {{.PkComparisonExpression}} < {{.EndValueExpression}})
+        WHERE {{.WhereClause}}
     `)),
 	MtreeLeafHashSQL: template.Must(template.New("mtreeLeafHashSQL").Parse(`
         SELECT digest(COALESCE(string_agg({{.TableAlias}}::text, '|' ORDER BY {{.PkOrderByStr}}), 'EMPTY_BLOCK'), 'sha256')
         FROM {{.SchemaIdent}}.{{.TableIdent}} AS {{.TableAlias}}
-        WHERE ($1::boolean OR {{.PkComparisonExpression}} >= {{.StartValueExpression}})
-        AND ({{.SkipMaxIdx}}::boolean OR {{.PkComparisonExpression}} <= {{.EndValueExpression}})
+        WHERE {{.WhereClause}}
     `)),
 	UpdateLeafHashes: template.Must(template.New("updateLeafHashes").Parse(`
 		UPDATE
@@ -886,6 +885,17 @@ var SQLTemplates = Templates{
 			AND mt.node_level = 0
 		RETURNING
 			mt.node_position
+	`)),
+	UpdateLeafHashesBatch: template.Must(template.New("updateLeafHashesBatch").Parse(`
+		UPDATE
+			{{.MtreeTable}} mt
+		SET
+			leaf_hash = $1,
+			node_hash = $1,
+			last_modified = current_timestamp
+		WHERE
+			node_position = $2
+			AND mt.node_level = 0
 	`)),
 	GetBlockRanges: template.Must(template.New("getBlockRanges").Parse(`
 		SELECT

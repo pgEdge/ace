@@ -19,11 +19,17 @@ jobs:
       with:
         go-version: '1.24'
 
-    - name: Run table-diff tests
-      run: go test -count=1 -v ./tests/integration -run 'TableDiff'
+    - name: Run table-diff simple pkey tests
+      run: go test -count=1 -v ./tests/integration -run 'TestTableDiffSimplePK'
+
+    - name: Run table-diff composite pkey tests
+      run: go test -count=1 -v ./tests/integration -run 'TestTableDiffCompositePK'
 
     - name: Run table-repair tests
       run: go test -count=1 -v ./tests/integration -run 'TableRepair'
 
-    - name: Run Merkle Tree tests
-      run: go test -count=1 -v ./tests/integration -run 'MerkleTree'
+    - name: Run Merkle Tree simple pkey tests
+      run: go test -count=1 -v ./tests/integration -run 'TestMerkleTreeSimplePK'
+
+    - name: Run Merkle Tree composite pkey tests
+      run: go test -count=1 -v ./tests/integration -run 'TestMerkleTreeCompositePK'
