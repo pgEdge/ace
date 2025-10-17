@@ -418,8 +418,8 @@ func (t *TableDiffTask) Validate() error {
 		return fmt.Errorf("invalid value range for concurrency_factor, must be between 1 and 10")
 	}
 
-	if t.Output != "csv" && t.Output != "json" && t.Output != "html" {
-		return fmt.Errorf("table-diff currently supports only csv, json and html output formats")
+	if t.Output != "json" && t.Output != "html" {
+		return fmt.Errorf("table-diff currently supports only json and html output formats")
 	}
 
 	nodeList, err := utils.ParseNodes(t.Nodes)
@@ -1065,8 +1065,12 @@ func (t *TableDiffTask) ExecuteTask() error {
 
 	t.AddPrimaryKeyToDiffSummary()
 
-	if err := utils.WriteDiffReport(t.DiffResult, t.Schema, t.Table); err != nil {
+	jsonPath, _, err := utils.WriteDiffReport(t.DiffResult, t.Schema, t.Table, t.Output)
+	if err != nil {
 		return err
+	}
+	if jsonPath != "" {
+		t.DiffFilePath = jsonPath
 	}
 
 	return nil

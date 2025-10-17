@@ -17,6 +17,7 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 
@@ -107,11 +108,13 @@ func SetupCLI() *cli.App {
 	}
 
 	tableDiffFlags := append(commonFlags, diffFlags...)
-	tableDiffFlags = append(tableDiffFlags, &cli.StringFlag{
-		Name:  "table-filter",
-		Usage: "Where clause expression to use while diffing tables",
-		Value: "",
-	})
+	tableDiffFlags = append(tableDiffFlags,
+		&cli.StringFlag{
+			Name:  "table-filter",
+			Usage: "Where clause expression to use while diffing tables",
+			Value: "",
+		},
+	)
 
 	tableRerunFlags := append(commonFlags, rerunOnlyFlags...)
 
@@ -550,7 +553,7 @@ func TableDiffCLI(ctx *cli.Context) error {
 	task.BlockSize = int(blockSizeInt)
 	task.ConcurrencyFactor = ctx.Int("concurrency-factor")
 	task.CompareUnitSize = ctx.Int("compare-unit-size")
-	task.Output = ctx.String("output")
+	task.Output = strings.ToLower(ctx.String("output"))
 	task.Nodes = ctx.String("nodes")
 	task.TableFilter = ctx.String("table-filter")
 	task.QuietMode = ctx.Bool("quiet")

@@ -561,48 +561,59 @@ func MapToOrderedMap(m map[string]any, cols []string) types.OrderedMap {
 	return om
 }
 
-func WriteDiffReport(diffResult types.DiffOutput, schema, table string) error {
-	if len(diffResult.NodeDiffs) > 0 {
-		for _, nodePairDiff := range diffResult.NodeDiffs {
-			for nodeName, rows := range nodePairDiff.Rows {
-				sort.SliceStable(rows, func(i, j int) bool {
-					pkValuesI := getPKValues(rows[i], diffResult.Summary.PrimaryKey)
-					pkValuesJ := getPKValues(rows[j], diffResult.Summary.PrimaryKey)
-					return comparePKValues(pkValuesI, pkValuesJ) < 0
-				})
-				nodePairDiff.Rows[nodeName] = rows
-			}
-		}
-
-		outputFileName := fmt.Sprintf("%s_%s_diffs-%s.json",
-			strings.ReplaceAll(schema, ".", "_"),
-			strings.ReplaceAll(table, ".", "_"),
-			time.Now().Format("20060102150405"),
-		)
-
-		jsonData, err := json.MarshalIndent(diffResult, "", "  ")
-		if err != nil {
-			logger.Error("ERROR marshalling diff output to JSON: %v", err)
-			return fmt.Errorf("failed to marshal diffs: %w", err)
-		}
-
-		err = os.WriteFile(outputFileName, jsonData, 0644)
-		if err != nil {
-			logger.Error("ERROR writing diff output to file %s: %v", outputFileName, err)
-			return fmt.Errorf("failed to write diffs file: %w", err)
-		}
-		logger.Warn("%s TABLES DO NOT MATCH", CrossMark)
-
-		for key, diffCount := range diffResult.Summary.DiffRowsCount {
-			logger.Warn("Found %d differences between %s", diffCount, key)
-		}
-
-		logger.Info("Diff report written to %s", outputFileName)
-
-	} else {
+func WriteDiffReport(diffResult types.DiffOutput, schema, table, format string) (string, string, error) {
+	if len(diffResult.NodeDiffs) == 0 {
 		logger.Info("%s TABLES MATCH", CheckMark)
+		return "", "", nil
 	}
-	return nil
+
+	for _, nodePairDiff := range diffResult.NodeDiffs {
+		for nodeName, rows := range nodePairDiff.Rows {
+			sort.SliceStable(rows, func(i, j int) bool {
+				pkValuesI := getPKValues(rows[i], diffResult.Summary.PrimaryKey)
+				pkValuesJ := getPKValues(rows[j], diffResult.Summary.PrimaryKey)
+				return comparePKValues(pkValuesI, pkValuesJ) < 0
+			})
+			nodePairDiff.Rows[nodeName] = rows
+		}
+	}
+
+	outputPrefix := fmt.Sprintf("%s_%s_diffs-%s",
+		strings.ReplaceAll(schema, ".", "_"),
+		strings.ReplaceAll(table, ".", "_"),
+		time.Now().Format("20060102150405"),
+	)
+	jsonFileName := outputPrefix + ".json"
+
+	jsonData, err := json.MarshalIndent(diffResult, "", "  ")
+	if err != nil {
+		logger.Error("ERROR marshalling diff output to JSON: %v", err)
+		return "", "", fmt.Errorf("failed to marshal diffs: %w", err)
+	}
+
+	if err := os.WriteFile(jsonFileName, jsonData, 0644); err != nil {
+		logger.Error("ERROR writing diff output to file %s: %v", jsonFileName, err)
+		return "", "", fmt.Errorf("failed to write diffs file: %w", err)
+	}
+
+	logger.Warn("%s TABLES DO NOT MATCH", CrossMark)
+	for key, diffCount := range diffResult.Summary.DiffRowsCount {
+		logger.Warn("Found %d differences between %s", diffCount, key)
+	}
+	logger.Info("Diff report written to %s", jsonFileName)
+
+	var htmlPath string
+	if strings.EqualFold(format, "html") {
+		htmlPath, err = writeHTMLDiffReport(diffResult, jsonFileName)
+		if err != nil {
+			return "", "", err
+		}
+		if htmlPath != "" {
+			logger.Info("HTML diff report written to %s", htmlPath)
+		}
+	}
+
+	return jsonFileName, htmlPath, nil
 }
 
 func getPKValues(row types.OrderedMap, pkey []string) []any {

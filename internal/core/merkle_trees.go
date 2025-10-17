@@ -1703,7 +1703,7 @@ func (m *MerkleTreeTask) DiffMtree() error {
 		m.DiffResult.Summary.EndTime = endTime.Format(time.RFC3339)
 		m.DiffResult.Summary.TimeTaken = endTime.Sub(m.StartTime).String()
 		m.DiffResult.Summary.PrimaryKey = m.Key
-		if err := utils.WriteDiffReport(m.DiffResult, m.Schema, m.Table); err != nil {
+		if _, _, err := utils.WriteDiffReport(m.DiffResult, m.Schema, m.Table, m.Output); err != nil {
 			return err
 		}
 	}
