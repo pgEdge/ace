@@ -27,19 +27,19 @@ func main() {
 	// This is the order of precedence for finding the config file.
 	// 1. env var (ACE_CONFIG)
 	// 2. current dir
-	// 3. $HOME/.config/pgedge/ace/
-	// 4. /etc/pgedge/ace/
+	// 3. $HOME/.config/ace/
+	// 4. /etc/ace/
 	if envPath := os.Getenv("ACE_CONFIG"); envPath != "" {
 		potentialPaths = append(potentialPaths, envPath)
 	}
 
 	potentialPaths = append(potentialPaths, "ace.yaml")
 	if home, err := os.UserHomeDir(); err == nil {
-		p := filepath.Join(home, ".config", "pgedge", "ace", "ace.yaml")
+		p := filepath.Join(home, ".config", "ace", "ace.yaml")
 		potentialPaths = append(potentialPaths, p)
 	}
 
-	potentialPaths = append(potentialPaths, "/etc/pgedge/ace/ace.yaml")
+	potentialPaths = append(potentialPaths, "/etc/ace/ace.yaml")
 
 	for _, p := range potentialPaths {
 		if _, err := os.Stat(p); err == nil {
