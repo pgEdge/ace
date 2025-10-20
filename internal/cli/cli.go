@@ -35,6 +35,9 @@ import (
 //go:embed default_config.yaml
 var defaultConfigYAML string
 
+//go:embed default_pg_service.conf
+var defaultPgServiceConf string
+
 func SetupCLI() *cli.App {
 	commonFlags := []cli.Flag{
 		&cli.StringFlag{
@@ -285,6 +288,24 @@ func SetupCLI() *cli.App {
 		},
 	}
 
+	clusterInitFlags := []cli.Flag{
+		&cli.StringFlag{
+			Name:    "path",
+			Aliases: []string{"p"},
+			Usage:   "Path to write the pg service file",
+			Value:   "pg_service.conf",
+		},
+		&cli.BoolFlag{
+			Name:    "force",
+			Aliases: []string{"f"},
+			Usage:   "Overwrite the service file if it already exists",
+		},
+		&cli.BoolFlag{
+			Name:  "stdout",
+			Usage: "Print the service file to stdout instead of writing a file",
+		},
+	}
+
 	app := &cli.App{
 		Name:  "ace",
 		Usage: "ACE - Active Consistency Engine",
@@ -298,6 +319,18 @@ func SetupCLI() *cli.App {
 						Usage:  "Create a default ace.yaml file",
 						Flags:  configInitFlags,
 						Action: ConfigInitCLI,
+					},
+				},
+			},
+			{
+				Name:  "cluster",
+				Usage: "Manage ACE cluster service definitions",
+				Subcommands: []*cli.Command{
+					{
+						Name:   "init",
+						Usage:  "Create a sample pg_service.conf file",
+						Flags:  clusterInitFlags,
+						Action: ClusterInitCLI,
 					},
 				},
 			},
@@ -575,22 +608,22 @@ func SetupCLI() *cli.App {
 	return app
 }
 
-func ConfigInitCLI(ctx *cli.Context) error {
+func initTemplateFile(ctx *cli.Context, content string, defaultPath string, label string, perm os.FileMode) error {
 	outputPath := ctx.String("path")
 	if outputPath == "" {
-		outputPath = "ace.yaml"
+		outputPath = defaultPath
 	}
 
 	if ctx.Bool("stdout") || outputPath == "-" {
-		fmt.Println(defaultConfigYAML)
+		fmt.Println(content)
 		return nil
 	}
 
 	if !ctx.Bool("force") {
 		if _, err := os.Stat(outputPath); err == nil {
-			return fmt.Errorf("config file already exists at %s (use --force to overwrite)", outputPath)
+			return fmt.Errorf("%s already exists at %s (use --force to overwrite)", label, outputPath)
 		} else if !errors.Is(err, os.ErrNotExist) {
-			return fmt.Errorf("unable to verify existing config file at %s: %w", outputPath, err)
+			return fmt.Errorf("unable to verify existing %s at %s: %w", label, outputPath, err)
 		}
 	}
 
@@ -601,12 +634,20 @@ func ConfigInitCLI(ctx *cli.Context) error {
 		}
 	}
 
-	if err := os.WriteFile(outputPath, []byte(defaultConfigYAML), 0o644); err != nil {
-		return fmt.Errorf("failed to write config to %s: %w", outputPath, err)
+	if err := os.WriteFile(outputPath, []byte(content), perm); err != nil {
+		return fmt.Errorf("failed to write %s to %s: %w", label, outputPath, err)
 	}
 
-	fmt.Printf("Wrote default config to %s\n", outputPath)
+	fmt.Printf("Wrote %s to %s\n", label, outputPath)
 	return nil
+}
+
+func ConfigInitCLI(ctx *cli.Context) error {
+	return initTemplateFile(ctx, defaultConfigYAML, "ace.yaml", "config file", 0o644)
+}
+
+func ClusterInitCLI(ctx *cli.Context) error {
+	return initTemplateFile(ctx, defaultPgServiceConf, "pg_service.conf", "pg service file", 0o600)
 }
 
 func TableDiffCLI(ctx *cli.Context) error {
