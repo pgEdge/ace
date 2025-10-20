@@ -1,6 +1,8 @@
 .attic
 .vscode
+python/
 *diffs-*.json
+*diffs-*.html
 reports
 # Added by goreleaser init:
 dist/

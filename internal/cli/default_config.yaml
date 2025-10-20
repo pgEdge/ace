@@ -1,0 +1,59 @@
+#############################################################################
+#
+# ACE - Active Consistency Engine
+#
+# Copyright (C) 2023 - 2025, pgEdge (https://www.pgedge.com/)
+#
+# This software is released under the PostgreSQL License:
+# https://opensource.org/license/postgresql
+#
+#############################################################################
+
+postgres:
+  statement_timeout: 0       # milliseconds
+  connection_timeout: 10     # seconds
+
+table_diff:
+  concurrency_factor: 1
+  max_diff_rows: 1000000
+  min_diff_block_size: 1
+  max_diff_block_size: 1000000
+  diff_block_size: 1000
+  diff_batch_size: 1
+  max_diff_batch_size: 1000
+  compare_unit_size: 10000
+
+mtree:
+  cdc:
+    slot_name: "ace_mtree_slot"
+    publication_name: "ace_mtree_pub"
+    cdc_processing_timeout: 30
+  schema: "spock"
+
+  diff:
+    min_block_size: 1000
+    block_size: 100000
+    max_block_size: 1000000
+
+server:
+  listen_address: "0.0.0.0"
+  listen_port: 5000
+
+schedule_jobs: []
+schedule_config: []
+
+auto_repair_config:
+  enabled: false
+  cluster_name: ""
+  dbname: ""
+  poll_frequency: "10m"
+  repair_frequency: "15m"
+
+cert_auth:
+  use_cert_auth: true
+  user_cert_file: "data/pg16/pki/admin-cert/admin.crt"
+  user_key_file:  "data/pg16/pki/admin-cert/admin.key"
+  ca_cert_file:   "data/pg16/pki/ca.crt"
+  use_naive_datetime: false
+
+debug_mode: false

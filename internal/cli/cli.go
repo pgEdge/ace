@@ -13,9 +13,12 @@ package cli
 
 import (
 	"context"
+	_ "embed"
+	"errors"
 	"fmt"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -28,6 +31,9 @@ import (
 	"github.com/pgedge/ace/pkg/logger"
 	"github.com/urfave/cli/v2"
 )
+
+//go:embed default_config.yaml
+var defaultConfigYAML string
 
 func SetupCLI() *cli.App {
 	commonFlags := []cli.Flag{
@@ -261,10 +267,40 @@ func SetupCLI() *cli.App {
 	}
 	mtreeDiffFlags = append(mtreeDiffFlags, commonFlags...)
 
+	configInitFlags := []cli.Flag{
+		&cli.StringFlag{
+			Name:    "path",
+			Aliases: []string{"p"},
+			Usage:   "Path to write the config file",
+			Value:   "ace.yaml",
+		},
+		&cli.BoolFlag{
+			Name:    "force",
+			Aliases: []string{"f"},
+			Usage:   "Overwrite the config file if it already exists",
+		},
+		&cli.BoolFlag{
+			Name:  "stdout",
+			Usage: "Print the config to stdout instead of writing a file",
+		},
+	}
+
 	app := &cli.App{
 		Name:  "ace",
 		Usage: "ACE - Active Consistency Engine",
 		Commands: []*cli.Command{
+			{
+				Name:  "config",
+				Usage: "Manage ACE configuration files",
+				Subcommands: []*cli.Command{
+					{
+						Name:   "init",
+						Usage:  "Create a default ace.yaml file",
+						Flags:  configInitFlags,
+						Action: ConfigInitCLI,
+					},
+				},
+			},
 			{
 				Name:      "table-diff",
 				Usage:     "Compare tables between PostgreSQL databases",
@@ -537,6 +573,40 @@ func SetupCLI() *cli.App {
 	}
 
 	return app
+}
+
+func ConfigInitCLI(ctx *cli.Context) error {
+	outputPath := ctx.String("path")
+	if outputPath == "" {
+		outputPath = "ace.yaml"
+	}
+
+	if ctx.Bool("stdout") || outputPath == "-" {
+		fmt.Println(defaultConfigYAML)
+		return nil
+	}
+
+	if !ctx.Bool("force") {
+		if _, err := os.Stat(outputPath); err == nil {
+			return fmt.Errorf("config file already exists at %s (use --force to overwrite)", outputPath)
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("unable to verify existing config file at %s: %w", outputPath, err)
+		}
+	}
+
+	dir := filepath.Dir(outputPath)
+	if dir != "." {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return fmt.Errorf("failed to create directory %s: %w", dir, err)
+		}
+	}
+
+	if err := os.WriteFile(outputPath, []byte(defaultConfigYAML), 0o644); err != nil {
+		return fmt.Errorf("failed to write config to %s: %w", outputPath, err)
+	}
+
+	fmt.Printf("Wrote default config to %s\n", outputPath)
+	return nil
 }
 
 func TableDiffCLI(ctx *cli.Context) error {
