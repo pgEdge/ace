@@ -24,7 +24,18 @@ To build ACE, you need to have Go (version 1.18 or higher) installed.
 
 ## Configuration
 
-ACE requires a cluster configuration file to connect to the database nodes. Please refer to the [pgEdge docs](https://docs.pgedge.com/platform/installing_pgedge/json) on how to create this file.
+ACE discovers cluster connection details from a PostgreSQL service file before falling back to the [legacy JSON format](https://docs.pgedge.com/platform/installing_pgedge/json). Service names must follow the pattern `<cluster>` for shared defaults and `<cluster>.<node>` for each node entry (for example, `app_db.n1`, `app_db.n2`). The following locations are checked in order: the `ACE_PGSERVICEFILE` environment variable, the `PGSERVICEFILE` environment variable, `pg_service.conf` file in the current directory, `$HOME/.pg_service.conf`, and finally `/etc/pg_service.conf`.
+
+You can bootstrap a template with:
+```sh
+./ace cluster init --path pg_service.conf
+```
+Then adjust the host, port, database, and credentials for each node. If you still rely on the older JSON files, ACE will automatically read `<cluster>.json` when no matching service entries are present.
+
+ACE also needs an `ace.yaml` for runtime defaults such as `connection_timeout` for Postgres or for ACE-specific defaults such as `max_diff_rows`. It can be generated with:
+```sh
+./ace config init --path ace.yaml
+```
 
 ## Quickstart
 
@@ -38,6 +49,9 @@ To find differences between nodes for a specific table, use the `table-diff` com
 ```sh
 ./ace table-diff hetzner public.customers_large
 ```
+
+Add `--output html` to emit a colour-coded HTML diff report alongside the JSON diff. 
+
 
 **Sample Output (with differences):**
 ```

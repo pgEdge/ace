@@ -4,6 +4,20 @@ This document provides a detailed reference for the commands available in the Ac
 
 ## Commands
 
+### Cluster Configuration
+
+ACE resolves connection information from a PostgreSQL service file before falling back to the legacy `<cluster>.json` format. Define a base section named after the cluster (for example `[hetzner]`) to capture shared options, and one section per node using `<cluster>.<node>` such as `[hetzner.n1]`. The service file is searched in this order: `ACE_PGSERVICEFILE`, `PGSERVICEFILE`, `pg_service.conf` in the current directory, `~/.pg_service.conf`, and `/etc/pg_service.conf`. If none of these files contain entries for the requested cluster, ACE attempts to read `<cluster>.json`.
+
+Generate starter files with:
+```sh
+./ace cluster init --path pg_service.conf
+./ace config init --path ace.yaml
+```
+
+Update the generated `pg_service.conf` template with the host, port, database, and credentials for each node before running commands listed below.
+
+Note: A PostgreSQL service file (or a legacy cluster definition JSON file) and a configuration file `ace.yaml` are both necessary for running ACE.
+
 ### `table-diff`
 
 Compares a table between nodes and generates a diff report.
@@ -22,7 +36,7 @@ Compares a table between nodes and generates a diff report.
 | `--block-size`        | `-b`  | Number of rows per block                                           | 100000   |
 | `--concurrency-factor`| `-c`  | Concurrency factor                                                 | 1        |
 | `--compare-unit-size` | `-s`  | Max size of the smallest block to use when diffs are present       | 10000    |
-| `--output`            | `-o`  | Output format                                                      | json     |
+| `--output`            | `-o`  | Output format (`json` or `html`)                                     | json     |
 | `--nodes`             | `-n`  | Nodes to include in the diff (comma-separated, or "all")           | all      |
 | `--table-filter`      |       | `WHERE` clause expression to use while diffing tables              |          |
 | `--quiet`             |       | Suppress output                                                    | false    |
@@ -33,6 +47,8 @@ Compares a table between nodes and generates a diff report.
 ```sh
 ./ace table-diff --nodes="n1,n2" --dbname=mydatabase my-cluster public.my_table 
 ```
+
+When `--output html` is used, ACE writes an HTML diff alongside the JSON report (for example `public_my_table_diffs-<timestamp>.html`). The HTML diff report provides an easy-to-read, colour coded table of differences between nodes.
 
 ### `table-repair`
 
@@ -243,7 +259,7 @@ Compares the Merkle trees of a table across nodes to find inconsistencies. It ge
 | `--nodes`             | `-n`  | Nodes to include (comma-separated, or "all")                       | all      |
 | `--max-cpu-ratio`     |       | Max CPU ratio for parallel operations                              | 0.5      |
 | `--batch-size`        |       | Number of ranges to process in a batch when diffing                | 100      |
-| `--output`            | `-o`  | Output format for the diff report                                  | json     |
+| `--output`            | `-o`  | Output format for the diff report (`json` or `html`)               | json     |
 | `--skip-update`       | `-s`  | Skip updating the Merkle tree with CDC changes before the diff     | false    |
 | `--quiet`             |       | Suppress output                                                    | false    |
 | `--debug`             | `-v`  | Enable debug logging                                               | false    |
@@ -252,6 +268,8 @@ Compares the Merkle trees of a table across nodes to find inconsistencies. It ge
 ```sh
 ./ace mtree table-diff --dbname=mydatabase my-cluster public.my_table
 ```
+
+HTML output is also available via `--output html`; the command produces both JSON and HTML reports with matching timestamps.
 
 #### `mtree update`
 
