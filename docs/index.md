@@ -1,10 +1,11 @@
 ## Table of Contents
 
-The Active Consistency Engine (ACE) is a tool designed to ensure eventual consistency between nodes in a pgEdge cluster. For more information, please refer to the official [pgEdge docs on ACE](https://docs.pgedge.com/ace).
+ACE is a powerful tool designed to ensure and maintain consistency across nodes in a pgEdge Distributed Postgres cluster. It helps identify and resolve data inconsistencies, schema differences, and replication configuration mismatches across nodes in a cluster.
 
-- [Building ACE](../README.md#building-ace)
-- [Configuring ACE](../README.md#ace-configuration)
-- [ACE Quickstart](./quickstart.md)
-- [Using Merkle Trees to Improve ACE Performance](./merkle.md)
-- [Using the ACE API](./api.md)
+Key features of ACE include:
 
+- Table-level data comparison and repair
+- Replication set level verification
+- Automated repair capabilities
+- Schema comparison
+- Spock configuration validation
