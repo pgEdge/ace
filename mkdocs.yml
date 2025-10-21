@@ -50,6 +50,6 @@ repo_url: https://github.com/pgEdge/ace
 
 nav:
   - ACE Overview: index.md
-  - ACE Quickstart: docs/install_configure.md
+  - ACE Quickstart: docs/quickstart.md
   - Using ACE with Merkle Trees: docs/merkle.md
   - ACE API Reference: docs/api.md
