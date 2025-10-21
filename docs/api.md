@@ -1,22 +1,43 @@
 # API Reference
 
-This document provides a detailed reference for the commands available in the Active Consistency Engine (ACE).
+ACE first attempts to use the Postgres service file to resolve connection information before falling back to the (legacy) `<cluster>.json` file for cluster details. Before invoking any ACE commands, use the following commands to create the configuration files:
 
-## Commands
-
-### Cluster Configuration
-
-ACE resolves connection information from a PostgreSQL service file before falling back to the legacy `<cluster>.json` format. Define a base section named after the cluster (for example `[hetzner]`) to capture shared options, and one section per node using `<cluster>.<node>` such as `[hetzner.n1]`. The service file is searched in this order: `ACE_PGSERVICEFILE`, `PGSERVICEFILE`, `pg_service.conf` in the current directory, `~/.pg_service.conf`, and `/etc/pg_service.conf`. If none of these files contain entries for the requested cluster, ACE attempts to read `<cluster>.json`.
-
-Generate starter files with:
 ```sh
 ./ace cluster init --path pg_service.conf
 ./ace config init --path ace.yaml
 ```
 
-Update the generated `pg_service.conf` template with the host, port, database, and credentials for each node before running commands listed below.
+!!! info
 
-Note: A PostgreSQL service file (or a legacy cluster definition JSON file) and a configuration file `ace.yaml` are both necessary for running ACE.
+    You must invoke both commands to initialize ACE before using either standard ACE API calls or mtree calls. A Postgres service file (or a legacy cluster definition JSON file) and a configuration file named `ace.yaml` are both necessary for running ACE.
+
+The `ace.yaml` file defines defaults used for Postgres connections when calling the ACE commands like `table-diff` or `mtree table-diff` as well as configuration details for ACE commands.  You can modify properties that control ACE execution details like:
+
+* the listen_address.
+* the listen_port.
+* timeout values.
+* certificate information.
+
+... and more.
+
+The `pg_service.conf` file contains cluster details that help ACE locate nodes.  After creating the file, define a base section named after the cluster (for example `[acctg]`) to capture shared options, and one section per node using `<cluster>.<node>` such as `[acctg.n1]`. Then, update the template with the `host`, `port`, `database`, and credentials for each node before running ACE commands.
+
+The following locations are checked (in order):
+
+1. The `ACE_PGSERVICEFILE` environment variable.
+2. The `PGSERVICEFILE` environment variable.
+3. The `pg_service.conf` file in the current directory.
+4. `$HOME/.pg_service.conf`.
+5. `/etc/pg_service.conf`.
+
+If none of these files contain entries for the requested cluster, ACE attempts to read the `<cluster>.json` file.
+
+## Commands
+
+ACE API commands are available in two flavors: 
+
+* ACE commands for those users who are not using Merkle trees.
+* ACE [`mtree` commands](#merkle-tree-commands) for those users who use Merkle trees.
 
 ### `table-diff`
 
@@ -183,9 +204,10 @@ Compares spock metadata across cluster nodes.
 ./ace spock-diff --dbname=mydatabase my-cluster
 ``` 
 
-### Merkle Tree Commands
 
-The `mtree` commands provide a more advanced and efficient way to compare tables using Merkle trees. This method is suitable for very large tables where a full table scan is too slow.
+## Merkle Tree Commands
+
+`mtree` commands provide a more advanced and efficient way to compare tables using Merkle trees. This method is suitable for very large tables where a full table scan is too slow.
 
 #### `mtree init`
 

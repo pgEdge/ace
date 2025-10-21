@@ -8,7 +8,7 @@ To find differences between nodes for a specific table, use the `table-diff` com
 
 **Example:**
 ```sh
-./ace table-diff hetzner public.customers_large
+./ace table-diff acctg public.customers_large
 ```
 
 Add `--output html` to emit a colour-coded HTML diff report alongside the JSON diff. 
@@ -16,7 +16,7 @@ Add `--output html` to emit a colour-coded HTML diff report alongside the JSON d
 
 **Sample Output (with differences):**
 ```
-2025/07/22 12:03:51 INFO Cluster hetzner exists
+2025/07/22 12:03:51 INFO Cluster acctg exists
 2025/07/22 12:03:51 INFO Connections successful to nodes in cluster
 2025/07/22 12:03:51 INFO Table public.customers_large is comparable across nodes
 2025/07/22 12:03:51 INFO Using 16 CPUs, max concurrent workers = 16
@@ -33,7 +33,7 @@ If no differences are found, ACE will indicate that, and no diff file will be cr
 
 **Sample Output (no differences):**
 ```
-2025/07/22 12:05:59 INFO Cluster hetzner exists
+2025/07/22 12:05:59 INFO Cluster acctg exists
 2025/07/22 12:05:59 INFO Connections successful to nodes in cluster
 2025/07/22 12:05:59 INFO Table public.customers_large is comparable across nodes
 2025/07/22 12:05:59 INFO Using 16 CPUs, max concurrent workers = 16
@@ -48,12 +48,12 @@ Once a diff file has been generated, you can use the `table-repair` command to r
 
 **Example:**
 ```sh
-./ace table-repair --diff-file=public_customers_large_diffs-20250718134542.json --source-of-truth=n1 hetzner public.customers_large
+./ace table-repair --diff-file=public_customers_large_diffs-20250718134542.json --source-of-truth=n1 acctg public.customers_large
 ```
 
 **Sample Output:**
 ```
-2025/07/22 12:05:24 INFO Starting table repair for public.customers_large on cluster hetzner
+2025/07/22 12:05:24 INFO Starting table repair for public.customers_large on cluster acctg
 2025/07/22 12:05:24 INFO Processing repairs for divergent node: n2
 2025/07/22 12:05:24 INFO Executed 99 upsert operations on n2
 2025/07/22 12:05:24 INFO Repair of public.customers_large complete in 0.003s. Nodes n2 repaired (99 upserted).
