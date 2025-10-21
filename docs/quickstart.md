@@ -2,9 +2,9 @@
 
 !!! note
 
-    Before performing the steps in the Quickstart, you must [create and modify the ACE configuration files](/ace/docs/configuration.md).
+    Before performing the steps in the Quickstart, you must [create and modify the ACE configuration files](docs/configuration.md).
 
-This section provides a quick guide to get started with ACE. For a full list of commands and their options, please refer to the [API Reference](/ace/docs/api.md).
+This section provides a quick guide to get started with ACE. For a full list of commands and their options, please refer to the [API Reference](docs/api.md).
 
 ### 1. Finding Differences
 
