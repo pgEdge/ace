@@ -78,6 +78,9 @@ type TableDiffTask struct {
 	DiffResult types.DiffOutput
 	diffMutex  sync.Mutex
 
+	firstError   error
+	firstErrorMu sync.Mutex
+
 	Ctx context.Context
 }
 
@@ -93,6 +96,23 @@ func (t *TableDiffTask) GetClusterNodes() []map[string]any {
 	return t.ClusterNodes
 }
 func (t *TableDiffTask) SetClusterNodes(cn []map[string]any) { t.ClusterNodes = cn }
+
+func (t *TableDiffTask) recordError(err error) {
+	if err == nil {
+		return
+	}
+	t.firstErrorMu.Lock()
+	if t.firstError == nil {
+		t.firstError = err
+	}
+	t.firstErrorMu.Unlock()
+}
+
+func (t *TableDiffTask) getFirstError() error {
+	t.firstErrorMu.Lock()
+	defer t.firstErrorMu.Unlock()
+	return t.firstError
+}
 
 type RecursiveDiffTask struct {
 	Node1Name                 string
@@ -973,6 +993,11 @@ func (t *TableDiffTask) ExecuteTask() error {
 				cancel()
 				<-sem
 
+				if hErr != nil {
+					errWrap := fmt.Errorf("initial hash failed for node %s range %v-%v: %w", task.nodeName, task.r.Start, task.r.End, hErr)
+					t.recordError(errWrap)
+				}
+
 				resultsMutex.Lock()
 				if _, ok := resultsMap[task.rangeIndex]; !ok {
 					resultsMap[task.rangeIndex] = make(RangeResults)
@@ -991,6 +1016,10 @@ func (t *TableDiffTask) ExecuteTask() error {
 	}
 	close(hashTaskQueue)
 	initialHashWg.Wait()
+
+	if err := t.getFirstError(); err != nil {
+		return err
+	}
 
 	logger.Info("Initial hash calculations complete. Proceeding with comparisons for mismatches...")
 
@@ -1056,6 +1085,10 @@ func (t *TableDiffTask) ExecuteTask() error {
 
 	diffWg.Wait()
 	p.Wait()
+
+	if err := t.getFirstError(); err != nil {
+		return err
+	}
 
 	logger.Info("Table diff comparison completed for %s", t.QualifiedTableName)
 
@@ -1354,7 +1387,9 @@ func (t *TableDiffTask) recursiveDiff(
 
 		diffInfo, err := t.compareBlocks(node1Name, node2Name, currentRange)
 		if err != nil {
-			logger.Info("ERROR during fetchAndCompareRows for %s/%s, range %v-%v: %v", node1Name, node2Name, currentRange.Start, currentRange.End, err)
+			errWrap := fmt.Errorf("fetch and compare rows for %s/%s in range %v-%v: %w", node1Name, node2Name, currentRange.Start, currentRange.End, err)
+			t.recordError(errWrap)
+			logger.Info("ERROR during fetchAndCompareRows for %s/%s, range %v-%v: %v", node1Name, node2Name, currentRange.Start, currentRange.End, errWrap)
 			return
 		}
 
@@ -1418,8 +1453,10 @@ func (t *TableDiffTask) recursiveDiff(
 
 	subRanges, err := t.generateSubRanges(node1Name, currentRange, 2)
 	if err != nil {
+		errWrap := fmt.Errorf("generate sub-ranges for %s/%s in range %v-%v: %w", node1Name, node2Name, currentRange.Start, currentRange.End, err)
+		t.recordError(errWrap)
 		logger.Info("ERROR generating sub-ranges for %s/%s, range %v-%v: %v. Stopping recursion for this path.",
-			node1Name, node2Name, currentRange.Start, currentRange.End, err)
+			node1Name, node2Name, currentRange.Start, currentRange.End, errWrap)
 		return
 	}
 
@@ -1473,11 +1510,15 @@ func (t *TableDiffTask) recursiveDiff(
 		cancelHash()
 
 		if res1.err != nil {
-			logger.Info("ERROR hashing sub-range %v-%v for %s: %v", sr.Start, sr.End, node1Name, res1.err)
+			errWrap := fmt.Errorf("hashing sub-range %v-%v for %s: %w", sr.Start, sr.End, node1Name, res1.err)
+			t.recordError(errWrap)
+			logger.Info("ERROR hashing sub-range %v-%v for %s: %v", sr.Start, sr.End, node1Name, errWrap)
 			continue
 		}
 		if res2.err != nil {
-			logger.Info("ERROR hashing sub-range %v-%v for %s: %v", sr.Start, sr.End, node2Name, res2.err)
+			errWrap := fmt.Errorf("hashing sub-range %v-%v for %s: %w", sr.Start, sr.End, node2Name, res2.err)
+			t.recordError(errWrap)
+			logger.Info("ERROR hashing sub-range %v-%v for %s: %v", sr.Start, sr.End, node2Name, errWrap)
 			continue
 		}
 

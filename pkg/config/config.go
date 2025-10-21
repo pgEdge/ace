@@ -33,8 +33,12 @@ type Config struct {
 }
 
 type PostgresConfig struct {
-	StatementTimeout  int `yaml:"statement_timeout"`  // ms
-	ConnectionTimeout int `yaml:"connection_timeout"` // s
+	StatementTimeout      int    `yaml:"statement_timeout"`  // ms
+	ConnectionTimeout     int    `yaml:"connection_timeout"` // s
+	ApplicationName       string `yaml:"application_name"`
+	TCPKeepalivesIdle     *int   `yaml:"tcp_keepalives_idle"`     // s
+	TCPKeepalivesInterval *int   `yaml:"tcp_keepalives_interval"` // s
+	TCPKeepalivesCount    *int   `yaml:"tcp_keepalives_count"`
 }
 
 type DiffConfig struct {

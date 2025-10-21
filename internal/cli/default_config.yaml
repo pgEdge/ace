@@ -12,6 +12,10 @@
 postgres:
   statement_timeout: 0       # milliseconds
   connection_timeout: 10     # seconds
+  application_name: "ACE"
+  tcp_keepalives_idle: 30        # seconds
+  tcp_keepalives_interval: 10    # seconds
+  tcp_keepalives_count: 5
 
 table_diff:
   concurrency_factor: 1
