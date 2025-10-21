@@ -69,7 +69,7 @@ func findPgServiceFile() (string, error) {
 	if home, err := os.UserHomeDir(); err == nil {
 		candidates = append(candidates, filepath.Join(home, ".pg_service.conf"))
 	}
-	candidates = append(candidates, "/etc/ace/pg_service.conf")
+	candidates = append(candidates, "/etc/pg_service.conf")
 
 	for _, path := range candidates {
 		if path == "" {
