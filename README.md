@@ -37,6 +37,8 @@ ACE also needs an `ace.yaml` for runtime defaults such as `connection_timeout` f
 ./ace config init --path ace.yaml
 ```
 
+Set the `default_cluster` key in `ace.yaml` to the cluster name you most frequently target. When this value is present, CLI commands will use it automatically unless you provide an explicit cluster argument.
+
 ## Quickstart
 
 This section provides a quick guide to get started with ACE. For a full list of commands and their options, please refer to the [API Reference](docs/api.md).
@@ -45,9 +47,13 @@ This section provides a quick guide to get started with ACE. For a full list of 
 
 To find differences between nodes for a specific table, use the `table-diff` command. This command will compare the data in the specified table across all nodes in the cluster and generate a diff report if any inconsistencies are found.
 
+If you set `default_cluster` in `ace.yaml`, you can omit the cluster name in these examples and ACE will use that cluster automatically.
+
 **Example:**
 ```sh
-./ace table-diff hetzner public.customers_large
+./ace table-diff demo_cluster public.customers_large
+# or simply
+./ace table-diff public.customers_large
 ```
 
 Add `--output html` to emit a colour-coded HTML diff report alongside the JSON diff. 
@@ -55,7 +61,7 @@ Add `--output html` to emit a colour-coded HTML diff report alongside the JSON d
 
 **Sample Output (with differences):**
 ```
-2025/07/22 12:03:51 INFO Cluster hetzner exists
+2025/07/22 12:03:51 INFO Cluster demo_cluster exists
 2025/07/22 12:03:51 INFO Connections successful to nodes in cluster
 2025/07/22 12:03:51 INFO Table public.customers_large is comparable across nodes
 2025/07/22 12:03:51 INFO Using 16 CPUs, max concurrent workers = 16
@@ -72,7 +78,7 @@ If no differences are found, ACE will indicate that, and no diff file will be cr
 
 **Sample Output (no differences):**
 ```
-2025/07/22 12:05:59 INFO Cluster hetzner exists
+2025/07/22 12:05:59 INFO Cluster demo_cluster exists
 2025/07/22 12:05:59 INFO Connections successful to nodes in cluster
 2025/07/22 12:05:59 INFO Table public.customers_large is comparable across nodes
 2025/07/22 12:05:59 INFO Using 16 CPUs, max concurrent workers = 16
@@ -87,12 +93,12 @@ Once a diff file has been generated, you can use the `table-repair` command to r
 
 **Example:**
 ```sh
-./ace table-repair --diff-file=public_customers_large_diffs-20250718134542.json --source-of-truth=n1 hetzner public.customers_large
+./ace table-repair --diff-file=public_customers_large_diffs-20250718134542.json --source-of-truth=n1 demo_cluster public.customers_large
 ```
 
 **Sample Output:**
 ```
-2025/07/22 12:05:24 INFO Starting table repair for public.customers_large on cluster hetzner
+2025/07/22 12:05:24 INFO Starting table repair for public.customers_large on cluster demo_cluster
 2025/07/22 12:05:24 INFO Processing repairs for divergent node: n2
 2025/07/22 12:05:24 INFO Executed 99 upsert operations on n2
 2025/07/22 12:05:24 INFO Repair of public.customers_large complete in 0.003s. Nodes n2 repaired (99 upserted).
@@ -107,7 +113,9 @@ For very large tables, you can use Merkle trees to find differences more efficie
 First, you need to initialize the necessary database objects on all nodes in your cluster.
 
 ```sh
-./ace mtree init hetzner
+./ace mtree init demo_cluster
+# or omit the cluster when default_cluster is set
+./ace mtree init
 ```
 
 **Step 2: Build the Merkle Tree**
@@ -115,7 +123,9 @@ First, you need to initialize the necessary database objects on all nodes in you
 Next, build the Merkle tree for the table you want to compare. This process will divide the table into blocks and calculate hashes for each block.
 
 ```sh
-./ace mtree build hetzner public.customers_large
+./ace mtree build demo_cluster public.customers_large
+# or
+./ace mtree build public.customers_large
 ```
 
 **Step 3: Find Differences**
@@ -123,7 +133,9 @@ Next, build the Merkle tree for the table you want to compare. This process will
 Now you can run the Merkle tree diff command. This will compare the trees on each node and report any inconsistencies. This will also create a diff file that can be used with the `table-repair` command.
 
 ```sh
-./ace mtree table-diff hetzner public.customers_large
+./ace mtree table-diff demo_cluster public.customers_large
+# or
+./ace mtree table-diff public.customers_large
 ```
 
 **Step 4: Repair Differences (Optional)**
@@ -131,7 +143,7 @@ Now you can run the Merkle tree diff command. This will compare the trees on eac
 If differences are found, you can repair them using the `table-repair` command, just like with a standard `table-diff`.
 
 ```sh
-./ace table-repair --diff-file=<diff-file-from-mtree-diff> --source-of-truth=n1 hetzner public.customers_large
+./ace table-repair --diff-file=<diff-file-from-mtree-diff> --source-of-truth=n1 demo_cluster public.customers_large
 ```
 
 The Merkle trees can be kept up-to-date automatically by running the `mtree listen` command, which uses Change Data Capture (CDC) with the `pgoutput` output plugin to track row changes. Performing the `mtree table-diff` will update the Merkle tree even if `mtree listen` is not used.

@@ -13,15 +13,17 @@ package config
 
 import (
 	"os"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
 
 type Config struct {
-	Postgres  PostgresConfig `yaml:"postgres"`
-	TableDiff DiffConfig     `yaml:"table_diff"`
-	MTree     MTreeConfig    `yaml:"mtree"`
-	Server    ServerConfig   `yaml:"server"`
+	DefaultCluster string         `yaml:"default_cluster"`
+	Postgres       PostgresConfig `yaml:"postgres"`
+	TableDiff      DiffConfig     `yaml:"table_diff"`
+	MTree          MTreeConfig    `yaml:"mtree"`
+	Server         ServerConfig   `yaml:"server"`
 
 	ScheduleJobs   []JobDef   `yaml:"schedule_jobs"`
 	ScheduleConfig []SchedDef `yaml:"schedule_config"`
@@ -127,4 +129,12 @@ func Init(path string) error {
 	}
 	Cfg = c
 	return nil
+}
+
+// DefaultCluster returns the trimmed default cluster name from the loaded config.
+func DefaultCluster() string {
+	if Cfg == nil {
+		return ""
+	}
+	return strings.TrimSpace(Cfg.DefaultCluster)
 }
