@@ -4,7 +4,7 @@
 ## Table of Contents
 - [Building ACE](README.md#building-ace)
 - [Configuring ACE](./docs/configuration.md)
-- [Getting Started](./docs/using_ace.md)
+- [Getting Started](./docs/best_practices.md)
 - [Using Merkle Trees to Improve ACE Performance](./docs/merkle.md)
 - [Command Reference](./docs/commands/index.md)
 

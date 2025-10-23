@@ -24,11 +24,11 @@ Because Merkle mode is designed for very large tables, ACE uses probabilistic es
 
 The following steps walk you through initializing, building, and using Merkle trees to monitor your table.
 
-1. Initialize Merkle Tree objects with the command:
+First, initialize Merkle Tree objects with the command:
 
 `./ace mtree init cluster_name`
 
-2. Build the Merkle Tree with the command:
+Then, build the Merkle Tree with the command:
 
 `./ace mtree build cluster_name schema.table_name`
 
@@ -36,29 +36,28 @@ The following steps walk you through initializing, building, and using Merkle tr
 
     You can force recreation of objects with --recreate-objects=true, and let ACE analyze the table first with --analyse=true.
 
-3. Invoke ACE to compare Merkle trees across nodes and write a diff report (and optional HTML):
+Then, invoke ACE to compare Merkle trees across nodes and write a diff report (and optional HTML):
 
 `./ace mtree table-diff cluster_name schema.table_name`
 
-4. Use the diff file to initiate table repair with the ACE table-repair command:
+Finally, you can use the diff file to initiate table repair with the ACE [table-repair](./commands/table-repair.md) command:
 
 `./ace table-repair --diff-file=<diff-file-from-mtree-diff> --source-of-truth=n1 cluster_name schema.table_name`
-
 
 !!! note
 
     Running `mtree listen` can help keep trees current; every `mtree table-diff` also performs an on-demand update before comparing.
 
 
-## Building Merkle Trees in Parallel (Very Large Tables)
+## Building Merkle Trees in Parallel (for Very Large Tables)
 
-If a table is extremely large (e.g., ~1B rows or ~1 TB), remote building the Merkle tree from a single ACE node can be slowed by network latency. You can parallelize the build per node to speed up the process.
+If a table is extremely large (e.g., ~1B rows or ~1 TB), remote building the Merkle tree from a single ACE node can be slowed by network latency. You can parallelize the build (per node) to speed up the process.
 
 On one node, compute ranges and start hashing and writing the ranges to a file:
 
 `./ace mtree build cluster_name schema.table_name --max-cpu-ratio=1 --write-ranges=true`
 
-Copy the generated ranges file to other nodes (e.g., with scp).
+Then, copy the generated ranges file to other nodes (e.g., with scp).
 
 On each other node, build using the shared ranges file, targeting only that node:
 
