@@ -72,7 +72,7 @@ ACE checks the following locations in this order:
 
 After creating the file, add a base section named after the cluster (for example `[acctg]`) to capture shared options, and one section per node named in the form: `<cluster>.<node>`, such as `[acctg.n1]`. Then, update the template with the `host`, `port`, `database`, and credentials for each node before running ACE commands.
 
-
+```bash
 [acctg]
 host=10.0.0.1
 port=5432
@@ -91,6 +91,6 @@ port=5432
 dbname=acctg
 user=rocky
 password=1safepassword!
-
+```
 
 If none of these files contain entries for the requested cluster, ACE attempts to read the `<cluster>.json` file.
