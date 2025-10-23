@@ -1,4 +1,4 @@
-Using ACE with Merkle Trees
+# Using ACE with Merkle Trees
 
 !!! info
 
@@ -6,7 +6,7 @@ Using ACE with Merkle Trees
 
 ACE can use Merkle trees to make very large table comparisons dramatically faster. Normal table-diff runs (with tuned parameters) often complete in seconds or minutes, but on huge tables a full scan may take hours. Merkle trees avoid full rescans by hashing ranges (blocks) and only drilling into blocks that differ.
 
-**Before using Merkle Trees**
+**Before using a Merkle Tree**
 
 You must perform two setup steps before using Merkle trees effectively.  The first command adds cluster-level operators used by Merkle trees:
 
@@ -22,15 +22,15 @@ Because Merkle mode is designed for very large tables, ACE uses probabilistic es
 
 ## Using Merkle Trees
 
+The following steps walk you through initializing, building, and using Merkle trees to monitor your table.
+
 1. Initialize Merkle Tree objects with the command:
 
 `./ace mtree init cluster_name`
 
-
 2. Build the Merkle Tree with the command:
 
 `./ace mtree build cluster_name schema.table_name`
-
 
 !!! info
 
@@ -56,14 +56,14 @@ If a table is extremely large (e.g., ~1B rows or ~1 TB), remote building the Mer
 
 On one node, compute ranges and start hashing and writing the ranges to a file:
 
-`./ace mtree build acctg public.customers_large --max-cpu-ratio=1 --write-ranges=true`
+`./ace mtree build cluster_name schema.table_name --max-cpu-ratio=1 --write-ranges=true`
 
 Copy the generated ranges file to other nodes (e.g., with scp).
 
 On each other node, build using the shared ranges file, targeting only that node:
 
 ```bash
-./ace mtree build acctg public.customers_large \
+./ace mtree build cluster_name schema.table_name \
   --max-cpu-ratio=1 \
   --recreate-objects=true \
   --nodes=n2 \
@@ -72,60 +72,19 @@ On each other node, build using the shared ranges file, targeting only that node
 
 Repeat this process on each node in your cluster, using exactly one node per run so ACE doesn’t attempt remote creation from that host.
 
-## Day-to-Day Commands with Merkle Trees
 
-mtree table-diff
+## Using Merkle Tree Commands
 
-Performs a Merkle-based comparison (updates the tree first unless told otherwise) and writes a diff report.
+For detailed information about the options that you can include when using Merkle tree commands, see the documentation listed below:
 
-./ace mtree table-diff acctg public.customers_large
-
-
-Useful flags:
-
---output {json|html}
-
---skip-update
-
---batch-size <N>
-
---max-cpu-ratio <0..1>
-
-mtree update
-
-Manually update (refresh) a table’s Merkle tree using captured CDC.
-
-./ace mtree update acctg public.customers_large
+| Command   | Description                                  |
+| --------------- | ---------------------------------------- |
+| [mtree build](mtree-build.md)                   | Builds Merkle trees for a specific table on all nodes (after `mtree init`).               |
+| [mtree init](mtree-init.md)                     | Creates required schema/objects and sets up CDC (publication/slot) for Merkle operations. |
+| [mtree listen](mtree-listen.md)                 | Long-running process that consumes CDC and continuously updates Merkle trees.             |
+| [mtree table-diff](mtree-table-diff.md)         | Compares Merkle trees across nodes to detect inconsistencies; can emit JSON/HTML reports. |
+| [mtree teardown](mtree-teardown.md)             | Removes all Merkle-related objects and CDC setup created by `mtree init`.                 |
+| [mtree teardown-table](mtree-teardown-table.md) | Drops Merkle data/metadata for one table and removes it from CDC publication.             |
+| [mtree update](mtree-update.md)                 | Applies captured CDC changes to refresh Merkle trees; optional rebalance.                 |
 
 
---rebalance=true will split/merge blocks based on keyspace changes. The default update in mtree table-diff handles splits and updates, but defers merges; use --rebalance when you need merges.
-
-mtree listen
-
-Continuously consumes CDC (via pgoutput) and updates trees in real time.
-
-./ace mtree listen acctg
-
-mtree teardown (table-level)
-
-Remove table-specific Merkle artifacts:
-
-./ace mtree teardown acctg public.customers_large
-
-mtree teardown (cluster-level)
-
-Remove cluster-level objects (operators/functions) created by mtree init:
-
-./ace mtree teardown acctg
-
-Performance Considerations
-
-Triggers: The Merkle build adds triggers to track changes; these can impact write performance. Measure and verify for your workload.
-
-Tuning: For build/diff speed, adjust --max-cpu-ratio, relevant block/batch options, and keep the ACE node network-close to your databases.
-
-Stats: Ensure fresh ANALYZE on large tables for accurate range estimates.
-
-Rebalancing: Use --rebalance sparingly; merges are more expensive than splits.
-
-Thinking
