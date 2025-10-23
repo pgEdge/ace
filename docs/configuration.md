@@ -16,14 +16,7 @@ ACE first attempts to use the Postgres service file to resolve connection inform
 
 ## The ace.yaml file
 
-The `ace.yaml` file defines defaults used for Postgres connections when calling the ACE commands like `table-diff` or `mtree table-diff` as well as configuration details for ACE commands.  You can modify properties that control ACE execution details like:
-
-* the listen_address.
-* the listen_port.
-* timeout values.
-* certificate information.
-
-... and more.
+The [`ace.yaml` file](https://github.com/pgEdge/ace/blob/main/ace.yaml) defines default values used when calling the ACE commands.  The file contains properties that control the resources used by ACE commands; after creating the `ace.yaml` file, use your choice of editor to customize the properties for your system:
 
 | Section --> Property                    | Description |
 | --------------------------------------- | ------------|
