@@ -50,8 +50,8 @@ repo_url: https://github.com/pgEdge/ace
 
 nav:
   - ACE Overview: index.md
+  - Best Practices for Using ACE: best_practices.md
   - ACE Configuration: configuration.md
-  - Using ACE Commands: using_ace.md
   - Using ACE with Merkle Trees: merkle.md
   - ACE Commands:
     - Command reference: commands/index.md
@@ -68,3 +68,4 @@ nav:
     - table-diff: commands/table-diff.md
     - table-repair: commands/table-repair.md
     - table-rerun: commands/table-rerun.md
+  - Improving ACE Performance: performance.md

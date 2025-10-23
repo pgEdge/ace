@@ -2,11 +2,12 @@
 [![Go Integration Tests](https://github.com/pgEdge/ace/actions/workflows/test.yml/badge.svg?branch=main)](https://github.com/pgEdge/ace/actions/workflows/test.yml)
 
 ## Table of Contents
+- [ACE Best Practices](./docs/best_practices.md)
 - [Building ACE](README.md#building-ace)
 - [Configuring ACE](./docs/configuration.md)
-- [Getting Started](./docs/best_practices.md)
 - [Using Merkle Trees to Improve ACE Performance](./docs/merkle.md)
 - [Command Reference](./docs/commands/index.md)
+- [Performance Considerations](./docs/performance.md)
 
 The Active Consistency Engine (ACE) is a tool designed to ensure eventual consistency between nodes in a pgEdge cluster. For more information, please refer to the official [pgEdge docs on ACE](https://docs.pgedge.com/ace).
 
