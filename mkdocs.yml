@@ -53,4 +53,4 @@ nav:
   - ACE Configuration: configuration.md
   - Using ACE Commands: using_ace.md
   - Using ACE with Merkle Trees: merkle.md
-  - ACE API Reference: api.md
+  - ACE Commands: docs/functions/index.md

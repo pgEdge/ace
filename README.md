@@ -3,10 +3,10 @@
 
 ## Table of Contents
 - [Building ACE](README.md#building-ace)
-- [Configuring ACE](README.md#ace-configuration)
-- [ACE Quickstart](./docs/using_ace.md)
+- [Configuring ACE](./docs/configuration.md)
+- [Getting Started](./docs/using_ace.md)
 - [Using Merkle Trees to Improve ACE Performance](./docs/merkle.md)
-- [Using the ACE API](./docs/api.md)
+- [Function Reference](./docs/functions/index.md)
 
 The Active Consistency Engine (ACE) is a tool designed to ensure eventual consistency between nodes in a pgEdge cluster. For more information, please refer to the official [pgEdge docs on ACE](https://docs.pgedge.com/ace).
 
@@ -29,7 +29,7 @@ To build ACE, you need to have Go (version 1.18 or higher) installed.
 
 ## ACE Configuration
 
-ACE first attempts to use the Postgres service file to resolve connection information before falling back to the (legacy) `<cluster>.json` file for cluster details. Before invoking any ACE commands, use the following commands to create the configuration files:
+Before invoking any ACE commands, use the following commands to create the configuration files:
 
 ```sh
 ./ace cluster init --path pg_service.conf
@@ -38,20 +38,18 @@ ACE first attempts to use the Postgres service file to resolve connection inform
 
 !!! info
 
-    You must invoke both commands to initialize ACE before using either standard ACE API calls or mtree calls. A Postgres service file (or a legacy cluster definition JSON file) and a configuration file named `ace.yaml` are both necessary for running ACE.
+    For detailed information about creating and modifying the configuration files, visit [here](/docs/configuration.md).
 
-The `ace.yaml` file defines defaults used for Postgres connections when calling the ACE commands like `table-diff` or `mtree table-diff` as well as configuration details for ACE commands.  You can modify properties that control ACE execution details like:
+The [`ace.yaml` file](ace.yaml) defines default values used when executing ACE commands like `table-diff` or `mtree table-diff`.  You can modify properties that influence ACE performance and execution like timeout values and certificate information.
 
-* the listen_address.
-* the listen_port.
-* timeout values.
-* certificate information.
+The `pg_service.conf` file contains cluster connection details that help ACE locate nodes.  After creating the file: 
 
-... and more.
+* define a base section named after the cluster (for example `[acctg]`) for cluster details
+* define one section per node, named in the form `[cluster.node]` (for example, `[acctg.n1]`). 
 
-The `pg_service.conf` file contains cluster details that help ACE locate nodes.  After creating the file, define a base section named after the cluster (for example `[acctg]`) to capture shared options, and one section per node using `<cluster>.<node>` such as `[acctg.n1]`. Then, update the template with the `host`, `port`, `database`, and credentials for each node before running ACE commands.
+Then, update the file with the `host`, `port`, `database`, and credentials for each node before running ACE commands.
 
-The following locations are checked (in order):
+ACE checks the following locations in order for configuration files:
 
 1. The `ACE_PGSERVICEFILE` environment variable.
 2. The `PGSERVICEFILE` environment variable.
@@ -61,4 +59,3 @@ The following locations are checked (in order):
 
 If none of these files contain entries for the requested cluster, ACE attempts to read the `<cluster>.json` file.
 
-After creating the ACE configuration files, you're ready to use [ACE](/docs/quickstart.md).
