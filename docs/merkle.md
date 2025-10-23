@@ -1,38 +1,131 @@
-# Using ACE with Merkle Trees
+Using ACE with Merkle Trees
 
-For very large tables, you can use Merkle trees to find differences more efficiently. This method is faster because it doesn't require a full table scan on every comparison. Here's a quick guide to using Merkle trees.
+!!! info
 
-**Step 1: Initialize Merkle Tree Objects**
+    ACE Merkle trees are introduced as an experimental optimisation in pgEdge Distributed Postgres. Evaluate this feature carefully before enabling in production.
 
-First, you need to initialize the necessary database objects on all nodes in your cluster.
+ACE can use Merkle trees to make very large table comparisons dramatically faster. Normal table-diff runs (with tuned parameters) often complete in seconds or minutes, but on huge tables a full scan may take hours. Merkle trees avoid full rescans by hashing ranges (blocks) and only drilling into blocks that differ.
 
-```sh
-./ace mtree init acctg
+**Before using Merkle Trees**
+
+You must perform two setup steps before using Merkle trees effectively.  The first command adds cluster-level operators used by Merkle trees:
+
+`./ace mtree init cluster_name`
+
+The second command creates the Merkle metadata table and triggers for the target table:
+
+`./ace mtree build cluster_name schema.table_name`
+
+Building the per-table Merkle tree is typically a one-time operation. After that, ACE tracks changes and updates the tree automatically during diffs (or via mtree listen / mtree update).
+
+Because Merkle mode is designed for very large tables, ACE uses probabilistic estimates (row counts, PK ranges, etc.). For best results, ensure your table has fresh statistics with the Postgres ANALYZE command. You can pass `--analyse=true` during build, but on very large tables you may prefer to run ANALYZE manually at a more convenient time.
+
+## Using Merkle Trees
+
+1. Initialize Merkle Tree objects with the command:
+
+`./ace mtree init cluster_name`
+
+
+2. Build the Merkle Tree with the command:
+
+`./ace mtree build cluster_name schema.table_name`
+
+
+!!! info
+
+    You can force recreation of objects with --recreate-objects=true, and let ACE analyze the table first with --analyse=true.
+
+3. Invoke ACE to compare Merkle trees across nodes and write a diff report (and optional HTML):
+
+`./ace mtree table-diff cluster_name schema.table_name`
+
+4. Use the diff file to initiate table repair with the ACE table-repair command:
+
+`./ace table-repair --diff-file=<diff-file-from-mtree-diff> --source-of-truth=n1 cluster_name schema.table_name`
+
+
+!!! note
+
+    Running `mtree listen` can help keep trees current; every `mtree table-diff` also performs an on-demand update before comparing.
+
+
+## Building Merkle Trees in Parallel (Very Large Tables)
+
+If a table is extremely large (e.g., ~1B rows or ~1 TB), remote building the Merkle tree from a single ACE node can be slowed by network latency. You can parallelize the build per node to speed up the process.
+
+On one node, compute ranges and start hashing and writing the ranges to a file:
+
+`./ace mtree build acctg public.customers_large --max-cpu-ratio=1 --write-ranges=true`
+
+Copy the generated ranges file to other nodes (e.g., with scp).
+
+On each other node, build using the shared ranges file, targeting only that node:
+
+```bash
+./ace mtree build acctg public.customers_large \
+  --max-cpu-ratio=1 \
+  --recreate-objects=true \
+  --nodes=n2 \
+  --ranges-file=/path/to/ranges-file.txt
 ```
 
-**Step 2: Build the Merkle Tree**
+Repeat this process on each node in your cluster, using exactly one node per run so ACE doesn’t attempt remote creation from that host.
 
-Next, build the Merkle tree for the table you want to compare. This process will divide the table into blocks and calculate hashes for each block.
+## Day-to-Day Commands with Merkle Trees
 
-```sh
-./ace mtree build acctg public.customers_large
-```
+mtree table-diff
 
-**Step 3: Find Differences**
+Performs a Merkle-based comparison (updates the tree first unless told otherwise) and writes a diff report.
 
-Now you can run the Merkle tree diff command. This will compare the trees on each node and report any inconsistencies. This will also create a diff file that can be used with the `table-repair` command.
-
-```sh
 ./ace mtree table-diff acctg public.customers_large
-```
 
-**Step 4: Repair Differences (Optional)**
 
-If differences are found, you can repair them using the `table-repair` command, just like with a standard `table-diff`.
+Useful flags:
 
-```sh
-./ace table-repair --diff-file=<diff-file-from-mtree-diff> --source-of-truth=n1 acctg public.customers_large
-```
+--output {json|html}
 
-The Merkle trees can be kept up-to-date automatically by running the `mtree listen` command, which uses Change Data Capture (CDC) with the `pgoutput` output plugin to track row changes. Performing the `mtree table-diff` will update the Merkle tree even if `mtree listen` is not used.
+--skip-update
 
+--batch-size <N>
+
+--max-cpu-ratio <0..1>
+
+mtree update
+
+Manually update (refresh) a table’s Merkle tree using captured CDC.
+
+./ace mtree update acctg public.customers_large
+
+
+--rebalance=true will split/merge blocks based on keyspace changes. The default update in mtree table-diff handles splits and updates, but defers merges; use --rebalance when you need merges.
+
+mtree listen
+
+Continuously consumes CDC (via pgoutput) and updates trees in real time.
+
+./ace mtree listen acctg
+
+mtree teardown (table-level)
+
+Remove table-specific Merkle artifacts:
+
+./ace mtree teardown acctg public.customers_large
+
+mtree teardown (cluster-level)
+
+Remove cluster-level objects (operators/functions) created by mtree init:
+
+./ace mtree teardown acctg
+
+Performance Considerations
+
+Triggers: The Merkle build adds triggers to track changes; these can impact write performance. Measure and verify for your workload.
+
+Tuning: For build/diff speed, adjust --max-cpu-ratio, relevant block/batch options, and keep the ACE node network-close to your databases.
+
+Stats: Ensure fresh ANALYZE on large tables for accurate range estimates.
+
+Rebalancing: Use --rebalance sparingly; merges are more expensive than splits.
+
+Thinking
