@@ -4,13 +4,15 @@ Initializes database objects needed for Merkle tree operations on all nodes (sch
 
 **Usage**
 ```
-./ace mtree init [flags] [cluster]
+./ace mtree init [flags] [cluster_name]
 ```
 
 **Arguments**
-- `[cluster]` — Optional; overrides `default_cluster`.
+
+- `[cluster_name]` — Optional; overrides `default_cluster`.
 
 **Flags**
+
 | Flag | Alias | Description | Default |
 |------|-------|-------------|---------|
 | `--dbname` | `-d` | Database name |  |

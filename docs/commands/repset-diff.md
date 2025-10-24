@@ -3,15 +3,18 @@
 Runs `table-diff` on every table in a replication set and reports differences.
 
 **Usage**
+
 ```
 ./ace repset-diff [flags] [cluster] <repset>
 ```
 
 **Arguments**
+
 - `[cluster]` — Optional; overrides `default_cluster`.
 - `<repset>` — Replication set name.
 
 **Flags**
+
 | Flag | Alias | Description | Default |
 |------|-------|-------------|---------|
 | `--dbname` | `-d` | Database name |  |
@@ -22,6 +25,7 @@ Runs `table-diff` on every table in a replication set and reports differences.
 | `--debug` | `-v` | Debug logging | `false` |
 
 **Example**
+
 ```sh
 ./ace repset-diff --dbname=mydatabase my-cluster my_repset
 ```

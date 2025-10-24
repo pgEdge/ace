@@ -4,14 +4,17 @@ Compares Merkle trees of a table across nodes to find inconsistencies.
 By default, updates trees first using CDC.
 
 **Usage**
+
 ```
 ./ace mtree table-diff [flags] [cluster] <schema.table>
 ```
 
 **Arguments**
+
 - `[cluster]` — Optional; overrides `default_cluster`.
 
 **Flags**
+
 | Flag | Alias | Description | Default |
 |------|-------|-------------|---------|
 | `--dbname` | `-d` | Database name |  |
@@ -24,9 +27,11 @@ By default, updates trees first using CDC.
 | `--debug` | `-v` | Debug logging | `false` |
 
 **Example**
+
 ```sh
 ./ace mtree table-diff --dbname=mydatabase my-cluster public.my_table
 ```
 
 **Notes**
+
 - With `--output html`, both JSON and HTML reports are generated with matching timestamps.

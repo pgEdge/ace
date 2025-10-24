@@ -3,14 +3,17 @@
 Builds a Merkle tree for a table on all nodes (after `mtree init`).
 
 **Usage**
+
 ```
 ./ace mtree build [flags] [cluster] <schema.table>
 ```
 
 **Arguments**
+
 - `[cluster]` — Optional; overrides `default_cluster`.
 
 **Flags**
+
 | Flag | Alias | Description | Default |
 |------|-------|-------------|---------|
 | `--dbname` | `-d` | Database name |  |

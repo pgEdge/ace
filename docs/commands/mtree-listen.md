@@ -1,16 +1,19 @@
 # mtree listen
 
-Starts a long-running process to listen for CDC changes and auto-update Merkle trees for tracked tables.
+Starts a long-running process to listen for changes and auto-update Merkle trees for tracked tables.
 
 **Usage**
+
 ```
-./ace mtree listen [flags] [cluster]
+./ace mtree listen [flags] [cluster_name]
 ```
 
 **Arguments**
-- `[cluster]` — Optional; overrides `default_cluster`.
+
+- `[cluster_name]` — Optional; overrides `default_cluster`.
 
 **Flags**
+
 | Flag | Alias | Description | Default |
 |------|-------|-------------|---------|
 | `--dbname` | `-d` | Database name |  |

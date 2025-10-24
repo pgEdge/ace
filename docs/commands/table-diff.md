@@ -13,7 +13,7 @@ ACE diff functions compare two objects and identify the differences; the output 
 
 If you generate an HTML report, ACE generates an interactive report with:
 
-- Colour‑coded differences
+- Color‑coded differences
 - Expandable row details
 - Primary key highlighting
 - Missing row indicators
@@ -24,9 +24,9 @@ If you generate an HTML report, ACE generates an interactive report with:
 - Performance‑optimized large table scans
 - Focused comparisons between nodes, tables, or schemas
 
-> **Best practice:** Experiment with different block sizes and CPU utilisation to balance performance and resource usage. Use `--table-filter` for large tables to reduce comparison scope, and generate HTML reports to simplify analysis. Also ensure diffs do not exceed `MAX_ALLOWED_DIFFS`; otherwise, `table-repair` can only partially repair the table.
+!!! hint
 
----
+    Experiment with different block sizes and CPU utilisation to balance performance and resource usage. Use `--table-filter` for large tables to reduce comparison scope, and generate HTML reports to simplify analysis. Also ensure diffs do not exceed `MAX_ALLOWED_DIFFS`; otherwise, `table-repair` can only partially repair the table.
 
 ## Syntax
 
@@ -86,9 +86,7 @@ Hashing initial ranges: 168 / 177 [=============================================
 2025/07/22 12:06:01 INFO ✔ TABLES MATCH
 ```
 
----
-
-## How `table-diff` runs (performance notes)
+### How `table-diff` Works
 
 ACE optimises comparisons with multiprocessing and block hashing:
 

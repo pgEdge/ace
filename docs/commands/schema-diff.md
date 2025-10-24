@@ -4,15 +4,18 @@ Compares schemas across nodes. By default, runs `table-diff` on every table.
 Alternatively, `--ddl-only` compares only object presence (tables, views, functions, indexes).
 
 **Usage**
+
 ```
-./ace schema-diff [flags] [cluster] <schema>
+./ace schema-diff [flags] [cluster_name] <schema_name>
 ```
 
 **Arguments**
-- `[cluster]` — Optional; overrides `default_cluster`.
-- `<schema>` — Schema name.
+
+- `[cluster_name]` — Optional; overrides `default_cluster`.
+- `<schema_name>` — Schema name.
 
 **Flags**
+
 | Flag | Alias | Description | Default |
 |------|-------|-------------|---------|
 | `--dbname` | `-d` | Database name |  |
@@ -24,6 +27,7 @@ Alternatively, `--ddl-only` compares only object presence (tables, views, functi
 | `--debug` | `-v` | Debug logging | `false` |
 
 **Example**
+
 ```sh
 ./ace schema-diff --dbname=mydatabase my-cluster public
 ```
