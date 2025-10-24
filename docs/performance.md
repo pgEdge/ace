@@ -1,8 +1,15 @@
 # Performance Tuning (ACE)
 
-ACE parallelizes work across multiple processes, hashing blocks of rows and only drilling into blocks that differ. Runtime depends on **hardware**, **tuning flags**, **table shape**, **diff distribution**, and **network latency**.
+ACE parallelizes work across multiple processes, hashing blocks of rows and only drilling into blocks that differ. ACE performance on your system will depend on a number of tunable factors:
 
-## Parameters that Impact Performance
+* **Hardware** and **Host capacity**: More cores and memory help; ensure ACE’s CPU cap matches reality.
+* **Table characteristics**: Very wide rows, large JSON/BLOB/embedding columns slow hashing and transport.
+* **Diff distribution**: Many small, scattered mismatches force more data movement than a few concentrated ones.
+* **Network**: Keep ACE close (network-wise) to the databases.
+
+## Command Options that Can Impact Performance
+
+When invoking [ACE commands](/commands/index.md), review the available command options; many of the options are designed to improve performance.  For example:
 
 - **`--max-cpu-ratio`**  
   Percentage of host CPU ACE can use (0.0–1.0).  
@@ -22,14 +29,8 @@ ACE parallelizes work across multiple processes, hashing blocks of rows and only
 - **`--nodes`**  
   Compare a subset (e.g., `n1,n2`) to reduce cross-node IO.
 
-## Environment Matters
 
-- **Host capacity**: More cores and memory help; ensure ACE’s CPU cap matches reality.
-- **Table characteristics**: Very wide rows, large JSON/BLOB/embedding columns slow hashing and transport.
-- **Diff distribution**: Many small, scattered mismatches force more data movement than a few concentrated ones.
-- **Network**: Place ACE close (network-wise) to the databases.
-
-## Merkle Trees (for Very Large Tables)
+## Use Merkle Trees (for Very Large Tables)
 
 - Use **Merkle mode** (`mtree build`, `mtree table-diff`) to avoid full rescans.
 - Keep statistics **fresh** (`ANALYZE`) for accurate range estimation.
@@ -40,8 +41,8 @@ ACE parallelizes work across multiple processes, hashing blocks of rows and only
 
 ## Performance Tuning Checklist
 
-1. Start with `--max-cpu-ratio=1.0`, `--block-rows=10000`, `--batch-size=1`.
-2. Confirm table PKs and `ANALYZE` status.
+1. Include the command options `--max-cpu-ratio=1.0`, `--block-rows=10000`, `--batch-size=1` when possible.
+2. Confirm that your table has been `ANALYZE`d recently.
 3. Use `--table-filter` to target hot ranges.
-4. If still slow and tables are huge, switch to **Merkle**.
-5. After repair, run `table-rerun` to validate.
+4. If you're using ACE on huge tables, use Merkle trees.
+5. After repairing differences, run `table-rerun` to validate.

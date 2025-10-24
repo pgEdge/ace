@@ -1,6 +1,6 @@
 # ACE Getting Started
 
-ACE is a powerful tool designed to ensure and maintain consistency across nodes in a pgEdge Distributed Postgres cluster. It helps identify and resolve data inconsistencies, schema differences, and replication configuration mismatches across nodes in a cluster.
+ACE is a powerful tool designed to ensure and maintain consistency across nodes in a pgEdge Distributed Postgres cluster. ACE helps identify and resolve data inconsistencies, schema differences, and replication configuration mismatches across nodes in a cluster.
 
 Key features of ACE include:
 
@@ -16,7 +16,7 @@ In an eventually consistent system (like a cluster), nodes can diverge due to re
 
 
 ### Node Failures (Planned/Unplanned)
-- **Problem:** A node rejoins out-of-sync.
+- **Problem:** A node rejoins the cluster but is out-of-sync.
 - **Approach:** `table-diff` (or `repset-diff` / `schema-diff`) to assess drift; `table-repair` with `--dry-run` then apply.
 
 ### Network Partitions / Link Degradation
@@ -25,31 +25,30 @@ In an eventually consistent system (like a cluster), nodes can diverge due to re
 
 ### Planned Maintenance Windows
 - **Problem:** Nodes fall behind during upgrades or maintenance.
-- **Approach:** Post-window, run diffs and perform bulk `table-repair` to re-synchronize.
+- **Approach:** Run diffs and perform bulk `table-repair` to re-synchronize.
 
 ### Post-Repair Verification
 - **Problem:** Need to confirm remediation success.
-- **Approach:** `table-rerun --diff-file=<original-diff>` to verify that discrepancies no longer exist.
+- **Approach:** Use `table-rerun --diff-file=<original-diff>` to verify that discrepancies no longer exist.
 
 ### Spock Configuration Validation
 - **Problem:** Metadata/config drift can cause replication anomalies.
-- **Approach:** `spock-diff` to compare Spock state across nodes; correct differences before they cause data drift.
+- **Approach:** Use `spock-diff` to compare Spock state across nodes; correct differences before they cause data drift.
 
 ### Large-Scale Integrity Checks
 - **Problem:** Very large tables make full scans impractical.
-- **Approach:** Use Merkle trees:
-  - Initialize once (`mtree init`), build per-table (`mtree build`), then `mtree table-diff` for fast comparisons.
+- **Approach:** Use [Merkle trees](./merkle.md):
+  - Initialize once (`mtree init`), build each table (`mtree build`), then use `mtree table-diff` for faster comparisons.
   - Optionally keep trees current with `mtree listen`.
 
-## Operating Tips
+## Simplifying ACE Operations
 
-- **Automate** periodic checks (daily/weekly) and **alert** on diffs found.
+- **Automate** ACE to perform periodic checks (daily/weekly) and **alert** if diffs are found.
 - **Segment** by schema or repset to keep runs predictable.
-- **Record** JSON/HTML reports for audit trails.
+- **Record** ACE provides JSON/HTML reports for complete audit trails.
 - **Guardrails**: Track `MAX_ALLOWED_DIFFS`; break large repairs into manageable batches.
 
-
-### Known Limitations
+## Known Limitations
 
 * ACE cannot be used on a table without a primary key, because primary keys are the basis for range partitioning, hash calculations, and other critical functions in ACE.
 
