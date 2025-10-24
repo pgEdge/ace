@@ -9,12 +9,11 @@
 - [Command Reference](./docs/commands/index.md)
 - [Performance Considerations](./docs/performance.md)
 
-The Active Consistency Engine (ACE) is a tool designed to ensure eventual consistency between nodes in a pgEdge cluster. For more information, please refer to the official [pgEdge docs on ACE](https://docs.pgedge.com/ace).
-
+The Active Consistency Engine (ACE) is a tool designed to ensure eventual consistency between nodes in a cluster.
 
 ## Building ACE
 
-To build ACE, you need to have Go (version 1.18 or higher) installed.
+Before building ACE, you need to install Go (version 1.18 or higher).
 
 1.  Clone the repository:
     ```sh
@@ -39,7 +38,7 @@ Before invoking any ACE commands, use the following commands to create the confi
 
 !!! info
 
-    For detailed information about creating and modifying the configuration files, visit [here](/docs/configuration.md).
+    For detailed information about creating and modifying ACE configuration files, visit [here](/docs/configuration.md).
 
 The [`ace.yaml` file](ace.yaml) defines default values used when executing ACE commands like `table-diff` or `mtree table-diff`.  You can modify properties that influence ACE performance and execution like timeout values and certificate information.
 
@@ -50,7 +49,7 @@ The `pg_service.conf` file contains cluster connection details that help ACE loc
 
 Then, update the file with the `host`, `port`, `database`, and credentials for each node before running ACE commands.
 
-ACE checks the following locations in order for configuration files:
+ACE checks the following locations in order for a pg_service.conf file:
 
 1. The `ACE_PGSERVICEFILE` environment variable.
 2. The `PGSERVICEFILE` environment variable.
