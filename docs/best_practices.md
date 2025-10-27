@@ -4,13 +4,13 @@ ACE (Active Consistency Engine) helps keep nodes in a pgEdge Distributed Postgre
 
 ## General Guidance
 
-- **Validate your prerequisites.**
+**Validate your prerequisites.**
 
   - Ensure every table has a **primary key** (ACE requires it for block/range partitioning).
   
   - Confirm credentials and connection details in your `pg_service.conf` file.
 
-- **Scope deliberately.** Use targeted `schema-diff`, `repset-diff`, or `table-diff` with `--table-filter` instead of cluster-wide runs when diagnosing a known issue.
+**Scope deliberately.** Use targeted `schema-diff`, `repset-diff`, or `table-diff` with `--table-filter` instead of cluster-wide runs when diagnosing a known issue.
 
   - **`table-diff`**: Performs a deep dive on a specific table (fastest to iterate).
   
@@ -20,15 +20,26 @@ ACE (Active Consistency Engine) helps keep nodes in a pgEdge Distributed Postgre
   
   - **`spock-diff`**: Validate Spock metadata across nodes.
 
-- **Start safe, then tighten.** Begin with `--output json` and `--quiet` off; add `--output html` for human review. Use `--dry-run` for repair.
+**Start safe, then add options.** 
 
-- **Control resource use.** Tune `--max-cpu-ratio`, `--block-rows`, and `--batch-size` to fit the host and workload.
+  - Begin with `--output json` and `--quiet` off; add `--output html` for human review. 
+  
+  - Use `--dry-run` when performing repairs.
 
-- **Keep statistics fresh.** Run `ANALYZE` on large/hot tables before heavy comparisons (especially when using Merkle trees).
+**Control Resource use when Possible.** 
 
-- **Use connection pooling.** Point ACE at pgBouncer or pgCat for stable, efficient connections.
+  - Tune `--max-cpu-ratio`, `--block-rows`, and `--batch-size` to fit the host and workload.
 
-## Adopt a Safe Repair Workflow
+**Keep your Statistics Fresh.** 
+
+  - Run `ANALYZE` on large/hot tables before heavy comparisons (especially when using Merkle trees).
+
+**Use a Connection Pooler.** 
+
+  - Point ACE at pgBouncer or pgCat for stable, efficient connections.
+
+
+## Adopting a Safe Repair Workflow
 
 It's a good practice to schedule diff jobs (schema/repset/table) during low-traffic windows and after maintenance events.
 
