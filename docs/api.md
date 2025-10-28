@@ -17,7 +17,7 @@ Generate starter files with:
 Update the generated `pg_service.conf` template with the host, port, database, and credentials for each node before running commands listed below.
 
 Note: A PostgreSQL service file (or a legacy cluster definition JSON file) and a configuration file `ace.yaml` are both necessary for running ACE.
-The configuration file supports an optional `default_cluster` key; when set, CLI commands will use that cluster automatically unless you provide one explicitly.
+The configuration file supports an optional `default_cluster` key. When set, CLI commands will use that cluster automatically unless you provide one explicitly.
 
 ### `table-diff`
 

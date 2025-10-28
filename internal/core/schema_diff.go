@@ -17,16 +17,22 @@ import (
 	"fmt"
 	"maps"
 	"strconv"
+	"strings"
+	"time"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/pgedge/ace/db/queries"
 	"github.com/pgedge/ace/internal/auth"
 	utils "github.com/pgedge/ace/pkg/common"
 	"github.com/pgedge/ace/pkg/logger"
+	"github.com/pgedge/ace/pkg/taskstore"
 	"github.com/pgedge/ace/pkg/types"
 )
 
 type SchemaDiffCmd struct {
+	types.Task
+
 	ClusterName       string
 	DBName            string
 	SchemaName        string
@@ -48,6 +54,10 @@ type SchemaDiffCmd struct {
 	TableFilter       string
 	OverrideBlockSize bool
 	Ctx               context.Context
+
+	SkipDBUpdate  bool
+	TaskStore     *taskstore.Store
+	TaskStorePath string
 }
 
 type SchemaObjects struct {
@@ -85,6 +95,17 @@ func (c *SchemaDiffCmd) SetNodeList(nodes []string)          { c.nodeList = node
 func (c *SchemaDiffCmd) SetDatabase(db types.Database)       { c.database = db }
 func (c *SchemaDiffCmd) GetClusterNodes() []map[string]any   { return c.clusterNodes }
 func (c *SchemaDiffCmd) SetClusterNodes(cn []map[string]any) { c.clusterNodes = cn }
+
+func NewSchemaDiffTask() *SchemaDiffCmd {
+	return &SchemaDiffCmd{
+		Task: types.Task{
+			TaskID:     uuid.NewString(),
+			TaskType:   taskstore.TaskTypeSchemaDiff,
+			TaskStatus: taskstore.StatusPending,
+		},
+		Ctx: context.Background(),
+	}
+}
 
 func (c *SchemaDiffCmd) Validate() error {
 	if c.ClusterName == "" {
@@ -255,10 +276,109 @@ func (task *SchemaDiffCmd) schemaObjectDiff() error {
 	return nil
 }
 
-func (task *SchemaDiffCmd) SchemaTableDiff() error {
+func (task *SchemaDiffCmd) SchemaTableDiff() (err error) {
 	if err := task.RunChecks(false); err != nil {
 		return err
 	}
+
+	startTime := time.Now()
+
+	if strings.TrimSpace(task.TaskID) == "" {
+		task.TaskID = uuid.NewString()
+	}
+	if task.Task.TaskType == "" {
+		task.Task.TaskType = taskstore.TaskTypeSchemaDiff
+	}
+	task.Task.StartedAt = startTime
+	task.Task.TaskStatus = taskstore.StatusRunning
+	task.Task.ClusterName = task.ClusterName
+
+	var recorder *taskstore.Recorder
+	if !task.SkipDBUpdate {
+		rec, recErr := taskstore.NewRecorder(task.TaskStore, task.TaskStorePath)
+		if recErr != nil {
+			logger.Warn("schema-diff: unable to initialise task store (%v)", recErr)
+		} else {
+			recorder = rec
+			if task.TaskStore == nil && rec.Store() != nil {
+				task.TaskStore = rec.Store()
+			}
+
+			ctx := map[string]any{
+				"schema":       task.SchemaName,
+				"ddl_only":     task.DDLOnly,
+				"table_filter": task.TableFilter,
+				"tables_total": len(task.tableList),
+				"skip_tables":  task.SkipTables,
+				"skip_file":    task.SkipFile,
+			}
+
+			record := taskstore.Record{
+				TaskID:      task.TaskID,
+				TaskType:    taskstore.TaskTypeSchemaDiff,
+				Status:      taskstore.StatusRunning,
+				ClusterName: task.ClusterName,
+				SchemaName:  task.SchemaName,
+				StartedAt:   startTime,
+				TaskContext: ctx,
+			}
+
+			if err := recorder.Create(record); err != nil {
+				logger.Warn("schema-diff: unable to write initial task status (%v)", err)
+			}
+		}
+	}
+
+	var tablesProcessed, tablesFailed int
+	var failedTables []string
+
+	defer func() {
+		finishedAt := time.Now()
+		task.Task.FinishedAt = finishedAt
+		task.Task.TimeTaken = finishedAt.Sub(startTime).Seconds()
+
+		status := taskstore.StatusFailed
+		if err == nil {
+			status = taskstore.StatusCompleted
+		}
+		task.Task.TaskStatus = status
+
+		if recorder != nil && recorder.Created() {
+			ctx := map[string]any{
+				"tables_total":  len(task.tableList),
+				"tables_diffed": tablesProcessed,
+				"tables_failed": tablesFailed,
+				"ddl_only":      task.DDLOnly,
+			}
+			if len(failedTables) > 0 {
+				ctx["failed_tables"] = failedTables
+			}
+			if err != nil {
+				ctx["error"] = err.Error()
+			}
+
+			updateErr := recorder.Update(taskstore.Record{
+				TaskID:      task.TaskID,
+				Status:      status,
+				FinishedAt:  finishedAt,
+				TimeTaken:   task.Task.TimeTaken,
+				TaskContext: ctx,
+			})
+			if updateErr != nil {
+				logger.Warn("schema-diff: unable to update task status (%v)", updateErr)
+			}
+		}
+
+		if recorder != nil && recorder.OwnsStore() {
+			storePtr := recorder.Store()
+			if closeErr := recorder.Close(); closeErr != nil {
+				logger.Warn("schema-diff: failed to close task store (%v)", closeErr)
+			}
+			if storePtr != nil && task.TaskStore == storePtr {
+				task.TaskStore = nil
+			}
+		}
+	}()
 
 	if task.DDLOnly {
 		return task.schemaObjectDiff()
@@ -286,18 +406,25 @@ func (task *SchemaDiffCmd) SchemaTableDiff() error {
 
 		if err := tdTask.Validate(); err != nil {
 			logger.Warn("validation for table %s failed: %v", qualifiedTableName, err)
+			tablesFailed++
+			failedTables = append(failedTables, qualifiedTableName)
 			continue
 		}
 
 		if err := tdTask.RunChecks(true); err != nil {
 			logger.Warn("checks for table %s failed: %v", qualifiedTableName, err)
+			tablesFailed++
+			failedTables = append(failedTables, qualifiedTableName)
 			continue
 		}
 		if err := tdTask.ExecuteTask(); err != nil {
 			logger.Warn("error during comparison for table %s: %v", qualifiedTableName, err)
+			tablesFailed++
+			failedTables = append(failedTables, qualifiedTableName)
 			continue
 		}
 
+		tablesProcessed++
 	}
 
 	return nil

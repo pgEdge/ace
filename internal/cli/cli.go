@@ -988,7 +988,7 @@ func TableRerunCLI(ctx *cli.Context) error {
 	task.QuietMode = ctx.Bool("quiet")
 	task.Ctx = context.Background()
 
-	if err := task.ExecuteRerunTask(); err != nil {
+	if err := task.ExecuteTask(); err != nil {
 		return fmt.Errorf("error during table-rerun: %w", err)
 	}
 
@@ -1069,17 +1069,16 @@ func SchemaDiffCLI(ctx *cli.Context) error {
 		return fmt.Errorf("invalid block size '%s': %w", blockSizeStr, err)
 	}
 
-	task := &core.SchemaDiffCmd{
-		ClusterName: clusterName,
-		SchemaName:  positional[0],
-		DBName:      ctx.String("dbname"),
-		Nodes:       ctx.String("nodes"),
-		SkipTables:  ctx.String("skip-tables"),
-		SkipFile:    ctx.String("skip-file"),
-		Quiet:       ctx.Bool("quiet"),
-		DDLOnly:     ctx.Bool("ddl-only"),
-		Ctx:         context.Background(),
-	}
+	task := core.NewSchemaDiffTask()
+	task.ClusterName = clusterName
+	task.SchemaName = positional[0]
+	task.DBName = ctx.String("dbname")
+	task.Nodes = ctx.String("nodes")
+	task.SkipTables = ctx.String("skip-tables")
+	task.SkipFile = ctx.String("skip-file")
+	task.Quiet = ctx.Bool("quiet")
+	task.DDLOnly = ctx.Bool("ddl-only")
+	task.Ctx = context.Background()
 
 	task.BlockSize = int(blockSizeInt)
 	task.ConcurrencyFactor = ctx.Int("concurrency-factor")
@@ -1105,16 +1104,15 @@ func RepsetDiffCLI(ctx *cli.Context) error {
 		return fmt.Errorf("invalid block size '%s': %w", blockSizeStr, err)
 	}
 
-	task := &core.RepsetDiffCmd{
-		ClusterName: clusterName,
-		RepsetName:  positional[0],
-		DBName:      ctx.String("dbname"),
-		Nodes:       ctx.String("nodes"),
-		SkipTables:  ctx.String("skip-tables"),
-		SkipFile:    ctx.String("skip-file"),
-		Quiet:       ctx.Bool("quiet"),
-		Ctx:         context.Background(),
-	}
+	task := core.NewRepsetDiffTask()
+	task.ClusterName = clusterName
+	task.RepsetName = positional[0]
+	task.DBName = ctx.String("dbname")
+	task.Nodes = ctx.String("nodes")
+	task.SkipTables = ctx.String("skip-tables")
+	task.SkipFile = ctx.String("skip-file")
+	task.Quiet = ctx.Bool("quiet")
+	task.Ctx = context.Background()
 
 	task.BlockSize = int(blockSizeInt)
 	task.ConcurrencyFactor = ctx.Int("concurrency-factor")
