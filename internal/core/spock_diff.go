@@ -19,13 +19,16 @@ import (
 	"os"
 	"reflect"
 	"sort"
+	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/pgedge/ace/db/queries"
 	"github.com/pgedge/ace/internal/auth"
 	utils "github.com/pgedge/ace/pkg/common"
 	"github.com/pgedge/ace/pkg/logger"
+	"github.com/pgedge/ace/pkg/taskstore"
 	"github.com/pgedge/ace/pkg/types"
 )
 
@@ -49,7 +52,11 @@ type SpockDiffTask struct {
 	Pools      map[string]*pgxpool.Pool
 
 	DiffResult   *types.SpockDiffOutput
+	DiffFilePath string
 	SkipDBUpdate bool
+
+	TaskStore     *taskstore.Store
+	TaskStorePath string
 
 	Ctx context.Context
 }
@@ -69,9 +76,15 @@ func (t *SpockDiffTask) SetClusterNodes(cn []map[string]any) { t.ClusterNodes = 
 
 func NewSpockDiffTask() *SpockDiffTask {
 	return &SpockDiffTask{
+		Task: types.Task{
+			TaskID:     uuid.NewString(),
+			TaskType:   taskstore.TaskTypeSpockDiff,
+			TaskStatus: taskstore.StatusPending,
+		},
 		DerivedFields: types.DerivedFields{
 			HostMap: make(map[string]string),
 		},
+		Pools: make(map[string]*pgxpool.Pool),
 		DiffResult: &types.SpockDiffOutput{
 			SpockConfigs: make(map[string]any),
 			Diffs:        make(map[string]types.SpockPairDiff),
@@ -181,8 +194,102 @@ func (t *SpockDiffTask) RunChecks(skipValidation bool) error {
 	return nil
 }
 
-func (t *SpockDiffTask) ExecuteTask() error {
+func (t *SpockDiffTask) ExecuteTask() (err error) {
 	startTime := time.Now()
+
+	if strings.TrimSpace(t.TaskID) == "" {
+		t.TaskID = uuid.NewString()
+	}
+	if t.Task.TaskType == "" {
+		t.Task.TaskType = taskstore.TaskTypeSpockDiff
+	}
+	t.Task.StartedAt = startTime
+	t.Task.TaskStatus = taskstore.StatusRunning
+	t.Task.ClusterName = t.ClusterName
+
+	var recorder *taskstore.Recorder
+	if !t.SkipDBUpdate {
+		rec, recErr := taskstore.NewRecorder(t.TaskStore, t.TaskStorePath)
+		if recErr != nil {
+			logger.Warn("spock-diff: unable to initialise task store (%v)", recErr)
+		} else {
+			recorder = rec
+			if t.TaskStore == nil && rec.Store() != nil {
+				t.TaskStore = rec.Store()
+			}
+
+			ctx := map[string]any{
+				"nodes":  t.NodeList,
+				"output": t.Output,
+			}
+
+			record := taskstore.Record{
+				TaskID:      t.TaskID,
+				TaskType:    taskstore.TaskTypeSpockDiff,
+				Status:      taskstore.StatusRunning,
+				ClusterName: t.ClusterName,
+				StartedAt:   startTime,
+				TaskContext: ctx,
+			}
+
+			if err := recorder.Create(record); err != nil {
+				logger.Warn("spock-diff: unable to write initial task status (%v)", err)
+			}
+		}
+	}
+
+	defer func() {
+		finishedAt := time.Now()
+		t.Task.FinishedAt = finishedAt
+		t.Task.TimeTaken = finishedAt.Sub(startTime).Seconds()
+
+		status := taskstore.StatusFailed
+		if err == nil {
+			status = taskstore.StatusCompleted
+		}
+		t.Task.TaskStatus = status
+
+		if recorder != nil && recorder.Created() {
+			diffPairs := 0
+			if t.DiffResult != nil {
+				diffPairs = len(t.DiffResult.Diffs)
+			}
+			ctx := map[string]any{
+				"nodes":      t.NodeList,
+				"diff_pairs": diffPairs,
+			}
+			if t.DiffFilePath != "" {
+				ctx["diff_file"] = t.DiffFilePath
+			}
+			if err != nil {
+				ctx["error"] = err.Error()
+			}
+
+			updateErr := recorder.Update(taskstore.Record{
+				TaskID:       t.TaskID,
+				Status:       status,
+				DiffFilePath: t.DiffFilePath,
+				FinishedAt:   finishedAt,
+				TimeTaken:    t.Task.TimeTaken,
+				TaskContext:  ctx,
+			})
+			if updateErr != nil {
+				logger.Warn("spock-diff: unable to update task status (%v)", updateErr)
+			}
+		}
+
+		if recorder != nil && recorder.OwnsStore() {
+			storePtr := recorder.Store()
+			if closeErr := recorder.Close(); closeErr != nil {
+				logger.Warn("spock-diff: failed to close task store (%v)", closeErr)
+			}
+			if storePtr != nil && t.TaskStore == storePtr {
+				t.TaskStore = nil
+			}
+		}
+	}()
+
+	t.DiffFilePath = ""
 
 	pools := make(map[string]*pgxpool.Pool)
 	for _, nodeInfo := range t.ClusterNodes {
@@ -344,12 +451,14 @@ func (t *SpockDiffTask) ExecuteTask() error {
 			return fmt.Errorf("failed to marshal diffs: %w", err)
 		}
 
-		err = os.WriteFile(outputFileName, jsonData, 0644)
-		if err != nil {
+		if err = os.WriteFile(outputFileName, jsonData, 0644); err != nil {
 			logger.Info("ERROR writing diff output to file %s: %v", outputFileName, err)
 			return fmt.Errorf("failed to write diffs file: %w", err)
 		}
 		logger.Info("Diff report written to %s", outputFileName)
+		t.DiffFilePath = outputFileName
+	} else {
+		t.DiffFilePath = ""
 	}
 
 	logger.Info("Spock diff completed in %.3f seconds", endTime.Sub(startTime).Seconds())

@@ -25,6 +25,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgtype"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -33,6 +34,7 @@ import (
 	utils "github.com/pgedge/ace/pkg/common"
 	"github.com/pgedge/ace/pkg/config"
 	"github.com/pgedge/ace/pkg/logger"
+	"github.com/pgedge/ace/pkg/taskstore"
 	"github.com/pgedge/ace/pkg/types"
 	"github.com/vbauerster/mpb/v8"
 	"github.com/vbauerster/mpb/v8/decor"
@@ -67,6 +69,9 @@ type TableDiffTask struct {
 	DiffSummary map[string]string
 
 	SkipDBUpdate bool
+
+	TaskStore     *taskstore.Store
+	TaskStorePath string
 
 	Pools map[string]*pgxpool.Pool
 
@@ -163,6 +168,11 @@ func (t *TableDiffTask) getBlockHashSQL(hasLower, hasUpper bool) (string, error)
 
 func NewTableDiffTask() *TableDiffTask {
 	return &TableDiffTask{
+		Task: types.Task{
+			TaskID:     uuid.NewString(),
+			TaskType:   taskstore.TaskTypeTableDiff,
+			TaskStatus: taskstore.StatusPending,
+		},
 		Mode:              "diff",
 		InvokeMethod:      "cli",
 		DiffSummary:       make(map[string]string),
@@ -760,8 +770,105 @@ func (t *TableDiffTask) CheckColumnSize() error {
 	return nil
 }
 
-func (t *TableDiffTask) ExecuteTask() error {
+func (t *TableDiffTask) ExecuteTask() (err error) {
 	startTime := time.Now()
+
+	if t.Mode == "rerun" {
+		t.Task.TaskType = taskstore.TaskTypeTableRerun
+	} else if t.Task.TaskType == "" {
+		t.Task.TaskType = taskstore.TaskTypeTableDiff
+	}
+
+	if strings.TrimSpace(t.TaskID) == "" {
+		t.TaskID = uuid.NewString()
+	}
+	t.Task.StartedAt = startTime
+	t.Task.TaskStatus = taskstore.StatusRunning
+	t.Task.ClusterName = t.ClusterName
+
+	var recorder *taskstore.Recorder
+
+	if !t.SkipDBUpdate {
+		rec, recErr := taskstore.NewRecorder(t.TaskStore, t.TaskStorePath)
+		if recErr != nil {
+			logger.Warn("table-diff: unable to initialise task store (%v)", recErr)
+		} else {
+			recorder = rec
+			if t.TaskStore == nil && rec.Store() != nil {
+				t.TaskStore = rec.Store()
+			}
+
+			ctx := map[string]any{
+				"qualified_table": t.QualifiedTableName,
+				"mode":            t.Mode,
+				"nodes":           t.Nodes,
+			}
+			if t.TableFilter != "" {
+				ctx["table_filter"] = t.TableFilter
+			}
+
+			record := taskstore.Record{
+				TaskID:      t.TaskID,
+				TaskType:    taskstore.TaskTypeTableDiff,
+				Status:      taskstore.StatusRunning,
+				ClusterName: t.ClusterName,
+				SchemaName:  t.Schema,
+				TableName:   t.Table,
+				StartedAt:   startTime,
+				TaskContext: ctx,
+			}
+
+			if err := recorder.Create(record); err != nil {
+				logger.Warn("table-diff: unable to write initial task status (%v)", err)
+			}
+		}
+	}
+
+	defer func() {
+		finishedAt := time.Now()
+		t.Task.FinishedAt = finishedAt
+		t.Task.TimeTaken = finishedAt.Sub(startTime).Seconds()
+
+		status := taskstore.StatusFailed
+		if err == nil {
+			status = taskstore.StatusCompleted
+		}
+		t.Task.TaskStatus = status
+
+		if recorder != nil && recorder.Created() {
+			ctx := map[string]any{
+				"diff_summary": t.DiffResult.Summary,
+			}
+			if len(t.DiffResult.NodeDiffs) > 0 {
+				ctx["diff_pairs"] = len(t.DiffResult.NodeDiffs)
+			}
+			if err != nil {
+				ctx["error"] = err.Error()
+			}
+
+			updateErr := recorder.Update(taskstore.Record{
+				TaskID:       t.TaskID,
+				Status:       status,
+				DiffFilePath: t.DiffFilePath,
+				FinishedAt:   finishedAt,
+				TimeTaken:    t.Task.TimeTaken,
+				TaskContext:  ctx,
+			})
+			if updateErr != nil {
+				logger.Warn("table-diff: unable to update task status (%v)", updateErr)
+			}
+		}
+
+		if recorder != nil && recorder.OwnsStore() {
+			storePtr := recorder.Store()
+			if closeErr := recorder.Close(); closeErr != nil {
+				logger.Warn("table-diff: failed to close task store (%v)", closeErr)
+			}
+			if storePtr != nil && t.TaskStore == storePtr {
+				t.TaskStore = nil
+			}
+		}
+	}()
 
 	if t.Mode == "rerun" {
 		return t.ExecuteRerunTask()
@@ -787,7 +894,6 @@ func (t *TableDiffTask) ExecuteTask() error {
 	}
 	t.Pools = pools
 
-	var err error
 	if _, err = t.getBlockHashSQL(true, true); err != nil {
 		return fmt.Errorf("failed to build block-hash SQL: %w", err)
 	}

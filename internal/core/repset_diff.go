@@ -19,16 +19,21 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/pgedge/ace/db/queries"
 	"github.com/pgedge/ace/internal/auth"
 	utils "github.com/pgedge/ace/pkg/common"
 	"github.com/pgedge/ace/pkg/logger"
+	"github.com/pgedge/ace/pkg/taskstore"
 	"github.com/pgedge/ace/pkg/types"
 )
 
 type RepsetDiffCmd struct {
+	types.Task
+
 	ClusterName       string
 	DBName            string
 	RepsetName        string
@@ -49,6 +54,10 @@ type RepsetDiffCmd struct {
 	TableFilter       string
 	OverrideBlockSize bool
 	Ctx               context.Context
+
+	SkipDBUpdate  bool
+	TaskStore     *taskstore.Store
+	TaskStorePath string
 }
 
 func (c *RepsetDiffCmd) GetClusterName() string              { return c.ClusterName }
@@ -60,6 +69,17 @@ func (c *RepsetDiffCmd) SetNodeList(nodes []string)          { c.nodeList = node
 func (c *RepsetDiffCmd) SetDatabase(db types.Database)       { c.database = db }
 func (c *RepsetDiffCmd) GetClusterNodes() []map[string]any   { return c.clusterNodes }
 func (c *RepsetDiffCmd) SetClusterNodes(cn []map[string]any) { c.clusterNodes = cn }
+
+func NewRepsetDiffTask() *RepsetDiffCmd {
+	return &RepsetDiffCmd{
+		Task: types.Task{
+			TaskID:     uuid.NewString(),
+			TaskType:   taskstore.TaskTypeRepsetDiff,
+			TaskStatus: taskstore.StatusPending,
+		},
+		Ctx: context.Background(),
+	}
+}
 
 func (c *RepsetDiffCmd) parseSkipList() error {
 	var tables []string
@@ -154,10 +174,107 @@ func (c *RepsetDiffCmd) Validate() error {
 	return nil
 }
 
-func RepsetDiff(task *RepsetDiffCmd) error {
+func RepsetDiff(task *RepsetDiffCmd) (err error) {
 	if err := task.RunChecks(false); err != nil {
 		return err
 	}
+
+	startTime := time.Now()
+
+	if strings.TrimSpace(task.TaskID) == "" {
+		task.TaskID = uuid.NewString()
+	}
+	if task.Task.TaskType == "" {
+		task.Task.TaskType = taskstore.TaskTypeRepsetDiff
+	}
+	task.Task.StartedAt = startTime
+	task.Task.TaskStatus = taskstore.StatusRunning
+	task.Task.ClusterName = task.ClusterName
+
+	var recorder *taskstore.Recorder
+	if !task.SkipDBUpdate {
+		rec, recErr := taskstore.NewRecorder(task.TaskStore, task.TaskStorePath)
+		if recErr != nil {
+			logger.Warn("repset-diff: unable to initialise task store (%v)", recErr)
+		} else {
+			recorder = rec
+			if task.TaskStore == nil && rec.Store() != nil {
+				task.TaskStore = rec.Store()
+			}
+
+			ctx := map[string]any{
+				"repset":       task.RepsetName,
+				"tables_total": len(task.tableList),
+				"skip_tables":  task.SkipTables,
+				"skip_file":    task.SkipFile,
+				"table_filter": task.TableFilter,
+			}
+
+			record := taskstore.Record{
+				TaskID:      task.TaskID,
+				TaskType:    taskstore.TaskTypeRepsetDiff,
+				Status:      taskstore.StatusRunning,
+				ClusterName: task.ClusterName,
+				StartedAt:   startTime,
+				TaskContext: ctx,
+			}
+
+			if err := recorder.Create(record); err != nil {
+				logger.Warn("repset-diff: unable to write initial task status (%v)", err)
+			}
+		}
+	}
+
+	var tablesProcessed, tablesFailed, tablesSkipped int
+	var failedTables []string
+
+	defer func() {
+		finishedAt := time.Now()
+		task.Task.FinishedAt = finishedAt
+		task.Task.TimeTaken = finishedAt.Sub(startTime).Seconds()
+
+		status := taskstore.StatusFailed
+		if err == nil {
+			status = taskstore.StatusCompleted
+		}
+		task.Task.TaskStatus = status
+
+		if recorder != nil && recorder.Created() {
+			ctx := map[string]any{
+				"tables_total":   len(task.tableList),
+				"tables_diffed":  tablesProcessed,
+				"tables_failed":  tablesFailed,
+				"tables_skipped": tablesSkipped,
+			}
+			if len(failedTables) > 0 {
+				ctx["failed_tables"] = failedTables
+			}
+			if err != nil {
+				ctx["error"] = err.Error()
+			}
+
+			updateErr := recorder.Update(taskstore.Record{
+				TaskID:      task.TaskID,
+				Status:      status,
+				FinishedAt:  finishedAt,
+				TimeTaken:   task.Task.TimeTaken,
+				TaskContext: ctx,
+			})
+			if updateErr != nil {
+				logger.Warn("repset-diff: unable to update task status (%v)", updateErr)
+			}
+		}
+
+		if recorder != nil && recorder.OwnsStore() {
+			storePtr := recorder.Store()
+			if closeErr := recorder.Close(); closeErr != nil {
+				logger.Warn("repset-diff: failed to close task store (%v)", closeErr)
+			}
+			if storePtr != nil && task.TaskStore == storePtr {
+				task.TaskStore = nil
+			}
+		}
+	}()
 
 	for _, tableName := range task.tableList {
 		var skipped bool
@@ -171,6 +288,7 @@ func RepsetDiff(task *RepsetDiffCmd) error {
 			}
 		}
 		if skipped {
+			tablesSkipped++
 			continue
 		}
 
@@ -191,20 +309,31 @@ func RepsetDiff(task *RepsetDiffCmd) error {
 		tdTask.OverrideBlockSize = task.OverrideBlockSize
 		tdTask.QuietMode = task.Quiet
 		tdTask.Ctx = task.Ctx
+		tdTask.SkipDBUpdate = task.SkipDBUpdate
+		tdTask.TaskStorePath = task.TaskStorePath
 
 		if err := tdTask.Validate(); err != nil {
 			logger.Warn("validation for table %s failed: %v", tableName, err)
+			tablesFailed++
+			failedTables = append(failedTables, tableName)
 			continue
 		}
 
 		if err := tdTask.RunChecks(true); err != nil {
 			logger.Warn("checks for table %s failed: %v", tableName, err)
+			tablesFailed++
+			failedTables = append(failedTables, tableName)
 			continue
 		}
 		if err := tdTask.ExecuteTask(); err != nil {
 			logger.Warn("error during comparison for table %s: %v", tableName, err)
+			tablesFailed++
+			failedTables = append(failedTables, tableName)
 			continue
 		}
+
+		tablesProcessed++
 	}
+
 	return nil
 }
