@@ -17,14 +17,17 @@ import (
 	"maps"
 	"math"
 	"os"
+	"os/signal"
 	"reflect"
 	"runtime"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
+	"github.com/go-co-op/gocron/v2"
 	"github.com/google/uuid"
 	"github.com/jackc/pgtype"
 	"github.com/jackc/pgx/v5"
@@ -85,6 +88,11 @@ type TableDiffTask struct {
 
 	firstError   error
 	firstErrorMu sync.Mutex
+
+	IsAsync             bool
+	BackgroundScheduler gocron.Scheduler
+	ScheduleFrequency   string
+	frequency           time.Duration
 
 	Ctx context.Context
 }
@@ -488,11 +496,6 @@ func (t *TableDiffTask) Validate() error {
 		return err
 	}
 
-	/*
-		We've not eliminated our dependence on the cluster json file just yet.
-		So, for convenience, we'll append the chosen db credentials to the
-		cluster nodes.
-	*/
 	var clusterNodes []map[string]any
 	for _, nodeMap := range t.ClusterNodes {
 		if len(nodeList) > 0 {
@@ -529,6 +532,17 @@ func (t *TableDiffTask) Validate() error {
 		t.NodeList = []string{}
 		for _, node := range clusterNodes {
 			t.NodeList = append(t.NodeList, node["Name"].(string))
+		}
+	}
+
+	if t.IsAsync {
+		if t.ScheduleFrequency == "" {
+			return fmt.Errorf("run frequency should be specified with --every when --schedule is used")
+		}
+
+		t.frequency, err = time.ParseDuration(t.ScheduleFrequency)
+		if err != nil {
+			return fmt.Errorf("could not parse schedule duration; %w", err)
 		}
 	}
 
@@ -701,6 +715,99 @@ func (t *TableDiffTask) RunChecks(skipValidation bool) error {
 	}
 
 	return nil
+}
+
+func (t *TableDiffTask) RunScheduledTask() error {
+	scheduler, err := gocron.NewScheduler()
+	if err != nil {
+		return fmt.Errorf("could not initialise scheduler: %w", err)
+	}
+	t.BackgroundScheduler = scheduler
+
+	ctx := t.Ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	runOnce := func(runCtx context.Context) error {
+		if runCtx.Err() != nil {
+			return runCtx.Err()
+		}
+		runTask := t.cloneForScheduledRun(runCtx)
+		if err := runTask.Validate(); err != nil {
+			return fmt.Errorf("validation failed: %w", err)
+		}
+		if err := runTask.RunChecks(true); err != nil {
+			return fmt.Errorf("checks failed: %w", err)
+		}
+		if err := runTask.ExecuteTask(); err != nil {
+			return fmt.Errorf("comparison failed: %w", err)
+		}
+		return nil
+	}
+
+	if err := runOnce(ctx); err != nil {
+		_ = scheduler.Shutdown()
+		return err
+	}
+
+	job, err := scheduler.NewJob(
+		gocron.DurationJob(t.frequency),
+		gocron.NewTask(func() {
+			select {
+			case <-ctx.Done():
+				return
+			default:
+			}
+			if err := runOnce(ctx); err != nil {
+				logger.Error("scheduled table-diff run failed: %v", err)
+			}
+		}),
+	)
+	if err != nil {
+		_ = scheduler.Shutdown()
+		return fmt.Errorf("could not schedule table-diff job: %w", err)
+	}
+
+	logger.Info("Scheduled table-diff job (ID: %s) every %s", job.ID(), t.frequency)
+
+	scheduler.Start()
+
+	<-ctx.Done()
+
+	logger.Info("Shutting down scheduled table-diff job")
+	if shutdownErr := scheduler.Shutdown(); shutdownErr != nil {
+		return fmt.Errorf("shutdown scheduler: %w", shutdownErr)
+	}
+
+	return nil
+}
+
+func (t *TableDiffTask) cloneForScheduledRun(ctx context.Context) *TableDiffTask {
+	// TODO: Figure out if there's a cleaner way to do this.
+	cloned := NewTableDiffTask()
+	cloned.ClusterName = t.ClusterName
+	cloned.QualifiedTableName = t.QualifiedTableName
+	cloned.DBName = t.DBName
+	cloned.Nodes = t.Nodes
+	cloned.BlockSize = t.BlockSize
+	cloned.ConcurrencyFactor = t.ConcurrencyFactor
+	cloned.Output = t.Output
+	cloned.TableFilter = t.TableFilter
+	cloned.QuietMode = t.QuietMode
+	cloned.Mode = t.Mode
+	cloned.OverrideBlockSize = t.OverrideBlockSize
+	cloned.TaskStore = t.TaskStore
+	cloned.TaskStorePath = t.TaskStorePath
+	cloned.SkipDBUpdate = t.SkipDBUpdate
+	cloned.ClientRole = t.ClientRole
+	cloned.InvokeMethod = t.InvokeMethod
+	cloned.CompareUnitSize = t.CompareUnitSize
+	cloned.Ctx = ctx
+	return cloned
 }
 
 func (t *TableDiffTask) CheckColumnSize() error {

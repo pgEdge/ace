@@ -124,6 +124,16 @@ func SetupCLI() *cli.App {
 			Usage: "Where clause expression to use while diffing tables",
 			Value: "",
 		},
+		&cli.BoolFlag{
+			Name:  "schedule",
+			Usage: "Schedule a table-diff job to run periodically",
+			Value: false,
+		},
+		&cli.StringFlag{
+			Name:  "every",
+			Usage: "Time duration (e.g., 5m, 3h, etc.)",
+			Value: "",
+		},
 	)
 
 	tableRerunFlags := append(commonFlags, rerunOnlyFlags...)
@@ -735,21 +745,28 @@ func TableDiffCLI(ctx *cli.Context) error {
 	task.TableFilter = ctx.String("table-filter")
 	task.QuietMode = ctx.Bool("quiet")
 	task.OverrideBlockSize = ctx.Bool("override-block-size")
+	task.IsAsync = ctx.Bool("schedule")
+	task.ScheduleFrequency = ctx.String("every")
 	task.Ctx = context.Background()
 
 	if err := task.Validate(); err != nil {
 		return fmt.Errorf("validation failed: %w", err)
 	}
 
-	if err := task.RunChecks(true); err != nil {
-		return fmt.Errorf("checks failed: %w", err)
+	if !task.IsAsync {
+		if err := task.RunChecks(true); err != nil {
+			return fmt.Errorf("checks failed: %w", err)
+		}
 	}
 
-	if err := task.ExecuteTask(); err != nil {
-		return fmt.Errorf("error during comparison: %w", err)
+	if !task.IsAsync {
+		if err := task.ExecuteTask(); err != nil {
+			return fmt.Errorf("error during comparison: %w", err)
+		}
+		return nil
 	}
 
-	return nil
+	return task.RunScheduledTask()
 }
 
 func MtreeInitCLI(ctx *cli.Context) error {
