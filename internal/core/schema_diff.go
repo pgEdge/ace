@@ -16,10 +16,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"maps"
+	"os"
+	"os/signal"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
+	"github.com/go-co-op/gocron/v2"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/pgedge/ace/db/queries"
@@ -54,6 +58,11 @@ type SchemaDiffCmd struct {
 	TableFilter       string
 	OverrideBlockSize bool
 	Ctx               context.Context
+
+	IsAsync             bool
+	ScheduleFrequency   string
+	frequency           time.Duration
+	BackgroundScheduler gocron.Scheduler
 
 	SkipDBUpdate  bool
 	TaskStore     *taskstore.Store
@@ -113,6 +122,16 @@ func (c *SchemaDiffCmd) Validate() error {
 	}
 	if c.SchemaName == "" {
 		return fmt.Errorf("schema name is required")
+	}
+	if c.IsAsync {
+		if strings.TrimSpace(c.ScheduleFrequency) == "" {
+			return fmt.Errorf("run frequency should be specified with --every when --schedule is used")
+		}
+		freq, err := time.ParseDuration(c.ScheduleFrequency)
+		if err != nil {
+			return fmt.Errorf("could not parse schedule duration: %w", err)
+		}
+		c.frequency = freq
 	}
 	return nil
 }
@@ -428,6 +447,95 @@ func (task *SchemaDiffCmd) SchemaTableDiff() (err error) {
 	}
 
 	return nil
+}
+
+func (task *SchemaDiffCmd) RunScheduledTask() error {
+	if err := task.Validate(); err != nil {
+		return err
+	}
+	scheduler, err := gocron.NewScheduler()
+	if err != nil {
+		return fmt.Errorf("could not initialise scheduler: %w", err)
+	}
+	task.BackgroundScheduler = scheduler
+
+	ctx := task.Ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	runOnce := func(runCtx context.Context) error {
+		if runCtx.Err() != nil {
+			return runCtx.Err()
+		}
+		runTask := task.cloneForScheduledRun(runCtx)
+		if err := runTask.SchemaTableDiff(); err != nil {
+			return err
+		}
+		return nil
+	}
+
+	if err := runOnce(ctx); err != nil {
+		_ = scheduler.Shutdown()
+		return fmt.Errorf("initial schema diff failed: %w", err)
+	}
+
+	job, err := scheduler.NewJob(
+		gocron.DurationJob(task.frequency),
+		gocron.NewTask(func() {
+			select {
+			case <-ctx.Done():
+				return
+			default:
+			}
+			if err := runOnce(ctx); err != nil {
+				logger.Error("scheduled schema-diff run failed: %v", err)
+			}
+		}),
+	)
+	if err != nil {
+		_ = scheduler.Shutdown()
+		return fmt.Errorf("could not schedule schema-diff job: %w", err)
+	}
+
+	logger.Info("Scheduled schema-diff job (ID: %s) every %s", job.ID(), task.frequency)
+
+	scheduler.Start()
+
+	<-ctx.Done()
+
+	logger.Info("Shutting down scheduled schema-diff job")
+	if shutdownErr := scheduler.Shutdown(); shutdownErr != nil {
+		return fmt.Errorf("shutdown scheduler: %w", shutdownErr)
+	}
+
+	return nil
+}
+
+func (task *SchemaDiffCmd) cloneForScheduledRun(ctx context.Context) *SchemaDiffCmd {
+	clone := NewSchemaDiffTask()
+	clone.ClusterName = task.ClusterName
+	clone.DBName = task.DBName
+	clone.SchemaName = task.SchemaName
+	clone.Nodes = task.Nodes
+	clone.SkipTables = task.SkipTables
+	clone.SkipFile = task.SkipFile
+	clone.Quiet = task.Quiet
+	clone.DDLOnly = task.DDLOnly
+	clone.BlockSize = task.BlockSize
+	clone.ConcurrencyFactor = task.ConcurrencyFactor
+	clone.CompareUnitSize = task.CompareUnitSize
+	clone.Output = task.Output
+	clone.TableFilter = task.TableFilter
+	clone.OverrideBlockSize = task.OverrideBlockSize
+	clone.SkipDBUpdate = task.SkipDBUpdate
+	clone.TaskStore = task.TaskStore
+	clone.TaskStorePath = task.TaskStorePath
+	clone.Ctx = ctx
+	return clone
 }
 
 func getObjectsForSchema(ctx context.Context, pool *pgxpool.Pool, schemaName string) (*SchemaObjects, error) {

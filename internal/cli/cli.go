@@ -193,6 +193,18 @@ func SetupCLI() *cli.App {
 
 	repsetDiffFlags := append(commonFlags, diffFlags...)
 	repsetDiffFlags = append(repsetDiffFlags, skipFlags...)
+	repsetDiffFlags = append(repsetDiffFlags,
+		&cli.BoolFlag{
+			Name:  "schedule",
+			Usage: "Schedule a repset-diff job to run periodically",
+			Value: false,
+		},
+		&cli.StringFlag{
+			Name:  "every",
+			Usage: "Time duration (e.g., 5m, 3h, etc.)",
+			Value: "",
+		},
+	)
 
 	schemaDiffFlags := append(commonFlags, diffFlags...)
 	schemaDiffFlags = append(schemaDiffFlags, skipFlags...)
@@ -200,7 +212,18 @@ func SetupCLI() *cli.App {
 		Name:  "ddl-only",
 		Usage: "Compare only schema objects (tables, functions, etc.), not table data",
 		Value: false,
-	})
+	},
+		&cli.BoolFlag{
+			Name:  "schedule",
+			Usage: "Schedule a schema-diff job to run periodically",
+			Value: false,
+		},
+		&cli.StringFlag{
+			Name:  "every",
+			Usage: "Time duration (e.g., 5m, 3h, etc.)",
+			Value: "",
+		},
+	)
 
 	mtreeBuildFlags := []cli.Flag{
 		&cli.StringFlag{
@@ -1095,13 +1118,26 @@ func SchemaDiffCLI(ctx *cli.Context) error {
 	task.SkipFile = ctx.String("skip-file")
 	task.Quiet = ctx.Bool("quiet")
 	task.DDLOnly = ctx.Bool("ddl-only")
+	task.IsAsync = ctx.Bool("schedule")
+	task.ScheduleFrequency = ctx.String("every")
 	task.Ctx = context.Background()
+
+	if task.IsAsync && task.DDLOnly {
+		return fmt.Errorf("scheduling is only supported when --ddl-only is false")
+	}
 
 	task.BlockSize = int(blockSizeInt)
 	task.ConcurrencyFactor = ctx.Int("concurrency-factor")
 	task.CompareUnitSize = ctx.Int("compare-unit-size")
 	task.Output = ctx.String("output")
 	task.OverrideBlockSize = ctx.Bool("override-block-size")
+
+	if task.IsAsync {
+		if err := task.RunScheduledTask(); err != nil {
+			return fmt.Errorf("error scheduling schema diff: %w", err)
+		}
+		return nil
+	}
 
 	if err := task.SchemaTableDiff(); err != nil {
 		return fmt.Errorf("error during schema diff: %w", err)
@@ -1129,6 +1165,8 @@ func RepsetDiffCLI(ctx *cli.Context) error {
 	task.SkipTables = ctx.String("skip-tables")
 	task.SkipFile = ctx.String("skip-file")
 	task.Quiet = ctx.Bool("quiet")
+	task.IsAsync = ctx.Bool("schedule")
+	task.ScheduleFrequency = ctx.String("every")
 	task.Ctx = context.Background()
 
 	task.BlockSize = int(blockSizeInt)
@@ -1136,6 +1174,13 @@ func RepsetDiffCLI(ctx *cli.Context) error {
 	task.CompareUnitSize = ctx.Int("compare-unit-size")
 	task.Output = ctx.String("output")
 	task.OverrideBlockSize = ctx.Bool("override-block-size")
+
+	if task.IsAsync {
+		if err := task.RunScheduledTask(); err != nil {
+			return fmt.Errorf("error scheduling repset diff: %w", err)
+		}
+		return nil
+	}
 
 	if err := core.RepsetDiff(task); err != nil {
 		return fmt.Errorf("error during repset diff: %w", err)
