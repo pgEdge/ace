@@ -17,10 +17,13 @@ import (
 	"fmt"
 	"maps"
 	"os"
+	"os/signal"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
+	"github.com/go-co-op/gocron/v2"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/pgedge/ace/db/queries"
@@ -54,6 +57,11 @@ type RepsetDiffCmd struct {
 	TableFilter       string
 	OverrideBlockSize bool
 	Ctx               context.Context
+
+	IsAsync             bool
+	ScheduleFrequency   string
+	frequency           time.Duration
+	BackgroundScheduler gocron.Scheduler
 
 	SkipDBUpdate  bool
 	TaskStore     *taskstore.Store
@@ -170,6 +178,16 @@ func (c *RepsetDiffCmd) Validate() error {
 	}
 	if c.RepsetName == "" {
 		return fmt.Errorf("repset name is required")
+	}
+	if c.IsAsync {
+		if strings.TrimSpace(c.ScheduleFrequency) == "" {
+			return fmt.Errorf("run frequency should be specified with --every when --schedule is used")
+		}
+		freq, err := time.ParseDuration(c.ScheduleFrequency)
+		if err != nil {
+			return fmt.Errorf("could not parse schedule duration: %w", err)
+		}
+		c.frequency = freq
 	}
 	return nil
 }
@@ -336,4 +354,91 @@ func RepsetDiff(task *RepsetDiffCmd) (err error) {
 	}
 
 	return nil
+}
+
+func (task *RepsetDiffCmd) RunScheduledTask() error {
+	if err := task.Validate(); err != nil {
+		return err
+	}
+	scheduler, err := gocron.NewScheduler()
+	if err != nil {
+		return fmt.Errorf("could not initialise scheduler: %w", err)
+	}
+	task.BackgroundScheduler = scheduler
+
+	ctx := task.Ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	runOnce := func(runCtx context.Context) error {
+		if runCtx.Err() != nil {
+			return runCtx.Err()
+		}
+		runTask := task.cloneForScheduledRun(runCtx)
+		if err := RepsetDiff(runTask); err != nil {
+			return err
+		}
+		return nil
+	}
+
+	if err := runOnce(ctx); err != nil {
+		_ = scheduler.Shutdown()
+		return fmt.Errorf("initial repset diff failed: %w", err)
+	}
+
+	job, err := scheduler.NewJob(
+		gocron.DurationJob(task.frequency),
+		gocron.NewTask(func() {
+			select {
+			case <-ctx.Done():
+				return
+			default:
+			}
+			if err := runOnce(ctx); err != nil {
+				logger.Error("scheduled repset-diff run failed: %v", err)
+			}
+		}),
+	)
+	if err != nil {
+		_ = scheduler.Shutdown()
+		return fmt.Errorf("could not schedule repset-diff job: %w", err)
+	}
+
+	logger.Info("Scheduled repset-diff job (ID: %s) every %s", job.ID(), task.frequency)
+
+	scheduler.Start()
+
+	<-ctx.Done()
+
+	logger.Info("Shutting down scheduled repset-diff job")
+	if shutdownErr := scheduler.Shutdown(); shutdownErr != nil {
+		return fmt.Errorf("shutdown scheduler: %w", shutdownErr)
+	}
+
+	return nil
+}
+
+func (task *RepsetDiffCmd) cloneForScheduledRun(ctx context.Context) *RepsetDiffCmd {
+	clone := NewRepsetDiffTask()
+	clone.ClusterName = task.ClusterName
+	clone.DBName = task.DBName
+	clone.RepsetName = task.RepsetName
+	clone.Nodes = task.Nodes
+	clone.SkipTables = task.SkipTables
+	clone.SkipFile = task.SkipFile
+	clone.Quiet = task.Quiet
+	clone.BlockSize = task.BlockSize
+	clone.ConcurrencyFactor = task.ConcurrencyFactor
+	clone.CompareUnitSize = task.CompareUnitSize
+	clone.Output = task.Output
+	clone.TableFilter = task.TableFilter
+	clone.OverrideBlockSize = task.OverrideBlockSize
+	clone.SkipDBUpdate = task.SkipDBUpdate
+	clone.TaskStore = task.TaskStore
+	clone.TaskStorePath = task.TaskStorePath
+	clone.Ctx = ctx
+	return clone
 }
