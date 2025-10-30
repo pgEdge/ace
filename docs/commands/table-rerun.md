@@ -11,6 +11,7 @@ Re-runs a previous diff to confirm fixes or check if inconsistencies persist.
 - `[cluster]` — Optional; overrides `default_cluster`.
 
 **Flags**
+
 | Flag | Alias | Description | Default |
 |------|-------|-------------|---------|
 | `--diff-file` | `-f` | Path to original diff (**required**) |  |
