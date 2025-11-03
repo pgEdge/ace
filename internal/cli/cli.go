@@ -28,6 +28,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/pgedge/ace/internal/cdc"
 	"github.com/pgedge/ace/internal/core"
+	"github.com/pgedge/ace/internal/scheduler"
 	"github.com/pgedge/ace/pkg/config"
 	"github.com/pgedge/ace/pkg/logger"
 	"github.com/urfave/cli/v2"
@@ -354,6 +355,26 @@ func SetupCLI() *cli.App {
 						Flags:  configInitFlags,
 						Action: ConfigInitCLI,
 					},
+				},
+			},
+			{
+				Name:  "start",
+				Usage: "Start the ACE scheduler for configured jobs",
+				Flags: []cli.Flag{
+					&cli.BoolFlag{
+						Name:    "debug",
+						Aliases: []string{"v"},
+						Usage:   "Enable debug logging",
+					},
+				},
+				Action: StartSchedulerCLI,
+				Before: func(ctx *cli.Context) error {
+					if ctx.Bool("debug") {
+						logger.SetLevel(log.DebugLevel)
+					} else {
+						logger.SetLevel(log.InfoLevel)
+					}
+					return nil
 				},
 			},
 			{
@@ -765,31 +786,55 @@ func TableDiffCLI(ctx *cli.Context) error {
 	task.CompareUnitSize = ctx.Int("compare-unit-size")
 	task.Output = strings.ToLower(ctx.String("output"))
 	task.Nodes = ctx.String("nodes")
+	scheduleEnabled := ctx.Bool("schedule")
+	scheduleEvery := ctx.String("every")
 	task.TableFilter = ctx.String("table-filter")
 	task.QuietMode = ctx.Bool("quiet")
 	task.OverrideBlockSize = ctx.Bool("override-block-size")
-	task.IsAsync = ctx.Bool("schedule")
-	task.ScheduleFrequency = ctx.String("every")
 	task.Ctx = context.Background()
 
 	if err := task.Validate(); err != nil {
 		return fmt.Errorf("validation failed: %w", err)
 	}
 
-	if !task.IsAsync {
+	if !scheduleEnabled {
 		if err := task.RunChecks(true); err != nil {
 			return fmt.Errorf("checks failed: %w", err)
 		}
-	}
-
-	if !task.IsAsync {
 		if err := task.ExecuteTask(); err != nil {
 			return fmt.Errorf("error during comparison: %w", err)
 		}
 		return nil
 	}
 
-	return task.RunScheduledTask()
+	freq, err := scheduler.ParseFrequency(scheduleEvery)
+	if err != nil {
+		return err
+	}
+
+	job := scheduler.Job{
+		Name:       fmt.Sprintf("table-diff:%s", task.QualifiedTableName),
+		Frequency:  freq,
+		RunOnStart: true,
+		Task: func(runCtx context.Context) error {
+			runTask := task.CloneForSchedule(runCtx)
+			if err := runTask.Validate(); err != nil {
+				return fmt.Errorf("validation failed: %w", err)
+			}
+			if err := runTask.RunChecks(true); err != nil {
+				return fmt.Errorf("checks failed: %w", err)
+			}
+			if err := runTask.ExecuteTask(); err != nil {
+				return fmt.Errorf("error during comparison: %w", err)
+			}
+			return nil
+		},
+	}
+
+	runCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	return scheduler.RunSingleJob(runCtx, job)
 }
 
 func MtreeInitCLI(ctx *cli.Context) error {
@@ -1115,14 +1160,14 @@ func SchemaDiffCLI(ctx *cli.Context) error {
 	task.DBName = ctx.String("dbname")
 	task.Nodes = ctx.String("nodes")
 	task.SkipTables = ctx.String("skip-tables")
+	scheduleEnabled := ctx.Bool("schedule")
+	scheduleEvery := ctx.String("every")
 	task.SkipFile = ctx.String("skip-file")
 	task.Quiet = ctx.Bool("quiet")
 	task.DDLOnly = ctx.Bool("ddl-only")
-	task.IsAsync = ctx.Bool("schedule")
-	task.ScheduleFrequency = ctx.String("every")
 	task.Ctx = context.Background()
 
-	if task.IsAsync && task.DDLOnly {
+	if scheduleEnabled && task.DDLOnly {
 		return fmt.Errorf("scheduling is only supported when --ddl-only is false")
 	}
 
@@ -1132,17 +1177,39 @@ func SchemaDiffCLI(ctx *cli.Context) error {
 	task.Output = ctx.String("output")
 	task.OverrideBlockSize = ctx.Bool("override-block-size")
 
-	if task.IsAsync {
-		if err := task.RunScheduledTask(); err != nil {
-			return fmt.Errorf("error scheduling schema diff: %w", err)
+	if err := task.Validate(); err != nil {
+		return fmt.Errorf("validation failed: %w", err)
+	}
+
+	if !scheduleEnabled {
+		if err := task.SchemaTableDiff(); err != nil {
+			return fmt.Errorf("error during schema diff: %w", err)
 		}
 		return nil
 	}
 
-	if err := task.SchemaTableDiff(); err != nil {
-		return fmt.Errorf("error during schema diff: %w", err)
+	freq, err := scheduler.ParseFrequency(scheduleEvery)
+	if err != nil {
+		return err
 	}
-	return nil
+
+	job := scheduler.Job{
+		Name:       fmt.Sprintf("schema-diff:%s", task.SchemaName),
+		Frequency:  freq,
+		RunOnStart: true,
+		Task: func(runCtx context.Context) error {
+			runTask := task.CloneForSchedule(runCtx)
+			if err := runTask.SchemaTableDiff(); err != nil {
+				return fmt.Errorf("execution failed: %w", err)
+			}
+			return nil
+		},
+	}
+
+	runCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	return scheduler.RunSingleJob(runCtx, job)
 }
 
 func RepsetDiffCLI(ctx *cli.Context) error {
@@ -1157,6 +1224,9 @@ func RepsetDiffCLI(ctx *cli.Context) error {
 		return fmt.Errorf("invalid block size '%s': %w", blockSizeStr, err)
 	}
 
+	scheduleEnabled := ctx.Bool("schedule")
+	scheduleEvery := ctx.String("every")
+
 	task := core.NewRepsetDiffTask()
 	task.ClusterName = clusterName
 	task.RepsetName = positional[0]
@@ -1165,8 +1235,6 @@ func RepsetDiffCLI(ctx *cli.Context) error {
 	task.SkipTables = ctx.String("skip-tables")
 	task.SkipFile = ctx.String("skip-file")
 	task.Quiet = ctx.Bool("quiet")
-	task.IsAsync = ctx.Bool("schedule")
-	task.ScheduleFrequency = ctx.String("every")
 	task.Ctx = context.Background()
 
 	task.BlockSize = int(blockSizeInt)
@@ -1175,15 +1243,62 @@ func RepsetDiffCLI(ctx *cli.Context) error {
 	task.Output = ctx.String("output")
 	task.OverrideBlockSize = ctx.Bool("override-block-size")
 
-	if task.IsAsync {
-		if err := task.RunScheduledTask(); err != nil {
-			return fmt.Errorf("error scheduling repset diff: %w", err)
+	if err := task.Validate(); err != nil {
+		return fmt.Errorf("validation failed: %w", err)
+	}
+
+	if !scheduleEnabled {
+		if err := core.RepsetDiff(task); err != nil {
+			return fmt.Errorf("error during repset diff: %w", err)
 		}
 		return nil
 	}
 
-	if err := core.RepsetDiff(task); err != nil {
-		return fmt.Errorf("error during repset diff: %w", err)
+	freq, err := scheduler.ParseFrequency(scheduleEvery)
+	if err != nil {
+		return err
 	}
-	return nil
+
+	job := scheduler.Job{
+		Name:       fmt.Sprintf("repset-diff:%s", task.RepsetName),
+		Frequency:  freq,
+		RunOnStart: true,
+		Task: func(runCtx context.Context) error {
+			runTask := task.CloneForSchedule(runCtx)
+			if err := core.RepsetDiff(runTask); err != nil {
+				return fmt.Errorf("execution failed: %w", err)
+			}
+			return nil
+		},
+	}
+
+	runCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	return scheduler.RunSingleJob(runCtx, job)
+}
+
+func StartSchedulerCLI(ctx *cli.Context) error {
+	if config.Cfg == nil {
+		return fmt.Errorf("configuration not loaded; run inside a directory with ace.yaml or set ACE_CONFIG")
+	}
+
+	jobs, err := scheduler.BuildJobsFromConfig(config.Cfg)
+	if err != nil {
+		return err
+	}
+
+	if len(jobs) == 0 {
+		logger.Info("scheduler: no enabled jobs found in configuration")
+		return nil
+	}
+
+	for _, job := range jobs {
+		logger.Info("scheduler: registering job %s", job.Name)
+	}
+
+	runCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	return scheduler.RunJobs(runCtx, jobs)
 }

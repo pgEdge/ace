@@ -41,6 +41,23 @@ mtree:
     block_size: 100000
     max_block_size: 1000000
 
+# Example scheduler configuration:
+# schedule_jobs:
+#   - name: nightly-order-check        # Unique identifier for the job
+#     type: table-diff                 # Supported values: table-diff, schema-diff, repset-diff
+#     cluster_name: my-cluster         # Optional; falls back to default_cluster
+#     table_name: public.orders        # Use schema_name for schema-diff, repset_name for repset-diff
+#     args:                            # Optional flags mirrored from the CLI
+#       dbname: appdb
+#       nodes: n1,n2
+#       output: json
+# schedule_config:
+#   - job_name: nightly-order-check
+#     run_frequency: 24h               # Or crontab_schedule: "0 2 * * *"
+#     enabled: true
+#
+# Add additional entries to schedule_jobs for more tasks, and reference each by
+# name from schedule_config.
 server:
   listen_address: "0.0.0.0"
   listen_port: 5000

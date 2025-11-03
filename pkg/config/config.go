@@ -75,11 +75,13 @@ type ServerConfig struct {
 }
 
 type JobDef struct {
-	Name        string                 `yaml:"name"`
-	ClusterName string                 `yaml:"cluster_name,omitempty"`
-	TableName   string                 `yaml:"table_name,omitempty"`
-	RepsetName  string                 `yaml:"repset_name,omitempty"`
-	Args        map[string]interface{} `yaml:"args,omitempty"`
+	Name        string         `yaml:"name"`
+	Type        string         `yaml:"type,omitempty"`
+	ClusterName string         `yaml:"cluster_name,omitempty"`
+	TableName   string         `yaml:"table_name,omitempty"`
+	SchemaName  string         `yaml:"schema_name,omitempty"`
+	RepsetName  string         `yaml:"repset_name,omitempty"`
+	Args        map[string]any `yaml:"args,omitempty"`
 }
 
 type SchedDef struct {
