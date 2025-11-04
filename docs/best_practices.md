@@ -26,9 +26,9 @@ ACE (Active Consistency Engine) helps keep nodes in a pgEdge Distributed Postgre
   
   - Use `--dry-run` when performing repairs.
 
-**Control Resource use when Possible.** 
+**Control Resource Use When Possible.** 
 
-  - Tune `--max-cpu-ratio`, `--block-rows`, and `--batch-size` to fit the host and workload.
+  - Adjust `--block-size`, `--concurrency-factor`, and `--compare-unit-size` to match each host’s capacity. For Merkle operations, consider lowering or raising `--max-cpu-ratio` as needed.
 
 **Keep your Statistics Fresh.** 
 
@@ -47,4 +47,4 @@ It's a good practice to schedule diff jobs (schema/repset/table) during low-traf
 2. **Perform a Repair Dry-run**: `table-repair --dry-run` to preview actions.
 3. **Perform Conservative Repairs when Possible**: Prefer `--upsert-only` or `--insert-only` on critical tables where deletes are risky.
 4. **Verify the Repair**: `table-rerun` using the original diff to confirm resolution.
-5. **Iterate in Batches** if the number of diffs is large (watch your `MAX_ALLOWED_DIFFS` guardrail).
+5. **Iterate in Batches** if the number of diffs is large, narrow the scope with `--table-filter` or segment work by replication set/schema.

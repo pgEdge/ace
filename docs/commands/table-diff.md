@@ -26,7 +26,7 @@ If you generate an HTML report, ACE generates an interactive report with:
 
 !!! hint
 
-    Experiment with different block sizes and CPU utilisation to balance performance and resource usage. Use `--table-filter` for large tables to reduce comparison scope, and generate HTML reports to simplify analysis. Also ensure diffs do not exceed `MAX_ALLOWED_DIFFS`; otherwise, `table-repair` can only partially repair the table.
+    Experiment with `--block-size`, `--concurrency-factor`, and `--compare-unit-size` to balance runtime and resource usage. Use `--table-filter` for large tables to reduce comparison scope, and generate HTML reports to simplify analysis.
 
 ## Syntax
 
@@ -42,17 +42,19 @@ If you generate an HTML report, ACE generates an interactive report with:
 | Option | Alias | Description |
 |---|---|---|
 | `-d, --dbname <name>` |  | Database name. Defaults to the first DB in the cluster config. |
-| `--block-rows <int>` |  | Number of rows processed per block. Min: `1000`, Max: `100000`, Default: `10000`. Larger blocks can be faster but use more memory. Configurable in `ace_config.py`. |
-| `-m, --max-cpu-ratio <float>` |  | Maximum CPU utilisation (0.0–1.0). Default: `0.6`. Configurable in `ace_config.py`. |
-| `--batch-size <int>` |  | Blocks per worker per batch (default `1`). Higher values reduce parallelism overhead, but typically `1` is best. Configurable in `ace_config.py`. |
-| `-o, --output <type>` |  | Output format: `html`, `json`, or `csv`. Default: `json`. Reports default to `diffs/<YYYY-MM-DD>/diffs_<HHMMSSmmmm>.json`. HTML/CSV highlight differences. |
-| `-n, --nodes <list>` |  | Comma‑separated nodes to compare (or `all`). Up to three nodes recommended for clarity. |
-| `-q, --quiet` |  | Suppress progress and sanity‑check output. If no differences are found, exits quietly; otherwise prints JSON to `stdout`. |
-| `-t, --table-filter <WHERE>` |  | SQL `WHERE` clause to narrow the row set being compared. |
+| `--block-size <int>` | `-b` | Rows processed per comparison block. Default `100000`. Honours `ace.yaml` limits unless `--override-block-size` is set. |
+| `--concurrency-factor <int>` | `-c` | Number of workers per node (1–10). Default `1`. |
+| `--compare-unit-size <int>` | `-s` | Recursive split size for mismatched blocks. Default `10000`. |
+| `--output <json\|html>` | `-o` | Report format. Default `json`. When `html`, both JSON and HTML files share the same timestamped prefix. |
+| `--nodes <list>` | `-n` | Comma-separated node list or `all`. Up to three-way diffs are supported. |
+| `--table-filter <WHERE>` |  | Optional SQL `WHERE` clause applied on every node before hashing. |
+| `--override-block-size` |  | Skip block-size safety checks defined in `ace.yaml`. |
+| `--quiet` |  | Suppress progress output. Results still write to the diff file. |
+| `--debug` | `-v` | Enable verbose logging. |
 
 ## Example
 
-Compare a table across all nodes and write a JSON report (add `--output html` for a colour‑coded HTML report alongside JSON):
+Compare a table across all nodes and write a JSON report (add `--output html` to emit both JSON and HTML using the same `<schema>_<table>_diffs-<timestamp>` prefix):
 
 ```sh
 ./ace table-diff acctg public.customers_large
@@ -90,11 +92,11 @@ Hashing initial ranges: 168 / 177 [=============================================
 
 ACE optimises comparisons with multiprocessing and block hashing:
 
-- It splits work into blocks (`--block-rows`) and uses multiple workers (bounded by `--max-cpu-ratio`) to compute hashes. If hashes mismatch for a block, rows are materialised to produce the diff report.
-- Runtime factors include host resources (CPU/memory), allowed CPU utilisation, table size and row width (e.g., large JSON/bytea/embedding columns can slow hashing), distribution of differences (widely scattered diffs trigger more block fetches), and network latency to database nodes.
+- It splits work into blocks (`--block-size`) and uses multiple workers per node (`--concurrency-factor`) to compute hashes. If hashes mismatch for a block, rows are materialised and, if necessary, recursively split using `--compare-unit-size`.
+- Runtime factors include host resources (CPU/memory), allowed parallelism, table size and row width (e.g., large JSON/bytea/embedding columns can slow hashing), distribution of differences (widely scattered diffs trigger more block fetches), and network latency to database nodes.
 
 ### Tuning tips
-1. Tune `--block-rows` and `--max-cpu-ratio` for your hardware and data profile.
+1. Tune `--block-size` and `--concurrency-factor` for your hardware and data profile.
 2. Use `--table-filter` to narrow scope on very large tables.
 3. Prefer `--output html` when you’ll manually review diffs.
-4. Keep diffs below `MAX_ALLOWED_DIFFS` to enable full repair via `table-repair`.
+4. Use `--override-block-size` sparingly; the guardrails in `ace.yaml` prevent allocations that can overwhelm memory.

@@ -6,7 +6,7 @@ Key features of ACE include:
 
 - Table-level data comparison and repair
 - Replication set level verification
-- Automated repair capabilities
+- Diff-driven repair workflows
 - Schema comparison
 - Spock configuration validation
 
@@ -43,12 +43,10 @@ In an eventually consistent system (like a cluster), nodes can diverge due to re
 
 ## Simplifying ACE Operations
 
-- **Automate** ACE to perform periodic checks (daily/weekly) and **alert** if diffs are found.
+- **Schedule** ACE via your orchestration tool of choice to perform periodic checks and alert if diffs are found.
 - **Segment** by schema or repset to keep runs predictable.
 - **Record** ACE provides JSON/HTML reports for complete audit trails.
-- **Guardrails**: Track `MAX_ALLOWED_DIFFS`; break large repairs into manageable batches.
 
 ## Known Limitations
 
 * ACE cannot be used on a table without a primary key, because primary keys are the basis for range partitioning, hash calculations, and other critical functions in ACE.
-

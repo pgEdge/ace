@@ -21,19 +21,15 @@ The [`ace.yaml` file](https://github.com/pgEdge/ace/blob/main/ace.yaml) defines 
 
 | Section --> Property | Description |
 |---|---|
-| postgres --> statement_timeout | **Equivalent to PostgreSQL `statement_timeout`.** Aborts any query that exceeds the specified time (ms). `0` disables. Useful to limit impact for large `table-diff`. **Default: 60000** |
+| postgres --> statement_timeout | **Equivalent to PostgreSQL `statement_timeout`.** Aborts any query that exceeds the specified time (ms). `0` disables and is the default. Set a non-zero value to guard long-running operations. |
 | postgres --> connection_timeout | **Equivalent to PostgreSQL `connect_timeout`.** Max wait to connect (s). `0` = wait indefinitely. **Default: 10** |
 | postgres --> application_name | Value reported in `application_name`. **Default: "ACE"** |
 | postgres --> tcp_keepalives_idle | TCP keepalive idle time (s). **Default: 30** |
 | postgres --> tcp_keepalives_interval | TCP keepalive interval (s). **Default: 10** |
 | postgres --> tcp_keepalives_count | Number of keepalive probes before drop. **Default: 5** |
 | table_diff --> concurrency_factor | Parallelism used for table diff operations. **Default: 1** |
-| table_diff --> max_diff_rows | ACE will abort the run if the number of diffs exceed this count. **Default: 1000000** |
 | table_diff --> min_diff_block_size | Minimum diff block (row chunk) size. **Default: 1** |
 | table_diff --> max_diff_block_size | Maximum diff block size. **Default: 1000000** |
-| table_diff --> diff_block_size | Target diff block size (rows per chunk). **Default: 1000** |
-| table_diff --> diff_batch_size | Blocks processed per worker batch. **Default: 1** |
-| table_diff --> max_diff_batch_size | Maximum blocks per worker batch. **Default: 1000** |
 | table_diff --> compare_unit_size | Unit size for smallest comparison chunk. **Default: 10000** |
 | mtree → cdc --> slot_name | Logical decoding slot name for mtree CDC. **Default: "ace_mtree_slot"** |
 | mtree → cdc --> publication_name | Publication used for mtree CDC. **Default: "ace_mtree_pub"** |
@@ -46,11 +42,6 @@ The [`ace.yaml` file](https://github.com/pgEdge/ace/blob/main/ace.yaml) defines 
 | server --> listen_port | Port the ACE server listens on. **Default: 5000** |
 | (root) --> schedule_jobs | List of scheduled jobs. **Default: []** |
 | (root) --> schedule_config | Global scheduling settings. **Default: []** |
-| auto_repair_config --> enabled | Toggle automatic repair workflow. **Default: false** |
-| auto_repair_config --> cluster_name | Target cluster name. **Default: ""** |
-| auto_repair_config --> dbname | Target database name. **Default: ""** |
-| auto_repair_config --> poll_frequency | How often to poll for issues (e.g., "10m"). **Default: "10m"** |
-| auto_repair_config --> repair_frequency | How often to run repairs (e.g., "15m"). **Default: "15m"** |
 | cert_auth --> use_cert_auth | Use client certificate authentication. **Default: true** |
 | cert_auth --> user_cert_file | Path to user/client certificate. **Default: "data/pg16/pki/admin-cert/admin.crt"** |
 | cert_auth --> user_key_file | Path to user/client private key. **Default: "data/pg16/pki/admin-cert/admin.key"** |
