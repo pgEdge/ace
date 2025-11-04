@@ -14,10 +14,10 @@ The commands in the first section of this page are designed for use without Merk
 Compares a table between nodes and generates a diff report.
 
 **Usage:**
-`./ace table-diff [flags] <cluster> <schema.table>`
+`./ace table-diff [flags] [cluster] <schema.table>`
 
 **Arguments:**
--   `<cluster>`: The name of the cluster to connect to (must match a cluster name in the configuration file).
+-   `[cluster]`: Optional cluster override. When omitted, ACE uses the `default_cluster` from `ace.yaml`.
 -   `<schema.table>`: The fully qualified name of the table to compare.
 
 **Flags:**
@@ -46,10 +46,10 @@ When `--output html` is used, ACE writes an HTML diff alongside the JSON report 
 Repairs table inconsistencies using a diff file.
 
 **Usage:**
-`./ace table-repair <cluster> <schema.table> [flags]`
+`./ace table-repair [cluster] <schema.table> [flags]`
 
 **Arguments:**
--   `<cluster>`: The name of the cluster to connect to.
+-   `[cluster]`: Optional cluster override. When omitted, ACE uses the `default_cluster` from `ace.yaml`.
 -   `<schema.table>`: The fully qualified name of the table to repair.
 
 **Flags:**
@@ -78,11 +78,10 @@ Repairs table inconsistencies using a diff file.
 Re-runs a diff from a file to check for persistent differences.
 
 **Usage:**
-`./ace table-rerun [flags] <cluster>`
+`./ace table-rerun [flags] [cluster]`
 
 **Arguments:**
--   `<cluster>`: The name of the cluster to connect to.
--   `<schema.table>`: The fully qualified name of the table.
+-   `[cluster]`: Optional cluster override. When omitted, ACE uses the `default_cluster` from `ace.yaml`.
 
 **Flags:**
 | Flag                  | Alias | Description                                                        | Default  |
@@ -103,10 +102,10 @@ Re-runs a diff from a file to check for persistent differences.
 Compares schemas across nodes in a pgEdge cluster. By default, `schema-diff` performs a `table-diff` on every table in the schema and reports differences. Alternatively, `schema-diff` could also be used to compare if two or more nodes have the same set of tables, views, functions, and indices, which can be achieved by passing in `ddl-only`
 
 **Usage:**
-`./ace schema-diff [flags] <cluster> <schema>`
+`./ace schema-diff [flags] [cluster] <schema>`
 
 **Arguments:**
--   `<cluster>`: The name of the cluster to connect to.
+-   `[cluster]`: Optional cluster override. When omitted, ACE uses the `default_cluster` from `ace.yaml`.
 -   `<schema>`: The name of the schema to compare.
 
 **Flags:**
@@ -130,10 +129,10 @@ Compares schemas across nodes in a pgEdge cluster. By default, `schema-diff` per
 Performs a `table-diff` on every table in a replication set and reports differences.
 
 **Usage:**
-`./ace repset-diff [flags] <cluster> <repset>`
+`./ace repset-diff [flags] [cluster] <repset>`
 
 **Arguments:**
--   `<cluster>`: The name of the cluster to connect to.
+-   `[cluster]`: Optional cluster override. When omitted, ACE uses the `default_cluster` from `ace.yaml`.
 -   `<repset>`: The name of the replication set to compare.
 
 **Flags:**
@@ -156,10 +155,10 @@ Performs a `table-diff` on every table in a replication set and reports differen
 Compares spock metadata across cluster nodes.
 
 **Usage:**
-`./ace spock-diff [flags] <cluster>`
+`./ace spock-diff [flags] [cluster]`
 
 **Arguments:**
--   `<cluster>`: The name of the cluster to connect to.
+-   `[cluster]`: Optional cluster override. When omitted, ACE uses the `default_cluster` from `ace.yaml`.
 
 **Flags:**
 | Flag                  | Alias | Description                                                        | Default  |
@@ -184,10 +183,10 @@ Compares spock metadata across cluster nodes.
 Initialises the required database objects for Merkle tree operations on all nodes in a cluster. This includes creating a dedicated schema, tables for metadata, and setting up publications and replication slots for change data capture (CDC).
 
 **Usage:**
-`./ace mtree init [flags] <cluster>`
+`./ace mtree init [flags] [cluster]`
 
 **Arguments:**
--   `<cluster>`: The name of the cluster to connect to.
+-   `[cluster]`: Optional cluster override. When omitted, ACE uses the `default_cluster` from `ace.yaml`.
 
 **Flags:**
 | Flag                  | Alias | Description                                                        | Default  |
@@ -207,11 +206,10 @@ Initialises the required database objects for Merkle tree operations on all node
 Builds a Merkle tree for a specific table on all nodes in the cluster. This command should be run after `mtree init`.
 
 **Usage:**
-`./ace mtree build [flags] <cluster> <schema.table>`
+`./ace mtree build [flags] [cluster] <schema.table>`
 
 **Arguments:**
--   `<cluster>`: The name of the cluster.
--   `<schema.table>`: The fully qualified name of the table.
+-   `[cluster]`: Optional cluster override. When omitted, ACE uses the `default_cluster` from `ace.yaml`.
 
 **Flags:**
 | Flag                  | Alias | Description                                                        | Default  |
@@ -238,11 +236,10 @@ Builds a Merkle tree for a specific table on all nodes in the cluster. This comm
 Compares the Merkle trees of a table across nodes to find inconsistencies. It generates a diff report similar to the standard `table-diff` command. By default, it first updates the Merkle trees with the latest changes using CDC before performing the diff.
 
 **Usage:**
-`./ace mtree table-diff [flags] <cluster> <schema.table>`
+`./ace mtree table-diff [flags] [cluster] <schema.table>`
 
 **Arguments:**
--   `<cluster>`: The name of the cluster.
--   `<schema.table>`: The fully qualified name of the table.
+-   `[cluster]`: Optional cluster override. When omitted, ACE uses the `default_cluster` from `ace.yaml`.
 
 **Flags:**
 | Flag                  | Alias | Description                                                        | Default  |
@@ -268,11 +265,10 @@ HTML output is also available via `--output html`; the command produces both JSO
 Manually triggers an update of a Merkle tree for a table using the captured changes from CDC. This can also be used to rebalance the tree.
 
 **Usage:**
-`./ace mtree update [flags] <cluster> <schema.table>`
+`./ace mtree update [flags] [cluster] <schema.table>`
 
 **Arguments:**
--   `<cluster>`: The name of the cluster.
--   `<schema.table>`: The fully qualified name of the table.
+-   `[cluster]`: Optional cluster override. When omitted, ACE uses the `default_cluster` from `ace.yaml`.
 
 **Flags:**
 | Flag                  | Alias | Description                                                        | Default  |
@@ -294,10 +290,10 @@ Manually triggers an update of a Merkle tree for a table using the captured chan
 Starts a long-running process that listens for database changes via CDC and automatically updates the Merkle trees for all tracked tables.
 
 **Usage:**
-`./ace mtree listen [flags] <cluster>`
+`./ace mtree listen [flags] [cluster]`
 
 **Arguments:**
--   `<cluster>`: The name of the cluster.
+-   `[cluster]`: Optional cluster override. When omitted, ACE uses the `default_cluster` from `ace.yaml`.
 
 **Flags:**
 | Flag                  | Alias | Description                                                        | Default  |
@@ -317,11 +313,10 @@ Starts a long-running process that listens for database changes via CDC and auto
 Removes all database objects associated with a Merkle tree for a specific table. This includes the tree data, metadata, and removing the table from the CDC publication.
 
 **Usage:**
-`./ace mtree teardown-table [flags] <cluster> <schema.table>`
+`./ace mtree teardown-table [flags] [cluster] <schema.table>`
 
 **Arguments:**
--   `<cluster>`: The name of the cluster.
--   `<schema.table>`: The fully qualified name of the table.
+-   `[cluster]`: Optional cluster override. When omitted, ACE uses the `default_cluster` from `ace.yaml`.
 
 **Flags:**
 | Flag                  | Alias | Description                                                        | Default  |
@@ -341,10 +336,10 @@ Removes all database objects associated with a Merkle tree for a specific table.
 Removes all database objects created by `mtree init` from all nodes in the cluster. This will drop the dedicated schema, all Merkle tree data, and stop CDC.
 
 **Usage:**
-`./ace mtree teardown [flags] <cluster>`
+`./ace mtree teardown [flags] [cluster]`
 
 **Arguments:**
--   `<cluster>`: The name of the cluster.
+-   `[cluster]`: Optional cluster override. When omitted, ACE uses the `default_cluster` from `ace.yaml`.
 
 **Flags:**
 | Flag                  | Alias | Description                                                        | Default  |

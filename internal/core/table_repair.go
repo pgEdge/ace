@@ -21,12 +21,14 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/pgedge/ace/db/queries"
 	"github.com/pgedge/ace/internal/auth"
 	utils "github.com/pgedge/ace/pkg/common"
 	"github.com/pgedge/ace/pkg/logger"
+	"github.com/pgedge/ace/pkg/taskstore"
 	"github.com/pgedge/ace/pkg/types"
 )
 
@@ -63,6 +65,11 @@ type TableRepairTask struct {
 	InvokeMethod string // TBD
 	ClientRole   string // TBD
 
+	SkipDBUpdate bool
+
+	TaskStore     *taskstore.Store
+	TaskStorePath string
+
 	Pools map[string]*pgxpool.Pool
 
 	RawDiffs types.DiffOutput
@@ -84,6 +91,11 @@ func (tr *TableRepairTask) SetClusterNodes(cn []map[string]any) { tr.ClusterNode
 
 func NewTableRepairTask() *TableRepairTask {
 	return &TableRepairTask{
+		Task: types.Task{
+			TaskID:     uuid.NewString(),
+			TaskType:   taskstore.TaskTypeTableRepair,
+			TaskStatus: taskstore.StatusPending,
+		},
 		InvokeMethod: "cli",
 		Pools:        make(map[string]*pgxpool.Pool),
 		DerivedFields: types.DerivedFields{
@@ -401,7 +413,7 @@ func writeReportToFile(report *RepairReport) error {
 	return nil
 }
 
-func (t *TableRepairTask) Run(skipValidation bool) error {
+func (t *TableRepairTask) Run(skipValidation bool) (err error) {
 	if !skipValidation {
 		if err := t.ValidateAndPrepare(); err != nil {
 			return fmt.Errorf("task validation and preparation failed: %w", err)
@@ -409,6 +421,104 @@ func (t *TableRepairTask) Run(skipValidation bool) error {
 	}
 
 	startTime := time.Now()
+
+	if strings.TrimSpace(t.TaskID) == "" {
+		t.TaskID = uuid.NewString()
+	}
+	if t.Task.TaskType == "" {
+		t.Task.TaskType = taskstore.TaskTypeTableRepair
+	}
+	t.Task.StartedAt = startTime
+	t.Task.TaskStatus = taskstore.StatusRunning
+	t.Task.ClusterName = t.ClusterName
+
+	var recorder *taskstore.Recorder
+	if !t.SkipDBUpdate {
+		rec, recErr := taskstore.NewRecorder(t.TaskStore, t.TaskStorePath)
+		if recErr != nil {
+			logger.Warn("table-repair: unable to initialise task store (%v)", recErr)
+		} else {
+			recorder = rec
+			if t.TaskStore == nil && rec.Store() != nil {
+				t.TaskStore = rec.Store()
+			}
+
+			ctx := map[string]any{
+				"qualified_table": t.QualifiedTableName,
+				"diff_file":       t.DiffFilePath,
+				"source_of_truth": t.SourceOfTruth,
+				"dry_run":         t.DryRun,
+				"insert_only":     t.InsertOnly,
+				"upsert_only":     t.UpsertOnly,
+				"fire_triggers":   t.FireTriggers,
+				"bidirectional":   t.Bidirectional,
+				"generate_report": t.GenerateReport,
+			}
+
+			record := taskstore.Record{
+				TaskID:       t.TaskID,
+				TaskType:     taskstore.TaskTypeTableRepair,
+				Status:       taskstore.StatusRunning,
+				ClusterName:  t.ClusterName,
+				SchemaName:   t.Schema,
+				TableName:    t.Table,
+				DiffFilePath: t.DiffFilePath,
+				StartedAt:    startTime,
+				TaskContext:  ctx,
+			}
+
+			if err := recorder.Create(record); err != nil {
+				logger.Warn("table-repair: unable to write initial task status (%v)", err)
+			}
+		}
+	}
+
+	defer func() {
+		finishedAt := time.Now()
+		t.Task.FinishedAt = finishedAt
+		t.Task.TimeTaken = finishedAt.Sub(startTime).Seconds()
+
+		status := taskstore.StatusFailed
+		if err == nil {
+			status = taskstore.StatusCompleted
+		}
+		t.Task.TaskStatus = status
+
+		if recorder != nil && recorder.Created() {
+			ctx := map[string]any{
+				"dry_run": t.DryRun,
+			}
+			if t.report != nil {
+				ctx["repair_report"] = t.report
+			}
+			if err != nil {
+				ctx["error"] = err.Error()
+			}
+
+			updateErr := recorder.Update(taskstore.Record{
+				TaskID:       t.TaskID,
+				Status:       status,
+				DiffFilePath: t.DiffFilePath,
+				FinishedAt:   finishedAt,
+				TimeTaken:    t.Task.TimeTaken,
+				TaskContext:  ctx,
+			})
+			if updateErr != nil {
+				logger.Warn("table-repair: unable to update task status (%v)", updateErr)
+			}
+		}
+
+		if recorder != nil && recorder.OwnsStore() {
+			storePtr := recorder.Store()
+			if closeErr := recorder.Close(); closeErr != nil {
+				logger.Warn("table-repair: failed to close task store (%v)", closeErr)
+			}
+			if storePtr != nil && t.TaskStore == storePtr {
+				t.TaskStore = nil
+			}
+		}
+	}()
+
 	if t.GenerateReport {
 		t.report = t.initialiseReport()
 	}

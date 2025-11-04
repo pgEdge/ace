@@ -9,6 +9,8 @@
 #
 #############################################################################
 
+default_cluster: ""
+
 postgres:
   statement_timeout: 0       # milliseconds
   connection_timeout: 10     # seconds

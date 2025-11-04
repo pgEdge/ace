@@ -36,6 +36,8 @@ Before invoking any ACE commands, use the following commands to create the confi
 ./ace config init --path ace.yaml
 ```
 
+Set the `default_cluster` key in `ace.yaml` to the cluster name you most frequently target. When this value is present, CLI commands will use it automatically unless you provide an explicit cluster argument.
+
 !!! info
 
     For detailed information about creating and modifying ACE configuration files, visit [here](/docs/configuration.md).

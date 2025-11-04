@@ -41,6 +41,7 @@ import (
 	utils "github.com/pgedge/ace/pkg/common"
 	"github.com/pgedge/ace/pkg/config"
 	"github.com/pgedge/ace/pkg/logger"
+	"github.com/pgedge/ace/pkg/taskstore"
 	"github.com/pgedge/ace/pkg/types"
 	"github.com/vbauerster/mpb/v8"
 	"github.com/vbauerster/mpb/v8/decor"
@@ -76,6 +77,10 @@ type MerkleTreeTask struct {
 	OverrideBlockSize bool
 	Mode              string
 	NoCDC             bool
+	SkipDBUpdate      bool
+
+	TaskStore     *taskstore.Store
+	TaskStorePath string
 
 	DiffResult     types.DiffOutput
 	diffMutex      sync.Mutex
@@ -95,6 +100,111 @@ type CompareRangesResult struct {
 	Diffs     map[string]map[string][]map[string]any
 	TotalDiff int
 	Err       error
+}
+
+func (m *MerkleTreeTask) startLifecycle(taskType string, initialCtx map[string]any) (*taskstore.Recorder, time.Time) {
+	start := time.Now()
+
+	if strings.TrimSpace(m.TaskID) == "" {
+		m.TaskID = uuid.NewString()
+	}
+	m.Task.TaskType = taskType
+	m.Task.StartedAt = start
+	m.Task.TaskStatus = taskstore.StatusRunning
+	m.Task.ClusterName = m.ClusterName
+
+	ctx := make(map[string]any)
+	for k, v := range initialCtx {
+		ctx[k] = v
+	}
+	if m.Mode != "" {
+		ctx["mode"] = m.Mode
+	}
+	if m.QualifiedTableName != "" {
+		ctx["qualified_table"] = m.QualifiedTableName
+	}
+	if m.Schema != "" {
+		ctx["schema"] = m.Schema
+	}
+	if m.Table != "" {
+		ctx["table"] = m.Table
+	}
+	if len(m.NodeList) > 0 {
+		ctx["nodes"] = m.NodeList
+	}
+
+	var recorder *taskstore.Recorder
+	if !m.SkipDBUpdate {
+		rec, recErr := taskstore.NewRecorder(m.TaskStore, m.TaskStorePath)
+		if recErr != nil {
+			logger.Warn("mtree: unable to initialise task store (%v)", recErr)
+		} else {
+			recorder = rec
+			if m.TaskStore == nil && rec.Store() != nil {
+				m.TaskStore = rec.Store()
+			}
+
+			record := taskstore.Record{
+				TaskID:      m.TaskID,
+				TaskType:    taskType,
+				Status:      taskstore.StatusRunning,
+				ClusterName: m.ClusterName,
+				SchemaName:  m.Schema,
+				TableName:   m.Table,
+				StartedAt:   start,
+				TaskContext: ctx,
+			}
+
+			if err := recorder.Create(record); err != nil {
+				logger.Warn("mtree: unable to write initial task status (%v)", err)
+			}
+		}
+	}
+
+	return recorder, start
+}
+
+func (m *MerkleTreeTask) finishLifecycle(recorder *taskstore.Recorder, start time.Time, statusErr error, resultCtx map[string]any) {
+	finished := time.Now()
+	m.Task.FinishedAt = finished
+	m.Task.TimeTaken = finished.Sub(start).Seconds()
+
+	status := taskstore.StatusFailed
+	if statusErr == nil {
+		status = taskstore.StatusCompleted
+	}
+	m.Task.TaskStatus = status
+
+	if recorder != nil && recorder.Created() {
+		ctx := make(map[string]any)
+		for k, v := range resultCtx {
+			ctx[k] = v
+		}
+		if statusErr != nil {
+			ctx["error"] = statusErr.Error()
+		}
+
+		updateErr := recorder.Update(taskstore.Record{
+			TaskID:      m.TaskID,
+			Status:      status,
+			FinishedAt:  finished,
+			TimeTaken:   m.Task.TimeTaken,
+			TaskContext: ctx,
+		})
+		if updateErr != nil {
+			logger.Warn("mtree: unable to update task status (%v)", updateErr)
+		}
+	}
+
+	if recorder != nil && recorder.OwnsStore() {
+		storePtr := recorder.Store()
+		if closeErr := recorder.Close(); closeErr != nil {
+			logger.Warn("mtree: failed to close task store (%v)", closeErr)
+		}
+		if storePtr != nil && m.TaskStore == storePtr {
+			m.TaskStore = nil
+		}
+	}
 }
 
 func (m *MerkleTreeTask) CompareRanges(workItems []CompareRangesWorkItem) {
@@ -619,8 +729,13 @@ func valueOrNil(end []any) interface{} {
 	return end[0]
 }
 
-func (m *MerkleTreeTask) MtreeInit() error {
-	if err := m.validateInit(); err != nil {
+func (m *MerkleTreeTask) MtreeInit() (err error) {
+	recorder, start := m.startLifecycle(taskstore.TaskTypeMtreeInit, nil)
+	defer func() {
+		m.finishLifecycle(recorder, start, err, nil)
+	}()
+
+	if err = m.validateInit(); err != nil {
 		return fmt.Errorf("validation failed: %w", err)
 	}
 
@@ -640,8 +755,7 @@ func (m *MerkleTreeTask) MtreeInit() error {
 		}
 		defer pool.Close()
 
-		err = queries.CreateSchema(m.Ctx, pool, aceSchema())
-		if err != nil {
+		if err = queries.CreateSchema(m.Ctx, pool, aceSchema()); err != nil {
 			return fmt.Errorf("failed to create schema '%s': %w", aceSchema(), err)
 		}
 
@@ -651,13 +765,11 @@ func (m *MerkleTreeTask) MtreeInit() error {
 		}
 		defer tx.Rollback(m.Ctx)
 
-		err = queries.CreateXORFunction(m.Ctx, tx)
-		if err != nil {
+		if err = queries.CreateXORFunction(m.Ctx, tx); err != nil {
 			return fmt.Errorf("failed to create xor function: %w", err)
 		}
 
-		err = queries.CreateCDCMetadataTable(m.Ctx, tx)
-		if err != nil {
+		if err = queries.CreateCDCMetadataTable(m.Ctx, tx); err != nil {
 			return fmt.Errorf("failed to create cdc metadata table: %w", err)
 		}
 
@@ -665,8 +777,7 @@ func (m *MerkleTreeTask) MtreeInit() error {
 			return fmt.Errorf("failed to setup publication on node %s: %w", nodeInfo["Name"], err)
 		}
 
-		err = queries.UpdateCDCMetadata(m.Ctx, tx, cfg.PublicationName, cfg.SlotName, lsn.String(), []string{})
-		if err != nil {
+		if err = queries.UpdateCDCMetadata(m.Ctx, tx, cfg.PublicationName, cfg.SlotName, lsn.String(), []string{}); err != nil {
 			return fmt.Errorf("failed to update cdc metadata: %w", err)
 		}
 
@@ -679,8 +790,13 @@ func (m *MerkleTreeTask) MtreeInit() error {
 	return nil
 }
 
-func (m *MerkleTreeTask) MtreeTeardown() error {
-	if err := m.validateInit(); err != nil {
+func (m *MerkleTreeTask) MtreeTeardown() (err error) {
+	recorder, start := m.startLifecycle(taskstore.TaskTypeMtreeTeardown, nil)
+	defer func() {
+		m.finishLifecycle(recorder, start, err, nil)
+	}()
+
+	if err = m.validateInit(); err != nil {
 		return fmt.Errorf("validation failed: %w", err)
 	}
 
@@ -691,19 +807,16 @@ func (m *MerkleTreeTask) MtreeTeardown() error {
 		}
 		defer pool.Close()
 
-		err = queries.DropPublication(m.Ctx, pool, "ace_mtree_pub")
-		if err != nil {
+		if err = queries.DropPublication(m.Ctx, pool, "ace_mtree_pub"); err != nil {
 			return fmt.Errorf("failed to drop publication: %w", err)
 		}
 		logger.Info("Publication dropped on node: %s", nodeInfo["Name"])
 
-		err = queries.DropReplicationSlot(m.Ctx, pool, "ace_mtree_slot")
-		if err != nil {
+		if err = queries.DropReplicationSlot(m.Ctx, pool, "ace_mtree_slot"); err != nil {
 			return fmt.Errorf("failed to drop replication slot: %w", err)
 		}
 		logger.Info("Replication slot dropped on node: %s", nodeInfo["Name"])
-		err = queries.DropCDCMetadataTable(m.Ctx, pool)
-		if err != nil {
+		if err = queries.DropCDCMetadataTable(m.Ctx, pool); err != nil {
 			return fmt.Errorf("failed to drop cdc metadata table: %w", err)
 		}
 		logger.Info("CDC metadata table dropped on node: %s", nodeInfo["Name"])
@@ -711,8 +824,13 @@ func (m *MerkleTreeTask) MtreeTeardown() error {
 	return nil
 }
 
-func (m *MerkleTreeTask) MtreeTeardownTable() error {
-	if err := m.validateTeardownTable(); err != nil {
+func (m *MerkleTreeTask) MtreeTeardownTable() (err error) {
+	recorder, start := m.startLifecycle(taskstore.TaskTypeMtreeTeardownTable, nil)
+	defer func() {
+		m.finishLifecycle(recorder, start, err, nil)
+	}()
+
+	if err = m.validateTeardownTable(); err != nil {
 		return fmt.Errorf("validation failed: %w", err)
 	}
 
@@ -840,8 +958,8 @@ func (m *MerkleTreeTask) GetNode(nodeName string) (map[string]interface{}, error
 func NewMerkleTreeTask() *MerkleTreeTask {
 	return &MerkleTreeTask{
 		Task: types.Task{
-			TaskID:    uuid.NewString(),
-			StartedAt: time.Now(),
+			TaskID:     uuid.NewString(),
+			TaskStatus: taskstore.StatusPending,
 		},
 		DerivedFields: types.DerivedFields{
 			ColTypes:  make(map[string]map[string]string),
@@ -1032,7 +1150,20 @@ func (m *MerkleTreeTask) RunChecks(skipValidation bool) error {
 	return nil
 }
 
-func (m *MerkleTreeTask) BuildMtree() error {
+func (m *MerkleTreeTask) BuildMtree() (err error) {
+	resultCtx := map[string]any{}
+	initialCtx := map[string]any{
+		"block_size":     m.BlockSize,
+		"max_cpu_ratio":  m.MaxCpuRatio,
+		"override_block": m.OverrideBlockSize,
+		"write_ranges":   m.WriteRanges,
+		"ranges_file":    m.RangesFile,
+	}
+	recorder, start := m.startLifecycle(taskstore.TaskTypeMtreeBuild, initialCtx)
+	defer func() {
+		m.finishLifecycle(recorder, start, err, resultCtx)
+	}()
+
 	var blockRanges []types.BlockRange
 	var numBlocks int
 	cfg := config.Cfg.MTree.CDC
@@ -1229,14 +1360,38 @@ func (m *MerkleTreeTask) BuildMtree() error {
 		pool.Close()
 	}
 
+	resultCtx["max_rows"] = maxRows
+	resultCtx["num_blocks"] = numBlocks
+	resultCtx["block_ranges_provided"] = len(blockRanges) > 0
+
 	return nil
 }
 
-func (m *MerkleTreeTask) UpdateMtree(skipAllChecks bool) error {
+func (m *MerkleTreeTask) UpdateMtree(skipAllChecks bool) (err error) {
+	resultCtx := map[string]any{
+		"rebalance":       m.Rebalance,
+		"skip_all_checks": skipAllChecks,
+	}
+
 	if !skipAllChecks {
-		if err := m.RunChecks(true); err != nil {
+		if err = m.RunChecks(true); err != nil {
 			return err
 		}
+	}
+
+	var (
+		recorder *taskstore.Recorder
+		start    time.Time
+	)
+	if m.Mode == "update" || m.Mode == "" {
+		initialCtx := map[string]any{
+			"rebalance":       m.Rebalance,
+			"skip_all_checks": skipAllChecks,
+		}
+		recorder, start = m.startLifecycle(taskstore.TaskTypeMtreeUpdate, initialCtx)
+		defer func() {
+			m.finishLifecycle(recorder, start, err, resultCtx)
+		}()
 	}
 
 	if !m.NoCDC {
@@ -1404,6 +1559,9 @@ func (m *MerkleTreeTask) UpdateMtree(skipAllChecks bool) error {
 		}
 		fmt.Printf("Successfully updated %d blocks on %s\n", len(affectedPositions), nodeInfo["Name"])
 	}
+
+	resultCtx["block_size"] = blockSize
+	resultCtx["nodes_processed"] = len(m.ClusterNodes)
 
 	return nil
 }
@@ -1580,8 +1738,19 @@ func getNodePairs(nodes []map[string]any) [][2]map[string]any {
 	return pairs
 }
 
-func (m *MerkleTreeTask) DiffMtree() error {
-	if err := m.UpdateMtree(true); err != nil {
+func (m *MerkleTreeTask) DiffMtree() (err error) {
+	initialCtx := map[string]any{
+		"output":     m.Output,
+		"batch_size": m.BatchSize,
+	}
+	resultCtx := map[string]any{}
+	recorder, start := m.startLifecycle(taskstore.TaskTypeMtreeDiff, initialCtx)
+	defer func() {
+		resultCtx["diff_summary"] = m.DiffResult.Summary
+		m.finishLifecycle(recorder, start, err, resultCtx)
+	}()
+
+	if err = m.UpdateMtree(true); err != nil {
 		return fmt.Errorf("failed to update merkle tree before diff: %w", err)
 	}
 	nodePairs := getNodePairs(m.ClusterNodes)
@@ -1703,10 +1872,14 @@ func (m *MerkleTreeTask) DiffMtree() error {
 		m.DiffResult.Summary.EndTime = endTime.Format(time.RFC3339)
 		m.DiffResult.Summary.TimeTaken = endTime.Sub(m.StartTime).String()
 		m.DiffResult.Summary.PrimaryKey = m.Key
-		if _, _, err := utils.WriteDiffReport(m.DiffResult, m.Schema, m.Table, m.Output); err != nil {
-			return err
+		if diffPath, _, writeErr := utils.WriteDiffReport(m.DiffResult, m.Schema, m.Table, m.Output); writeErr != nil {
+			return writeErr
+		} else if diffPath != "" {
+			resultCtx["diff_file"] = diffPath
 		}
 	}
+
+	resultCtx["mismatched_pairs"] = len(m.DiffResult.NodeDiffs)
 
 	return nil
 }
