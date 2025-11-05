@@ -13,7 +13,6 @@ plugins:
 
 theme:
   name: material
-  custom_dir: docs/overrides
 
   logo_dark_mode: 'img/logo-dark.png'
   logo_light_mode: 'img/logo-light.png'
@@ -52,20 +51,25 @@ nav:
   - ACE Overview: index.md
   - Best Practices for Using ACE: best_practices.md
   - ACE Configuration: configuration.md
-  - Using ACE with Merkle Trees: merkle.md
-  - ACE Commands:
-    - Command reference: commands/index.md
-    - mtree-build: commands/mtree-build.md
-    - mtree-init: commands/mtree-init.md
-    - mtree-listen: commands/mtree-listen.md
-    - mtree-table-diff: commands/mtree-table-diff.md
-    - mtree-teardown-table: commands/mtree-teardown-table.md
-    - mtree-teardown: commands/mtree-teardown.md
-    - mtree-update: commands/mtree-update.md
-    - repset-diff: commands/repset-diff.md
-    - schema-diff: commands/schema-diff.md
-    - spock-diff: commands/spock-diff.md
-    - table-diff: commands/table-diff.md
-    - table-repair: commands/table-repair.md
-    - table-rerun: commands/table-rerun.md
+  - 'ACE Commands':
+    - 'Command reference': commands/index.md
+    - 'Diff Commands':
+      - 'Overview': commands/diff/index.md
+      - 'table-diff': commands/diff/table-diff.md
+      - 'repset-diff': commands/diff/repset-diff.md
+      - 'schema-diff': commands/diff/schema-diff.md
+      - 'spock-diff': commands/diff/spock-diff.md
+      - 'table-rerun': commands/diff/table-rerun.md
+    - 'Merkle Tree Commands':
+      - 'Overview': commands/mtree/index.md
+      - 'mtree-build': commands/mtree/mtree-build.md
+      - 'mtree-init': commands/mtree/mtree-init.md
+      - 'mtree-listen': commands/mtree/mtree-listen.md
+      - 'mtree-table-diff': commands/mtree/mtree-table-diff.md
+      - 'mtree-teardown-table': commands/mtree/mtree-teardown-table.md
+      - 'mtree-teardown': commands/mtree/mtree-teardown.md
+      - 'mtree-update': commands/mtree/mtree-update.md
+    - 'Repair Commands':
+      - 'Overview': commands/repair/index.md
+      - 'table-repair': commands/repair/table-repair.md
   - Improving ACE Performance: performance.md
