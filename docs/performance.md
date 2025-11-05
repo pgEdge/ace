@@ -14,7 +14,7 @@ ACE parallelizes work across multiple processes, hashing blocks of rows and only
 
 If you notice a pronounced change in a node's performance:
 
-* Review your ACE commands; experiment with the [table-diff tuning flags](#command-options-that-can-impact-performance) such as `--block-size`, `--concurrency-factor`, and `--compare-unit-size`.
+* Review your ACE commands; experiment with the [table-diff tuning flags](#command-options-that-impact-performance) such as `--block-size`, `--concurrency-factor`, and `--compare-unit-size`.
 * Confirm that your table has been `ANALYZE`d recently.
 * Use `--table-filter` and `--nodes` to target hot ranges.
 * If you're using ACE on huge tables, use Merkle trees.
@@ -23,7 +23,7 @@ If you notice a pronounced change in a node's performance:
 
 ## Command Options that Impact Performance
 
-When invoking [ACE commands](/commands/), review the available command options; many of the options are designed to improve performance.  For example:
+When invoking [ACE commands](commands/index.md), review the available command options; many of the options are designed to improve performance.  For example:
 
 - **`--block-size`**
     Controls the number of rows hashed per block. Larger blocks reduce round-trips but can increase memory usage or hash time. Defaults to `100000`, and respects the guardrails defined in `ace.yaml` unless `--override-block-size` is set.
@@ -46,7 +46,7 @@ When invoking [ACE commands](/commands/), review the available command options; 
 
 ## Improving Performance with Merkle Trees
 
-Using a [Merkle tree](/commands/mtree/) can improve performance when your tables are very large by storing statistics so you can avoid a full rescan between diff activities.  To improve performance when using Merkle trees:
+Using a [Merkle tree](commands/mtree/index.md) can improve performance when your tables are very large by storing statistics so you can avoid a full rescan between diff activities.  To improve performance when using Merkle trees:
 
 - Keep your statistics fresh (`ANALYZE`) for accurate range estimation.
 - For huge tables(billion-row/terabyte), [parallelize builds](commands/mtree/index.md#building-merkle-trees-in-parallel-for-very-large-tables). 
