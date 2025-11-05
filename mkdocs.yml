@@ -60,6 +60,9 @@ nav:
       - 'schema-diff': commands/diff/schema-diff.md
       - 'spock-diff': commands/diff/spock-diff.md
       - 'table-rerun': commands/diff/table-rerun.md
+    - 'Repair Commands':
+      - 'Overview': commands/repair/index.md
+      - 'table-repair': commands/repair/table-repair.md
     - 'Merkle Tree Commands':
       - 'Overview': commands/mtree/index.md
       - 'mtree-build': commands/mtree/mtree-build.md
@@ -69,7 +72,4 @@ nav:
       - 'mtree-teardown-table': commands/mtree/mtree-teardown-table.md
       - 'mtree-teardown': commands/mtree/mtree-teardown.md
       - 'mtree-update': commands/mtree/mtree-update.md
-    - 'Repair Commands':
-      - 'Overview': commands/repair/index.md
-      - 'table-repair': commands/repair/table-repair.md
   - Improving ACE Performance: performance.md
