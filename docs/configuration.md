@@ -22,8 +22,8 @@ The [`ace.yaml` file](https://github.com/pgEdge/ace/blob/main/ace.yaml) defines 
 <!-- TODO: Remove and/or update inapplicable fields -->
 | Section --> Property | Description |
 |---|---|
-| postgres --> statement_timeout | **Equivalent to PostgreSQL `statement_timeout`.** Aborts any query that exceeds the specified time (ms). `0` disables and is the default. Set a non-zero value to guard long-running operations. |
-| postgres --> connection_timeout | **Equivalent to PostgreSQL `connect_timeout`.** Max wait to connect (s). `0` = wait indefinitely. **Default: 10** |
+| postgres --> statement_timeout | **Equivalent to Postgres `statement_timeout`.** Aborts any query that exceeds the specified time (ms). `0` disables and is the default. Set a non-zero value to guard long-running operations. |
+| postgres --> connection_timeout | **Equivalent to Postgres `connect_timeout`.** Max wait to connect (s). `0` = wait indefinitely. **Default: 10** |
 | postgres --> application_name | Value reported in `application_name`. **Default: "ACE"** |
 | postgres --> tcp_keepalives_idle | TCP keepalive idle time (s). **Default: 30** |
 | postgres --> tcp_keepalives_interval | TCP keepalive interval (s). **Default: 10** |
@@ -51,7 +51,7 @@ The [`ace.yaml` file](https://github.com/pgEdge/ace/blob/main/ace.yaml) defines 
 
 
 
-## The pg_service.conf file
+## The pg_service.conf File
 
 ACE uses the [`pg_service.conf` file](https://www.postgresql.org/docs/current/libpq-pgservice.html) to find cluster and node details.  
 

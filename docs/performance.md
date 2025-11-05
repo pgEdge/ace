@@ -21,7 +21,7 @@ If you notice a pronounced change in a node's performance:
 * After repairing differences, run `table-rerun` to validate the results.
 
 
-## Command Options that Can Impact Performance
+## Command Options that Impact Performance
 
 When invoking [ACE commands](/commands/), review the available command options; many of the options are designed to improve performance.  For example:
 

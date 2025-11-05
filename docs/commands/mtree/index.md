@@ -39,7 +39,7 @@ Then, invoke ACE to compare Merkle trees across nodes and write a diff report (a
 
 `./ace mtree table-diff cluster_name schema.table_name`
 
-Finally, you can use the diff file to initiate table repair with the ACE [table-repair](./commands/table-repair.md) command:
+Finally, you can use the diff file to initiate table repair with the ACE [table-repair](../repair/table-repair.md) command:
 
 `./ace table-repair --diff-file=<diff-file-from-mtree-diff> --source-of-truth=n1 cluster_name schema.table_name`
 

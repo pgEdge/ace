@@ -12,7 +12,7 @@ Key features of ACE include:
 
 ## ACE Use Cases
 
-In an evntually consistent multi-master system, nodes may potentially diverge due to replication issues, network partitions, or node failures. ACE helps restore correctness by performing efficient, controlled comparisons and targeted repairs across nodes.
+In an eventually consistent multi-master system, nodes may potentially diverge due to replication issues, network partitions, or node failures. ACE helps restore correctness by performing efficient, controlled comparisons and targeted repairs across nodes.
 
 
 ### Node Failures (Planned/Unplanned)
@@ -37,7 +37,7 @@ In an evntually consistent multi-master system, nodes may potentially diverge du
 
 ### Large-Scale Integrity Checks
 - **Problem:** Very large tables make full scans impractical.
-- **Approach:** Use [Merkle trees](./merkle.md):
+- **Approach:** Use [Merkle trees](commands/mtree/index.md):
   - Initialize (`mtree init`) and build the tree (`mtree build`) once for each table, then use `mtree table-diff` for faster comparisons.
   - Optionally keep trees current with `mtree listen` for real-time tree updates, and save time during `mtree table-diff`.
 
