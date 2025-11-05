@@ -3,22 +3,22 @@ ACE diff commands can identify differences between tables and objects in a repli
 
 ACE diff functions compare two objects and identify the differences; the output is a report that contains a:
 
-- Summary of compared rows
-- Mismatched data details
-- Node-specific statistics
+- summary of compared rows.
+- mismatched data details.
+- node-specific statistics.
 
 If you generate an HTML report, ACE generates an interactive report with:
 
-- Color‑coded difference highlighting
-- Expandable row details
-- Primary key highlighting
-- Missing row indicators
+- color‑coded difference highlighting.
+- expandable row details.
+- primary key highlighting.
+- missing row indicators.
 
-**Common use cases:**
+**Common Use Cases:**
 
-- Performing routine content verification
-- Performance‑optimized large table scans
-- Focused comparisons between nodes, tables, or schemas
+- Performing routine content verification.
+- Performance‑optimized large table scans.
+- Focused comparisons between nodes, tables, or schemas.
 
 !!! hint
 
