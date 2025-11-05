@@ -19,6 +19,7 @@ ACE first attempts to use the Postgres service file to resolve connection inform
 The [`ace.yaml` file](https://github.com/pgEdge/ace/blob/main/ace.yaml) defines default values used when calling the ACE commands.  The file contains properties that control the resources used by ACE commands; after creating the `ace.yaml` file, use your choice of editor to customize the properties for your system:
 
 
+<!-- TODO: Remove and/or update inapplicable fields -->
 | Section --> Property | Description |
 |---|---|
 | postgres --> statement_timeout | **Equivalent to PostgreSQL `statement_timeout`.** Aborts any query that exceeds the specified time (ms). `0` disables and is the default. Set a non-zero value to guard long-running operations. |
@@ -46,7 +47,6 @@ The [`ace.yaml` file](https://github.com/pgEdge/ace/blob/main/ace.yaml) defines 
 | cert_auth --> user_cert_file | Path to user/client certificate. **Default: "data/pg16/pki/admin-cert/admin.crt"** |
 | cert_auth --> user_key_file | Path to user/client private key. **Default: "data/pg16/pki/admin-cert/admin.key"** |
 | cert_auth --> ca_cert_file | Path to CA certificate. **Default: "data/pg16/pki/ca.crt"** |
-| cert_auth --> use_naive_datetime | Use naive datetimes (no timezone) when parsing cert times. **Default: false** |
 | (root) --> debug_mode | Enable verbose/diagnostic logging. **Default: false** |
 
 

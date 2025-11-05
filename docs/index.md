@@ -1,6 +1,6 @@
 # ACE Getting Started
 
-ACE is a powerful tool designed to ensure and maintain consistency across nodes in a pgEdge Distributed Postgres cluster. ACE helps identify and resolve data inconsistencies, schema differences, and replication configuration mismatches across nodes in a cluster.
+ACE is a powerful tool designed to ensure and maintain consistency across nodes in a pgEdge Distributed Postgres cluster. ACE helps identify and resolve data inconsistencies, schema differences, and replication configuration mismatches across nodes.
 
 Key features of ACE include:
 
@@ -12,7 +12,7 @@ Key features of ACE include:
 
 ## ACE Use Cases
 
-In an eventually consistent system (like a cluster), nodes can diverge due to replication exceptions, lag, network partitions, or node failures. ACE reconciles such differences across databases by performing efficient comparisons and repairs in a controlled manner.
+In an evntually consistent multi-master system, nodes may potentially diverge due to replication issues, network partitions, or node failures. ACE helps restore correctness by performing efficient, controlled comparisons and targeted repairs across nodes.
 
 
 ### Node Failures (Planned/Unplanned)
@@ -38,14 +38,15 @@ In an eventually consistent system (like a cluster), nodes can diverge due to re
 ### Large-Scale Integrity Checks
 - **Problem:** Very large tables make full scans impractical.
 - **Approach:** Use [Merkle trees](./merkle.md):
-  - Initialize once (`mtree init`), build each table (`mtree build`), then use `mtree table-diff` for faster comparisons.
-  - Optionally keep trees current with `mtree listen`.
+  - Initialize (`mtree init`) and build the tree (`mtree build`) once for each table, then use `mtree table-diff` for faster comparisons.
+  - Optionally keep trees current with `mtree listen` for real-time tree updates, and save time during `mtree table-diff`.
 
 ## Simplifying ACE Operations
 
+<!-- TODO: Fix this after merging the scheduler PR -->
 - **Schedule** ACE via your orchestration tool of choice to perform periodic checks and alert if diffs are found.
-- **Segment** by schema or repset to keep runs predictable.
-- **Record** ACE provides JSON/HTML reports for complete audit trails.
+- **Segment and Target** by schema, repset, or by using `table-filter` to keep runs predictable. 
+- **Store** ACE-generated JSON/HTML reports for complete audit trails.
 
 ## Known Limitations
 

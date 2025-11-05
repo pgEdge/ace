@@ -23,7 +23,7 @@ If you notice a pronounced change in a node's performance:
 
 ## Command Options that Can Impact Performance
 
-When invoking [ACE commands](/commands/index.md), review the available command options; many of the options are designed to improve performance.  For example:
+When invoking [ACE commands](/commands/), review the available command options; many of the options are designed to improve performance.  For example:
 
 - **`--block-size`**
     Controls the number of rows hashed per block. Larger blocks reduce round-trips but can increase memory usage or hash time. Defaults to `100000`, and respects the guardrails defined in `ace.yaml` unless `--override-block-size` is set.
@@ -46,10 +46,10 @@ When invoking [ACE commands](/commands/index.md), review the available command o
 
 ## Improving Performance with Merkle Trees
 
-Using a [Merkle tree](/merkle.md) can improve performance when your tables are very large by storing statistics so you can avoid a full rescan between diff activities.  To improve performance when using Merkle trees:
+Using a [Merkle tree](/commands/mtree/) can improve performance when your tables are very large by storing statistics so you can avoid a full rescan between diff activities.  To improve performance when using Merkle trees:
 
 - Keep your statistics fresh (`ANALYZE`) for accurate range estimation.
-- For huge tables(billion-row/terabyte), [parallelize builds](/merkle.md#building-merkle-trees-in-parallel-for-very-large-tables). 
+- For huge tables(billion-row/terabyte), [parallelize builds](commands/mtree/index.md#building-merkle-trees-in-parallel-for-very-large-tables). 
 - Use `mtree listen` (CDC) or rely on the pre-diff update that `mtree table-diff` performs automatically to keep your data fresh automatically.
 - Tune `--max-cpu-ratio` on Merkle commands (`mtree build`, `mtree table-diff`, `mtree update`) to control worker parallelism per host.
 

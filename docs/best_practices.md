@@ -32,7 +32,7 @@ ACE (Active Consistency Engine) helps keep nodes in a pgEdge Distributed Postgre
 
 **Keep your Statistics Fresh.** 
 
-  - Run `ANALYZE` on large/hot tables before heavy comparisons (especially when using Merkle trees).
+  - Run `ANALYZE` on large/cold tables before heavy comparisons, since ACE relies on probabilistic sampling (`TABLESAMPLE`) to speed things up. Especially useful for cold tables and when using Merkle trees.
 
 **Use a Connection Pooler.** 
 

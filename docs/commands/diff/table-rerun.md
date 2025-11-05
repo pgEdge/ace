@@ -25,7 +25,7 @@ Re-runs a previous diff to confirm fixes or check if inconsistencies persist.
 
 **Example**
 ```sh
-./ace table-rerun --diff-file=public_customers_large_diffs-20250722120353.json --dbname=mydatabase my-cluster public.customers_large
+./ace table-rerun --diff-file=public_customers_large_diffs-20250722120353.json --dbname=mydatabase my-cluster 
 ```
 
 If ACE still finds mismatches, it writes a new report named `<schema>_<table>_rerun-diffs-<timestamp>.json`; otherwise it logs that all previously reported differences have been resolved.

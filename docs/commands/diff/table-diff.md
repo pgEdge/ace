@@ -1,32 +1,6 @@
 # table-diff
 
-## Using the ACE table-diff Command
-
-ACE diff commands can identify the differences between replication set (repset), schema, and table content on different nodes of your replication cluster. In the example that follows, we'll use the `table-diff` command to find differences between nodes for a specific table. This command compares the data in the specified table across all nodes in the cluster and generates a diff report if any inconsistencies are found.
-
-ACE diff functions compare two objects and identify the differences; the output is a report that contains a:
-
-- Summary of compared rows
-- Mismatched data details
-- Node-specific statistics
-- Error logs (if any)
-
-If you generate an HTML report, ACE generates an interactive report with:
-
-- Color‑coded differences
-- Expandable row details
-- Primary key highlighting
-- Missing row indicators
-
-**Common use cases:**
-
-- Performing routine content verification
-- Performance‑optimized large table scans
-- Focused comparisons between nodes, tables, or schemas
-
-!!! hint
-
-    Experiment with `--block-size`, `--concurrency-factor`, and `--compare-unit-size` to balance runtime and resource usage. Use `--table-filter` for large tables to reduce comparison scope, and generate HTML reports to simplify analysis.
+This command compares the data in the specified table across nodes in a cluster and generates a diff report if any inconsistencies are found. 
 
 ## Syntax
 
