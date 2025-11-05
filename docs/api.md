@@ -1,23 +1,13 @@
-# API Reference
+# ACE Command Reference
 
-This document provides a detailed reference for the commands available in the Active Consistency Engine (ACE).
+ACE API commands are available in two flavors: 
+
+* ACE commands for those users who are not using Merkle trees.
+* ACE [`mtree` commands](#merkle-tree-commands) for those users who use Merkle trees.
 
 ## Commands
 
-### Cluster Configuration
-
-ACE resolves connection information from a PostgreSQL service file before falling back to the legacy `<cluster>.json` format. Define a base section named after the cluster (for example `[hetzner]`) to capture shared options, and one section per node using `<cluster>.<node>` such as `[hetzner.n1]`. The service file is searched in this order: `ACE_PGSERVICEFILE`, `PGSERVICEFILE`, `pg_service.conf` in the current directory, `~/.pg_service.conf`, and `/etc/pg_service.conf`. If none of these files contain entries for the requested cluster, ACE attempts to read `<cluster>.json`.
-
-Generate starter files with:
-```sh
-./ace cluster init --path pg_service.conf
-./ace config init --path ace.yaml
-```
-
-Update the generated `pg_service.conf` template with the host, port, database, and credentials for each node before running commands listed below.
-
-Note: A PostgreSQL service file (or a legacy cluster definition JSON file) and a configuration file `ace.yaml` are both necessary for running ACE.
-The configuration file supports an optional `default_cluster` key. When set, CLI commands will use that cluster automatically unless you provide one explicitly.
+The commands in the first section of this page are designed for use without Merkle trees.
 
 ### `table-diff`
 
@@ -40,8 +30,8 @@ Compares a table between nodes and generates a diff report.
 | `--output`            | `-o`  | Output format (`json` or `html`)                                     | json     |
 | `--nodes`             | `-n`  | Nodes to include in the diff (comma-separated, or "all")           | all      |
 | `--table-filter`      |       | `WHERE` clause expression to use while diffing tables              |          |
-| `--quiet`             |       | Suppress output                                                    | false    |
-| `--override-block-size`|      | Override block size                                                | false    |
+| `--override-block-size`|      | Allow block sizes outside `ace.yaml` guardrails                    | false    |
+| `--quiet`             |       | Suppress progress output                                           | false    |
 | `--debug`             | `-v`  | Enable debug logging                                               | false    |
 
 **Example:**
@@ -49,7 +39,8 @@ Compares a table between nodes and generates a diff report.
 ./ace table-diff --nodes="n1,n2" --dbname=mydatabase my-cluster public.my_table 
 ```
 
-When `--output html` is used, ACE writes an HTML diff alongside the JSON report (for example `public_my_table_diffs-<timestamp>.html`). The HTML diff report provides an easy-to-read, colour coded table of differences between nodes.
+Diff files follow the pattern `<schema>_<table>_diffs-<timestamp>.json`. When `--output html` is used, ACE writes an additional HTML file using the same prefix (for example `public_my_table_diffs-20231027100000.html`). The HTML diff report provides an easy-to-read, colour coded table of differences between nodes.
+
 
 ### `table-repair`
 
@@ -69,19 +60,23 @@ Repairs table inconsistencies using a diff file.
 | `--dbname`            | `-d`  | Name of the database                                               |          |
 | `--source-of-truth`   | `-s`  | Name of the node to be considered the source of truth              |          |
 | `--nodes`             | `-n`  | Nodes to include for cluster info (comma-separated, or "all")      | all      |
-| `--quiet`             |       | Suppress output                                                    | false    |
-| `--debug`             | `-v`  | Enable debug logging                                               | false    |
 | `--dry-run`           |       | Show what would be done without executing                          | false    |
-| `--generate-report`   |       | Generate a report of the repair operation                          | false    |
+| `--generate-report`   |       | Write a JSON audit report under `reports/<date>/`                  | false    |
 | `--insert-only`       |       | Only perform inserts, no updates or deletes                        | false    |
 | `--upsert-only`       |       | Only perform upserts (insert or update), no deletes                | false    |
+| `--bidirectional`     |       | Perform insert-only repairs in both directions                     | false    |
 | `--fire-triggers`     |       | Fire triggers during repairs                                       | false    |
-| `--bidirectional`     |       | Perform repairs in both directions (use with insert-only)          | false    |
+| `--quiet`             |       | Suppress output                                                    | false    |
+| `--debug`             | `-v`  | Enable debug logging                                               | false    |
 
 **Example:**
 ```sh
-./ace table-repair --diff-file=public_my_table_diffs-20231027100000.json --source-of-truth=n1 --dbname=mydatabase my-cluster public.my_table 
+./ace table-repair my-cluster public.my_table \
+  --diff-file=public_my_table_diffs-20231027100000.json \
+  --source-of-truth=n1
 ``` 
+
+Repair reports (when requested) are written to `reports/<YYYY-MM-DD>/repair_report_<HHMMSS.mmm>.json`, while dry runs use the same directory with a `dry_run_report_` prefix.
 
 ### `table-rerun`
 
@@ -96,7 +91,7 @@ Re-runs a diff from a file to check for persistent differences.
 **Flags:**
 | Flag                  | Alias | Description                                                        | Default  |
 | --------------------- | ----- | ------------------------------------------------------------------ | -------- |
-| `--diff-file`         | `-f`  | Path to the diff file to re-run (**required**)                     |          |
+| `--diff-file`         |       | Path to the diff file to re-run (**required**)                     |          |
 | `--dbname`            | `-d`  | Name of the database                                               |          |
 | `--nodes`             | `-n`  | Nodes to include in the diff (comma-separated, or "all")           | all      |
 | `--quiet`             |       | Suppress output                                                    | false    |
@@ -104,8 +99,10 @@ Re-runs a diff from a file to check for persistent differences.
 
 **Example:**
 ```sh
-./ace table-rerun --diff-file=public_my_table_diffs-20231027100000.json --dbname=mydatabase my-cluster public.my_table
+./ace table-rerun --diff-file=public_my_table_diffs-20231027100000.json --dbname=mydatabase my-cluster
 ```
+
+If any rows still differ, `table-rerun` writes a fresh report named `<schema>_<table>_rerun-diffs-<timestamp>.json`; otherwise it logs a success message without producing a new file.
  
 ### `schema-diff`
 
@@ -125,6 +122,11 @@ Compares schemas across nodes in a pgEdge cluster. By default, `schema-diff` per
 | `--nodes`             | `-n`  | Nodes to include in the diff (comma-separated, or "all")           | all      |
 | `--skip-tables`       |       | Tables to exclude from the diff (comma-separated)                  |          |
 | `--skip-file`         |       | File containing a list of tables to exclude                        |          |
+| `--block-size`        | `-b`  | Rows per block when diffing tables                                 | 100000   |
+| `--concurrency-factor`| `-c`  | Workers per node                                                    | 1        |
+| `--compare-unit-size` | `-s`  | Recursive split size for mismatched blocks                         | 10000    |
+| `--output`            | `-o`  | Per-table diff output format (`json` or `html`)                    | json     |
+| `--override-block-size`|      | Allow block sizes outside `ace.yaml` guardrails                    | false    |
 | `--ddl-only`          |       | Only compare if objects (tables, views, functions, and indices) are the same, not individual tables                                          | false    |
 | `--quiet`             |       | Suppress output                                                    | false    |
 | `--debug`             | `-v`  | Enable debug logging                                               | false    |
@@ -133,6 +135,8 @@ Compares schemas across nodes in a pgEdge cluster. By default, `schema-diff` per
 ```sh
 ./ace schema-diff --dbname=mydatabase my-cluster public
 ```
+
+When `--ddl-only` is omitted, each table uses `table-diff` with the same block size, concurrency factor, compare-unit size, output format, and override behaviour supplied here.
 
 ### `repset-diff`
 
@@ -152,6 +156,11 @@ Performs a `table-diff` on every table in a replication set and reports differen
 | `--nodes`             | `-n`  | Nodes to include in the diff (comma-separated, or "all")           | all      |
 | `--skip-tables`       |       | Tables to exclude from the diff (comma-separated)                  |          |
 | `--skip-file`         |       | File containing a list of tables to exclude                        |          |
+| `--block-size`        | `-b`  | Rows per block when diffing tables                                 | 100000   |
+| `--concurrency-factor`| `-c`  | Workers per node                                                    | 1        |
+| `--compare-unit-size` | `-s`  | Recursive split size for mismatched blocks                         | 10000    |
+| `--output`            | `-o`  | Per-table diff output format (`json` or `html`)                    | json     |
+| `--override-block-size`|      | Allow block sizes outside `ace.yaml` guardrails                    | false    |
 | `--quiet`             |       | Suppress output                                                    | false    |
 | `--debug`             | `-v`  | Enable debug logging                                               | false    |
 
@@ -159,6 +168,8 @@ Performs a `table-diff` on every table in a replication set and reports differen
 ```sh
 ./ace repset-diff --dbname=mydatabase my-cluster my_repset
 ```
+
+Each table in the replication set is diffed with the same block size, concurrency factor, compare-unit size, output format, and override behaviour provided on the command line.
 
 ### `spock-diff`
 
@@ -176,6 +187,7 @@ Compares spock metadata across cluster nodes.
 | `--dbname`            | `-d`  | Name of the database                                               |          |
 | `--nodes`             | `-n`  | Nodes to include in the diff (comma-separated, or "all")           | all      |
 | `--output`            | `-o`  | Output format                                                      | json     |
+| `--quiet`             |       | Suppress output                                                    | false    |
 | `--debug`             | `-v`  | Enable debug logging                                               | false    |
 
 **Example:**
@@ -183,9 +195,10 @@ Compares spock metadata across cluster nodes.
 ./ace spock-diff --dbname=mydatabase my-cluster
 ``` 
 
-### Merkle Tree Commands
 
-The `mtree` commands provide a more advanced and efficient way to compare tables using Merkle trees. This method is suitable for very large tables where a full table scan is too slow.
+## Merkle Tree Commands
+
+`mtree` commands provide a more advanced and efficient way to compare tables using Merkle trees. This method is suitable for very large tables where a full table scan is too slow.
 
 #### `mtree init`
 
