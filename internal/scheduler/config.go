@@ -209,6 +209,13 @@ func buildSchemaDiffJob(cfg *config.Config, def config.JobDef, spec scheduleSpec
 		RunOnStart: true,
 		Task: func(ctx context.Context) error {
 			runTask := base.CloneForSchedule(ctx)
+
+			if err := runTask.Validate(); err != nil {
+				return fmt.Errorf("validation failed: %w", err)
+			}
+			if err := runTask.RunChecks(true); err != nil {
+				return fmt.Errorf("checks failed: %w", err)
+			}
 			if err := runTask.SchemaTableDiff(); err != nil {
 				return fmt.Errorf("execution failed: %w", err)
 			}
@@ -270,6 +277,12 @@ func buildRepsetDiffJob(cfg *config.Config, def config.JobDef, spec scheduleSpec
 		RunOnStart: true,
 		Task: func(ctx context.Context) error {
 			runTask := base.CloneForSchedule(ctx)
+			if err := runTask.Validate(); err != nil {
+				return fmt.Errorf("validation failed: %w", err)
+			}
+			if err := runTask.RunChecks(true); err != nil {
+				return fmt.Errorf("checks failed: %w", err)
+			}
 			if err := core.RepsetDiff(runTask); err != nil {
 				return fmt.Errorf("execution failed: %w", err)
 			}

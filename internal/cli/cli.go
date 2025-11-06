@@ -1182,6 +1182,9 @@ func SchemaDiffCLI(ctx *cli.Context) error {
 	}
 
 	if !scheduleEnabled {
+		if err := task.RunChecks(true); err != nil {
+			return fmt.Errorf("checks failed: %w", err)
+		}
 		if err := task.SchemaTableDiff(); err != nil {
 			return fmt.Errorf("error during schema diff: %w", err)
 		}
@@ -1199,6 +1202,12 @@ func SchemaDiffCLI(ctx *cli.Context) error {
 		RunOnStart: true,
 		Task: func(runCtx context.Context) error {
 			runTask := task.CloneForSchedule(runCtx)
+			if err := runTask.Validate(); err != nil {
+				return fmt.Errorf("validation failed: %w", err)
+			}
+			if err := runTask.RunChecks(true); err != nil {
+				return fmt.Errorf("checks failed: %w", err)
+			}
 			if err := runTask.SchemaTableDiff(); err != nil {
 				return fmt.Errorf("execution failed: %w", err)
 			}
@@ -1248,6 +1257,9 @@ func RepsetDiffCLI(ctx *cli.Context) error {
 	}
 
 	if !scheduleEnabled {
+		if err := task.RunChecks(true); err != nil {
+			return fmt.Errorf("checks failed: %w", err)
+		}
 		if err := core.RepsetDiff(task); err != nil {
 			return fmt.Errorf("error during repset diff: %w", err)
 		}
@@ -1265,6 +1277,12 @@ func RepsetDiffCLI(ctx *cli.Context) error {
 		RunOnStart: true,
 		Task: func(runCtx context.Context) error {
 			runTask := task.CloneForSchedule(runCtx)
+			if err := runTask.Validate(); err != nil {
+				return fmt.Errorf("validation failed: %w", err)
+			}
+			if err := runTask.RunChecks(true); err != nil {
+				return fmt.Errorf("checks failed: %w", err)
+			}
 			if err := core.RepsetDiff(runTask); err != nil {
 				return fmt.Errorf("execution failed: %w", err)
 			}

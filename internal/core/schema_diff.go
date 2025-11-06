@@ -114,6 +114,21 @@ func (c *SchemaDiffCmd) Validate() error {
 	if c.SchemaName == "" {
 		return fmt.Errorf("schema name is required")
 	}
+
+	nodeList, err := utils.ParseNodes(c.Nodes)
+	if err != nil {
+		return fmt.Errorf("nodes should be a comma-separated list of nodenames. E.g., nodes=\"n1,n2\". Error: %w", err)
+	}
+	c.SetNodeList(nodeList)
+
+	if len(nodeList) > 3 {
+		return fmt.Errorf("schema-diff currently supports up to a three-way schema comparison")
+	}
+
+	if c.Nodes != "all" && len(nodeList) == 1 {
+		return fmt.Errorf("schema-diff needs at least two nodes to compare")
+	}
+
 	return nil
 }
 

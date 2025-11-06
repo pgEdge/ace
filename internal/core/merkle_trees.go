@@ -66,7 +66,7 @@ type MerkleTreeTask struct {
 
 	Analyse           bool
 	Rebalance         bool
-	RecreateObjects   bool
+	RecreateObjects   bool // TBD
 	BlockSize         int
 	MaxCpuRatio       float64
 	BatchSize         int

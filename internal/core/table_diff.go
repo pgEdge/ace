@@ -1275,7 +1275,7 @@ func (t *TableDiffTask) hashRange(
 
 	if err != nil {
 		duration := time.Since(startTime)
-		logger.Info("[%s] ERROR after %v for range Start=%v, End=%v (using query: '%s', args: %v): %v", node, duration, r.Start, r.End, query, args, err)
+		logger.Debug("[%s] ERROR after %v for range Start=%v, End=%v (using query: '%s', args: %v): %v", node, duration, r.Start, r.End, query, args, err)
 		return "", fmt.Errorf("BlockHash query failed for %s range %v-%v: %w", node, r.Start, r.End, err)
 	}
 
