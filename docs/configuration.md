@@ -41,8 +41,8 @@ The [`ace.yaml` file](https://github.com/pgEdge/ace/blob/main/ace.yaml) defines 
 | mtree → diff --> max_block_size | Maximum Merkle diff block size. **Default: 1000000** |
 | server --> listen_address | Address the ACE server listens on. **Default: "0.0.0.0"** |
 | server --> listen_port | Port the ACE server listens on. **Default: 5000** |
-| (root) --> schedule_jobs | List of scheduled jobs. **Default: []** |
-| (root) --> schedule_config | Global scheduling settings. **Default: []** |
+| (root) --> schedule_jobs | Array of job definitions consumed by the scheduler (see [Scheduling ACE Runs](scheduling.md)). **Default: []** |
+| (root) --> schedule_config | Array of cadence settings (`run_frequency` or `crontab_schedule`) that reference entries in `schedule_jobs`. **Default: []** |
 | cert_auth --> use_cert_auth | Use client certificate authentication. **Default: true** |
 | cert_auth --> user_cert_file | Path to user/client certificate. **Default: "data/pg16/pki/admin-cert/admin.crt"** |
 | cert_auth --> user_key_file | Path to user/client private key. **Default: "data/pg16/pki/admin-cert/admin.key"** |

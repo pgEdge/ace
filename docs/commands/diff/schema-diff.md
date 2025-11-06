@@ -30,6 +30,8 @@ Alternatively, `--ddl-only` compares only object presence (tables, views, functi
 | `--ddl-only` |  | Compare object sets only (no per-table diff) | `false` |
 | `--quiet` |  | Suppress output | `false` |
 | `--debug` | `-v` | Debug logging | `false` |
+| `--schedule` |  | Run the schema diff repeatedly on a timer (requires `--every`). Not compatible with `--ddl-only`. |
+| `--every <duration>` |  | Go duration string (for example, `24h`). Used with `--schedule`. |
 
 **Example**
 
@@ -38,3 +40,13 @@ Alternatively, `--ddl-only` compares only object presence (tables, views, functi
 ```
 
 When `--ddl-only` is **not** set, every qualifying table invokes `table-diff` using the same block size, concurrency factor, compare-unit size, output format, and override settings supplied here, so you get consistent behaviour between standalone and schema-driven comparisons.
+
+### Scheduling runs
+
+Use `--schedule --every=<duration>` to keep a schema comparison running on a loop. This mode is only supported when ACE can run per-table diffs (omit `--ddl-only`):
+
+```sh
+./ace schema-diff --schedule --every=24h --dbname=mydatabase my-cluster public
+```
+
+ACE performs the first comparison immediately, then waits for the given interval before repeating. Stop the process to end the loop.

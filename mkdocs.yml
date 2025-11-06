@@ -72,4 +72,5 @@ nav:
       - 'mtree-teardown-table': commands/mtree/mtree-teardown-table.md
       - 'mtree-teardown': commands/mtree/mtree-teardown.md
       - 'mtree-update': commands/mtree/mtree-update.md
+  - Scheduling ACE Runs: scheduling.md
   - Improving ACE Performance: performance.md

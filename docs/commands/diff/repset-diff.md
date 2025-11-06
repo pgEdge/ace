@@ -28,6 +28,8 @@ Runs `table-diff` on every table in a replication set and reports differences.
 | `--override-block-size` |  | Allow block sizes outside `ace.yaml` guardrails. |
 | `--quiet` |  | Suppress output | `false` |
 | `--debug` | `-v` | Debug logging | `false` |
+| `--schedule` |  | Run the diff repeatedly on a timer (requires `--every`). |
+| `--every <duration>` |  | Go duration string (for example, `30m`, `6h`). Used with `--schedule`. |
 
 **Example**
 
@@ -36,3 +38,13 @@ Runs `table-diff` on every table in a replication set and reports differences.
 ```
 
 Each table in the replication set is diffed with the same block size, concurrency factor, compare-unit size, output format, and override behaviour you provide here.
+
+### Scheduling runs
+
+Combine `--schedule` with `--every=<duration>` to keep the replication-set sweep running until you cancel it:
+
+```sh
+./ace repset-diff --schedule --every=4h --dbname=mydatabase my-cluster my_repset
+```
+
+ACE runs the job immediately, waits for the interval, then repeats in the same process.
