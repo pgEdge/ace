@@ -114,6 +114,21 @@ func (c *SchemaDiffCmd) Validate() error {
 	if c.SchemaName == "" {
 		return fmt.Errorf("schema name is required")
 	}
+
+	nodeList, err := utils.ParseNodes(c.Nodes)
+	if err != nil {
+		return fmt.Errorf("nodes should be a comma-separated list of nodenames. E.g., nodes=\"n1,n2\". Error: %w", err)
+	}
+	c.SetNodeList(nodeList)
+
+	if len(nodeList) > 3 {
+		return fmt.Errorf("schema-diff currently supports up to a three-way schema comparison")
+	}
+
+	if c.Nodes != "all" && len(nodeList) == 1 {
+		return fmt.Errorf("schema-diff needs at least two nodes to compare")
+	}
+
 	return nil
 }
 
@@ -428,6 +443,29 @@ func (task *SchemaDiffCmd) SchemaTableDiff() (err error) {
 	}
 
 	return nil
+}
+
+func (task *SchemaDiffCmd) CloneForSchedule(ctx context.Context) *SchemaDiffCmd {
+	clone := NewSchemaDiffTask()
+	clone.ClusterName = task.ClusterName
+	clone.DBName = task.DBName
+	clone.SchemaName = task.SchemaName
+	clone.Nodes = task.Nodes
+	clone.SkipTables = task.SkipTables
+	clone.SkipFile = task.SkipFile
+	clone.Quiet = task.Quiet
+	clone.DDLOnly = task.DDLOnly
+	clone.BlockSize = task.BlockSize
+	clone.ConcurrencyFactor = task.ConcurrencyFactor
+	clone.CompareUnitSize = task.CompareUnitSize
+	clone.Output = task.Output
+	clone.TableFilter = task.TableFilter
+	clone.OverrideBlockSize = task.OverrideBlockSize
+	clone.SkipDBUpdate = task.SkipDBUpdate
+	clone.TaskStore = task.TaskStore
+	clone.TaskStorePath = task.TaskStorePath
+	clone.Ctx = ctx
+	return clone
 }
 
 func getObjectsForSchema(ctx context.Context, pool *pgxpool.Pool, schemaName string) (*SchemaObjects, error) {

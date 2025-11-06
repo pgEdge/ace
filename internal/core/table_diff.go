@@ -488,11 +488,6 @@ func (t *TableDiffTask) Validate() error {
 		return err
 	}
 
-	/*
-		We've not eliminated our dependence on the cluster json file just yet.
-		So, for convenience, we'll append the chosen db credentials to the
-		cluster nodes.
-	*/
 	var clusterNodes []map[string]any
 	for _, nodeMap := range t.ClusterNodes {
 		if len(nodeList) > 0 {
@@ -701,6 +696,29 @@ func (t *TableDiffTask) RunChecks(skipValidation bool) error {
 	}
 
 	return nil
+}
+
+func (t *TableDiffTask) CloneForSchedule(ctx context.Context) *TableDiffTask {
+	cloned := NewTableDiffTask()
+	cloned.ClusterName = t.ClusterName
+	cloned.QualifiedTableName = t.QualifiedTableName
+	cloned.DBName = t.DBName
+	cloned.Nodes = t.Nodes
+	cloned.BlockSize = t.BlockSize
+	cloned.ConcurrencyFactor = t.ConcurrencyFactor
+	cloned.Output = t.Output
+	cloned.TableFilter = t.TableFilter
+	cloned.QuietMode = t.QuietMode
+	cloned.Mode = t.Mode
+	cloned.OverrideBlockSize = t.OverrideBlockSize
+	cloned.TaskStore = t.TaskStore
+	cloned.TaskStorePath = t.TaskStorePath
+	cloned.SkipDBUpdate = t.SkipDBUpdate
+	cloned.ClientRole = t.ClientRole
+	cloned.InvokeMethod = t.InvokeMethod
+	cloned.CompareUnitSize = t.CompareUnitSize
+	cloned.Ctx = ctx
+	return cloned
 }
 
 func (t *TableDiffTask) CheckColumnSize() error {
@@ -1257,7 +1275,7 @@ func (t *TableDiffTask) hashRange(
 
 	if err != nil {
 		duration := time.Since(startTime)
-		logger.Info("[%s] ERROR after %v for range Start=%v, End=%v (using query: '%s', args: %v): %v", node, duration, r.Start, r.End, query, args, err)
+		logger.Debug("[%s] ERROR after %v for range Start=%v, End=%v (using query: '%s', args: %v): %v", node, duration, r.Start, r.End, query, args, err)
 		return "", fmt.Errorf("BlockHash query failed for %s range %v-%v: %w", node, r.Start, r.End, err)
 	}
 

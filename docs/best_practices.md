@@ -38,6 +38,10 @@ ACE (Active Consistency Engine) helps keep nodes in a pgEdge Distributed Postgre
 
   - Point ACE at pgBouncer or pgCat for stable, efficient connections.
 
+**Automate checks.**
+
+  - Use `--schedule --every=<duration>` for quick loops or configure jobs in `ace.yaml` and run `./ace start`. See [Scheduling ACE Runs](scheduling.md) for examples.
+
 
 ## Adopting a Safe Repair Workflow
 

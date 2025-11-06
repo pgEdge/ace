@@ -337,3 +337,25 @@ func RepsetDiff(task *RepsetDiffCmd) (err error) {
 
 	return nil
 }
+
+func (task *RepsetDiffCmd) CloneForSchedule(ctx context.Context) *RepsetDiffCmd {
+	clone := NewRepsetDiffTask()
+	clone.ClusterName = task.ClusterName
+	clone.DBName = task.DBName
+	clone.RepsetName = task.RepsetName
+	clone.Nodes = task.Nodes
+	clone.SkipTables = task.SkipTables
+	clone.SkipFile = task.SkipFile
+	clone.Quiet = task.Quiet
+	clone.BlockSize = task.BlockSize
+	clone.ConcurrencyFactor = task.ConcurrencyFactor
+	clone.CompareUnitSize = task.CompareUnitSize
+	clone.Output = task.Output
+	clone.TableFilter = task.TableFilter
+	clone.OverrideBlockSize = task.OverrideBlockSize
+	clone.SkipDBUpdate = task.SkipDBUpdate
+	clone.TaskStore = task.TaskStore
+	clone.TaskStorePath = task.TaskStorePath
+	clone.Ctx = ctx
+	return clone
+}

@@ -43,8 +43,7 @@ In an eventually consistent multi-master system, nodes may potentially diverge d
 
 ## Simplifying ACE Operations
 
-<!-- TODO: Fix this after merging the scheduler PR -->
-- **Schedule** ACE via your orchestration tool of choice to perform periodic checks and alert if diffs are found.
+- **Schedule** ACE via CLI timers or the built-in scheduler to perform periodic checks (see [Scheduling ACE Runs](scheduling.md)).
 - **Segment and Target** by schema, repset, or by using `table-filter` to keep runs predictable. 
 - **Store** ACE-generated JSON/HTML reports for complete audit trails.
 

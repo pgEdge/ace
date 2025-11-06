@@ -33,11 +33,15 @@ Compares a table between nodes and generates a diff report.
 | `--override-block-size`|      | Allow block sizes outside `ace.yaml` guardrails                    | false    |
 | `--quiet`             |       | Suppress progress output                                           | false    |
 | `--debug`             | `-v`  | Enable debug logging                                               | false    |
+| `--schedule`          |       | Run the diff repeatedly on a timer (requires `--every`)            | false    |
+| `--every`             |       | Go duration string (e.g., `30m`, `2h`) used with `--schedule`      |          |
 
 **Example:**
 ```sh
 ./ace table-diff --nodes="n1,n2" --dbname=mydatabase my-cluster public.my_table 
 ```
+
+Add `--schedule --every=<duration>` to keep the comparison running until you cancel the command.
 
 Diff files follow the pattern `<schema>_<table>_diffs-<timestamp>.json`. When `--output html` is used, ACE writes an additional HTML file using the same prefix (for example `public_my_table_diffs-20231027100000.html`). The HTML diff report provides an easy-to-read, colour coded table of differences between nodes.
 
@@ -130,11 +134,15 @@ Compares schemas across nodes in a pgEdge cluster. By default, `schema-diff` per
 | `--ddl-only`          |       | Only compare if objects (tables, views, functions, and indices) are the same, not individual tables                                          | false    |
 | `--quiet`             |       | Suppress output                                                    | false    |
 | `--debug`             | `-v`  | Enable debug logging                                               | false    |
+| `--schedule`          |       | Run the schema diff repeatedly on a timer (requires `--every`)     | false    |
+| `--every`             |       | Go duration string (e.g., `24h`) used with `--schedule`; not valid with `--ddl-only` |          |
 
 **Example:**
 ```sh
 ./ace schema-diff --dbname=mydatabase my-cluster public
 ```
+
+Omit `--ddl-only` if you want to combine the command with `--schedule --every=<duration>` for recurring comparisons.
 
 When `--ddl-only` is omitted, each table uses `table-diff` with the same block size, concurrency factor, compare-unit size, output format, and override behaviour supplied here.
 
@@ -163,11 +171,15 @@ Performs a `table-diff` on every table in a replication set and reports differen
 | `--override-block-size`|      | Allow block sizes outside `ace.yaml` guardrails                    | false    |
 | `--quiet`             |       | Suppress output                                                    | false    |
 | `--debug`             | `-v`  | Enable debug logging                                               | false    |
+| `--schedule`          |       | Run the replication-set diff repeatedly on a timer (requires `--every`) | false    |
+| `--every`             |       | Go duration string (e.g., `4h`) used with `--schedule`              |          |
 
 **Example:**
 ```sh
 ./ace repset-diff --dbname=mydatabase my-cluster my_repset
 ```
+
+Add `--schedule --every=<duration>` to keep the sweep running until you stop the process.
 
 Each table in the replication set is diffed with the same block size, concurrency factor, compare-unit size, output format, and override behaviour provided on the command line.
 

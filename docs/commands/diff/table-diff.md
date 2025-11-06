@@ -25,6 +25,8 @@ This command compares the data in the specified table across nodes in a cluster 
 | `--override-block-size` |  | Skip block-size safety checks defined in `ace.yaml`. |
 | `--quiet` |  | Suppress progress output. Results still write to the diff file. |
 | `--debug` | `-v` | Enable verbose logging. |
+| `--schedule` |  | Run the diff repeatedly on a timer (requires `--every`). |
+| `--every <duration>` |  | Go duration string (for example, `15m`, `1h30m`). Used with `--schedule`. |
 
 ## Example
 
@@ -74,3 +76,13 @@ ACE optimises comparisons with multiprocessing and block hashing:
 2. Use `--table-filter` to narrow scope on very large tables.
 3. Prefer `--output html` when you’ll manually review diffs.
 4. Use `--override-block-size` sparingly; the guardrails in `ace.yaml` prevent allocations that can overwhelm memory.
+
+### Scheduling runs
+
+Add `--schedule --every=<duration>` to keep the diff running on a loop. The command performs an initial comparison immediately, then repeats after each interval until you stop the process:
+
+```sh
+./ace table-diff --schedule --every=1h my-cluster public.orders
+```
+
+All other flags (`--nodes`, `--block-size`, `--output`, and so on) are reused for every iteration.
