@@ -56,6 +56,11 @@ func toConnectionString(node map[string]any, dbName string) string {
 	}
 	if password, ok := node["DBPassword"].(string); ok && password != "" {
 		parts = append(parts, "password="+password)
+	} else if config.Cfg.CertAuth.UseCertAuth {
+		parts = append(parts, fmt.Sprintf("sslmode=%s", node["SSLMode"].(string)))
+		parts = append(parts, fmt.Sprintf("sslcert=%s", config.Cfg.CertAuth.ACEUserCertFile))
+		parts = append(parts, fmt.Sprintf("sslkey=%s", config.Cfg.CertAuth.ACEUserKeyFile))
+		parts = append(parts, fmt.Sprintf("sslrootcert=%s", config.Cfg.CertAuth.CACertFile))
 	}
 	dbToUse := dbName
 	if dbToUse == "" {
@@ -85,7 +90,14 @@ func toConnectionString(node map[string]any, dbName string) string {
 			parts = append(parts, fmt.Sprintf("tcp_keepalives_count=%d", *pgCfg.TCPKeepalivesCount))
 		}
 	}
-	parts = append(parts, "sslmode=disable")
+	if !config.Cfg.CertAuth.UseCertAuth {
+		parts = append(parts, "sslmode=disable")
+	} else {
+		parts = append(parts, fmt.Sprintf("sslmode=%s", node["SSLMode"].(string)))
+		parts = append(parts, fmt.Sprintf("sslcert=%s", node["SSLCert"].(string)))
+		parts = append(parts, fmt.Sprintf("sslkey=%s", node["SSLKey"].(string)))
+		parts = append(parts, fmt.Sprintf("sslrootcert=%s", node["SSLRootCert"].(string)))
+	}
 	logger.Debug("connection string: %s", strings.Join(parts, " "))
 	return strings.Join(parts, " ")
 }

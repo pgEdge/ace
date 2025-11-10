@@ -100,11 +100,10 @@ type AutoRepairConfig struct {
 }
 
 type CertAuthConfig struct {
-	UseCertAuth      bool   `yaml:"use_cert_auth"`
-	UserCertFile     string `yaml:"user_cert_file"`
-	UserKeyFile      string `yaml:"user_key_file"`
-	CACertFile       string `yaml:"ca_cert_file"`
-	UseNaiveDatetime bool   `yaml:"use_naive_datetime"`
+	UseCertAuth     bool   `yaml:"use_cert_auth"`
+	ACEUserCertFile string `yaml:"ace_user_cert_file"`
+	ACEUserKeyFile  string `yaml:"ace_user_key_file"`
+	CACertFile      string `yaml:"ca_cert_file"`
 }
 
 // Cfg holds the loaded config for the whole app.

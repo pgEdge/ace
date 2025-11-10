@@ -28,6 +28,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgtype"
+	"github.com/pgedge/ace/pkg/config"
 	"github.com/pgedge/ace/pkg/logger"
 	"github.com/pgedge/ace/pkg/types"
 )
@@ -216,13 +217,11 @@ func loadClusterInfoFromServiceFile(t ClusterConfigProvider) (bool, error) {
 		}
 
 		user := strings.TrimSpace(opts["user"])
-		password := strings.TrimSpace(opts["password"])
 
 		if !dbSet {
 			resolvedDB = types.Database{
-				DBName:     dbName,
-				DBUser:     user,
-				DBPassword: password,
+				DBName: dbName,
+				DBUser: user,
 			}
 			if dbName != "" {
 				t.SetDBName(dbName)
@@ -235,21 +234,32 @@ func loadClusterInfoFromServiceFile(t ClusterConfigProvider) (bool, error) {
 			if resolvedDB.DBUser == "" {
 				resolvedDB.DBUser = user
 			}
-			if resolvedDB.DBPassword == "" {
-				resolvedDB.DBPassword = password
-			}
+		}
+
+		password := ""
+		if !config.Cfg.CertAuth.UseCertAuth {
+			password = strings.TrimSpace(opts["password"])
+		} else {
+			resolvedDB.SSLMode = strings.TrimSpace(opts["sslmode"])
+			resolvedDB.SSLCert = strings.TrimSpace(opts["sslcert"])
+			resolvedDB.SSLKey = strings.TrimSpace(opts["sslkey"])
+			resolvedDB.SSLRootCert = strings.TrimSpace(opts["sslrootcert"])
 		}
 
 		nodeMap := map[string]any{
-			"Name":       nodeName,
-			"Service":    fmt.Sprintf("%s.%s", clusterName, nodeName),
-			"PublicIP":   host,
-			"Host":       host,
-			"Port":       port,
-			"IsActive":   "yes",
-			"DBName":     dbName,
-			"DBUser":     user,
-			"DBPassword": password,
+			"Name":        nodeName,
+			"Service":     fmt.Sprintf("%s.%s", clusterName, nodeName),
+			"PublicIP":    host,
+			"Host":        host,
+			"Port":        port,
+			"IsActive":    "yes",
+			"DBName":      dbName,
+			"DBUser":      user,
+			"DBPassword":  password,
+			"SSLMode":     resolvedDB.SSLMode,
+			"SSLCert":     resolvedDB.SSLCert,
+			"SSLKey":      resolvedDB.SSLKey,
+			"SSLRootCert": resolvedDB.SSLRootCert,
 		}
 		clusterNodes = append(clusterNodes, nodeMap)
 		selectedNames = append(selectedNames, nodeName)
