@@ -123,13 +123,8 @@ func (t *SpockDiffTask) Validate() error {
 			}
 		}
 		combinedMap := make(map[string]any)
-
 		maps.Copy(combinedMap, nodeMap)
-
-		combinedMap["DBName"] = t.Database.DBName
-		combinedMap["DBUser"] = t.Database.DBUser
-		combinedMap["DBPassword"] = t.Database.DBPassword
-
+		utils.ApplyDatabaseCredentials(combinedMap, t.Database)
 		clusterNodes = append(clusterNodes, combinedMap)
 	}
 

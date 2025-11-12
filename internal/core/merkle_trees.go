@@ -1004,14 +1004,9 @@ func (m *MerkleTreeTask) validateCommon() error {
 			}
 		}
 		combinedMap := make(map[string]any)
-
 		maps.Copy(combinedMap, nodeMap)
-
-		combinedMap["DBName"] = m.Database.DBName
-		combinedMap["DBUser"] = m.Database.DBUser
-		combinedMap["DBPassword"] = m.Database.DBPassword
+		utils.ApplyDatabaseCredentials(combinedMap, m.Database)
 		combinedMap["Host"] = nodeMap["Host"]
-
 		clusterNodes = append(clusterNodes, combinedMap)
 	}
 

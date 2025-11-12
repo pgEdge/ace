@@ -236,14 +236,28 @@ func loadClusterInfoFromServiceFile(t ClusterConfigProvider) (bool, error) {
 			}
 		}
 
+		cfg := config.Cfg
+		useCertAuth := cfg != nil && cfg.CertAuth.UseCertAuth
+
 		password := ""
-		if !config.Cfg.CertAuth.UseCertAuth {
+		if !useCertAuth {
 			password = strings.TrimSpace(opts["password"])
+			if password != "" {
+				resolvedDB.DBPassword = password
+			}
 		} else {
-			resolvedDB.SSLMode = strings.TrimSpace(opts["sslmode"])
-			resolvedDB.SSLCert = strings.TrimSpace(opts["sslcert"])
-			resolvedDB.SSLKey = strings.TrimSpace(opts["sslkey"])
-			resolvedDB.SSLRootCert = strings.TrimSpace(opts["sslrootcert"])
+			if mode := strings.TrimSpace(opts["sslmode"]); mode != "" {
+				resolvedDB.SSLMode = mode
+			}
+			if cert := strings.TrimSpace(opts["sslcert"]); cert != "" {
+				resolvedDB.SSLCert = cert
+			}
+			if key := strings.TrimSpace(opts["sslkey"]); key != "" {
+				resolvedDB.SSLKey = key
+			}
+			if root := strings.TrimSpace(opts["sslrootcert"]); root != "" {
+				resolvedDB.SSLRootCert = root
+			}
 		}
 
 		nodeMap := map[string]any{
@@ -446,6 +460,35 @@ func ReadClusterInfo(t ClusterConfigProvider) error {
 	t.SetClusterNodes(clusterNodes)
 
 	return nil
+}
+
+// ApplyDatabaseCredentials ensures the provided map has the database level
+// connection details (user/password/ssl). Existing non-empty values are left
+// untouched so node-specific overrides are preserved.
+func ApplyDatabaseCredentials(dst map[string]any, db types.Database) {
+	if dst == nil {
+		return
+	}
+
+	setIfEmpty := func(key, val string) {
+		if val == "" {
+			return
+		}
+		if existing, ok := dst[key]; ok {
+			if s, ok := existing.(string); ok && strings.TrimSpace(s) != "" {
+				return
+			}
+		}
+		dst[key] = val
+	}
+
+	setIfEmpty("DBName", db.DBName)
+	setIfEmpty("DBUser", db.DBUser)
+	setIfEmpty("DBPassword", db.DBPassword)
+	setIfEmpty("SSLMode", db.SSLMode)
+	setIfEmpty("SSLCert", db.SSLCert)
+	setIfEmpty("SSLKey", db.SSLKey)
+	setIfEmpty("SSLRootCert", db.SSLRootCert)
 }
 
 // ConvertToPgxType converts a value from a JSON unmarshal to a type that pgx can handle

@@ -26,17 +26,37 @@ import (
 
 func toConnectionString(node map[string]any, dbName string) string {
 	var parts []string
+
+	stringValue := func(key string) string {
+		if node == nil {
+			return ""
+		}
+		val, ok := node[key]
+		if !ok || val == nil {
+			return ""
+		}
+		switch v := val.(type) {
+		case string:
+			return strings.TrimSpace(v)
+		case fmt.Stringer:
+			return strings.TrimSpace(v.String())
+		default:
+			return strings.TrimSpace(fmt.Sprintf("%v", v))
+		}
+	}
+
 	var host string
-	if h, ok := node["Host"].(string); ok && strings.TrimSpace(h) != "" {
-		host = strings.TrimSpace(h)
-	} else if h, ok := node["PublicIP"].(string); ok && strings.TrimSpace(h) != "" {
-		host = strings.TrimSpace(h)
-	} else if h, ok := node["PrivateIP"].(string); ok && strings.TrimSpace(h) != "" {
-		host = strings.TrimSpace(h)
+	if h := stringValue("Host"); h != "" {
+		host = h
+	} else if h := stringValue("PublicIP"); h != "" {
+		host = h
+	} else if h := stringValue("PrivateIP"); h != "" {
+		host = h
 	}
 	if host != "" {
 		parts = append(parts, "host="+host)
 	}
+
 	switch v := node["Port"].(type) {
 	case float64:
 		if v != 0 {
@@ -47,32 +67,28 @@ func toConnectionString(node map[string]any, dbName string) string {
 			parts = append(parts, fmt.Sprintf("port=%d", v))
 		}
 	case string:
-		if strings.TrimSpace(v) != "" {
-			parts = append(parts, "port="+strings.TrimSpace(v))
+		if trimmed := strings.TrimSpace(v); trimmed != "" {
+			parts = append(parts, "port="+trimmed)
 		}
 	}
-	if user, ok := node["DBUser"].(string); ok && user != "" {
+
+	if user := stringValue("DBUser"); user != "" {
 		parts = append(parts, "user="+user)
 	}
-	if password, ok := node["DBPassword"].(string); ok && password != "" {
+	if password := stringValue("DBPassword"); password != "" {
 		parts = append(parts, "password="+password)
-	} else if config.Cfg.CertAuth.UseCertAuth {
-		parts = append(parts, fmt.Sprintf("sslmode=%s", node["SSLMode"].(string)))
-		parts = append(parts, fmt.Sprintf("sslcert=%s", config.Cfg.CertAuth.ACEUserCertFile))
-		parts = append(parts, fmt.Sprintf("sslkey=%s", config.Cfg.CertAuth.ACEUserKeyFile))
-		parts = append(parts, fmt.Sprintf("sslrootcert=%s", config.Cfg.CertAuth.CACertFile))
 	}
+
 	dbToUse := dbName
 	if dbToUse == "" {
-		if db, ok := node["DBName"].(string); ok && db != "" {
-			dbToUse = db
-		}
+		dbToUse = stringValue("DBName")
 	}
 	if dbToUse != "" {
 		parts = append(parts, "dbname="+dbToUse)
 	}
 
-	if cfg := config.Cfg; cfg != nil {
+	cfg := config.Cfg
+	if cfg != nil {
 		pgCfg := cfg.Postgres
 		if pgCfg.ConnectionTimeout > 0 {
 			parts = append(parts, fmt.Sprintf("connect_timeout=%d", pgCfg.ConnectionTimeout))
@@ -90,16 +106,45 @@ func toConnectionString(node map[string]any, dbName string) string {
 			parts = append(parts, fmt.Sprintf("tcp_keepalives_count=%d", *pgCfg.TCPKeepalivesCount))
 		}
 	}
-	if !config.Cfg.CertAuth.UseCertAuth {
+
+	useCertAuth := cfg != nil && cfg.CertAuth.UseCertAuth
+	if !useCertAuth {
 		parts = append(parts, "sslmode=disable")
 	} else {
-		parts = append(parts, fmt.Sprintf("sslmode=%s", node["SSLMode"].(string)))
-		parts = append(parts, fmt.Sprintf("sslcert=%s", node["SSLCert"].(string)))
-		parts = append(parts, fmt.Sprintf("sslkey=%s", node["SSLKey"].(string)))
-		parts = append(parts, fmt.Sprintf("sslrootcert=%s", node["SSLRootCert"].(string)))
+		sslMode := stringValue("SSLMode")
+		if sslMode == "" {
+			sslMode = "verify-full"
+		}
+		sslCert := stringValue("SSLCert")
+		if sslCert == "" {
+			sslCert = strings.TrimSpace(cfg.CertAuth.ACEUserCertFile)
+		}
+		sslKey := stringValue("SSLKey")
+		if sslKey == "" {
+			sslKey = strings.TrimSpace(cfg.CertAuth.ACEUserKeyFile)
+		}
+		sslRoot := stringValue("SSLRootCert")
+		if sslRoot == "" {
+			sslRoot = strings.TrimSpace(cfg.CertAuth.CACertFile)
+		}
+
+		if sslMode != "" {
+			parts = append(parts, "sslmode="+sslMode)
+		}
+		if sslCert != "" {
+			parts = append(parts, "sslcert="+sslCert)
+		}
+		if sslKey != "" {
+			parts = append(parts, "sslkey="+sslKey)
+		}
+		if sslRoot != "" {
+			parts = append(parts, "sslrootcert="+sslRoot)
+		}
 	}
-	logger.Debug("connection string: %s", strings.Join(parts, " "))
-	return strings.Join(parts, " ")
+
+	connStr := strings.Join(parts, " ")
+	logger.Debug("connection string: %s", connStr)
+	return connStr
 }
 
 func GetClusterNodeConnection(ctx context.Context, node map[string]any, dbName string) (*pgxpool.Pool, error) {

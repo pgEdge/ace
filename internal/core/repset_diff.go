@@ -126,9 +126,7 @@ func (c *RepsetDiffCmd) RunChecks(skipValidation bool) error {
 
 	nodeWithDBInfo := make(map[string]any)
 	maps.Copy(nodeWithDBInfo, firstNode)
-	nodeWithDBInfo["DBName"] = c.database.DBName
-	nodeWithDBInfo["DBUser"] = c.database.DBUser
-	nodeWithDBInfo["DBPassword"] = c.database.DBPassword
+	utils.ApplyDatabaseCredentials(nodeWithDBInfo, c.database)
 
 	if portVal, ok := nodeWithDBInfo["Port"]; ok {
 		if portFloat, isFloat := portVal.(float64); isFloat {
