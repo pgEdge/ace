@@ -260,7 +260,7 @@ func (t *TableRepairTask) ValidateAndPrepare() error {
 	for _, nodeInfo := range t.ClusterNodes {
 		nodeName, _ := nodeInfo["Name"].(string)
 		if nodeName == t.SourceOfTruth || involvedNodeNames[nodeName] {
-			connPool, err := auth.GetClusterNodeConnection(t.Ctx, nodeInfo, t.ClientRole)
+			connPool, err := auth.GetClusterNodeConnection(t.Ctx, nodeInfo, auth.ConnectionOptions{Role: t.ClientRole})
 			if err != nil {
 				logger.Warn("Failed to connect to node %s: %v. Will attempt to proceed if it's not critical or SoT.", nodeName, err)
 				if nodeName == t.SourceOfTruth {
@@ -599,7 +599,7 @@ func (t *TableRepairTask) runUnidirectionalRepair(startTime time.Time) error {
 			}
 
 			var err error
-			divergentPool, err = auth.GetClusterNodeConnection(t.Ctx, nodeInfo, t.ClientRole)
+			divergentPool, err = auth.GetClusterNodeConnection(t.Ctx, nodeInfo, auth.ConnectionOptions{Role: t.ClientRole})
 			if err != nil {
 				logger.Error("Failed to connect to node %s: %v. Skipping repairs for this node.", nodeName, err)
 				repairErrors = append(repairErrors, fmt.Sprintf("connection failed for %s: %v", nodeName, err))

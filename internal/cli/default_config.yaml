@@ -61,6 +61,10 @@ mtree:
 server:
   listen_address: "0.0.0.0"
   listen_port: 5000
+  tls_cert_file: ""
+  tls_key_file: ""
+  client_crl_file: ""
+  allowed_common_names: []
 
 schedule_jobs: []
 schedule_config: []

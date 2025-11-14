@@ -70,8 +70,12 @@ type MTreeConfig struct {
 }
 
 type ServerConfig struct {
-	ListenAddress string `yaml:"listen_address"`
-	ListenPort    int    `yaml:"listen_port"`
+	ListenAddress string   `yaml:"listen_address"`
+	ListenPort    int      `yaml:"listen_port"`
+	TLSCertFile   string   `yaml:"tls_cert_file"`
+	TLSKeyFile    string   `yaml:"tls_key_file"`
+	ClientCRLFile string   `yaml:"client_crl_file"`
+	AllowedCNs    []string `yaml:"allowed_common_names"`
 }
 
 type JobDef struct {

@@ -18,11 +18,18 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/pgedge/ace/pkg/config"
 	"github.com/pgedge/ace/pkg/logger"
 )
+
+type ConnectionOptions struct {
+	DBName   string
+	Role     string
+	PoolSize int
+}
 
 func toConnectionString(node map[string]any, dbName string) string {
 	var parts []string
@@ -147,12 +154,13 @@ func toConnectionString(node map[string]any, dbName string) string {
 	return connStr
 }
 
-func GetClusterNodeConnection(ctx context.Context, node map[string]any, dbName string) (*pgxpool.Pool, error) {
-	connStr := toConnectionString(node, dbName)
+func GetClusterNodeConnection(ctx context.Context, node map[string]any, opts ConnectionOptions) (*pgxpool.Pool, error) {
+	connStr := toConnectionString(node, opts.DBName)
 	config, err := pgxpool.ParseConfig(connStr)
 	if err != nil {
 		return nil, err
 	}
+	applyConnectionOptions(config, opts)
 	applyPostgresPoolConfig(config)
 	pool, err := pgxpool.NewWithConfig(ctx, config)
 	if err != nil {
@@ -161,15 +169,13 @@ func GetClusterNodeConnection(ctx context.Context, node map[string]any, dbName s
 	return pool, nil
 }
 
-func GetSizedClusterNodeConnection(node map[string]any, dbName string, poolSize int) (*pgxpool.Pool, error) {
-	connStr := toConnectionString(node, dbName)
+func GetSizedClusterNodeConnection(node map[string]any, opts ConnectionOptions) (*pgxpool.Pool, error) {
+	connStr := toConnectionString(node, opts.DBName)
 	config, err := pgxpool.ParseConfig(connStr)
 	if err != nil {
 		return nil, err
 	}
-	if poolSize > 0 {
-		config.MaxConns = int32(poolSize)
-	}
+	applyConnectionOptions(config, opts)
 	applyPostgresPoolConfig(config)
 	pool, err := pgxpool.NewWithConfig(context.Background(), config)
 	if err != nil {
@@ -252,4 +258,28 @@ func ensureRuntimeParams(params map[string]string) map[string]string {
 		return make(map[string]string)
 	}
 	return params
+}
+
+func applyConnectionOptions(cfg *pgxpool.Config, opts ConnectionOptions) {
+	if cfg == nil {
+		return
+	}
+	if opts.PoolSize > 0 {
+		cfg.MaxConns = int32(opts.PoolSize)
+	}
+	role := strings.TrimSpace(opts.Role)
+	if role == "" {
+		return
+	}
+
+	roleSQL := fmt.Sprintf("SET ROLE %s", pgx.Identifier{role}.Sanitize())
+	cfg.AfterConnect = func(ctx context.Context, conn *pgx.Conn) error {
+		if conn == nil {
+			return fmt.Errorf("nil connection when applying role %s", role)
+		}
+		if _, err := conn.Exec(ctx, roleSQL); err != nil {
+			return fmt.Errorf("failed to set role %q: %w", role, err)
+		}
+		return nil
+	}
 }

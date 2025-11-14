@@ -556,7 +556,7 @@ func (t *TableDiffTask) RunChecks(skipValidation bool) error {
 			continue
 		}
 
-		conn, err := auth.GetClusterNodeConnection(t.Ctx, nodeInfo, t.ClientRole)
+		conn, err := auth.GetClusterNodeConnection(t.Ctx, nodeInfo, auth.ConnectionOptions{Role: t.ClientRole})
 		if err != nil {
 			return fmt.Errorf("failed to connect to node %s: %w", hostname, err)
 		}
@@ -746,7 +746,7 @@ func (t *TableDiffTask) CheckColumnSize() error {
 
 			if nodeHost == host && int(nodePort) == port {
 				var err error
-				pool, err = auth.GetClusterNodeConnection(t.Ctx, nodeInfo, t.ClientRole)
+				pool, err = auth.GetClusterNodeConnection(t.Ctx, nodeInfo, auth.ConnectionOptions{Role: t.ClientRole})
 				if err != nil {
 					return fmt.Errorf("failed to connect to node %s:%d: %w", host, port, err)
 				}
@@ -898,7 +898,7 @@ func (t *TableDiffTask) ExecuteTask() (err error) {
 	pools := make(map[string]*pgxpool.Pool)
 	for _, nodeInfo := range t.ClusterNodes {
 		name := nodeInfo["Name"].(string)
-		pool, err := auth.GetClusterNodeConnection(t.Ctx, nodeInfo, t.ClientRole)
+		pool, err := auth.GetClusterNodeConnection(t.Ctx, nodeInfo, auth.ConnectionOptions{Role: t.ClientRole})
 		if err != nil {
 			return fmt.Errorf("failed to connect to node %s: %w", name, err)
 		}

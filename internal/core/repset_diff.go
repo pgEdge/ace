@@ -134,7 +134,7 @@ func (c *RepsetDiffCmd) RunChecks(skipValidation bool) error {
 		}
 	}
 
-	pool, err := auth.GetClusterNodeConnection(c.Ctx, nodeWithDBInfo, "")
+	pool, err := auth.GetClusterNodeConnection(c.Ctx, nodeWithDBInfo, auth.ConnectionOptions{})
 	if err != nil {
 		return fmt.Errorf("could not connect to database: %w", err)
 	}

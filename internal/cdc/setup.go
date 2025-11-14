@@ -42,7 +42,7 @@ func SetupReplicationSlot(ctx context.Context, nodeInfo map[string]any) (pglogre
 	cfg := config.Cfg.MTree.CDC
 	slot := cfg.SlotName
 
-	pool, err := auth.GetClusterNodeConnection(ctx, nodeInfo, "")
+	pool, err := auth.GetClusterNodeConnection(ctx, nodeInfo, auth.ConnectionOptions{})
 	if err != nil {
 		return 0, fmt.Errorf("failed to get connection pool: %w", err)
 	}

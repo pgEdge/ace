@@ -63,7 +63,7 @@ func (t *TableDiffTask) ExecuteRerunTask() error {
 		if !utils.Contains(t.NodeList, name) {
 			continue
 		}
-		pool, err := auth.GetClusterNodeConnection(t.Ctx, nodeInfo, t.ClientRole)
+		pool, err := auth.GetClusterNodeConnection(t.Ctx, nodeInfo, auth.ConnectionOptions{Role: t.ClientRole})
 		if err != nil {
 			for _, p := range pools {
 				p.Close()

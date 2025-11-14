@@ -257,7 +257,7 @@ func (m *MerkleTreeTask) compareRangesWorker(wg *sync.WaitGroup, jobs <-chan Com
 		pool1, ok := pools[node1Name]
 		if !ok {
 			var err error
-			pool1, err = auth.GetClusterNodeConnection(m.Ctx, work.Node1, "")
+			pool1, err = auth.GetClusterNodeConnection(m.Ctx, work.Node1, auth.ConnectionOptions{})
 			if err != nil {
 				logger.Error("worker failed to connect to %s: %v", node1Name, err)
 				bar.Increment()
@@ -270,7 +270,7 @@ func (m *MerkleTreeTask) compareRangesWorker(wg *sync.WaitGroup, jobs <-chan Com
 		pool2, ok := pools[node2Name]
 		if !ok {
 			var err error
-			pool2, err = auth.GetClusterNodeConnection(m.Ctx, work.Node2, "")
+			pool2, err = auth.GetClusterNodeConnection(m.Ctx, work.Node2, auth.ConnectionOptions{})
 			if err != nil {
 				logger.Error("worker failed to connect to %s: %v", node2Name, err)
 				bar.Increment()
@@ -749,7 +749,7 @@ func (m *MerkleTreeTask) MtreeInit() (err error) {
 			return fmt.Errorf("failed to set up replication slot on node %s: %w", nodeInfo["Name"], err)
 		}
 
-		pool, err := auth.GetClusterNodeConnection(m.Ctx, nodeInfo, "")
+		pool, err := auth.GetClusterNodeConnection(m.Ctx, nodeInfo, auth.ConnectionOptions{})
 		if err != nil {
 			return fmt.Errorf("failed to get connection pool for node %s: %w", nodeInfo["Name"], err)
 		}
@@ -801,7 +801,7 @@ func (m *MerkleTreeTask) MtreeTeardown() (err error) {
 	}
 
 	for _, nodeInfo := range m.ClusterNodes {
-		pool, err := auth.GetClusterNodeConnection(m.Ctx, nodeInfo, "")
+		pool, err := auth.GetClusterNodeConnection(m.Ctx, nodeInfo, auth.ConnectionOptions{})
 		if err != nil {
 			return fmt.Errorf("failed to get connection pool for node %s: %w", nodeInfo["Name"], err)
 		}
@@ -839,7 +839,7 @@ func (m *MerkleTreeTask) MtreeTeardownTable() (err error) {
 	for _, nodeInfo := range m.ClusterNodes {
 		logger.Info("Tearing down Merkle tree objects for table '%s' on node: %s", m.QualifiedTableName, nodeInfo["Name"])
 
-		pool, err := auth.GetClusterNodeConnection(m.Ctx, nodeInfo, "")
+		pool, err := auth.GetClusterNodeConnection(m.Ctx, nodeInfo, auth.ConnectionOptions{})
 		if err != nil {
 			return fmt.Errorf("failed to get connection pool for node %s: %w", nodeInfo["Name"], err)
 		}
@@ -1091,7 +1091,7 @@ func (m *MerkleTreeTask) RunChecks(skipValidation bool) error {
 	var localCols, localKey []string
 
 	for _, nodeInfo := range m.ClusterNodes {
-		pool, err := auth.GetClusterNodeConnection(m.Ctx, nodeInfo, "")
+		pool, err := auth.GetClusterNodeConnection(m.Ctx, nodeInfo, auth.ConnectionOptions{})
 		if err != nil {
 			return fmt.Errorf("failed to get connection pool for node %s: %w", nodeInfo["Name"], err)
 		}
@@ -1185,7 +1185,7 @@ func (m *MerkleTreeTask) BuildMtree() (err error) {
 	var maxRows int64
 	var refNode map[string]any
 	for _, nodeInfo := range m.ClusterNodes {
-		pool, err := auth.GetSizedClusterNodeConnection(nodeInfo, "", poolSize)
+		pool, err := auth.GetSizedClusterNodeConnection(nodeInfo, auth.ConnectionOptions{PoolSize: poolSize})
 		if err != nil {
 			for _, p := range pools {
 				p.Close()
@@ -1409,7 +1409,7 @@ func (m *MerkleTreeTask) UpdateMtree(skipAllChecks bool) (err error) {
 	var blockSize int
 	var foundBlockSize bool
 	for _, nodeInfo := range m.ClusterNodes {
-		pool, err := auth.GetClusterNodeConnection(m.Ctx, nodeInfo, "")
+		pool, err := auth.GetClusterNodeConnection(m.Ctx, nodeInfo, auth.ConnectionOptions{})
 		if err != nil {
 			return fmt.Errorf("error getting connection pool for node %s: %w", nodeInfo["Name"], err)
 		}
@@ -1431,7 +1431,7 @@ func (m *MerkleTreeTask) UpdateMtree(skipAllChecks bool) (err error) {
 
 	for _, nodeInfo := range m.ClusterNodes {
 		fmt.Printf("\nUpdating Merkle tree on node: %s\n", nodeInfo["Name"])
-		pool, err := auth.GetClusterNodeConnection(m.Ctx, nodeInfo, "")
+		pool, err := auth.GetClusterNodeConnection(m.Ctx, nodeInfo, auth.ConnectionOptions{})
 		if err != nil {
 			return fmt.Errorf("error getting connection pool for node %s: %w", nodeInfo["Name"], err)
 		}
@@ -1776,13 +1776,13 @@ func (m *MerkleTreeTask) DiffMtree() (err error) {
 		node2 := pair[1]
 		logger.Info("Comparing merkle trees between %s and %s", node1["Name"], node2["Name"])
 
-		pool1, err := auth.GetClusterNodeConnection(m.Ctx, node1, "")
+		pool1, err := auth.GetClusterNodeConnection(m.Ctx, node1, auth.ConnectionOptions{})
 		if err != nil {
 			return fmt.Errorf("failed to get connection pool for node %s: %w", node1["Name"], err)
 		}
 		defer pool1.Close()
 
-		pool2, err := auth.GetClusterNodeConnection(m.Ctx, node2, "")
+		pool2, err := auth.GetClusterNodeConnection(m.Ctx, node2, auth.ConnectionOptions{})
 		if err != nil {
 			return fmt.Errorf("failed to get connection pool for node %s: %w", node2["Name"], err)
 		}
