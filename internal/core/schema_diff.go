@@ -150,9 +150,7 @@ func (c *SchemaDiffCmd) RunChecks(skipValidation bool) error {
 
 	nodeWithDBInfo := make(map[string]any)
 	maps.Copy(nodeWithDBInfo, firstNode)
-	nodeWithDBInfo["DBName"] = c.database.DBName
-	nodeWithDBInfo["DBUser"] = c.database.DBUser
-	nodeWithDBInfo["DBPassword"] = c.database.DBPassword
+	utils.ApplyDatabaseCredentials(nodeWithDBInfo, c.database)
 
 	if portVal, ok := nodeWithDBInfo["Port"]; ok {
 		if portFloat, isFloat := portVal.(float64); isFloat {
@@ -160,7 +158,7 @@ func (c *SchemaDiffCmd) RunChecks(skipValidation bool) error {
 		}
 	}
 
-	pool, err := auth.GetClusterNodeConnection(c.Ctx, nodeWithDBInfo, "")
+	pool, err := auth.GetClusterNodeConnection(c.Ctx, nodeWithDBInfo, auth.ConnectionOptions{})
 	if err != nil {
 		return fmt.Errorf("could not connect to database: %w", err)
 	}
@@ -196,16 +194,14 @@ func (task *SchemaDiffCmd) schemaObjectDiff() error {
 		nodeName := nodeInfo["Name"].(string)
 		nodeWithDBInfo := make(map[string]any)
 		maps.Copy(nodeWithDBInfo, nodeInfo)
-		nodeWithDBInfo["DBName"] = task.database.DBName
-		nodeWithDBInfo["DBUser"] = task.database.DBUser
-		nodeWithDBInfo["DBPassword"] = task.database.DBPassword
+		utils.ApplyDatabaseCredentials(nodeWithDBInfo, task.database)
 		if portVal, ok := nodeWithDBInfo["Port"]; ok {
 			if portFloat, isFloat := portVal.(float64); isFloat {
 				nodeWithDBInfo["Port"] = strconv.Itoa(int(portFloat))
 			}
 		}
 
-		pool, err := auth.GetClusterNodeConnection(task.Ctx, nodeWithDBInfo, "")
+		pool, err := auth.GetClusterNodeConnection(task.Ctx, nodeWithDBInfo, auth.ConnectionOptions{})
 		if err != nil {
 			logger.Warn("could not connect to node %s: %v. Skipping.", nodeName, err)
 			continue

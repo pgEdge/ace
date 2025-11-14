@@ -50,7 +50,7 @@ func UpdateFromCDC(nodeInfo map[string]any) error {
 }
 
 func processReplicationStream(ctx context.Context, nodeInfo map[string]any, continuous bool) error {
-	pool, err := auth.GetClusterNodeConnection(ctx, nodeInfo, "")
+	pool, err := auth.GetClusterNodeConnection(ctx, nodeInfo, auth.ConnectionOptions{})
 	if err != nil {
 		logger.Error("failed to get connection pool: %v", err)
 	}

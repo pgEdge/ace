@@ -29,6 +29,7 @@ import (
 	"github.com/pgedge/ace/internal/cdc"
 	"github.com/pgedge/ace/internal/core"
 	"github.com/pgedge/ace/internal/scheduler"
+	"github.com/pgedge/ace/internal/server"
 	"github.com/pgedge/ace/pkg/config"
 	"github.com/pgedge/ace/pkg/logger"
 	"github.com/urfave/cli/v2"
@@ -366,8 +367,33 @@ func SetupCLI() *cli.App {
 						Aliases: []string{"v"},
 						Usage:   "Enable debug logging",
 					},
+					&cli.StringFlag{
+						Name:  "component",
+						Usage: "Component to start: scheduler, api, or all",
+						Value: "all",
+					},
 				},
 				Action: StartSchedulerCLI,
+				Before: func(ctx *cli.Context) error {
+					if ctx.Bool("debug") {
+						logger.SetLevel(log.DebugLevel)
+					} else {
+						logger.SetLevel(log.InfoLevel)
+					}
+					return nil
+				},
+			},
+			{
+				Name:  "server",
+				Usage: "Run the ACE REST API server",
+				Flags: []cli.Flag{
+					&cli.BoolFlag{
+						Name:    "debug",
+						Aliases: []string{"v"},
+						Usage:   "Enable debug logging",
+					},
+				},
+				Action: StartAPIServerCLI,
 				Before: func(ctx *cli.Context) error {
 					if ctx.Bool("debug") {
 						logger.SetLevel(log.DebugLevel)
@@ -1301,22 +1327,125 @@ func StartSchedulerCLI(ctx *cli.Context) error {
 		return fmt.Errorf("configuration not loaded; run inside a directory with ace.yaml or set ACE_CONFIG")
 	}
 
+	component := strings.ToLower(strings.TrimSpace(ctx.String("component")))
+	runScheduler := false
+	runAPI := false
+	switch component {
+	case "", "all":
+		runScheduler = true
+		runAPI = true
+	case "scheduler":
+		runScheduler = true
+	case "api":
+		runAPI = true
+	default:
+		return fmt.Errorf("invalid component %q (expected scheduler, api, or all)", component)
+	}
+
 	jobs, err := scheduler.BuildJobsFromConfig(config.Cfg)
 	if err != nil {
 		return err
 	}
 
-	if len(jobs) == 0 {
-		logger.Info("scheduler: no enabled jobs found in configuration")
+	runCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	type runner struct {
+		name string
+		run  func(context.Context) error
+	}
+
+	var runners []runner
+
+	if runScheduler {
+		if len(jobs) == 0 {
+			logger.Info("scheduler: no enabled jobs found in configuration")
+		} else {
+			for _, job := range jobs {
+				logger.Info("scheduler: registering job %s", job.Name)
+			}
+			runners = append(runners, runner{
+				name: "scheduler",
+				run: func(ctx context.Context) error {
+					return scheduler.RunJobs(ctx, jobs)
+				},
+			})
+		}
+	}
+
+	if runAPI {
+		if ok, apiErr := canStartAPIServer(config.Cfg); ok {
+			apiServer, err := server.New(config.Cfg)
+			if err != nil {
+				return fmt.Errorf("api server init failed: %w", err)
+			}
+			runners = append(runners, runner{
+				name: "api-server",
+				run: func(ctx context.Context) error {
+					return apiServer.Run(ctx)
+				},
+			})
+		} else if component == "api" {
+			return fmt.Errorf("api server requested but cannot start: %w", apiErr)
+		} else {
+			logger.Info("api server not started: %v", apiErr)
+		}
+	}
+
+	if len(runners) == 0 {
 		return nil
 	}
 
-	for _, job := range jobs {
-		logger.Info("scheduler: registering job %s", job.Name)
+	errCh := make(chan error, len(runners))
+	for _, r := range runners {
+		go func(r runner) {
+			errCh <- r.run(runCtx)
+		}(r)
+	}
+
+	for i := 0; i < len(runners); i++ {
+		if err := <-errCh; err != nil && !errors.Is(err, context.Canceled) {
+			stop()
+			return err
+		}
+	}
+
+	return nil
+}
+
+func StartAPIServerCLI(ctx *cli.Context) error {
+	if config.Cfg == nil {
+		return fmt.Errorf("configuration not loaded; run inside a directory with ace.yaml or set ACE_CONFIG")
+	}
+
+	if ok, err := canStartAPIServer(config.Cfg); !ok {
+		return err
+	}
+
+	apiServer, err := server.New(config.Cfg)
+	if err != nil {
+		return err
 	}
 
 	runCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	return scheduler.RunJobs(runCtx, jobs)
+	return apiServer.Run(runCtx)
+}
+
+func canStartAPIServer(cfg *config.Config) (bool, error) {
+	if cfg == nil {
+		return false, fmt.Errorf("configuration not loaded")
+	}
+	serverCfg := cfg.Server
+	if strings.TrimSpace(serverCfg.TLSCertFile) == "" {
+		return false, fmt.Errorf("server.tls_cert_file is not configured")
+	}
+	if strings.TrimSpace(serverCfg.TLSKeyFile) == "" {
+		return false, fmt.Errorf("server.tls_key_file is not configured")
+	}
+	if strings.TrimSpace(cfg.CertAuth.CACertFile) == "" {
+		return false, fmt.Errorf("cert_auth.ca_cert_file is not configured")
+	}
+	return true, nil
 }
