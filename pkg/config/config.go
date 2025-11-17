@@ -76,6 +76,7 @@ type ServerConfig struct {
 	TLSKeyFile    string   `yaml:"tls_key_file"`
 	ClientCRLFile string   `yaml:"client_crl_file"`
 	AllowedCNs    []string `yaml:"allowed_common_names"`
+	TaskStorePath string   `yaml:"taskstore_path"`
 }
 
 type JobDef struct {

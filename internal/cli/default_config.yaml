@@ -65,6 +65,7 @@ server:
   tls_key_file: ""
   client_crl_file: ""
   allowed_common_names: []
+  taskstore_path: ""
 
 schedule_jobs: []
 schedule_config: []

@@ -9,17 +9,23 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/pgedge/ace/pkg/config"
 	"github.com/pgedge/ace/pkg/logger"
+	"github.com/pgedge/ace/pkg/taskstore"
 )
 
 type APIServer struct {
 	cfg        *config.Config
 	server     *http.Server
 	validator  *certValidator
+	taskStore  *taskstore.Store
 	listenAddr string
+	jobCtx     context.Context
+	jobCancel  context.CancelFunc
+	wg         sync.WaitGroup
 }
 
 func New(cfg *config.Config) (*APIServer, error) {
@@ -42,6 +48,11 @@ func New(cfg *config.Config) (*APIServer, error) {
 		return nil, err
 	}
 
+	taskStore, err := taskstore.New(cfg.Server.TaskStorePath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to initialise task store: %w", err)
+	}
+
 	tlsCert, err := tls.LoadX509KeyPair(srvCfg.TLSCertFile, srvCfg.TLSKeyFile)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load server TLS keypair: %w", err)
@@ -52,10 +63,13 @@ func New(cfg *config.Config) (*APIServer, error) {
 	apiServer := &APIServer{
 		cfg:        cfg,
 		validator:  validator,
+		taskStore:  taskStore,
 		listenAddr: fmt.Sprintf("%s:%d", srvCfg.ListenAddress, srvCfg.ListenPort),
+		jobCtx:     context.Background(),
 	}
 
 	mux.Handle("/api/v1/table-diff", apiServer.authenticated(http.HandlerFunc(apiServer.handleTableDiff)))
+	mux.Handle("/api/v1/tasks/", apiServer.authenticated(http.HandlerFunc(apiServer.handleTaskStatus)))
 
 	tlsConfig := &tls.Config{
 		MinVersion:   tls.VersionTLS12,
@@ -83,6 +97,19 @@ func (s *APIServer) Run(ctx context.Context) error {
 	if s == nil || s.server == nil {
 		return fmt.Errorf("api server is not initialized")
 	}
+
+	runCtx, cancel := context.WithCancel(ctx)
+	s.jobCtx = runCtx
+	s.jobCancel = cancel
+	defer func() {
+		cancel()
+		s.wg.Wait()
+		if s.taskStore != nil {
+			if err := s.taskStore.Close(); err != nil {
+				logger.Warn("failed to close task store: %v", err)
+			}
+		}
+	}()
 
 	errCh := make(chan error, 1)
 	go func() {

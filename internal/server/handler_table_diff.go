@@ -1,14 +1,18 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/pgedge/ace/internal/core"
 	"github.com/pgedge/ace/pkg/config"
 	"github.com/pgedge/ace/pkg/logger"
-	"github.com/pgedge/ace/pkg/types"
+	"github.com/pgedge/ace/pkg/taskstore"
 )
 
 type tableDiffRequest struct {
@@ -24,8 +28,22 @@ type tableDiffRequest struct {
 }
 
 type tableDiffResponse struct {
-	TaskID string           `json:"task_id"`
-	Result types.DiffOutput `json:"result"`
+	TaskID string `json:"task_id"`
+	Status string `json:"status"`
+}
+
+type taskStatusResponse struct {
+	TaskID      string         `json:"task_id"`
+	TaskType    string         `json:"task_type"`
+	Status      string         `json:"status"`
+	Cluster     string         `json:"cluster"`
+	Schema      string         `json:"schema,omitempty"`
+	Table       string         `json:"table,omitempty"`
+	Repset      string         `json:"repset,omitempty"`
+	StartedAt   string         `json:"started_at,omitempty"`
+	FinishedAt  string         `json:"finished_at,omitempty"`
+	TimeTaken   float64        `json:"time_taken,omitempty"`
+	TaskContext map[string]any `json:"task_context,omitempty"`
 }
 
 func (s *APIServer) handleTableDiff(w http.ResponseWriter, r *http.Request) {
@@ -62,6 +80,10 @@ func (s *APIServer) handleTableDiff(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnauthorized, "client identity unavailable")
 		return
 	}
+	if s.taskStore == nil {
+		writeError(w, http.StatusServiceUnavailable, "task store unavailable")
+		return
+	}
 
 	task := core.NewTableDiffTask()
 	task.ClusterName = cluster
@@ -77,8 +99,10 @@ func (s *APIServer) handleTableDiff(w http.ResponseWriter, r *http.Request) {
 	task.Ctx = r.Context()
 	task.ClientRole = clientInfo.role
 	task.InvokeMethod = "api"
-	task.SkipDBUpdate = true
 	task.QuietMode = true
+	task.SkipDBUpdate = false
+	task.TaskStore = s.taskStore
+	task.TaskStorePath = s.cfg.Server.TaskStorePath
 
 	if err := task.Validate(); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
@@ -91,17 +115,17 @@ func (s *APIServer) handleTableDiff(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := task.ExecuteTask(); err != nil {
-		logger.Error("table-diff execution failed: %v", err)
-		writeError(w, http.StatusInternalServerError, err.Error())
+	if err := s.enqueueTableDiffTask(task); err != nil {
+		logger.Error("failed to enqueue table-diff task: %v", err)
+		writeError(w, http.StatusInternalServerError, "unable to enqueue task")
 		return
 	}
 
 	resp := tableDiffResponse{
 		TaskID: task.TaskID,
-		Result: task.DiffResult,
+		Status: "QUEUED",
 	}
-	writeJSON(w, http.StatusOK, resp)
+	writeJSON(w, http.StatusAccepted, resp)
 }
 
 func (s *APIServer) resolveBlockSize(requested int) int {
@@ -155,4 +179,75 @@ func (s *APIServer) resolveNodes(nodes []string) string {
 		return "all"
 	}
 	return strings.Join(clean, ",")
+}
+
+func (s *APIServer) enqueueTableDiffTask(task *core.TableDiffTask) error {
+	if s == nil || task == nil {
+		return fmt.Errorf("invalid task")
+	}
+	if s.taskStore == nil {
+		return fmt.Errorf("task store is not initialised")
+	}
+	s.wg.Add(1)
+	go func(t *core.TableDiffTask) {
+		defer s.wg.Done()
+		ctx, cancel := context.WithCancel(s.jobCtx)
+		defer cancel()
+		t.Ctx = ctx
+		if err := t.ExecuteTask(); err != nil {
+			logger.Error("table-diff task %s failed: %v", t.TaskID, err)
+		}
+	}(task)
+	return nil
+}
+
+func (s *APIServer) handleTaskStatus(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.Header().Set("Allow", http.MethodGet)
+		writeError(w, http.StatusMethodNotAllowed, "only GET is supported")
+		return
+	}
+
+	if s.taskStore == nil {
+		writeError(w, http.StatusInternalServerError, "task store unavailable")
+		return
+	}
+
+	taskID := strings.TrimPrefix(r.URL.Path, "/api/v1/tasks/")
+	taskID = strings.Trim(taskID, "/")
+	if taskID == "" {
+		writeError(w, http.StatusBadRequest, "task_id is required")
+		return
+	}
+
+	rec, err := s.taskStore.Get(taskID)
+	if errors.Is(err, taskstore.ErrNotFound) {
+		writeError(w, http.StatusNotFound, "task not found")
+		return
+	}
+	if err != nil {
+		logger.Error("failed to fetch task %s: %v", taskID, err)
+		writeError(w, http.StatusInternalServerError, "failed to fetch task status")
+		return
+	}
+
+	resp := taskStatusResponse{
+		TaskID:      rec.TaskID,
+		TaskType:    rec.TaskType,
+		Status:      rec.Status,
+		Cluster:     rec.ClusterName,
+		Schema:      rec.SchemaName,
+		Table:       rec.TableName,
+		Repset:      rec.RepsetName,
+		TimeTaken:   rec.TimeTaken,
+		TaskContext: rec.TaskContext,
+	}
+	if !rec.StartedAt.IsZero() {
+		resp.StartedAt = rec.StartedAt.Format(time.RFC3339Nano)
+	}
+	if !rec.FinishedAt.IsZero() {
+		resp.FinishedAt = rec.FinishedAt.Format(time.RFC3339Nano)
+	}
+
+	writeJSON(w, http.StatusOK, resp)
 }
