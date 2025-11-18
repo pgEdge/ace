@@ -179,6 +179,79 @@ func (s *Store) Close() error {
 	return s.db.Close()
 }
 
+func (s *Store) Get(taskID string) (Record, error) {
+	var rec Record
+	if strings.TrimSpace(taskID) == "" {
+		return rec, fmt.Errorf("task id is required")
+	}
+	row := s.db.QueryRow(
+		`SELECT task_id, task_type, task_status, cluster_name, task_context,
+                schema, table_name, repset_name, diff_file_path,
+                started_at, finished_at, time_taken
+         FROM ace_tasks WHERE task_id = ?`, taskID)
+
+	var (
+		ctxVal      sql.NullString
+		startedAt   sql.NullString
+		finishedAt  sql.NullString
+		diffFile    sql.NullString
+		schemaName  sql.NullString
+		tableName   sql.NullString
+		repsetName  sql.NullString
+		taskContext map[string]any
+	)
+	if err := row.Scan(
+		&rec.TaskID,
+		&rec.TaskType,
+		&rec.Status,
+		&rec.ClusterName,
+		&ctxVal,
+		&schemaName,
+		&tableName,
+		&repsetName,
+		&diffFile,
+		&startedAt,
+		&finishedAt,
+		&rec.TimeTaken,
+	); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return Record{}, ErrNotFound
+		}
+		return Record{}, fmt.Errorf("fetch task %s: %w", taskID, err)
+	}
+
+	if schemaName.Valid {
+		rec.SchemaName = schemaName.String
+	}
+	if tableName.Valid {
+		rec.TableName = tableName.String
+	}
+	if repsetName.Valid {
+		rec.RepsetName = repsetName.String
+	}
+	if diffFile.Valid {
+		rec.DiffFilePath = diffFile.String
+	}
+	if startedAt.Valid {
+		if t, err := time.Parse(time.RFC3339Nano, startedAt.String); err == nil {
+			rec.StartedAt = t
+		}
+	}
+	if finishedAt.Valid {
+		if t, err := time.Parse(time.RFC3339Nano, finishedAt.String); err == nil {
+			rec.FinishedAt = t
+		}
+	}
+	if ctxVal.Valid && strings.TrimSpace(ctxVal.String) != "" {
+		rec.RawTaskContext = ctxVal.String
+		if err := json.Unmarshal([]byte(ctxVal.String), &taskContext); err == nil {
+			rec.TaskContext = taskContext
+		}
+	}
+
+	return rec, nil
+}
+
 func (s *Store) Create(rec Record) error {
 	if err := rec.validateForCreate(); err != nil {
 		return err

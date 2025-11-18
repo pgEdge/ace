@@ -18,25 +18,52 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/pgedge/ace/pkg/config"
 	"github.com/pgedge/ace/pkg/logger"
 )
 
+type ConnectionOptions struct {
+	DBName   string
+	Role     string
+	PoolSize int
+}
+
 func toConnectionString(node map[string]any, dbName string) string {
 	var parts []string
+
+	stringValue := func(key string) string {
+		if node == nil {
+			return ""
+		}
+		val, ok := node[key]
+		if !ok || val == nil {
+			return ""
+		}
+		switch v := val.(type) {
+		case string:
+			return strings.TrimSpace(v)
+		case fmt.Stringer:
+			return strings.TrimSpace(v.String())
+		default:
+			return strings.TrimSpace(fmt.Sprintf("%v", v))
+		}
+	}
+
 	var host string
-	if h, ok := node["Host"].(string); ok && strings.TrimSpace(h) != "" {
-		host = strings.TrimSpace(h)
-	} else if h, ok := node["PublicIP"].(string); ok && strings.TrimSpace(h) != "" {
-		host = strings.TrimSpace(h)
-	} else if h, ok := node["PrivateIP"].(string); ok && strings.TrimSpace(h) != "" {
-		host = strings.TrimSpace(h)
+	if h := stringValue("Host"); h != "" {
+		host = h
+	} else if h := stringValue("PublicIP"); h != "" {
+		host = h
+	} else if h := stringValue("PrivateIP"); h != "" {
+		host = h
 	}
 	if host != "" {
 		parts = append(parts, "host="+host)
 	}
+
 	switch v := node["Port"].(type) {
 	case float64:
 		if v != 0 {
@@ -47,27 +74,28 @@ func toConnectionString(node map[string]any, dbName string) string {
 			parts = append(parts, fmt.Sprintf("port=%d", v))
 		}
 	case string:
-		if strings.TrimSpace(v) != "" {
-			parts = append(parts, "port="+strings.TrimSpace(v))
+		if trimmed := strings.TrimSpace(v); trimmed != "" {
+			parts = append(parts, "port="+trimmed)
 		}
 	}
-	if user, ok := node["DBUser"].(string); ok && user != "" {
+
+	if user := stringValue("DBUser"); user != "" {
 		parts = append(parts, "user="+user)
 	}
-	if password, ok := node["DBPassword"].(string); ok && password != "" {
+	if password := stringValue("DBPassword"); password != "" {
 		parts = append(parts, "password="+password)
 	}
+
 	dbToUse := dbName
 	if dbToUse == "" {
-		if db, ok := node["DBName"].(string); ok && db != "" {
-			dbToUse = db
-		}
+		dbToUse = stringValue("DBName")
 	}
 	if dbToUse != "" {
 		parts = append(parts, "dbname="+dbToUse)
 	}
 
-	if cfg := config.Cfg; cfg != nil {
+	cfg := config.Cfg
+	if cfg != nil {
 		pgCfg := cfg.Postgres
 		if pgCfg.ConnectionTimeout > 0 {
 			parts = append(parts, fmt.Sprintf("connect_timeout=%d", pgCfg.ConnectionTimeout))
@@ -85,17 +113,54 @@ func toConnectionString(node map[string]any, dbName string) string {
 			parts = append(parts, fmt.Sprintf("tcp_keepalives_count=%d", *pgCfg.TCPKeepalivesCount))
 		}
 	}
-	parts = append(parts, "sslmode=disable")
-	logger.Debug("connection string: %s", strings.Join(parts, " "))
-	return strings.Join(parts, " ")
+
+	useCertAuth := cfg != nil && cfg.CertAuth.UseCertAuth
+	if !useCertAuth {
+		parts = append(parts, "sslmode=disable")
+	} else {
+		sslMode := stringValue("SSLMode")
+		if sslMode == "" {
+			sslMode = "verify-full"
+		}
+		sslCert := stringValue("SSLCert")
+		if sslCert == "" {
+			sslCert = strings.TrimSpace(cfg.CertAuth.ACEUserCertFile)
+		}
+		sslKey := stringValue("SSLKey")
+		if sslKey == "" {
+			sslKey = strings.TrimSpace(cfg.CertAuth.ACEUserKeyFile)
+		}
+		sslRoot := stringValue("SSLRootCert")
+		if sslRoot == "" {
+			sslRoot = strings.TrimSpace(cfg.CertAuth.CACertFile)
+		}
+
+		if sslMode != "" {
+			parts = append(parts, "sslmode="+sslMode)
+		}
+		if sslCert != "" {
+			parts = append(parts, "sslcert="+sslCert)
+		}
+		if sslKey != "" {
+			parts = append(parts, "sslkey="+sslKey)
+		}
+		if sslRoot != "" {
+			parts = append(parts, "sslrootcert="+sslRoot)
+		}
+	}
+
+	connStr := strings.Join(parts, " ")
+	logger.Debug("connection string: %s", connStr)
+	return connStr
 }
 
-func GetClusterNodeConnection(ctx context.Context, node map[string]any, dbName string) (*pgxpool.Pool, error) {
-	connStr := toConnectionString(node, dbName)
+func GetClusterNodeConnection(ctx context.Context, node map[string]any, opts ConnectionOptions) (*pgxpool.Pool, error) {
+	connStr := toConnectionString(node, opts.DBName)
 	config, err := pgxpool.ParseConfig(connStr)
 	if err != nil {
 		return nil, err
 	}
+	applyConnectionOptions(config, opts)
 	applyPostgresPoolConfig(config)
 	pool, err := pgxpool.NewWithConfig(ctx, config)
 	if err != nil {
@@ -104,15 +169,13 @@ func GetClusterNodeConnection(ctx context.Context, node map[string]any, dbName s
 	return pool, nil
 }
 
-func GetSizedClusterNodeConnection(node map[string]any, dbName string, poolSize int) (*pgxpool.Pool, error) {
-	connStr := toConnectionString(node, dbName)
+func GetSizedClusterNodeConnection(node map[string]any, opts ConnectionOptions) (*pgxpool.Pool, error) {
+	connStr := toConnectionString(node, opts.DBName)
 	config, err := pgxpool.ParseConfig(connStr)
 	if err != nil {
 		return nil, err
 	}
-	if poolSize > 0 {
-		config.MaxConns = int32(poolSize)
-	}
+	applyConnectionOptions(config, opts)
 	applyPostgresPoolConfig(config)
 	pool, err := pgxpool.NewWithConfig(context.Background(), config)
 	if err != nil {
@@ -195,4 +258,28 @@ func ensureRuntimeParams(params map[string]string) map[string]string {
 		return make(map[string]string)
 	}
 	return params
+}
+
+func applyConnectionOptions(cfg *pgxpool.Config, opts ConnectionOptions) {
+	if cfg == nil {
+		return
+	}
+	if opts.PoolSize > 0 {
+		cfg.MaxConns = int32(opts.PoolSize)
+	}
+	role := strings.TrimSpace(opts.Role)
+	if role == "" {
+		return
+	}
+
+	roleSQL := fmt.Sprintf("SET ROLE %s", pgx.Identifier{role}.Sanitize())
+	cfg.AfterConnect = func(ctx context.Context, conn *pgx.Conn) error {
+		if conn == nil {
+			return fmt.Errorf("nil connection when applying role %s", role)
+		}
+		if _, err := conn.Exec(ctx, roleSQL); err != nil {
+			return fmt.Errorf("failed to set role %q: %w", role, err)
+		}
+		return nil
+	}
 }

@@ -28,6 +28,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgtype"
+	"github.com/pgedge/ace/pkg/config"
 	"github.com/pgedge/ace/pkg/logger"
 	"github.com/pgedge/ace/pkg/types"
 )
@@ -216,13 +217,11 @@ func loadClusterInfoFromServiceFile(t ClusterConfigProvider) (bool, error) {
 		}
 
 		user := strings.TrimSpace(opts["user"])
-		password := strings.TrimSpace(opts["password"])
 
 		if !dbSet {
 			resolvedDB = types.Database{
-				DBName:     dbName,
-				DBUser:     user,
-				DBPassword: password,
+				DBName: dbName,
+				DBUser: user,
 			}
 			if dbName != "" {
 				t.SetDBName(dbName)
@@ -235,21 +234,46 @@ func loadClusterInfoFromServiceFile(t ClusterConfigProvider) (bool, error) {
 			if resolvedDB.DBUser == "" {
 				resolvedDB.DBUser = user
 			}
-			if resolvedDB.DBPassword == "" {
+		}
+
+		cfg := config.Cfg
+		useCertAuth := cfg != nil && cfg.CertAuth.UseCertAuth
+
+		password := ""
+		if !useCertAuth {
+			password = strings.TrimSpace(opts["password"])
+			if password != "" {
 				resolvedDB.DBPassword = password
+			}
+		} else {
+			if mode := strings.TrimSpace(opts["sslmode"]); mode != "" {
+				resolvedDB.SSLMode = mode
+			}
+			if cert := strings.TrimSpace(opts["sslcert"]); cert != "" {
+				resolvedDB.SSLCert = cert
+			}
+			if key := strings.TrimSpace(opts["sslkey"]); key != "" {
+				resolvedDB.SSLKey = key
+			}
+			if root := strings.TrimSpace(opts["sslrootcert"]); root != "" {
+				resolvedDB.SSLRootCert = root
 			}
 		}
 
 		nodeMap := map[string]any{
-			"Name":       nodeName,
-			"Service":    fmt.Sprintf("%s.%s", clusterName, nodeName),
-			"PublicIP":   host,
-			"Host":       host,
-			"Port":       port,
-			"IsActive":   "yes",
-			"DBName":     dbName,
-			"DBUser":     user,
-			"DBPassword": password,
+			"Name":        nodeName,
+			"Service":     fmt.Sprintf("%s.%s", clusterName, nodeName),
+			"PublicIP":    host,
+			"Host":        host,
+			"Port":        port,
+			"IsActive":    "yes",
+			"DBName":      dbName,
+			"DBUser":      user,
+			"DBPassword":  password,
+			"SSLMode":     resolvedDB.SSLMode,
+			"SSLCert":     resolvedDB.SSLCert,
+			"SSLKey":      resolvedDB.SSLKey,
+			"SSLRootCert": resolvedDB.SSLRootCert,
 		}
 		clusterNodes = append(clusterNodes, nodeMap)
 		selectedNames = append(selectedNames, nodeName)
@@ -436,6 +460,35 @@ func ReadClusterInfo(t ClusterConfigProvider) error {
 	t.SetClusterNodes(clusterNodes)
 
 	return nil
+}
+
+// ApplyDatabaseCredentials ensures the provided map has the database level
+// connection details (user/password/ssl). Existing non-empty values are left
+// untouched so node-specific overrides are preserved.
+func ApplyDatabaseCredentials(dst map[string]any, db types.Database) {
+	if dst == nil {
+		return
+	}
+
+	setIfEmpty := func(key, val string) {
+		if val == "" {
+			return
+		}
+		if existing, ok := dst[key]; ok {
+			if s, ok := existing.(string); ok && strings.TrimSpace(s) != "" {
+				return
+			}
+		}
+		dst[key] = val
+	}
+
+	setIfEmpty("DBName", db.DBName)
+	setIfEmpty("DBUser", db.DBUser)
+	setIfEmpty("DBPassword", db.DBPassword)
+	setIfEmpty("SSLMode", db.SSLMode)
+	setIfEmpty("SSLCert", db.SSLCert)
+	setIfEmpty("SSLKey", db.SSLKey)
+	setIfEmpty("SSLRootCert", db.SSLRootCert)
 }
 
 // ConvertToPgxType converts a value from a JSON unmarshal to a type that pgx can handle

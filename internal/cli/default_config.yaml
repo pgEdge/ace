@@ -61,6 +61,11 @@ mtree:
 server:
   listen_address: "0.0.0.0"
   listen_port: 5000
+  tls_cert_file: ""
+  tls_key_file: ""
+  client_crl_file: ""
+  allowed_common_names: []
+  taskstore_path: ""
 
 schedule_jobs: []
 schedule_config: []
@@ -73,10 +78,9 @@ auto_repair_config:
   repair_frequency: "15m"
 
 cert_auth:
-  use_cert_auth: true
-  user_cert_file: "data/pg16/pki/admin-cert/admin.crt"
-  user_key_file:  "data/pg16/pki/admin-cert/admin.key"
+  use_cert_auth: false
+  ace_user_cert_file: "data/pg16/pki/admin-cert/admin.crt"
+  ace_user_key_file:  "data/pg16/pki/admin-cert/admin.key"
   ca_cert_file:   "data/pg16/pki/ca.crt"
-  use_naive_datetime: false
 
 debug_mode: false

@@ -70,8 +70,13 @@ type MTreeConfig struct {
 }
 
 type ServerConfig struct {
-	ListenAddress string `yaml:"listen_address"`
-	ListenPort    int    `yaml:"listen_port"`
+	ListenAddress string   `yaml:"listen_address"`
+	ListenPort    int      `yaml:"listen_port"`
+	TLSCertFile   string   `yaml:"tls_cert_file"`
+	TLSKeyFile    string   `yaml:"tls_key_file"`
+	ClientCRLFile string   `yaml:"client_crl_file"`
+	AllowedCNs    []string `yaml:"allowed_common_names"`
+	TaskStorePath string   `yaml:"taskstore_path"`
 }
 
 type JobDef struct {
@@ -100,11 +105,10 @@ type AutoRepairConfig struct {
 }
 
 type CertAuthConfig struct {
-	UseCertAuth      bool   `yaml:"use_cert_auth"`
-	UserCertFile     string `yaml:"user_cert_file"`
-	UserKeyFile      string `yaml:"user_key_file"`
-	CACertFile       string `yaml:"ca_cert_file"`
-	UseNaiveDatetime bool   `yaml:"use_naive_datetime"`
+	UseCertAuth     bool   `yaml:"use_cert_auth"`
+	ACEUserCertFile string `yaml:"ace_user_cert_file"`
+	ACEUserKeyFile  string `yaml:"ace_user_key_file"`
+	CACertFile      string `yaml:"ca_cert_file"`
 }
 
 // Cfg holds the loaded config for the whole app.

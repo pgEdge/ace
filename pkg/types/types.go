@@ -38,9 +38,13 @@ type SpockConfig struct {
 }
 
 type Database struct {
-	DBName     string `json:"db_name"`
-	DBUser     string `json:"db_user"`
-	DBPassword string `json:"db_password"`
+	DBName      string `json:"db_name"`
+	DBUser      string `json:"db_user"`
+	DBPassword  string `json:"db_password"`
+	SSLMode     string `json:"ssl_mode"`
+	SSLCert     string `json:"ssl_cert"`
+	SSLKey      string `json:"ssl_key"`
+	SSLRootCert string `json:"ssl_root_cert"`
 }
 
 type NodeGroup struct {

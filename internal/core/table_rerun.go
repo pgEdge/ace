@@ -48,11 +48,7 @@ func (t *TableDiffTask) ExecuteRerunTask() error {
 	for _, nodeMap := range t.ClusterNodes {
 		combinedMap := make(map[string]any)
 		maps.Copy(combinedMap, nodeMap)
-
-		combinedMap["DBName"] = t.Database.DBName
-		combinedMap["DBUser"] = t.Database.DBUser
-		combinedMap["DBPassword"] = t.Database.DBPassword
-
+		utils.ApplyDatabaseCredentials(combinedMap, t.Database)
 		clusterNodes = append(clusterNodes, combinedMap)
 	}
 	t.ClusterNodes = clusterNodes
@@ -67,7 +63,7 @@ func (t *TableDiffTask) ExecuteRerunTask() error {
 		if !utils.Contains(t.NodeList, name) {
 			continue
 		}
-		pool, err := auth.GetClusterNodeConnection(t.Ctx, nodeInfo, t.ClientRole)
+		pool, err := auth.GetClusterNodeConnection(t.Ctx, nodeInfo, auth.ConnectionOptions{Role: t.ClientRole})
 		if err != nil {
 			for _, p := range pools {
 				p.Close()

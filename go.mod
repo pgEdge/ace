@@ -11,7 +11,7 @@
 
 module github.com/pgedge/ace
 
-go 1.24.2
+go 1.25.4
 
 require (
 	github.com/charmbracelet/log v0.4.2
@@ -250,5 +250,3 @@ require (
 	sigs.k8s.io/yaml v1.4.0 // indirect
 	tags.cncf.io/container-device-interface v1.0.1 // indirect
 )
-
-replace github.com/pgedge/ace => ./

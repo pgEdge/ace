@@ -123,13 +123,8 @@ func (t *SpockDiffTask) Validate() error {
 			}
 		}
 		combinedMap := make(map[string]any)
-
 		maps.Copy(combinedMap, nodeMap)
-
-		combinedMap["DBName"] = t.Database.DBName
-		combinedMap["DBUser"] = t.Database.DBUser
-		combinedMap["DBPassword"] = t.Database.DBPassword
-
+		utils.ApplyDatabaseCredentials(combinedMap, t.Database)
 		clusterNodes = append(clusterNodes, combinedMap)
 	}
 
@@ -180,7 +175,7 @@ func (t *SpockDiffTask) RunChecks(skipValidation bool) error {
 			continue
 		}
 
-		conn, err := auth.GetClusterNodeConnection(t.Ctx, nodeInfo, t.ClientRole)
+		conn, err := auth.GetClusterNodeConnection(t.Ctx, nodeInfo, auth.ConnectionOptions{Role: t.ClientRole})
 		if err != nil {
 			return fmt.Errorf("failed to connect to node %s: %w", hostname, err)
 		}
@@ -294,7 +289,7 @@ func (t *SpockDiffTask) ExecuteTask() (err error) {
 	pools := make(map[string]*pgxpool.Pool)
 	for _, nodeInfo := range t.ClusterNodes {
 		name := nodeInfo["Name"].(string)
-		pool, err := auth.GetClusterNodeConnection(t.Ctx, nodeInfo, t.ClientRole)
+		pool, err := auth.GetClusterNodeConnection(t.Ctx, nodeInfo, auth.ConnectionOptions{Role: t.ClientRole})
 		if err != nil {
 			return fmt.Errorf("failed to connect to node %s: %w", name, err)
 		}
