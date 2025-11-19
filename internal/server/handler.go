@@ -91,6 +91,58 @@ type repsetDiffRequest struct {
 	Quiet             bool     `json:"quiet"`
 }
 
+type mtreeClusterRequest struct {
+	Cluster string   `json:"cluster"`
+	DBName  string   `json:"dbname"`
+	Nodes   []string `json:"nodes"`
+	Quiet   bool     `json:"quiet"`
+}
+
+type mtreeTableRequest struct {
+	Cluster string   `json:"cluster"`
+	Table   string   `json:"table"`
+	DBName  string   `json:"dbname"`
+	Nodes   []string `json:"nodes"`
+	Quiet   bool     `json:"quiet"`
+}
+
+type mtreeBuildRequest struct {
+	Cluster           string   `json:"cluster"`
+	Table             string   `json:"table"`
+	DBName            string   `json:"dbname"`
+	Nodes             []string `json:"nodes"`
+	BlockSize         int      `json:"block_size"`
+	MaxCPURatio       float64  `json:"max_cpu_ratio"`
+	OverrideBlockSize bool     `json:"override_block_size"`
+	Analyse           bool     `json:"analyse"`
+	RecreateObjects   bool     `json:"recreate_objects"`
+	WriteRanges       bool     `json:"write_ranges"`
+	RangesFile        string   `json:"ranges_file"`
+	Quiet             bool     `json:"quiet"`
+}
+
+type mtreeUpdateRequest struct {
+	Cluster     string   `json:"cluster"`
+	Table       string   `json:"table"`
+	DBName      string   `json:"dbname"`
+	Nodes       []string `json:"nodes"`
+	MaxCPURatio float64  `json:"max_cpu_ratio"`
+	Rebalance   bool     `json:"rebalance"`
+	Quiet       bool     `json:"quiet"`
+}
+
+type mtreeDiffRequest struct {
+	Cluster     string   `json:"cluster"`
+	Table       string   `json:"table"`
+	DBName      string   `json:"dbname"`
+	Nodes       []string `json:"nodes"`
+	MaxCPURatio float64  `json:"max_cpu_ratio"`
+	BatchSize   int      `json:"batch_size"`
+	Output      string   `json:"output"`
+	SkipUpdate  bool     `json:"skip_update"`
+	Quiet       bool     `json:"quiet"`
+}
+
 type taskSubmissionResponse struct {
 	TaskID string `json:"task_id"`
 	Status string `json:"status"`
@@ -620,6 +672,394 @@ func (s *APIServer) resolveClusterName(name string) (string, error) {
 		return "", fmt.Errorf("cluster is required")
 	}
 	return cluster, nil
+}
+
+func (s *APIServer) handleMtreeInit(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", http.MethodPost)
+		writeError(w, http.StatusMethodNotAllowed, "only POST is supported")
+		return
+	}
+	if s.taskStore == nil {
+		writeError(w, http.StatusServiceUnavailable, "task store unavailable")
+		return
+	}
+
+	var req mtreeClusterRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON payload")
+		return
+	}
+	defer r.Body.Close()
+
+	cluster, err := s.resolveClusterName(req.Cluster)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	task := core.NewMerkleTreeTask()
+	task.ClusterName = cluster
+	task.DBName = strings.TrimSpace(req.DBName)
+	task.Nodes = s.resolveNodes(req.Nodes)
+	task.QuietMode = req.Quiet
+	task.Mode = "init"
+	task.Ctx = r.Context()
+	task.SkipDBUpdate = false
+	task.TaskStore = s.taskStore
+	task.TaskStorePath = s.cfg.Server.TaskStorePath
+
+	if err := s.enqueueTask(task.TaskID, func(ctx context.Context) error {
+		task.Ctx = ctx
+		return task.MtreeInit()
+	}); err != nil {
+		logger.Error("failed to enqueue mtree init task: %v", err)
+		writeError(w, http.StatusInternalServerError, "unable to enqueue task")
+		return
+	}
+
+	writeJSON(w, http.StatusAccepted, taskSubmissionResponse{
+		TaskID: task.TaskID,
+		Status: "QUEUED",
+	})
+}
+
+func (s *APIServer) handleMtreeTeardown(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", http.MethodPost)
+		writeError(w, http.StatusMethodNotAllowed, "only POST is supported")
+		return
+	}
+	if s.taskStore == nil {
+		writeError(w, http.StatusServiceUnavailable, "task store unavailable")
+		return
+	}
+
+	var req mtreeClusterRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON payload")
+		return
+	}
+	defer r.Body.Close()
+
+	cluster, err := s.resolveClusterName(req.Cluster)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	task := core.NewMerkleTreeTask()
+	task.ClusterName = cluster
+	task.DBName = strings.TrimSpace(req.DBName)
+	task.Nodes = s.resolveNodes(req.Nodes)
+	task.QuietMode = req.Quiet
+	task.Mode = "teardown"
+	task.Ctx = r.Context()
+	task.SkipDBUpdate = false
+	task.TaskStore = s.taskStore
+	task.TaskStorePath = s.cfg.Server.TaskStorePath
+
+	if err := s.enqueueTask(task.TaskID, func(ctx context.Context) error {
+		task.Ctx = ctx
+		return task.MtreeTeardown()
+	}); err != nil {
+		logger.Error("failed to enqueue mtree teardown task: %v", err)
+		writeError(w, http.StatusInternalServerError, "unable to enqueue task")
+		return
+	}
+
+	writeJSON(w, http.StatusAccepted, taskSubmissionResponse{
+		TaskID: task.TaskID,
+		Status: "QUEUED",
+	})
+}
+
+func (s *APIServer) handleMtreeTeardownTable(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", http.MethodPost)
+		writeError(w, http.StatusMethodNotAllowed, "only POST is supported")
+		return
+	}
+	if s.taskStore == nil {
+		writeError(w, http.StatusServiceUnavailable, "task store unavailable")
+		return
+	}
+
+	var req mtreeTableRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON payload")
+		return
+	}
+	defer r.Body.Close()
+
+	cluster, err := s.resolveClusterName(req.Cluster)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	table := strings.TrimSpace(req.Table)
+	if table == "" {
+		writeError(w, http.StatusBadRequest, "table is required")
+		return
+	}
+
+	task := core.NewMerkleTreeTask()
+	task.ClusterName = cluster
+	task.QualifiedTableName = table
+	task.DBName = strings.TrimSpace(req.DBName)
+	task.Nodes = s.resolveNodes(req.Nodes)
+	task.QuietMode = req.Quiet
+	task.Mode = "teardown-table"
+	task.Ctx = r.Context()
+	task.SkipDBUpdate = false
+	task.TaskStore = s.taskStore
+	task.TaskStorePath = s.cfg.Server.TaskStorePath
+
+	if err := s.enqueueTask(task.TaskID, func(ctx context.Context) error {
+		task.Ctx = ctx
+		return task.MtreeTeardownTable()
+	}); err != nil {
+		logger.Error("failed to enqueue mtree teardown-table task: %v", err)
+		writeError(w, http.StatusInternalServerError, "unable to enqueue task")
+		return
+	}
+
+	writeJSON(w, http.StatusAccepted, taskSubmissionResponse{
+		TaskID: task.TaskID,
+		Status: "QUEUED",
+	})
+}
+
+func (s *APIServer) handleMtreeBuild(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", http.MethodPost)
+		writeError(w, http.StatusMethodNotAllowed, "only POST is supported")
+		return
+	}
+	if s.taskStore == nil {
+		writeError(w, http.StatusServiceUnavailable, "task store unavailable")
+		return
+	}
+
+	var req mtreeBuildRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON payload")
+		return
+	}
+	defer r.Body.Close()
+
+	cluster, err := s.resolveClusterName(req.Cluster)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	table := strings.TrimSpace(req.Table)
+	if table == "" {
+		writeError(w, http.StatusBadRequest, "table is required")
+		return
+	}
+
+	task := core.NewMerkleTreeTask()
+	task.ClusterName = cluster
+	task.QualifiedTableName = table
+	task.DBName = strings.TrimSpace(req.DBName)
+	task.Nodes = s.resolveNodes(req.Nodes)
+	task.QuietMode = req.Quiet
+	task.BlockSize = s.resolveMtreeBlockSize(req.BlockSize)
+	task.MaxCpuRatio = s.resolveMtreeMaxCPURatio(req.MaxCPURatio)
+	task.OverrideBlockSize = req.OverrideBlockSize
+	task.Analyse = req.Analyse
+	task.RecreateObjects = req.RecreateObjects
+	task.WriteRanges = req.WriteRanges
+	task.RangesFile = strings.TrimSpace(req.RangesFile)
+	task.Mode = "build"
+	task.Ctx = r.Context()
+	task.SkipDBUpdate = false
+	task.TaskStore = s.taskStore
+	task.TaskStorePath = s.cfg.Server.TaskStorePath
+
+	if err := task.Validate(); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if err := task.RunChecks(true); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	if err := s.enqueueTask(task.TaskID, func(ctx context.Context) error {
+		task.Ctx = ctx
+		return task.BuildMtree()
+	}); err != nil {
+		logger.Error("failed to enqueue mtree build task: %v", err)
+		writeError(w, http.StatusInternalServerError, "unable to enqueue task")
+		return
+	}
+
+	writeJSON(w, http.StatusAccepted, taskSubmissionResponse{
+		TaskID: task.TaskID,
+		Status: "QUEUED",
+	})
+}
+
+func (s *APIServer) handleMtreeUpdate(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", http.MethodPost)
+		writeError(w, http.StatusMethodNotAllowed, "only POST is supported")
+		return
+	}
+	if s.taskStore == nil {
+		writeError(w, http.StatusServiceUnavailable, "task store unavailable")
+		return
+	}
+
+	var req mtreeUpdateRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON payload")
+		return
+	}
+	defer r.Body.Close()
+
+	cluster, err := s.resolveClusterName(req.Cluster)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	table := strings.TrimSpace(req.Table)
+	if table == "" {
+		writeError(w, http.StatusBadRequest, "table is required")
+		return
+	}
+
+	task := core.NewMerkleTreeTask()
+	task.ClusterName = cluster
+	task.QualifiedTableName = table
+	task.DBName = strings.TrimSpace(req.DBName)
+	task.Nodes = s.resolveNodes(req.Nodes)
+	task.QuietMode = req.Quiet
+	task.MaxCpuRatio = s.resolveMtreeMaxCPURatio(req.MaxCPURatio)
+	task.Rebalance = req.Rebalance
+	task.Mode = "update"
+	task.Ctx = r.Context()
+	task.SkipDBUpdate = false
+	task.TaskStore = s.taskStore
+	task.TaskStorePath = s.cfg.Server.TaskStorePath
+
+	if err := task.Validate(); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if err := task.RunChecks(true); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	if err := s.enqueueTask(task.TaskID, func(ctx context.Context) error {
+		task.Ctx = ctx
+		return task.UpdateMtree(true)
+	}); err != nil {
+		logger.Error("failed to enqueue mtree update task: %v", err)
+		writeError(w, http.StatusInternalServerError, "unable to enqueue task")
+		return
+	}
+
+	writeJSON(w, http.StatusAccepted, taskSubmissionResponse{
+		TaskID: task.TaskID,
+		Status: "QUEUED",
+	})
+}
+
+func (s *APIServer) handleMtreeDiff(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", http.MethodPost)
+		writeError(w, http.StatusMethodNotAllowed, "only POST is supported")
+		return
+	}
+	if s.taskStore == nil {
+		writeError(w, http.StatusServiceUnavailable, "task store unavailable")
+		return
+	}
+
+	var req mtreeDiffRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON payload")
+		return
+	}
+	defer r.Body.Close()
+
+	cluster, err := s.resolveClusterName(req.Cluster)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	table := strings.TrimSpace(req.Table)
+	if table == "" {
+		writeError(w, http.StatusBadRequest, "table is required")
+		return
+	}
+
+	task := core.NewMerkleTreeTask()
+	task.ClusterName = cluster
+	task.QualifiedTableName = table
+	task.DBName = strings.TrimSpace(req.DBName)
+	task.Nodes = s.resolveNodes(req.Nodes)
+	task.QuietMode = req.Quiet
+	task.MaxCpuRatio = s.resolveMtreeMaxCPURatio(req.MaxCPURatio)
+	task.BatchSize = s.resolveMtreeBatchSize(req.BatchSize)
+	task.Output = strings.TrimSpace(req.Output)
+	if task.Output == "" {
+		task.Output = "json"
+	}
+	task.NoCDC = req.SkipUpdate
+	task.Mode = "diff"
+	task.Ctx = r.Context()
+	task.SkipDBUpdate = false
+	task.TaskStore = s.taskStore
+	task.TaskStorePath = s.cfg.Server.TaskStorePath
+
+	if err := task.Validate(); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if err := task.RunChecks(true); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	if err := s.enqueueTask(task.TaskID, func(ctx context.Context) error {
+		task.Ctx = ctx
+		return task.DiffMtree()
+	}); err != nil {
+		logger.Error("failed to enqueue mtree diff task: %v", err)
+		writeError(w, http.StatusInternalServerError, "unable to enqueue task")
+		return
+	}
+
+	writeJSON(w, http.StatusAccepted, taskSubmissionResponse{
+		TaskID: task.TaskID,
+		Status: "QUEUED",
+	})
+}
+
+func (s *APIServer) resolveMtreeBlockSize(requested int) int {
+	if requested > 0 {
+		return requested
+	}
+	return 10000
+}
+
+func (s *APIServer) resolveMtreeMaxCPURatio(requested float64) float64 {
+	if requested > 0 {
+		return requested
+	}
+	return 0.5
+}
+
+func (s *APIServer) resolveMtreeBatchSize(requested int) int {
+	if requested > 0 {
+		return requested
+	}
+	return 100
 }
 
 func (s *APIServer) handleTaskStatus(w http.ResponseWriter, r *http.Request) {

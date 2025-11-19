@@ -75,6 +75,12 @@ func New(cfg *config.Config) (*APIServer, error) {
 	mux.Handle("/api/v1/spock-diff", apiServer.authenticated(http.HandlerFunc(apiServer.handleSpockDiff)))
 	mux.Handle("/api/v1/schema-diff", apiServer.authenticated(http.HandlerFunc(apiServer.handleSchemaDiff)))
 	mux.Handle("/api/v1/repset-diff", apiServer.authenticated(http.HandlerFunc(apiServer.handleRepsetDiff)))
+	mux.Handle("/api/v1/mtree/init", apiServer.authenticated(http.HandlerFunc(apiServer.handleMtreeInit)))
+	mux.Handle("/api/v1/mtree/teardown", apiServer.authenticated(http.HandlerFunc(apiServer.handleMtreeTeardown)))
+	mux.Handle("/api/v1/mtree/teardown-table", apiServer.authenticated(http.HandlerFunc(apiServer.handleMtreeTeardownTable)))
+	mux.Handle("/api/v1/mtree/build", apiServer.authenticated(http.HandlerFunc(apiServer.handleMtreeBuild)))
+	mux.Handle("/api/v1/mtree/update", apiServer.authenticated(http.HandlerFunc(apiServer.handleMtreeUpdate)))
+	mux.Handle("/api/v1/mtree/diff", apiServer.authenticated(http.HandlerFunc(apiServer.handleMtreeDiff)))
 	mux.Handle("/api/v1/tasks/", apiServer.authenticated(http.HandlerFunc(apiServer.handleTaskStatus)))
 
 	tlsConfig := &tls.Config{
