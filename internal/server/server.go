@@ -55,6 +55,7 @@ func New(cfg *config.Config) (*APIServer, error) {
 
 	tlsCert, err := tls.LoadX509KeyPair(srvCfg.TLSCertFile, srvCfg.TLSKeyFile)
 	if err != nil {
+		taskStore.Close()
 		return nil, fmt.Errorf("failed to load server TLS keypair: %w", err)
 	}
 
@@ -69,6 +70,11 @@ func New(cfg *config.Config) (*APIServer, error) {
 	}
 
 	mux.Handle("/api/v1/table-diff", apiServer.authenticated(http.HandlerFunc(apiServer.handleTableDiff)))
+	mux.Handle("/api/v1/table-rerun", apiServer.authenticated(http.HandlerFunc(apiServer.handleTableRerun)))
+	mux.Handle("/api/v1/table-repair", apiServer.authenticated(http.HandlerFunc(apiServer.handleTableRepair)))
+	mux.Handle("/api/v1/spock-diff", apiServer.authenticated(http.HandlerFunc(apiServer.handleSpockDiff)))
+	mux.Handle("/api/v1/schema-diff", apiServer.authenticated(http.HandlerFunc(apiServer.handleSchemaDiff)))
+	mux.Handle("/api/v1/repset-diff", apiServer.authenticated(http.HandlerFunc(apiServer.handleRepsetDiff)))
 	mux.Handle("/api/v1/tasks/", apiServer.authenticated(http.HandlerFunc(apiServer.handleTaskStatus)))
 
 	tlsConfig := &tls.Config{
@@ -132,6 +138,28 @@ func (s *APIServer) Run(ctx context.Context) error {
 	case err := <-errCh:
 		return err
 	}
+}
+
+func (s *APIServer) enqueueTask(taskID string, run func(context.Context) error) error {
+	if s == nil {
+		return fmt.Errorf("api server unavailable")
+	}
+	if s.taskStore == nil {
+		return fmt.Errorf("task store unavailable")
+	}
+	if s.jobCtx == nil {
+		return fmt.Errorf("api server is not running")
+	}
+	s.wg.Add(1)
+	go func() {
+		defer s.wg.Done()
+		ctx, cancel := context.WithCancel(s.jobCtx)
+		defer cancel()
+		if err := run(ctx); err != nil {
+			logger.Error("task %s failed: %v", taskID, err)
+		}
+	}()
+	return nil
 }
 
 type clientInfo struct {
