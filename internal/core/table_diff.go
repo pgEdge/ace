@@ -13,6 +13,8 @@ package core
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"maps"
 	"math"
@@ -43,6 +45,12 @@ import (
 type Range struct {
 	Start any
 	End   any
+}
+
+func buildFilteredViewName(taskID, table string) string {
+	sum := sha256.Sum256([]byte(taskID))
+	hash := hex.EncodeToString(sum[:8]) // use first 16 hex chars
+	return fmt.Sprintf("ace_%s_%s_filtered", hash, table)
 }
 
 type TableDiffTask struct {
@@ -541,6 +549,10 @@ func (t *TableDiffTask) RunChecks(skipValidation bool) error {
 
 	schema := t.Schema
 	table := t.Table
+	var filteredViewName string
+	if t.TableFilter != "" {
+		filteredViewName = buildFilteredViewName(t.TaskID, table)
+	}
 
 	for _, nodeInfo := range t.ClusterNodes {
 		hostname, _ := nodeInfo["Name"].(string)
@@ -615,8 +627,7 @@ func (t *TableDiffTask) RunChecks(skipValidation bool) error {
 		hostMap[hostIP+":"+port] = hostname
 
 		if t.TableFilter != "" {
-			viewName := fmt.Sprintf("%s_%s_filtered", t.TaskID, table)
-			sanitisedViewName := pgx.Identifier{viewName}.Sanitize()
+			sanitisedViewName := pgx.Identifier{filteredViewName}.Sanitize()
 			sanitisedSchema := pgx.Identifier{schema}.Sanitize()
 			sanitisedTable := pgx.Identifier{table}.Sanitize()
 			viewSQL := fmt.Sprintf("CREATE MATERIALIZED VIEW IF NOT EXISTS %s AS SELECT * FROM %s.%s WHERE %s",
@@ -687,7 +698,7 @@ func (t *TableDiffTask) RunChecks(skipValidation bool) error {
 	}
 
 	if t.TableFilter != "" {
-		t.Table = fmt.Sprintf("%s_%s_filtered", t.TaskID, t.Table)
+		t.Table = filteredViewName
 	}
 
 	return nil
