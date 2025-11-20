@@ -106,6 +106,9 @@ func buildTableDiffJob(cfg *config.Config, def config.JobDef, spec scheduleSpec)
 	if v := intArg(def.Args, "compare_unit_size", 0); v > 0 {
 		base.CompareUnitSize = v
 	}
+	if v := intArg(def.Args, "max_diff_rows", 0); v > 0 {
+		base.MaxDiffRows = int64(v)
+	}
 	if out := stringArg(def.Args, "output"); out != "" {
 		base.Output = out
 	}

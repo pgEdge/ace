@@ -25,6 +25,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -87,12 +88,16 @@ type TableDiffTask struct {
 	blockHashSQLMu    sync.Mutex
 
 	CompareUnitSize int
+	MaxDiffRows     int64
 
 	DiffResult types.DiffOutput
 	diffMutex  sync.Mutex
 
 	firstError   error
 	firstErrorMu sync.Mutex
+
+	totalDiffRows      atomic.Int64
+	diffLimitTriggered atomic.Bool
 
 	Ctx context.Context
 }
@@ -125,6 +130,33 @@ func (t *TableDiffTask) getFirstError() error {
 	t.firstErrorMu.Lock()
 	defer t.firstErrorMu.Unlock()
 	return t.firstError
+}
+
+func (t *TableDiffTask) shouldStopDueToLimit() bool {
+	if t.MaxDiffRows <= 0 {
+		return false
+	}
+	if t.diffLimitTriggered.Load() {
+		return true
+	}
+	return t.totalDiffRows.Load() >= t.MaxDiffRows
+}
+
+// It's imperative for the caller to hold the diffMutex while calling this function
+func (t *TableDiffTask) incrementDiffRowsLocked(delta int) bool {
+	if delta <= 0 || t.MaxDiffRows <= 0 {
+		return false
+	}
+
+	total := t.totalDiffRows.Add(int64(delta))
+	if total >= t.MaxDiffRows {
+		t.DiffResult.Summary.DiffRowLimitReached = true
+		if t.diffLimitTriggered.CompareAndSwap(false, true) {
+			logger.Warn("table-diff: detected %d differences which meets/exceeds max_diff_rows limit (%d); stopping early", total, t.MaxDiffRows)
+		}
+		return true
+	}
+	return false
 }
 
 type RecursiveDiffTask struct {
@@ -452,6 +484,13 @@ func (t *TableDiffTask) Validate() error {
 		return fmt.Errorf("block row size should be >= %d", config.Cfg.TableDiff.MinBlockSize)
 	}
 
+	if t.MaxDiffRows < 0 {
+		return fmt.Errorf("max_diff_rows must be >= 0")
+	}
+	if t.MaxDiffRows == 0 && config.Cfg.TableDiff.MaxDiffRows > 0 {
+		t.MaxDiffRows = config.Cfg.TableDiff.MaxDiffRows
+	}
+
 	if t.ConcurrencyFactor > 10 || t.ConcurrencyFactor < 1 {
 		return fmt.Errorf("invalid value range for concurrency_factor, must be between 1 and 10")
 	}
@@ -723,6 +762,7 @@ func (t *TableDiffTask) CloneForSchedule(ctx context.Context) *TableDiffTask {
 	cloned.ClientRole = t.ClientRole
 	cloned.InvokeMethod = t.InvokeMethod
 	cloned.CompareUnitSize = t.CompareUnitSize
+	cloned.MaxDiffRows = t.MaxDiffRows
 	cloned.Ctx = ctx
 	return cloned
 }
@@ -809,6 +849,9 @@ func (t *TableDiffTask) ExecuteTask() (err error) {
 	t.Task.StartedAt = startTime
 	t.Task.TaskStatus = taskstore.StatusRunning
 	t.Task.ClusterName = t.ClusterName
+
+	t.totalDiffRows.Store(0)
+	t.diffLimitTriggered.Store(false)
 
 	var recorder *taskstore.Recorder
 
@@ -966,6 +1009,7 @@ func (t *TableDiffTask) ExecuteTask() (err error) {
 			BlockSize:         t.BlockSize,
 			CompareUnitSize:   t.CompareUnitSize,
 			ConcurrencyFactor: t.ConcurrencyFactor,
+			MaxDiffRows:       t.MaxDiffRows,
 			StartTime:         startTime.Format(time.RFC3339),
 			TotalRowsChecked:  int64(maxCount),
 			DiffRowsCount:     make(map[string]int),
@@ -1205,6 +1249,10 @@ func (t *TableDiffTask) ExecuteTask() (err error) {
 		)
 
 		for _, task := range mismatchedTasks {
+			if t.shouldStopDueToLimit() {
+				diffBar.Increment()
+				continue
+			}
 			diffWg.Add(1)
 			go func(task RecursiveDiffTask) {
 				defer diffBar.Increment()
@@ -1216,11 +1264,18 @@ func (t *TableDiffTask) ExecuteTask() (err error) {
 	diffWg.Wait()
 	p.Wait()
 
+	if t.diffLimitTriggered.Load() {
+		t.DiffResult.Summary.DiffRowLimitReached = true
+	}
+
 	if err := t.getFirstError(); err != nil {
 		return err
 	}
 
 	logger.Info("Table diff comparison completed for %s", t.QualifiedTableName)
+	if t.DiffResult.Summary.DiffRowLimitReached {
+		logger.Warn("table-diff stopped after reaching max_diff_rows=%d; additional differences may exist", t.MaxDiffRows)
+	}
 
 	endTime := time.Now()
 	t.DiffResult.Summary.EndTime = endTime.Format(time.RFC3339)
@@ -1499,6 +1554,10 @@ func (t *TableDiffTask) recursiveDiff(
 ) {
 	defer wg.Done()
 
+	if t.shouldStopDueToLimit() {
+		return
+	}
+
 	node1Name := task.Node1Name
 	node2Name := task.Node2Name
 	currentRange := task.CurrentRange
@@ -1529,6 +1588,7 @@ func (t *TableDiffTask) recursiveDiff(
 		}
 
 		var currentDiffRowsForPair int
+		limitReached := false
 		if len(diffInfo.Node1OnlyRows) > 0 || len(diffInfo.Node2OnlyRows) > 0 || len(diffInfo.ModifiedRows) > 0 {
 			t.diffMutex.Lock()
 
@@ -1546,30 +1606,60 @@ func (t *TableDiffTask) recursiveDiff(
 			}
 
 			for _, row := range diffInfo.Node1OnlyRows {
+				if t.shouldStopDueToLimit() {
+					limitReached = true
+					break
+				}
 				rowAsMap := utils.OrderedMapToMap(row)
 				rowWithMeta := utils.AddSpockMetadata(rowAsMap)
 				rowAsOrderedMap := utils.MapToOrderedMap(rowWithMeta, t.Cols)
 				t.DiffResult.NodeDiffs[pairKey].Rows[node1Name] = append(t.DiffResult.NodeDiffs[pairKey].Rows[node1Name], rowAsOrderedMap)
 				currentDiffRowsForPair++
+				if t.incrementDiffRowsLocked(1) {
+					limitReached = true
+					break
+				}
 			}
-			for _, row := range diffInfo.Node2OnlyRows {
-				rowAsMap := utils.OrderedMapToMap(row)
-				rowWithMeta := utils.AddSpockMetadata(rowAsMap)
-				rowAsOrderedMap := utils.MapToOrderedMap(rowWithMeta, t.Cols)
-				t.DiffResult.NodeDiffs[pairKey].Rows[node2Name] = append(t.DiffResult.NodeDiffs[pairKey].Rows[node2Name], rowAsOrderedMap)
-				currentDiffRowsForPair++
-			}
-			for _, modRow := range diffInfo.ModifiedRows {
-				node1DataAsMap := utils.OrderedMapToMap(modRow.Node1Data)
-				node1DataWithMeta := utils.AddSpockMetadata(node1DataAsMap)
-				node1DataAsOrderedMap := utils.MapToOrderedMap(node1DataWithMeta, t.Cols)
-				t.DiffResult.NodeDiffs[pairKey].Rows[node1Name] = append(t.DiffResult.NodeDiffs[pairKey].Rows[node1Name], node1DataAsOrderedMap)
 
-				node2DataAsMap := utils.OrderedMapToMap(modRow.Node2Data)
-				node2DataWithMeta := utils.AddSpockMetadata(node2DataAsMap)
-				node2DataAsOrderedMap := utils.MapToOrderedMap(node2DataWithMeta, t.Cols)
-				t.DiffResult.NodeDiffs[pairKey].Rows[node2Name] = append(t.DiffResult.NodeDiffs[pairKey].Rows[node2Name], node2DataAsOrderedMap)
-				currentDiffRowsForPair++
+			if !limitReached {
+				for _, row := range diffInfo.Node2OnlyRows {
+					if t.shouldStopDueToLimit() {
+						limitReached = true
+						break
+					}
+					rowAsMap := utils.OrderedMapToMap(row)
+					rowWithMeta := utils.AddSpockMetadata(rowAsMap)
+					rowAsOrderedMap := utils.MapToOrderedMap(rowWithMeta, t.Cols)
+					t.DiffResult.NodeDiffs[pairKey].Rows[node2Name] = append(t.DiffResult.NodeDiffs[pairKey].Rows[node2Name], rowAsOrderedMap)
+					currentDiffRowsForPair++
+					if t.incrementDiffRowsLocked(1) {
+						limitReached = true
+						break
+					}
+				}
+			}
+
+			if !limitReached {
+				for _, modRow := range diffInfo.ModifiedRows {
+					if t.shouldStopDueToLimit() {
+						limitReached = true
+						break
+					}
+					node1DataAsMap := utils.OrderedMapToMap(modRow.Node1Data)
+					node1DataWithMeta := utils.AddSpockMetadata(node1DataAsMap)
+					node1DataAsOrderedMap := utils.MapToOrderedMap(node1DataWithMeta, t.Cols)
+					t.DiffResult.NodeDiffs[pairKey].Rows[node1Name] = append(t.DiffResult.NodeDiffs[pairKey].Rows[node1Name], node1DataAsOrderedMap)
+
+					node2DataAsMap := utils.OrderedMapToMap(modRow.Node2Data)
+					node2DataWithMeta := utils.AddSpockMetadata(node2DataAsMap)
+					node2DataAsOrderedMap := utils.MapToOrderedMap(node2DataWithMeta, t.Cols)
+					t.DiffResult.NodeDiffs[pairKey].Rows[node2Name] = append(t.DiffResult.NodeDiffs[pairKey].Rows[node2Name], node2DataAsOrderedMap)
+					currentDiffRowsForPair++
+					if t.incrementDiffRowsLocked(1) {
+						limitReached = true
+						break
+					}
+				}
 			}
 
 			if t.DiffResult.Summary.DiffRowsCount == nil {
@@ -1577,7 +1667,15 @@ func (t *TableDiffTask) recursiveDiff(
 			}
 			t.DiffResult.Summary.DiffRowsCount[pairKey] += currentDiffRowsForPair
 			t.diffMutex.Unlock()
+
+			if limitReached || t.shouldStopDueToLimit() {
+				return
+			}
 		}
+		return
+	}
+
+	if t.shouldStopDueToLimit() {
 		return
 	}
 
@@ -1616,6 +1714,10 @@ func (t *TableDiffTask) recursiveDiff(
 	}
 
 	for _, sr := range subRanges {
+		if t.shouldStopDueToLimit() {
+			return
+		}
+
 		newEstimatedBlockSize := currentEstimatedBlockSize / len(subRanges)
 		if newEstimatedBlockSize <= 0 {
 			newEstimatedBlockSize = 1
@@ -1655,6 +1757,11 @@ func (t *TableDiffTask) recursiveDiff(
 		if res1.hash != res2.hash {
 			logger.Debug("%s Mismatch in sub-range %v-%v for %s (%s...) vs %s (%s...). Recursing.",
 				utils.CrossMark, sr.Start, sr.End, node1Name, utils.SafeCut(res1.hash, 8), node2Name, utils.SafeCut(res2.hash, 8))
+
+			if t.shouldStopDueToLimit() {
+				return
+			}
+
 			wg.Add(1)
 			go t.recursiveDiff(ctx, RecursiveDiffTask{
 				Node1Name:                 node1Name,

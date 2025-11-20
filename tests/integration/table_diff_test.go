@@ -15,6 +15,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -41,6 +42,7 @@ func newTestTableDiffTask(
 	task.BlockSize = 1000
 	task.CompareUnitSize = 100
 	task.ConcurrencyFactor = 1
+	task.MaxDiffRows = math.MaxInt64
 
 	task.DiffResult = types.DiffOutput{
 		NodeDiffs: make(map[string]types.DiffByNodePair),
@@ -110,6 +112,7 @@ func runCustomerTableDiffTests(t *testing.T) {
 	t.Run("DataOnlyOnNode2", testTableDiff_DataOnlyOnNode2)
 	t.Run("ModifiedRows", testTableDiff_ModifiedRows)
 	t.Run("TableFiltering", testTableDiff_TableFiltering)
+	t.Run("MaxDiffRowsLimit", testTableDiff_MaxDiffRowsLimit)
 }
 
 func testTableDiff_NoDifferences(t *testing.T) {
@@ -1066,6 +1069,88 @@ func testTableDiff_TableFiltering(t *testing.T) {
 	}
 
 	log.Println("TestTableDiff_TableFiltering completed.")
+}
+
+func testTableDiff_MaxDiffRowsLimit(t *testing.T) {
+	ctx := context.Background()
+	tableName := "customers"
+	qualifiedTableName := fmt.Sprintf("%s.%s", testSchema, tableName)
+
+	t.Cleanup(func() {
+		repairTable(t, qualifiedTableName, serviceN1)
+		files, _ := filepath.Glob("*_diffs-*.json")
+		for _, f := range files {
+			os.Remove(f)
+		}
+	})
+
+	modifications := []struct {
+		indexVal int
+		email    string
+	}{
+		{indexVal: 1, email: "limit-test-1@example.com"},
+		{indexVal: 2, email: "limit-test-2@example.com"},
+		{indexVal: 3, email: "limit-test-3@example.com"},
+		{indexVal: 4, email: "limit-test-4@example.com"},
+	}
+
+	tx, err := pgCluster.Node2Pool.Begin(ctx)
+	require.NoError(t, err)
+	defer tx.Rollback(ctx)
+
+	_, err = tx.Exec(ctx, "SELECT spock.repair_mode(true)")
+	require.NoError(t, err)
+
+	updateSQL := fmt.Sprintf("UPDATE %s.%s SET email = $1 WHERE index = $2", testSchema, tableName)
+	for _, mod := range modifications {
+		_, err := tx.Exec(ctx, updateSQL, mod.email, mod.indexVal)
+		require.NoErrorf(t, err, "failed to update row with index %d on node %s", mod.indexVal, serviceN2)
+	}
+
+	_, err = tx.Exec(ctx, "SELECT spock.repair_mode(false)")
+	require.NoError(t, err)
+	require.NoError(t, tx.Commit(ctx))
+
+	nodesToCompare := []string{serviceN1, serviceN2}
+	tdTask := newTestTableDiffTask(t, qualifiedTableName, nodesToCompare)
+	tdTask.BlockSize = 10
+	tdTask.CompareUnitSize = 1
+	tdTask.MaxDiffRows = 2
+
+	err = tdTask.RunChecks(false)
+	require.NoError(t, err)
+
+	err = tdTask.ExecuteTask()
+	require.NoError(t, err)
+
+	pairKey := serviceN1 + "/" + serviceN2
+	if strings.Compare(serviceN1, serviceN2) > 0 {
+		pairKey = serviceN2 + "/" + serviceN1
+	}
+
+	if _, ok := tdTask.DiffResult.NodeDiffs[pairKey]; !ok {
+		t.Fatalf("expected diffs for pair %s when enforcing max diff rows", pairKey)
+	}
+
+	if !tdTask.DiffResult.Summary.DiffRowLimitReached {
+		t.Fatalf("expected diff row limit to be reached when max_diff_rows=%d", tdTask.MaxDiffRows)
+	}
+
+	if tdTask.DiffResult.Summary.MaxDiffRows != tdTask.MaxDiffRows {
+		t.Fatalf("expected summary to record max_diff_rows=%d, got %d",
+			tdTask.MaxDiffRows, tdTask.DiffResult.Summary.MaxDiffRows)
+	}
+
+	totalDiffRows := 0
+	for _, count := range tdTask.DiffResult.Summary.DiffRowsCount {
+		totalDiffRows += count
+	}
+	if totalDiffRows < int(tdTask.MaxDiffRows) {
+		t.Fatalf("expected at least %d diff rows recorded before halting, got %d",
+			tdTask.MaxDiffRows, totalDiffRows)
+	}
+
+	log.Println("TestTableDiff_MaxDiffRowsLimit completed.")
 }
 
 func testTableDiff_ByteaColumnSizeCheck(t *testing.T, compositeKey bool) {

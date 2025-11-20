@@ -99,6 +99,19 @@ func writeHTMLDiffReport(diffResult types.DiffOutput, jsonFilePath string) (stri
 		{Label: "End Time", Value: formatTimestampHuman(summary.EndTime)},
 	}
 
+	if summary.MaxDiffRows > 0 {
+		summaryItems = append(summaryItems, summaryItem{
+			Label: "Max Diff Rows",
+			Value: formatInt64WithCommas(summary.MaxDiffRows),
+		})
+		if summary.DiffRowLimitReached {
+			summaryItems = append(summaryItems, summaryItem{
+				Label: "Stopped Early",
+				Value: "yes (max_diff_rows limit)",
+			})
+		}
+	}
+
 	var filteredItems []summaryItem
 	for _, item := range summaryItems {
 		if item.Value != "" && item.Value != "0" {

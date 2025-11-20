@@ -108,10 +108,12 @@ type DiffSummary struct {
 	BlockSize             int            `json:"block_size"`
 	CompareUnitSize       int            `json:"compare_unit_size"`
 	ConcurrencyFactor     int            `json:"concurrency_factor"`
+	MaxDiffRows           int64          `json:"max_diff_rows"`
 	StartTime             string         `json:"start_time"`
 	EndTime               string         `json:"end_time"`
 	TimeTaken             string         `json:"time_taken"`
 	DiffRowsCount         map[string]int `json:"diff_rows_count"`    // Key: "nodeA/nodeB", Value: count of differing rows
+	DiffRowLimitReached   bool           `json:"diff_row_limit_reached"`
 	TotalRowsChecked      int64          `json:"total_rows_checked"` // Estimated
 	InitialRangesCount    int            `json:"initial_ranges_count"`
 	MismatchedRangesCount int            `json:"mismatched_ranges_count"`
