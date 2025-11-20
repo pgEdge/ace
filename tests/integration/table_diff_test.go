@@ -984,7 +984,6 @@ func testTableDiff_TableFiltering(t *testing.T) {
 	nodesToCompare := []string{serviceN1, serviceN2}
 	tdTask := newTestTableDiffTask(t, qualifiedTableName, nodesToCompare)
 	tdTask.TableFilter = "index <= 100"
-	tdTask.TaskID = fmt.Sprintf("filter_test_%d", time.Now().UnixNano())
 
 	err = tdTask.RunChecks(false)
 	if err != nil {
