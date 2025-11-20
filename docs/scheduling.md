@@ -2,15 +2,15 @@
 
 ACE can watch for drift on a schedule so you do not have to trigger every diff manually. There are two ways to automate checks:
 
-1. **Ad-hoc runs from the CLI**: Add `--schedule` and `--every=<duration>` when invoking `table-diff`, `repset-diff`, or `schema-diff` to loop a single job until you cancel it.
+1. **Ad-hoc runs from the CLI**: Add `--schedule`/`-S` and `--every=<duration>`/`-e <duration>` when invoking `table-diff`, `repset-diff`, or `schema-diff` to loop a single job until you cancel it.
 2. **The background scheduler**: Define jobs in `ace.yaml`, then run `./ace start` to execute multiple jobs on a cadence (either by frequency or a cron expression).
 
 ## Ad-hoc Scheduling with CLI Flags
 
 All diff commands accept the same pair of options:
 
-- `--schedule` (no value): Switch the command from “run once” to “run on a timer”.
-- `--every=<duration>`: Required when `--schedule` is set. Uses Go duration syntax (`5m`, `1h30m`, `12h`, etc.).
+- `--schedule`/`-S` (no value): Switch the command from “run once” to “run on a timer”.
+- `--every=<duration>`/`-e <duration>`: Required when `--schedule` is set. Uses Go duration syntax (`5m`, `1h30m`, `12h`, etc.).
 
 When you supply both flags, ACE performs an initial run immediately, waits for the duration, and then repeats until you press <kbd>Ctrl+C</kbd> (or otherwise terminate the process). The job inherits the rest of the CLI options (nodes, block-size, output format, and so on) for every run.
 

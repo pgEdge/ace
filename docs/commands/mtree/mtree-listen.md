@@ -18,7 +18,7 @@ Starts a long-running process to listen for changes and auto-update Merkle trees
 |------|-------|-------------|---------|
 | `--dbname` | `-d` | Database name |  |
 | `--nodes` | `-n` | Nodes to include (comma or `all`) | `all` |
-| `--quiet` |  | Suppress output | `false` |
+| `--quiet` | `-q` | Suppress output | `false` |
 | `--debug` | `-v` | Debug logging | `false` |
 
 **Example**

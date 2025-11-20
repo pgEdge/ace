@@ -19,17 +19,17 @@ Runs `table-diff` on every table in a replication set and reports differences.
 |------|-------|-------------|---------|
 | `--dbname` | `-d` | Database name |  |
 | `--nodes` | `-n` | Nodes to include (comma or `all`) | `all` |
-| `--skip-tables` |  | Comma list of tables to exclude |  |
-| `--skip-file` |  | File with list of tables to exclude |  |
+| `--skip-tables` | `-T` | Comma list of tables to exclude |  |
+| `--skip-file` | `-s` | File with list of tables to exclude |  |
 | `--block-size <int>` | `-b` | Rows per block when diffing each table. Default `100000`. |
 | `--concurrency-factor <int>` | `-c` | Workers per node (1–10). Default `1`. |
-| `--compare-unit-size <int>` | `-s` | Recursive split size for mismatched blocks. Default `10000`. |
+| `--compare-unit-size <int>` | `-u` | Recursive split size for mismatched blocks. Default `10000`. |
 | `--output <json\|html>` | `-o` | Per-table diff report format. Default `json`. |
-| `--override-block-size` |  | Allow block sizes outside `ace.yaml` guardrails. |
-| `--quiet` |  | Suppress output | `false` |
+| `--override-block-size` | `-B` | Allow block sizes outside `ace.yaml` guardrails. |
+| `--quiet` | `-q` | Suppress output | `false` |
 | `--debug` | `-v` | Debug logging | `false` |
-| `--schedule` |  | Run the diff repeatedly on a timer (requires `--every`). |
-| `--every <duration>` |  | Go duration string (for example, `30m`, `6h`). Used with `--schedule`. |
+| `--schedule` | `-S` | Run the diff repeatedly on a timer (requires `--every`). |
+| `--every <duration>` | `-e` | Go duration string (for example, `30m`, `6h`). Used with `--schedule`. |
 
 **Example**
 

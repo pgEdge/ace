@@ -20,9 +20,9 @@ Manually applies changes to a table’s Merkle tree (also supports rebalancing).
 |------|-------|-------------|---------|
 | `--dbname` | `-d` | Database name |  |
 | `--nodes` | `-n` | Nodes to include (comma or `all`) | `all` |
-| `--max-cpu-ratio` |  | Max CPU ratio | `0.5` |
-| `--rebalance` |  | Merge small blocks to rebalance | `false` |
-| `--quiet` |  | Suppress output | `false` |
+| `--max-cpu-ratio` | `-m` | Max CPU ratio | `0.5` |
+| `--rebalance` | `-l` | Merge small blocks to rebalance | `false` |
+| `--quiet` | `-q` | Suppress output | `false` |
 | `--debug` | `-v` | Debug logging | `false` |
 
 **Example**

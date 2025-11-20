@@ -18,7 +18,7 @@ Drops all database objects created by `mtree init` across the cluster (schema, M
 |------|-------|-------------|---------|
 | `--dbname` | `-d` | Database name |  |
 | `--nodes` | `-n` | Nodes to include (comma or `all`) | `all` |
-| `--quiet` |  | Suppress output | `false` |
+| `--quiet` | `-q` | Suppress output | `false` |
 | `--debug` | `-v` | Debug logging | `false` |
 
 **Example**

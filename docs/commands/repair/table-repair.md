@@ -11,7 +11,7 @@ Performs repairs on tables of divergent nodes based on the diff report generated
 - `cluster_name`: Name of the cluster. Optional. Overrides `default_cluster` in `ace.yaml` if specified.
 - `schema.table_name`: Schema‑qualified table name to repair.
 - `--diff-file`: Path to the diff JSON file.
-- `--source-of-truth` (`-s`): Authoritative node for repairs. *Required* unless you run in bidirectional insert-only mode.
+- `--source-of-truth` (`-r`): Authoritative node for repairs. *Required* unless you run in bidirectional insert-only mode.
 
 ## Options
 
@@ -20,14 +20,14 @@ Performs repairs on tables of divergent nodes based on the diff report generated
 | `--diff-file <path>` | `-f` | Path to the diff file (required) |  |
 | `--dbname <name>` | `-d` | Database name override |  |
 | `--nodes <list>` | `-n` | Nodes to include when resolving cluster metadata | `all` |
-| `--source-of-truth <node>` | `-s` | Authoritative node for repairs (required unless `--bidirectional`) |  |
-| `--dry-run` |  | Emit a dry-run plan instead of executing changes | `false` |
-| `--generate-report` |  | Write a JSON repair report to `reports/<YYYY-MM-DD>/repair_report_<HHMMSS.mmm>.json` | `false` |
-| `--insert-only` |  | Only insert missing rows; skip updates/deletes | `false` |
-| `--upsert-only` |  | Insert or update rows; skip deletes | `false` |
-| `--bidirectional` |  | Perform insert-only repairs in both directions | `false` |
-| `--fire-triggers` |  | Execute triggers (otherwise runs with `session_replication_role='replica'`) | `false` |
-| `--quiet` |  | Suppress non-essential logging | `false` |
+| `--source-of-truth <node>` | `-r` | Authoritative node for repairs (required unless `--bidirectional`) |  |
+| `--dry-run` | `-y` | Emit a dry-run plan instead of executing changes | `false` |
+| `--generate-report` | `-g` | Write a JSON repair report to `reports/<YYYY-MM-DD>/repair_report_<HHMMSS.mmm>.json` | `false` |
+| `--insert-only` | `-i` | Only insert missing rows; skip updates/deletes | `false` |
+| `--upsert-only` | `-P` | Insert or update rows; skip deletes | `false` |
+| `--bidirectional` | `-Z` | Perform insert-only repairs in both directions | `false` |
+| `--fire-triggers` | `-t` | Execute triggers (otherwise runs with `session_replication_role='replica'`) | `false` |
+| `--quiet` | `-q` | Suppress non-essential logging | `false` |
 | `--debug` | `-v` | Enable verbose logging | `false` |
 
 ## Example

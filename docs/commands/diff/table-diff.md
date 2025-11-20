@@ -15,18 +15,18 @@ This command compares the data in the specified table across nodes in a cluster 
 
 | Option | Alias | Description |
 |---|---|---|
-| `-d, --dbname <name>` |  | Database name. Defaults to the first DB in the cluster config. |
+| `--dbname <name>` | `-d` | Database name. Defaults to the first DB in the cluster config. |
 | `--block-size <int>` | `-b` | Rows processed per comparison block. Default `100000`. Honours `ace.yaml` limits unless `--override-block-size` is set. |
 | `--concurrency-factor <int>` | `-c` | Number of workers per node (1–10). Default `1`. |
-| `--compare-unit-size <int>` | `-s` | Recursive split size for mismatched blocks. Default `10000`. |
+| `--compare-unit-size <int>` | `-u` | Recursive split size for mismatched blocks. Default `10000`. |
 | `--output <json\|html>` | `-o` | Report format. Default `json`. When `html`, both JSON and HTML files share the same timestamped prefix. |
 | `--nodes <list>` | `-n` | Comma-separated node list or `all`. Up to three-way diffs are supported. |
-| `--table-filter <WHERE>` |  | Optional SQL `WHERE` clause applied on every node before hashing. |
-| `--override-block-size` |  | Skip block-size safety checks defined in `ace.yaml`. |
-| `--quiet` |  | Suppress progress output. Results still write to the diff file. |
+| `--table-filter <WHERE>` | `-F` | Optional SQL `WHERE` clause applied on every node before hashing. |
+| `--override-block-size` | `-B` | Skip block-size safety checks defined in `ace.yaml`. |
+| `--quiet` | `-q` | Suppress progress output. Results still write to the diff file. |
 | `--debug` | `-v` | Enable verbose logging. |
-| `--schedule` |  | Run the diff repeatedly on a timer (requires `--every`). |
-| `--every <duration>` |  | Go duration string (for example, `15m`, `1h30m`). Used with `--schedule`. |
+| `--schedule` | `-S` | Run the diff repeatedly on a timer (requires `--every`). |
+| `--every <duration>` | `-e` | Go duration string (for example, `15m`, `1h30m`). Used with `--schedule`. |
 
 ## Example
 
@@ -73,7 +73,7 @@ ACE optimises comparisons with multiprocessing and block hashing:
 
 ### Tuning tips
 1. Tune `--block-size` and `--concurrency-factor` for your hardware and data profile.
-2. Use `--table-filter` to narrow scope on very large tables.
+2. Use `--table-filter`/`-F` to narrow scope on very large tables.
 3. Prefer `--output html` when you’ll manually review diffs.
 4. Use `--override-block-size` sparingly; the guardrails in `ace.yaml` prevent allocations that can overwhelm memory.
 

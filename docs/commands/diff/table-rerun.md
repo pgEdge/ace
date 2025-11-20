@@ -14,10 +14,10 @@ Re-runs a previous diff to confirm fixes or check if inconsistencies persist.
 
 | Flag | Alias | Description | Default |
 |------|-------|-------------|---------|
-| `--diff-file` |  | Path to original diff (**required**) |  |
+| `--diff-file` | `-f` | Path to original diff (**required**) |  |
 | `--dbname` | `-d` | Database name |  |
 | `--nodes` | `-n` | Nodes to include (comma or `all`) | `all` |
-| `--quiet` |  | Suppress output | `false` |
+| `--quiet` | `-q` | Suppress output | `false` |
 | `--debug` | `-v` | Debug logging | `false` |
 
 **Tips**
