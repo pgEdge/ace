@@ -23,6 +23,7 @@ type tableDiffRequest struct {
 	BlockSize         int      `json:"block_size"`
 	Concurrency       int      `json:"concurrency_factor"`
 	CompareUnitSize   int      `json:"compare_unit_size"`
+	MaxDiffRows       int64    `json:"max_diff_rows"`
 	TableFilter       string   `json:"table_filter"`
 	OverrideBlockSize bool     `json:"override_block_size"`
 	Quiet             bool     `json:"quiet"`
@@ -205,6 +206,7 @@ func (s *APIServer) handleTableDiff(w http.ResponseWriter, r *http.Request) {
 	task.BlockSize = s.resolveBlockSize(req.BlockSize)
 	task.ConcurrencyFactor = s.resolveConcurrency(req.Concurrency)
 	task.CompareUnitSize = s.resolveCompareUnitSize(req.CompareUnitSize)
+	task.MaxDiffRows = s.resolveMaxDiffRows(req.MaxDiffRows)
 	task.Output = "json"
 	task.Nodes = s.resolveNodes(req.Nodes)
 	task.TableFilter = strings.TrimSpace(req.TableFilter)
@@ -272,6 +274,16 @@ func (s *APIServer) resolveCompareUnitSize(requested int) int {
 		return cfg.TableDiff.CompareUnitSize
 	}
 	return 10000
+}
+
+func (s *APIServer) resolveMaxDiffRows(requested int64) int64 {
+	if requested > 0 {
+		return requested
+	}
+	if cfg := s.cfg; cfg != nil && cfg.TableDiff.MaxDiffRows > 0 {
+		return cfg.TableDiff.MaxDiffRows
+	}
+	return 0
 }
 
 func (s *APIServer) resolveNodes(nodes []string) string {
