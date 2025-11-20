@@ -16,7 +16,7 @@ If you notice a pronounced change in a node's performance:
 
 * Review your ACE commands; experiment with the [table-diff tuning flags](#command-options-that-impact-performance) such as `--block-size`, `--concurrency-factor`, and `--compare-unit-size`.
 * Confirm that your table has been `ANALYZE`d recently.
-* Use `--table-filter` and `--nodes` to target hot ranges.
+* Use `--table-filter`/`-F` and `--nodes` to target hot ranges.
 * If you're using ACE on huge tables, use Merkle trees.
 * After repairing differences, run `table-rerun` to validate the results.
 
@@ -26,7 +26,7 @@ If you notice a pronounced change in a node's performance:
 When invoking [ACE commands](commands/index.md), review the available command options; many of the options are designed to improve performance.  For example:
 
 - **`--block-size`**
-    Controls the number of rows hashed per block. Larger blocks reduce round-trips but can increase memory usage or hash time. Defaults to `100000`, and respects the guardrails defined in `ace.yaml` unless `--override-block-size` is set.
+    Controls the number of rows hashed per block. Larger blocks reduce round-trips but can increase memory usage or hash time. Defaults to `100000`, and respects the guardrails defined in `ace.yaml` unless `--override-block-size`/`-B` is set.
 
 - **`--concurrency-factor`**
     Increases the number of workers per node (1–10). Higher values improve throughput on machines with spare CPU, but can create contention on smaller hosts. Default is `1`.
@@ -34,10 +34,10 @@ When invoking [ACE commands](commands/index.md), review the available command op
 - **`--compare-unit-size`**
     Sets the minimum block size used when ACE recursively drills into mismatched blocks. Smaller values provide more granular comparisons at the cost of additional round-trips. Default is `10000`.
 
-- **`--override-block-size`**
+- **`--override-block-size` (`-B`)**
     Override the safety limits defined in `ace.yaml`. Use cautiously: extremely large blocks can lead to `array_agg` memory pressure.
 
-- **`--table-filter`**
+- **`--table-filter` (`-F`)**
     Use a table filter clause to narrow the comparison scope for large tables.
 
 - **`--nodes`**  

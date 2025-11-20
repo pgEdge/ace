@@ -22,7 +22,7 @@ If you generate an HTML report, ACE generates an interactive report with:
 
 !!! hint
 
-     Running diff commands can be resource-intensive. Experiment with `--block-size`, `--concurrency-factor`, and `--compare-unit-size` to balance runtime and resource usage. Use `--table-filter` for large tables to reduce comparison scope, and generate HTML reports to simplify analysis.
+     Running diff commands can be resource-intensive. Experiment with `--block-size`, `--concurrency-factor`, and `--compare-unit-size` to balance runtime and resource usage. Use `--table-filter`/`-F` for large tables to reduce comparison scope, and generate HTML reports to simplify analysis.
 
 !!! info
 

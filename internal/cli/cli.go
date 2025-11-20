@@ -56,9 +56,10 @@ func SetupCLI() *cli.App {
 			Value:   "all",
 		},
 		&cli.BoolFlag{
-			Name:  "quiet",
-			Usage: "Whether to suppress output",
-			Value: false,
+			Name:    "quiet",
+			Aliases: []string{"q"},
+			Usage:   "Whether to suppress output",
+			Value:   false,
 		},
 		&cli.BoolFlag{
 			Name:    "debug",
@@ -83,7 +84,7 @@ func SetupCLI() *cli.App {
 		},
 		&cli.IntFlag{
 			Name:    "compare-unit-size",
-			Aliases: []string{"s"},
+			Aliases: []string{"u"},
 			Usage:   "Max size of the smallest block to use when diffs are present",
 			Value:   10000,
 		},
@@ -94,15 +95,17 @@ func SetupCLI() *cli.App {
 			Value:   "json",
 		},
 		&cli.BoolFlag{
-			Name:  "override-block-size",
-			Usage: "Override block size",
-			Value: false,
+			Name:    "override-block-size",
+			Aliases: []string{"B"},
+			Usage:   "Override block size",
+			Value:   false,
 		},
 	}
 
 	rerunOnlyFlags := []cli.Flag{
 		&cli.StringFlag{
 			Name:     "diff-file",
+			Aliases:  []string{"f"},
 			Usage:    "Path to the diff file to rerun from (required)",
 			Required: true,
 		},
@@ -110,31 +113,36 @@ func SetupCLI() *cli.App {
 
 	skipFlags := []cli.Flag{
 		&cli.StringFlag{
-			Name:  "skip-tables",
-			Usage: "Comma-separated list of tables to skip",
+			Name:    "skip-tables",
+			Aliases: []string{"T"},
+			Usage:   "Comma-separated list of tables to skip",
 		},
 		&cli.StringFlag{
-			Name:  "skip-file",
-			Usage: "Path to a file with a list of tables to skip",
+			Name:    "skip-file",
+			Aliases: []string{"s"},
+			Usage:   "Path to a file with a list of tables to skip",
 		},
 	}
 
 	tableDiffFlags := append(commonFlags, diffFlags...)
 	tableDiffFlags = append(tableDiffFlags,
 		&cli.StringFlag{
-			Name:  "table-filter",
-			Usage: "Where clause expression to use while diffing tables",
-			Value: "",
+			Name:    "table-filter",
+			Aliases: []string{"F"},
+			Usage:   "Where clause expression to use while diffing tables",
+			Value:   "",
 		},
 		&cli.BoolFlag{
-			Name:  "schedule",
-			Usage: "Schedule a table-diff job to run periodically",
-			Value: false,
+			Name:    "schedule",
+			Aliases: []string{"S"},
+			Usage:   "Schedule a table-diff job to run periodically",
+			Value:   false,
 		},
 		&cli.StringFlag{
-			Name:  "every",
-			Usage: "Time duration (e.g., 5m, 3h, etc.)",
-			Value: "",
+			Name:    "every",
+			Aliases: []string{"e"},
+			Usage:   "Time duration (e.g., 5m, 3h, etc.)",
+			Value:   "",
 		},
 	)
 
@@ -149,38 +157,44 @@ func SetupCLI() *cli.App {
 		},
 		&cli.StringFlag{
 			Name:    "source-of-truth",
-			Aliases: []string{"s"},
+			Aliases: []string{"r"},
 			Usage:   "Name of the node to be considered the source of truth",
 		},
 		&cli.BoolFlag{
-			Name:  "dry-run",
-			Usage: "Show what would be done without executing",
-			Value: false,
+			Name:    "dry-run",
+			Aliases: []string{"y"},
+			Usage:   "Show what would be done without executing",
+			Value:   false,
 		},
 		&cli.BoolFlag{
-			Name:  "generate-report",
-			Usage: "Generate a report of the repair operation",
-			Value: false,
+			Name:    "generate-report",
+			Aliases: []string{"g"},
+			Usage:   "Generate a report of the repair operation",
+			Value:   false,
 		},
 		&cli.BoolFlag{
-			Name:  "insert-only",
-			Usage: "Only perform inserts, no updates or deletes",
-			Value: false,
+			Name:    "insert-only",
+			Aliases: []string{"i"},
+			Usage:   "Only perform inserts, no updates or deletes",
+			Value:   false,
 		},
 		&cli.BoolFlag{
-			Name:  "upsert-only",
-			Usage: "Only perform upserts (insert or update), no deletes",
-			Value: false,
+			Name:    "upsert-only",
+			Aliases: []string{"P"},
+			Usage:   "Only perform upserts (insert or update), no deletes",
+			Value:   false,
 		},
 		&cli.BoolFlag{
-			Name:  "fire-triggers",
-			Usage: "Whether to fire triggers during repairs",
-			Value: false,
+			Name:    "fire-triggers",
+			Aliases: []string{"t"},
+			Usage:   "Whether to fire triggers during repairs",
+			Value:   false,
 		},
 		&cli.BoolFlag{
-			Name:  "bidirectional",
-			Usage: "Whether to perform repairs in both directions. Can be used only with the insert-only option",
-			Value: false,
+			Name:    "bidirectional",
+			Aliases: []string{"Z"},
+			Usage:   "Whether to perform repairs in both directions. Can be used only with the insert-only option",
+			Value:   false,
 		},
 	}
 
@@ -197,33 +211,38 @@ func SetupCLI() *cli.App {
 	repsetDiffFlags = append(repsetDiffFlags, skipFlags...)
 	repsetDiffFlags = append(repsetDiffFlags,
 		&cli.BoolFlag{
-			Name:  "schedule",
-			Usage: "Schedule a repset-diff job to run periodically",
-			Value: false,
+			Name:    "schedule",
+			Aliases: []string{"S"},
+			Usage:   "Schedule a repset-diff job to run periodically",
+			Value:   false,
 		},
 		&cli.StringFlag{
-			Name:  "every",
-			Usage: "Time duration (e.g., 5m, 3h, etc.)",
-			Value: "",
+			Name:    "every",
+			Aliases: []string{"e"},
+			Usage:   "Time duration (e.g., 5m, 3h, etc.)",
+			Value:   "",
 		},
 	)
 
 	schemaDiffFlags := append(commonFlags, diffFlags...)
 	schemaDiffFlags = append(schemaDiffFlags, skipFlags...)
 	schemaDiffFlags = append(schemaDiffFlags, &cli.BoolFlag{
-		Name:  "ddl-only",
-		Usage: "Compare only schema objects (tables, functions, etc.), not table data",
-		Value: false,
+		Name:    "ddl-only",
+		Aliases: []string{"L"},
+		Usage:   "Compare only schema objects (tables, functions, etc.), not table data",
+		Value:   false,
 	},
 		&cli.BoolFlag{
-			Name:  "schedule",
-			Usage: "Schedule a schema-diff job to run periodically",
-			Value: false,
+			Name:    "schedule",
+			Aliases: []string{"S"},
+			Usage:   "Schedule a schema-diff job to run periodically",
+			Value:   false,
 		},
 		&cli.StringFlag{
-			Name:  "every",
-			Usage: "Time duration (e.g., 5m, 3h, etc.)",
-			Value: "",
+			Name:    "every",
+			Aliases: []string{"e"},
+			Usage:   "Time duration (e.g., 5m, 3h, etc.)",
+			Value:   "",
 		},
 	)
 
@@ -235,61 +254,71 @@ func SetupCLI() *cli.App {
 			Value:   "10000",
 		},
 		&cli.Float64Flag{
-			Name:  "max-cpu-ratio",
-			Usage: "Max CPU for parallel operations",
-			Value: 0.5,
+			Name:    "max-cpu-ratio",
+			Aliases: []string{"m"},
+			Usage:   "Max CPU for parallel operations",
+			Value:   0.5,
 		},
 		&cli.BoolFlag{
-			Name:  "override-block-size",
-			Usage: "Skip block size check, and potentially tolerate unsafe block sizes",
-			Value: false,
+			Name:    "override-block-size",
+			Aliases: []string{"B"},
+			Usage:   "Skip block size check, and potentially tolerate unsafe block sizes",
+			Value:   false,
 		},
 		&cli.BoolFlag{
-			Name:  "analyse",
-			Usage: "Run ANALYZE on the table",
-			Value: false,
+			Name:    "analyse",
+			Aliases: []string{"a"},
+			Usage:   "Run ANALYZE on the table",
+			Value:   false,
 		},
 		&cli.BoolFlag{
-			Name:  "recreate-objects",
-			Usage: "Drop and recreate Merkle tree objects",
-			Value: false,
+			Name:    "recreate-objects",
+			Aliases: []string{"R"},
+			Usage:   "Drop and recreate Merkle tree objects",
+			Value:   false,
 		},
 		&cli.BoolFlag{
-			Name:  "write-ranges",
-			Usage: "Write block ranges to a JSON file",
-			Value: false,
+			Name:    "write-ranges",
+			Aliases: []string{"w"},
+			Usage:   "Write block ranges to a JSON file",
+			Value:   false,
 		},
 		&cli.StringFlag{
-			Name:  "ranges-file",
-			Usage: "Path to a file with pre-computed ranges",
+			Name:    "ranges-file",
+			Aliases: []string{"k"},
+			Usage:   "Path to a file with pre-computed ranges",
 		},
 	}
 	mtreeBuildFlags = append(mtreeBuildFlags, commonFlags...)
 
 	mtreeUpdateFlags := []cli.Flag{
 		&cli.Float64Flag{
-			Name:  "max-cpu-ratio",
-			Usage: "Max CPU for parallel operations",
-			Value: 0.5,
+			Name:    "max-cpu-ratio",
+			Aliases: []string{"m"},
+			Usage:   "Max CPU for parallel operations",
+			Value:   0.5,
 		},
 		&cli.BoolFlag{
-			Name:  "rebalance",
-			Usage: "Rebalance the tree by merging small blocks",
-			Value: false,
+			Name:    "rebalance",
+			Aliases: []string{"l"},
+			Usage:   "Rebalance the tree by merging small blocks",
+			Value:   false,
 		},
 	}
 	mtreeUpdateFlags = append(mtreeUpdateFlags, commonFlags...)
 
 	mtreeDiffFlags := []cli.Flag{
 		&cli.Float64Flag{
-			Name:  "max-cpu-ratio",
-			Usage: "Max CPU for parallel operations",
-			Value: 0.5,
+			Name:    "max-cpu-ratio",
+			Aliases: []string{"m"},
+			Usage:   "Max CPU for parallel operations",
+			Value:   0.5,
 		},
 		&cli.IntFlag{
-			Name:  "batch-size",
-			Usage: "Number of ranges to process in a batch",
-			Value: 100,
+			Name:    "batch-size",
+			Aliases: []string{"h"},
+			Usage:   "Number of ranges to process in a batch",
+			Value:   100,
 		},
 		&cli.StringFlag{
 			Name:    "output",
@@ -299,7 +328,7 @@ func SetupCLI() *cli.App {
 		},
 		&cli.BoolFlag{
 			Name:    "skip-update",
-			Aliases: []string{"s"},
+			Aliases: []string{"U"},
 			Usage:   "Skip updating the Merkle tree",
 			Value:   false,
 		},
@@ -315,12 +344,13 @@ func SetupCLI() *cli.App {
 		},
 		&cli.BoolFlag{
 			Name:    "force",
-			Aliases: []string{"f"},
+			Aliases: []string{"x"},
 			Usage:   "Overwrite the config file if it already exists",
 		},
 		&cli.BoolFlag{
-			Name:  "stdout",
-			Usage: "Print the config to stdout instead of writing a file",
+			Name:    "stdout",
+			Aliases: []string{"z"},
+			Usage:   "Print the config to stdout instead of writing a file",
 		},
 	}
 
@@ -333,12 +363,13 @@ func SetupCLI() *cli.App {
 		},
 		&cli.BoolFlag{
 			Name:    "force",
-			Aliases: []string{"f"},
+			Aliases: []string{"x"},
 			Usage:   "Overwrite the service file if it already exists",
 		},
 		&cli.BoolFlag{
-			Name:  "stdout",
-			Usage: "Print the service file to stdout instead of writing a file",
+			Name:    "stdout",
+			Aliases: []string{"z"},
+			Usage:   "Print the service file to stdout instead of writing a file",
 		},
 	}
 
@@ -368,9 +399,10 @@ func SetupCLI() *cli.App {
 						Usage:   "Enable debug logging",
 					},
 					&cli.StringFlag{
-						Name:  "component",
-						Usage: "Component to start: scheduler, api, or all",
-						Value: "all",
+						Name:    "component",
+						Aliases: []string{"C"},
+						Usage:   "Component to start: scheduler, api, or all",
+						Value:   "all",
 					},
 				},
 				Action: StartSchedulerCLI,

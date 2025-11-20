@@ -19,7 +19,7 @@ Compares Spock metadata across nodes.
 | `--dbname` | `-d` | Database name |  |
 | `--nodes` | `-n` | Nodes to include (comma or `all`) | `all` |
 | `--output` | `-o` | Output format | `json` |
-| `--quiet` |  | Suppress non-essential output | `false` |
+| `--quiet` | `-q` | Suppress non-essential output | `false` |
 | `--debug` | `-v` | Debug logging | `false` |
 
 **Example**

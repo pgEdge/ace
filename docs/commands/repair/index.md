@@ -21,7 +21,7 @@ The `table-repair` command fixes data inconsistencies identified by `table-diff`
 
 - Use `--dry-run` first to review changes.
 - Use `--upsert-only` or `--insert-only` for sensitive tables to avoid deletes.
-- `table-repair` only fixes rows present in the diff file. If a diff is too large, consider breaking the table into filtered chunks (`table-diff ... --table-filter`) and repairing iteratively.
+- `table-repair` only fixes rows present in the diff file. If a diff is too large, consider breaking the table into filtered chunks (`table-diff ... --table-filter`/`-F`) and repairing iteratively.
 - For very large, multi‑table incidents, a dump/restore may be more practical.
 
 ---
