@@ -14,29 +14,33 @@ The commands in the first section of this page are designed for use without Merk
 Compares a table between nodes and generates a diff report.
 
 **Usage:**
+
 `./ace table-diff [flags] [cluster] <schema.table>`
 
 **Arguments:**
--   `[cluster]`: Optional cluster override. When omitted, ACE uses the `default_cluster` from `ace.yaml`.
--   `<schema.table>`: The fully qualified name of the table to compare.
+
+  - `[cluster]`: Optional cluster override. When omitted, ACE uses the `default_cluster` from `ace.yaml`.
+  - `<schema.table>`: The fully qualified name of the table to compare.
 
 **Flags:**
-| Flag                  | Alias | Description                                                        | Default  |
-| --------------------- | ----- | ------------------------------------------------------------------ | -------- |
-| `--dbname`            | `-d`  | Name of the database                                               |          |
-| `--block-size`        | `-b`  | Number of rows per block                                           | 100000   |
-| `--concurrency-factor`| `-c`  | Concurrency factor                                                 | 1        |
-| `--compare-unit-size` | `-u`  | Max size of the smallest block to use when diffs are present       | 10000    |
-| `--output`            | `-o`  | Output format (`json` or `html`)                                     | json     |
-| `--nodes`             | `-n`  | Nodes to include in the diff (comma-separated, or "all")           | all      |
-| `--table-filter`      | `-F`  | `WHERE` clause expression to use while diffing tables              |          |
-| `--override-block-size`| `-B` | Allow block sizes outside `ace.yaml` guardrails                    | false    |
-| `--quiet`             | `-q`  | Suppress progress output                                           | false    |
-| `--debug`             | `-v`  | Enable debug logging                                               | false    |
-| `--schedule`          | `-S` | Run the diff repeatedly on a timer (requires `--every`)            | false    |
-| `--every`             | `-e` | Go duration string (e.g., `30m`, `2h`) used with `--schedule`      |          |
+
+| Flag                   | Alias | Description                                                         | Default |
+|------------------------|-------|---------------------------------------------------------------------|---------|
+| `--dbname`             | `-d`  | Name of the database                                                |         |
+| `--block-size`         | `-b`  | Number of rows per block                                            | 100000  |
+| `--concurrency-factor` | `-c`  | Concurrency factor                                                  | 1       |
+| `--compare-unit-size`  | `-u`  | Max size of the smallest block to use when diffs are present        | 10000   |
+| `--output`             | `-o`  | Output format (`json` or `html`)                                    | json    |
+| `--nodes`              | `-n`  | Nodes to include in the diff (comma-separated, or "all")            | all     |
+| `--table-filter`       | `-F`  | `WHERE` clause expression to use while diffing tables               |         |
+| `--override-block-size`| `-B`  | Allow block sizes outside `ace.yaml` guardrails                     | false   |
+| `--quiet`              | `-q`  | Suppress progress output                                            | false   |
+| `--debug`              | `-v`  | Enable debug logging                                                | false   |
+| `--schedule`           | `-S`  | Run the diff repeatedly on a timer (requires `--every`)             | false   |
+| `--every`              | `-e`  | Go duration string (e.g., `30m`, `2h`) used with `--schedule`       |         |
 
 **Example:**
+
 ```sh
 ./ace table-diff --nodes="n1,n2" --dbname=mydatabase my-cluster public.my_table 
 ```
@@ -51,29 +55,33 @@ Diff files follow the pattern `<schema>_<table>_diffs-<timestamp>.json`. When `-
 Repairs table inconsistencies using a diff file.
 
 **Usage:**
+
 `./ace table-repair [cluster] <schema.table> [flags]`
 
 **Arguments:**
--   `[cluster]`: Optional cluster override. When omitted, ACE uses the `default_cluster` from `ace.yaml`.
--   `<schema.table>`: The fully qualified name of the table to repair.
+
+  - `[cluster]`: Optional cluster override. When omitted, ACE uses the `default_cluster` from `ace.yaml`.
+  - `<schema.table>`: The fully qualified name of the table to repair.
 
 **Flags:**
-| Flag                  | Alias | Description                                                        | Default  |
-| --------------------- | ----- | ------------------------------------------------------------------ | -------- |
-| `--diff-file`         | `-f`  | Path to the diff file (**required**)                               |          |
-| `--dbname`            | `-d`  | Name of the database                                               |          |
-| `--source-of-truth`   | `-r`  | Name of the node to be considered the source of truth              |          |
-| `--nodes`             | `-n`  | Nodes to include for cluster info (comma-separated, or "all")      | all      |
-| `--dry-run`           | `-y` | Show what would be done without executing                          | false    |
-| `--generate-report`   | `-g` | Write a JSON audit report under `reports/<date>/`                  | false    |
-| `--insert-only`       | `-i` | Only perform inserts, no updates or deletes                        | false    |
-| `--upsert-only`       | `-P` | Only perform upserts (insert or update), no deletes                | false    |
-| `--bidirectional`     | `-Z` | Perform insert-only repairs in both directions                     | false    |
-| `--fire-triggers`     | `-t` | Fire triggers during repairs                                       | false    |
-| `--quiet`             | `-q`  | Suppress output                                                    | false    |
-| `--debug`             | `-v`  | Enable debug logging                                               | false    |
+
+| Flag                | Alias | Description                                                          | Default |
+|---------------------|-------|----------------------------------------------------------------------|---------|
+| `--diff-file`       | `-f`  | Path to the diff file (**required**)                                 |         |
+| `--dbname`          | `-d`  | Name of the database                                                 |         |
+| `--source-of-truth` | `-r`  | Name of the node to be considered the source of truth                |         |
+| `--nodes`           | `-n`  | Nodes to include for cluster info (comma-separated, or "all")        | all     |
+| `--dry-run`         | `-y`  | Show what would be done without executing                            | false   |
+| `--generate-report` | `-g`  | Write a JSON audit report under `reports/<date>/`                    | false   |
+| `--insert-only`     | `-i`  | Only perform inserts, no updates or deletes                          | false   |
+| `--upsert-only`     | `-P`  | Only perform upserts (insert or update), no deletes                  | false   |
+| `--bidirectional`   | `-Z`  | Perform insert-only repairs in both directions                       | false   |
+| `--fire-triggers`   | `-t`  | Fire triggers during repairs                                         | false   |
+| `--quiet`           | `-q`  | Suppress output                                                      | false   |
+| `--debug`           | `-v`  | Enable debug logging                                                 | false   |
 
 **Example:**
+
 ```sh
 ./ace table-repair my-cluster public.my_table \
   --diff-file=public_my_table_diffs-20231027100000.json \
@@ -87,21 +95,26 @@ Repair reports (when requested) are written to `reports/<YYYY-MM-DD>/repair_repo
 Re-runs a diff from a file to check for persistent differences.
 
 **Usage:**
+
 `./ace table-rerun [flags] [cluster]`
 
 **Arguments:**
--   `[cluster]`: Optional cluster override. When omitted, ACE uses the `default_cluster` from `ace.yaml`.
+
+  - `[cluster]`: Optional cluster override. When omitted, ACE uses the `default_cluster` from `ace.yaml`.
 
 **Flags:**
-| Flag                  | Alias | Description                                                        | Default  |
-| --------------------- | ----- | ------------------------------------------------------------------ | -------- |
-| `--diff-file`         | `-f`  | Path to the diff file to re-run (**required**)                     |          |
-| `--dbname`            | `-d`  | Name of the database                                               |          |
-| `--nodes`             | `-n`  | Nodes to include in the diff (comma-separated, or "all")           | all      |
-| `--quiet`             | `-q`  | Suppress output                                                    | false    |
-| `--debug`             | `-v`  | Enable debug logging                                               | false    |
+
+| Flag                  | Alias | Description                                                        | Default |
+|-----------------------|-------|--------------------------------------------------------------------|---------|
+| `--diff-file`         | `-f`  | Path to the diff file to re-run (**required**)                     |         |
+| `--dbname`            | `-d`  | Name of the database                                               |         |
+| `--nodes`             | `-n`  | Nodes to include in the diff (comma-separated, or "all")           | all     |
+| `--quiet`             | `-q`  | Suppress output                                                    | false   |
+| `--debug`             | `-v`  | Enable debug logging                                               | false   |
+
 
 **Example:**
+
 ```sh
 ./ace table-rerun --diff-file=public_my_table_diffs-20231027100000.json --dbname=mydatabase my-cluster
 ```
@@ -113,31 +126,34 @@ If any rows still differ, `table-rerun` writes a fresh report named `<schema>_<t
 Compares schemas across nodes in a pgEdge cluster. By default, `schema-diff` performs a `table-diff` on every table in the schema and reports differences. Alternatively, `schema-diff` could also be used to compare if two or more nodes have the same set of tables, views, functions, and indices, which can be achieved by passing in `ddl-only`
 
 **Usage:**
+
 `./ace schema-diff [flags] [cluster] <schema>`
 
 **Arguments:**
--   `[cluster]`: Optional cluster override. When omitted, ACE uses the `default_cluster` from `ace.yaml`.
--   `<schema>`: The name of the schema to compare.
+
+  - `[cluster]`: Optional cluster override. When omitted, ACE uses the `default_cluster` from `ace.yaml`.
+  - `<schema>`: The name of the schema to compare.
 
 **Flags:**
-| Flag                  | Alias | Description                                                        | Default  |
-| --------------------- | ----- | ------------------------------------------------------------------ | -------- |
-| `--dbname`            | `-d`  | Name of the database                                               |          |
-| `--nodes`             | `-n`  | Nodes to include in the diff (comma-separated, or "all")           | all      |
-| `--skip-tables`       | `-T` | Tables to exclude from the diff (comma-separated)                  |          |
-| `--skip-file`         | `-s` | File containing a list of tables to exclude                        |          |
-| `--block-size`        | `-b`  | Rows per block when diffing tables                                 | 100000   |
-| `--concurrency-factor`| `-c`  | Workers per node                                                    | 1        |
-| `--compare-unit-size` | `-u`  | Recursive split size for mismatched blocks                         | 10000    |
-| `--output`            | `-o`  | Per-table diff output format (`json` or `html`)                    | json     |
-| `--override-block-size`| `-B` | Allow block sizes outside `ace.yaml` guardrails                    | false    |
-| `--ddl-only`          | `-L` | Only compare if objects (tables, views, functions, and indices) are the same, not individual tables                                          | false    |
-| `--quiet`             | `-q`  | Suppress output                                                    | false    |
-| `--debug`             | `-v`  | Enable debug logging                                               | false    |
-| `--schedule`          | `-S` | Run the schema diff repeatedly on a timer (requires `--every`)     | false    |
-| `--every`             | `-e` | Go duration string (e.g., `24h`) used with `--schedule`; not valid with `--ddl-only` |          |
+
+| Flag                   | Alias | Description                                                             | Default |
+|------------------------|-------|-------------------------------------------------------------------------|---------|
+| `--dbname`             | `-d`  | Name of the database                                                    |         |
+| `--block-size`         | `-b`  | Number of rows per block                                                | 100000  |
+| `--concurrency-factor` | `-c`  | Concurrency factor                                                      | 1       |
+| `--compare-unit-size`  | `-u`  | Max size of the smallest block to use when diffs are present            | 10000   |
+| `--output`             | `-o`  | Output format (`json` or `html`)                                        | json    |
+| `--nodes`              | `-n`  | Nodes to include in the diff (comma-separated, or "all")                | all     |
+| `--table-filter`       | `-F`  | `WHERE` clause expression to use while diffing tables                   |         |
+| `--override-block-size`| `-B`  | Allow block sizes outside `ace.yaml` guardrails                         | false   |
+| `--quiet`              | `-q`  | Suppress progress output                                                | false   |
+| `--debug`              | `-v`  | Enable debug logging                                                    | false   |
+| `--schedule`           | `-S`  | Run the diff repeatedly on a timer (requires `--every`)                 | false   |
+| `--every`              | `-e`  | Go duration string (e.g., `24h`) used with `--schedule`; not valid with `--ddl-only` |         |
+
 
 **Example:**
+
 ```sh
 ./ace schema-diff --dbname=mydatabase my-cluster public
 ```
@@ -151,30 +167,34 @@ When `--ddl-only` is omitted, each table uses `table-diff` with the same block s
 Performs a `table-diff` on every table in a replication set and reports differences.
 
 **Usage:**
+
 `./ace repset-diff [flags] [cluster] <repset>`
 
 **Arguments:**
--   `[cluster]`: Optional cluster override. When omitted, ACE uses the `default_cluster` from `ace.yaml`.
--   `<repset>`: The name of the replication set to compare.
+
+  - `[cluster]`: Optional cluster override. When omitted, ACE uses the `default_cluster` from `ace.yaml`.
+  - `<repset>`: The name of the replication set to compare.
 
 **Flags:**
-| Flag                  | Alias | Description                                                        | Default  |
-| --------------------- | ----- | ------------------------------------------------------------------ | -------- |
-| `--dbname`            | `-d`  | Name of the database                                               |          |
-| `--nodes`             | `-n`  | Nodes to include in the diff (comma-separated, or "all")           | all      |
-| `--skip-tables`       | `-T` | Tables to exclude from the diff (comma-separated)                  |          |
-| `--skip-file`         | `-s` | File containing a list of tables to exclude                        |          |
-| `--block-size`        | `-b`  | Rows per block when diffing tables                                 | 100000   |
-| `--concurrency-factor`| `-c`  | Workers per node                                                    | 1        |
-| `--compare-unit-size` | `-u`  | Recursive split size for mismatched blocks                         | 10000    |
-| `--output`            | `-o`  | Per-table diff output format (`json` or `html`)                    | json     |
-| `--override-block-size`| `-B` | Allow block sizes outside `ace.yaml` guardrails                    | false    |
-| `--quiet`             | `-q`  | Suppress output                                                    | false    |
-| `--debug`             | `-v`  | Enable debug logging                                               | false    |
-| `--schedule`          | `-S` | Run the replication-set diff repeatedly on a timer (requires `--every`) | false    |
-| `--every`             | `-e` | Go duration string (e.g., `4h`) used with `--schedule`              |          |
+
+| Flag                    | Alias | Description                                                                 | Default |
+|-------------------------|-------|-----------------------------------------------------------------------------|---------|
+| `--dbname`              | `-d`  | Name of the database                                                        |         |
+| `--nodes`               | `-n`  | Nodes to include in the diff (comma-separated, or "all")                    | all     |
+| `--skip-tables`         | `-T`  | Tables to exclude from the diff (comma-separated)                           |         |
+| `--skip-file`           | `-s`  | File containing a list of tables to exclude                                 |         |
+| `--block-size`          | `-b`  | Rows per block when diffing tables                                          | 100000  |
+| `--concurrency-factor`  | `-c`  | Workers per node                                                             | 1       |
+| `--compare-unit-size`   | `-u`  | Recursive split size for mismatched blocks                                  | 10000   |
+| `--output`              | `-o`  | Per-table diff output format (`json` or `html`)                             | json    |
+| `--override-block-size` | `-B`  | Allow block sizes outside `ace.yaml` guardrails                             | false   |
+| `--quiet`               | `-q`  | Suppress output                                                             | false   |
+| `--debug`               | `-v`  | Enable debug logging                                                        | false   |
+| `--schedule`            | `-S`  | Run the replication-set diff repeatedly on a timer (requires `--every`)     | false   |
+| `--every`               | `-e`  | Go duration string (e.g., `4h`) used with `--schedule`                      |         |
 
 **Example:**
+
 ```sh
 ./ace repset-diff --dbname=mydatabase my-cluster my_repset
 ```
@@ -188,21 +208,26 @@ Each table in the replication set is diffed with the same block size, concurrenc
 Compares spock metadata across cluster nodes.
 
 **Usage:**
+
 `./ace spock-diff [flags] [cluster]`
 
 **Arguments:**
--   `[cluster]`: Optional cluster override. When omitted, ACE uses the `default_cluster` from `ace.yaml`.
+
+  - `[cluster]`: Optional cluster override. When omitted, ACE uses the `default_cluster` from `ace.yaml`.
 
 **Flags:**
-| Flag                  | Alias | Description                                                        | Default  |
-| --------------------- | ----- | ------------------------------------------------------------------ | -------- |
-| `--dbname`            | `-d`  | Name of the database                                               |          |
-| `--nodes`             | `-n`  | Nodes to include in the diff (comma-separated, or "all")           | all      |
-| `--output`            | `-o`  | Output format                                                      | json     |
-| `--quiet`             | `-q`  | Suppress output                                                    | false    |
-| `--debug`             | `-v`  | Enable debug logging                                               | false    |
+
+| Flag         | Alias | Description                       | Default |
+|--------------|-------|-----------------------------------|---------|
+| `--dbname`   | `-d`  | Name of the database              |         |
+| `--nodes`    | `-n`  | Nodes to include in the diff      | all     |
+| `--output`   | `-o`  | Output format                     | json    |
+| `--quiet`    | `-q`  | Suppress output                   | false   |
+| `--debug`    | `-v`  | Enable debug logging              | false   |
+
 
 **Example:**
+
 ```sh
 ./ace spock-diff --dbname=mydatabase my-cluster
 ``` 
@@ -217,20 +242,24 @@ Compares spock metadata across cluster nodes.
 Initialises the required database objects for Merkle tree operations on all nodes in a cluster. This includes creating a dedicated schema, tables for metadata, and setting up publications and replication slots for change data capture (CDC).
 
 **Usage:**
+
 `./ace mtree init [flags] [cluster]`
 
 **Arguments:**
--   `[cluster]`: Optional cluster override. When omitted, ACE uses the `default_cluster` from `ace.yaml`.
+
+  - `[cluster]`: Optional cluster override. When omitted, ACE uses the `default_cluster` from `ace.yaml`.
 
 **Flags:**
-| Flag                  | Alias | Description                                                        | Default  |
-| --------------------- | ----- | ------------------------------------------------------------------ | -------- |
-| `--dbname`            | `-d`  | Name of the database                                               |          |
-| `--nodes`             | `-n`  | Nodes to include (comma-separated, or "all")                       | all      |
-| `--quiet`             | `-q`  | Suppress output                                                    | false    |
-| `--debug`             | `-v`  | Enable debug logging                                               | false    |
+
+| Flag       | Alias | Description                                      | Default |
+|------------|-------|--------------------------------------------------|---------|
+| `--dbname` | `-d`  | Name of the database                             |         |
+| `--nodes`  | `-n`  | Nodes to include (comma-separated, or "all")     | all     |
+| `--quiet`  | `-q`  | Suppress output                                  | false   |
+| `--debug`  | `-v`  | Enable debug logging                             | false   |
 
 **Example:**
+
 ```sh
 ./ace mtree init --dbname=mydatabase my-cluster
 ```
@@ -240,27 +269,31 @@ Initialises the required database objects for Merkle tree operations on all node
 Builds a Merkle tree for a specific table on all nodes in the cluster. This command should be run after `mtree init`.
 
 **Usage:**
+
 `./ace mtree build [flags] [cluster] <schema.table>`
 
 **Arguments:**
--   `[cluster]`: Optional cluster override. When omitted, ACE uses the `default_cluster` from `ace.yaml`.
+
+-  `[cluster]`: Optional cluster override. When omitted, ACE uses the `default_cluster` from `ace.yaml`.
 
 **Flags:**
-| Flag                  | Alias | Description                                                        | Default  |
-| --------------------- | ----- | ------------------------------------------------------------------ | -------- |
-| `--dbname`            | `-d`  | Name of the database                                               |          |
-| `--nodes`             | `-n`  | Nodes to include (comma-separated, or "all")                       | all      |
-| `--block-size`        | `-b`  | Number of rows per leaf block                                      | 10000    |
-| `--max-cpu-ratio`     | `-m` | Max CPU ratio for parallel operations                              | 0.5      |
-| `--override-block-size`| `-B` | Skip block size check and allow potentially unsafe block sizes     | false    |
-| `--analyse`           | `-a` | Run `ANALYZE` on the table before building the tree                | false    |
-| `--recreate-objects`  | `-R` | Drop and recreate Merkle tree objects if they already exist        | false    |
-| `--write-ranges`      | `-w` | Write the calculated block ranges to a JSON file                   | false    |
-| `--ranges-file`       | `-k` | Path to a file with pre-computed block ranges to use for the build |          |
-| `--quiet`             | `-q`  | Suppress output                                                    | false    |
-| `--debug`             | `-v`  | Enable debug logging                                               | false    |
+
+| Flag                    | Alias | Description                                                           | Default |
+|-------------------------|-------|-----------------------------------------------------------------------|---------|
+| `--dbname`              | `-d`  | Name of the database                                                  |         |
+| `--nodes`               | `-n`  | Nodes to include (comma-separated, or "all")                          | all     |
+| `--block-size`          | `-b`  | Number of rows per leaf block                                         | 10000   |
+| `--max-cpu-ratio`       | `-m`  | Max CPU ratio for parallel operations                                 | 0.5     |
+| `--override-block-size` | `-B`  | Skip block size check and allow potentially unsafe block sizes        | false   |
+| `--analyse`             | `-a`  | Run `ANALYZE` on the table before building the tree                   | false   |
+| `--recreate-objects`    | `-R`  | Drop and recreate Merkle tree objects if they already exist           | false   |
+| `--write-ranges`        | `-w`  | Write the calculated block ranges to a JSON file                      | false   |
+| `--ranges-file`         | `-k`  | Path to a file with pre-computed block ranges to use for the build    |         |
+| `--quiet`               | `-q`  | Suppress output                                                       | false   |
+| `--debug`               | `-v`  | Enable debug logging                                                  | false   |
 
 **Example:**
+
 ```sh
 ./ace mtree build --dbname=mydatabase my-cluster public.my_table
 ```
@@ -270,24 +303,29 @@ Builds a Merkle tree for a specific table on all nodes in the cluster. This comm
 Compares the Merkle trees of a table across nodes to find inconsistencies. It generates a diff report similar to the standard `table-diff` command. By default, it first updates the Merkle trees with the latest changes using CDC before performing the diff.
 
 **Usage:**
+
 `./ace mtree table-diff [flags] [cluster] <schema.table>`
 
 **Arguments:**
--   `[cluster]`: Optional cluster override. When omitted, ACE uses the `default_cluster` from `ace.yaml`.
+
+  - `[cluster]`: Optional cluster override. When omitted, ACE uses the `default_cluster` from `ace.yaml`.
 
 **Flags:**
-| Flag                  | Alias | Description                                                        | Default  |
-| --------------------- | ----- | ------------------------------------------------------------------ | -------- |
-| `--dbname`            | `-d`  | Name of the database                                               |          |
-| `--nodes`             | `-n`  | Nodes to include (comma-separated, or "all")                       | all      |
-| `--max-cpu-ratio`     | `-m` | Max CPU ratio for parallel operations                              | 0.5      |
-| `--batch-size`        | `-h` | Number of ranges to process in a batch when diffing                | 100      |
-| `--output`            | `-o`  | Output format for the diff report (`json` or `html`)               | json     |
-| `--skip-update`       | `-U`  | Skip updating the Merkle tree with CDC changes before the diff     | false    |
-| `--quiet`             | `-q`  | Suppress output                                                    | false    |
-| `--debug`             | `-v`  | Enable debug logging                                               | false    |
+
+| Flag              | Alias | Description                                                            | Default |
+|-------------------|-------|------------------------------------------------------------------------|---------|
+| `--dbname`        | `-d`  | Name of the database                                                   |         |
+| `--nodes`         | `-n`  | Nodes to include (comma-separated, or "all")                           | all     |
+| `--max-cpu-ratio` | `-m`  | Max CPU ratio for parallel operations                                  | 0.5     |
+| `--batch-size`    | `-h`  | Number of ranges to process in a batch when diffing                    | 100     |
+| `--output`        | `-o`  | Output format for the diff report (`json` or `html`)                   | json    |
+| `--skip-update`   | `-U`  | Skip updating the Merkle tree with CDC changes before the diff        | false   |
+| `--quiet`         | `-q`  | Suppress output                                                        | false   |
+| `--debug`         | `-v`  | Enable debug logging                                                   | false   |
+
 
 **Example:**
+
 ```sh
 ./ace mtree table-diff --dbname=mydatabase my-cluster public.my_table
 ```
@@ -299,22 +337,27 @@ HTML output is also available via `--output html`; the command produces both JSO
 Manually triggers an update of a Merkle tree for a table using the captured changes from CDC. This can also be used to rebalance the tree.
 
 **Usage:**
+
 `./ace mtree update [flags] [cluster] <schema.table>`
 
 **Arguments:**
--   `[cluster]`: Optional cluster override. When omitted, ACE uses the `default_cluster` from `ace.yaml`.
+
+  - `[cluster]`: Optional cluster override. When omitted, ACE uses the `default_cluster` from `ace.yaml`.
 
 **Flags:**
-| Flag                  | Alias | Description                                                        | Default  |
-| --------------------- | ----- | ------------------------------------------------------------------ | -------- |
-| `--dbname`            | `-d`  | Name of the database                                               |          |
-| `--nodes`             | `-n`  | Nodes to include (comma-separated, or "all")                       | all      |
-| `--max-cpu-ratio`     | `-m` | Max CPU ratio for parallel operations                              | 0.5      |
-| `--rebalance`         | `-l` | Rebalance the tree by merging small blocks                         | false    |
-| `--quiet`             | `-q`  | Suppress output                                                    | false    |
-| `--debug`             | `-v`  | Enable debug logging                                               | false    |
+
+| Flag              | Alias | Description                                      | Default |
+|-------------------|-------|--------------------------------------------------|---------|
+| `--dbname`        | `-d`  | Name of the database                             |         |
+| `--nodes`         | `-n`  | Nodes to include (comma-separated, or "all")     | all     |
+| `--max-cpu-ratio` | `-m`  | Max CPU ratio for parallel operations            | 0.5     |
+| `--rebalance`     | `-l`  | Rebalance the tree by merging small blocks       | false   |
+| `--quiet`         | `-q`  | Suppress output                                  | false   |
+| `--debug`         | `-v`  | Enable debug logging                             | false   |
+
 
 **Example:**
+
 ```sh
 ./ace mtree update --rebalance --dbname=mydatabase my-cluster public.my_table
 ```
@@ -324,20 +367,24 @@ Manually triggers an update of a Merkle tree for a table using the captured chan
 Starts a long-running process that listens for database changes via CDC and automatically updates the Merkle trees for all tracked tables.
 
 **Usage:**
+
 `./ace mtree listen [flags] [cluster]`
 
 **Arguments:**
--   `[cluster]`: Optional cluster override. When omitted, ACE uses the `default_cluster` from `ace.yaml`.
+
+  - `[cluster]`: Optional cluster override. When omitted, ACE uses the `default_cluster` from `ace.yaml`.
 
 **Flags:**
-| Flag                  | Alias | Description                                                        | Default  |
-| --------------------- | ----- | ------------------------------------------------------------------ | -------- |
-| `--dbname`            | `-d`  | Name of the database                                               |          |
-| `--nodes`             | `-n`  | Nodes to include (comma-separated, or "all")                       | all      |
-| `--quiet`             | `-q`  | Suppress output                                                    | false    |
-| `--debug`             | `-v`  | Enable debug logging                                               | false    |
+
+| Flag       | Alias | Description                                  | Default |
+|------------|-------|----------------------------------------------|---------|
+| `--dbname` | `-d`  | Name of the database                         |         |
+| `--nodes`  | `-n`  | Nodes to include (comma-separated, or "all") | all     |
+| `--quiet`  | `-q`  | Suppress output                              | false   |
+| `--debug`  | `-v`  | Enable debug logging                         | false   |
 
 **Example:**
+
 ```sh
 ./ace mtree listen --dbname=mydatabase my-cluster
 ```
@@ -347,20 +394,24 @@ Starts a long-running process that listens for database changes via CDC and auto
 Removes all database objects associated with a Merkle tree for a specific table. This includes the tree data, metadata, and removing the table from the CDC publication.
 
 **Usage:**
+
 `./ace mtree teardown-table [flags] [cluster] <schema.table>`
 
 **Arguments:**
--   `[cluster]`: Optional cluster override. When omitted, ACE uses the `default_cluster` from `ace.yaml`.
+
+  - `[cluster]`: Optional cluster override. When omitted, ACE uses the `default_cluster` from `ace.yaml`.
 
 **Flags:**
-| Flag                  | Alias | Description                                                        | Default  |
-| --------------------- | ----- | ------------------------------------------------------------------ | -------- |
-| `--dbname`            | `-d`  | Name of the database                                               |          |
-| `--nodes`             | `-n`  | Nodes to include (comma-separated, or "all")                       | all      |
-| `--quiet`             | `-q`  | Suppress output                                                    | false    |
-| `--debug`             | `-v`  | Enable debug logging                                               | false    |
+
+| Flag       | Alias | Description                                  | Default |
+|------------|-------|----------------------------------------------|---------|
+| `--dbname` | `-d`  | Name of the database                         |         |
+| `--nodes`  | `-n`  | Nodes to include (comma-separated, or "all") | all     |
+| `--quiet`  | `-q`  | Suppress output                              | false   |
+| `--debug`  | `-v`  | Enable debug logging                         | false   |
 
 **Example:**
+
 ```sh
 ./ace mtree teardown-table --dbname=mydatabase my-cluster public.my_table
 ```
@@ -370,20 +421,25 @@ Removes all database objects associated with a Merkle tree for a specific table.
 Removes all database objects created by `mtree init` from all nodes in the cluster. This will drop the dedicated schema, all Merkle tree data, and stop CDC.
 
 **Usage:**
+
 `./ace mtree teardown [flags] [cluster]`
 
 **Arguments:**
--   `[cluster]`: Optional cluster override. When omitted, ACE uses the `default_cluster` from `ace.yaml`.
+
+  - `[cluster]`: Optional cluster override. When omitted, ACE uses the `default_cluster` from `ace.yaml`.
 
 **Flags:**
-| Flag                  | Alias | Description                                                        | Default  |
-| --------------------- | ----- | ------------------------------------------------------------------ | -------- |
-| `--dbname`            | `-d`  | Name of the database                                               |          |
-| `--nodes`             | `-n`  | Nodes to include (comma-separated, or "all")                       | all      |
-| `--quiet`             | `-q`  | Suppress output                                                    | false    |
-| `--debug`             | `-v`  | Enable debug logging                                               | false    |
+
+| Flag       | Alias | Description                                  | Default |
+|------------|-------|----------------------------------------------|---------|
+| `--dbname` | `-d`  | Name of the database                         |         |
+| `--nodes`  | `-n`  | Nodes to include (comma-separated, or "all") | all     |
+| `--quiet`  | `-q`  | Suppress output                              | false   |
+| `--debug`  | `-v`  | Enable debug logging                         | false   |
+
 
 **Example:**
+
 ```sh
 ./ace mtree teardown --dbname=mydatabase my-cluster
 ``` 
