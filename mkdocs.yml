@@ -74,3 +74,4 @@ nav:
       - 'mtree-update': commands/mtree/mtree-update.md
   - Scheduling ACE Runs: scheduling.md
   - Improving ACE Performance: performance.md
+  - Release Notes: CHANGELOG.md 
