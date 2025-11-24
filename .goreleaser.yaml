@@ -1,6 +1,3 @@
-# yaml-language-server: $schema=https://goreleaser.com/static/schema.json
-# vim: set ts=2 sw=2 tw=0 fo=cnqoj
-
 version: 2
 
 before:
@@ -9,20 +6,50 @@ before:
     - go generate ./...
 
 builds:
-  - id: ace
+  # Linux amd64 (native, with cgo + sqlite)
+  - id: ace-linux-amd64
     main: ./cmd/server
     binary: ace
     env:
       - CGO_ENABLED=1
     goos:
       - linux
-      - windows
+    goarch:
+      - amd64
+    ldflags:
+      - -s -w -X main.version={{ .Version }}
+
+  # Linux arm64 (cgo, using cross-compiler)
+  - id: ace-linux-arm64
+    main: ./cmd/server
+    binary: ace
+    env:
+      - CGO_ENABLED=1
+      - CC=aarch64-linux-gnu-gcc
+      - CXX=aarch64-linux-gnu-g++
+    goos:
+      - linux
+    goarch:
+      - arm64
+    ldflags:
+      - -s -w -X main.version={{ .Version }}
+
+  # Darwin + Windows (no cgo, to avoid needing extra cross toolchains)
+  # NOTE: This only works if your code can compile with CGO_DISABLED=0
+  # on these platforms (e.g. sqlite bits are behind //go:build cgo).
+  - id: ace-darwin-windows
+    main: ./cmd/server
+    binary: ace
+    env:
+      - CGO_ENABLED=0
+    goos:
       - darwin
+      - windows
     goarch:
       - amd64
       - arm64
     ldflags:
-      - -s -w -X main.version={{.Version}}
+      - -s -w -X main.version={{ .Version }}
 
 archives:
   - formats: [tar.gz]
@@ -35,7 +62,7 @@ archives:
       {{- if .Arm }}v{{ .Arm }}{{ end }}
 
     wrap_in_directory: "ace-{{ .Version }}"
-    
+
     format_overrides:
       - goos: windows
         formats: [zip]
