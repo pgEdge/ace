@@ -1,0 +1,34 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  goreleaser:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up QEMU (for cross-compiling)
+        uses: docker/setup-qemu-action@v3
+
+      - name: Run GoReleaser (cross, in Docker)
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          docker run --rm \
+            -v "$PWD":/workspace \
+            -w /workspace \
+            -e GITHUB_TOKEN \
+            -e CGO_ENABLED=1 \
+            goreleaser/goreleaser-cross:v1.25.4 \
+            release --clean
