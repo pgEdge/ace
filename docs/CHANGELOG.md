@@ -2,6 +2,20 @@
 
 All notable changes to ACE will be captured in this document. The project follows semantic versioning; the latest changes appear first.
 
+## [v1.4.0] - 2025-11-24
+
+### Added
+- REST API server secured with mutual TLS (configurable allowed CNs and optional CRL) that runs table-diff, table-rerun, table-repair, schema/repset/spock diffs, and Merkle tree init/build/update/diff/teardown as tracked tasks in a SQLite-backed store; runnable via `ace server` or `ace start --component api`.
+- Client certificate authentication for PostgreSQL connections via the new `cert_auth` settings, allowing ACE to use user cert/key/CA pairs instead of passwords when talking to mTLS-secured nodes.
+- `max_diff_rows` guardrail for table-diff runs (configurable in `ace.yaml` or API payloads) that stops comparisons once the threshold is hit and marks JSON/HTML reports when early termination occurs.
+
+### Changed
+- All CLI commands now expose short flag aliases and updated command reference docs; `ace start` also gained a `--component` selector to run just the scheduler, just the API server, or both.
+- Release automation and packaging were reworked: GoReleaser now builds CGO-enabled Linux binaries (amd64/arm64) alongside non-CGO macOS/Windows artifacts, and a GitHub Actions workflow publishes tagged releases.
+
+### Fixed
+- Table filters now create deterministic, sanitised filtered view names per task to avoid collisions and invalid identifiers when `--table-filter` is used.
+
 ## [v1.3.5] - 2025-11-06
 
 ### Added
@@ -75,4 +89,3 @@ All notable changes to ACE will be captured in this document. The project follow
 - Initial ACE release featuring `table-diff` with rich tuning flags (block size, concurrency, compare units, table filters, and JSON/CSV output).
 - `table-repair` workflow that consumes a diff report and applies repairs with safeguards such as dry-run, insert-only/upsert-only, and trigger controls.
 - Baseline configuration workflow using `ace.yaml` plus cluster definitions, establishing the foundation for subsequent automation.
-
