@@ -114,9 +114,7 @@ func (m *MerkleTreeTask) startLifecycle(taskType string, initialCtx map[string]a
 	m.Task.ClusterName = m.ClusterName
 
 	ctx := make(map[string]any)
-	for k, v := range initialCtx {
-		ctx[k] = v
-	}
+	maps.Copy(ctx, initialCtx)
 	if m.Mode != "" {
 		ctx["mode"] = m.Mode
 	}
@@ -2122,25 +2120,6 @@ func (m *MerkleTreeTask) intervalInUnion(s, e any, intervals []types.LeafRange) 
 		}
 
 		if !eBeforeOrEqualStart && !sAfterOrEqualEnd {
-			return true
-		}
-	}
-	return false
-}
-
-func (m *MerkleTreeTask) intervalIntersects(start, end any, allRanges []types.LeafRange) bool {
-	if len(allRanges) == 0 {
-		return false
-	}
-
-	for _, r := range allRanges {
-		rangeStart := r.RangeStart
-		rangeEnd := r.RangeEnd
-
-		isAfter := rangeEnd != nil && !allNil(boundaryToSlice(rangeEnd)) && start != nil && m.compareBoundaries(start, rangeEnd) > 0
-		isBefore := rangeStart != nil && !allNil(boundaryToSlice(rangeStart)) && end != nil && m.compareBoundaries(end, rangeStart) < 0
-
-		if !isAfter && !isBefore {
 			return true
 		}
 	}
