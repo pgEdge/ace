@@ -108,17 +108,6 @@ flowchart LR
   - Parent nodes are dropped and rebuilt after splits so XOR hashes reflect the new leaf layout.
   - Rationale: inserting the new block adjacent to the original would change hashes for every ancestor along that branch, forcing deeper traversal even though only two leaves changed. Appending preserves most parent-child hashes until the controlled rebuild, which limits needless tree churn.
 
-```mermaid
-flowchart LR
-  B["Before split:<br/>pos0 [1..100], pos1 [101..200], pos2 [201..400] (overfull), pos3 [401..nil]"]:::leaf
-  A["Append (temp positions):<br/>pos0 [1..100], pos1 [101..200], pos2 [201..300], pos3 [401..nil], pos4 [300..400] (new)"]:::leaf
-  R["After resequence by PK:<br/>pos0 [1..100], pos1 [101..200], pos2 [201..300], pos3 [300..400], pos4 [401..nil]"]:::leaf
-  B --> A --> R
-  classDef leaf fill:#eef2f7,stroke:#5b6f82,color:#0f1c2d;
-```
-
-Note: the final resequenced layout restores PK ordering (so the new block sits where it belongs), but the one-time append-before-resequence avoids immediate parent churn and lets ACE rebuild parents in a controlled pass instead of rippling changes up the tree mid-split.
-
 - **Why adjacency hurts**  
   Inserting the split block next to the original forces a cascade of parent hash changes, so diff traversal cannot prune early.
 
@@ -200,19 +189,22 @@ flowchart TB
 
 ```mermaid
 flowchart TB
-  subgraph BeforeMerge
+  subgraph BeforeMerge["Before merge"]
     M0["pos=0  [1..80] (small)"]:::leaf --> M1["pos=1  [81..120] (small)"]:::leaf --> M2["pos=2  [121..300]"]:::leaf --> M3["pos=3  [301..nil]"]:::leaf
   end
 
-  subgraph MergeStep
+  subgraph MergeStep["Merge step"]
     MM0["pos=0  [1..120] (merged)"]:::leaf
     MM2["pos=2  [121..300]"]:::leaf
     MM3["pos=3  [301..nil]"]:::leaf
   end
 
-  subgraph AfterResequence
+  subgraph AfterResequence["After resequence"]
     RM0["pos=0  [1..120]"]:::leaf --> RM1["pos=1  [121..300]"]:::leaf --> RM2["pos=2  [301..nil]"]:::leaf
   end
+
+  M3 -.-> MM0
+  MM3 -.-> RM0
 
   classDef leaf fill:#eef2f7,stroke:#5b6f82,color:#0f1c2d;
 ```
@@ -236,3 +228,128 @@ flowchart LR
 - **Thresholds and rebalance guidance**  
   - Splits fire when a block grows beyond ~2× `block_size`; merges apply when neighbouring blocks together are under ~1.5× `block_size` (or ~25% thresholds in Python reference). This keeps leaf sizes within a sensible band.
   - Re-sequencing and parent rebuilds are cheap compared to leaf rehashing, but they do perturb parent-child relationships. Use heavy rebalancing (`--rebalance`) sparingly—ideally in maintenance windows—to avoid churn on hot tables.
+
+## Diff Traversal Algorithm
+- ACE compares Merkle trees across node pairs top-down. If root hashes match, the entire table is considered in sync. When a parent hash mismatches, ACE descends to its children; matching subtrees are pruned, mismatching subtrees recurse until leaves are reached. If leaves don’t align (one side has extra splits/merges), the extra leaves are treated as mismatches.
+- Parent hashes are XORs of child hashes (fast to recompute). Leaf hashes are cryptographic hashes of table blocks; XOR collisions at parent levels are acceptable because leaf hashes still guard correctness.
+- Edge cases:
+  - **Unbalanced trees:** If one node split/merged more, traversal still walks each subtree; missing peers are flagged as mismatches.
+  - **Early pruning:** Large identical subtrees are skipped after a single hash compare.
+  - **Diff materialisation:** Only at mismatching leaves; ACE then fetches block rows and aligns by PK.
+
+```mermaid
+flowchart TB
+  %% Two trees with a mismatching branch and extra leaf on right
+  subgraph TreeL["Node A"]
+    LRoot["root_A"]:::root
+    LA["A1"]:::node
+    LB["A2"]:::node
+    L1["L1"]:::leaf
+    L2["L2"]:::leaf
+    L3["L3"]:::leaf
+    L4["L4"]:::leaf
+    LRoot --> LA
+    LRoot --> LB
+    LA --> L1
+    LA --> L2
+    LB --> L3
+    LB --> L4
+  end
+
+  subgraph TreeR["Node B"]
+    RRoot["root_B"]:::root
+    RA["B1"]:::node
+    RB["B2"]:::node
+    R1["R1"]:::leaf
+    R2["R2"]:::leaf
+    R3["R3"]:::leaf
+    R4["R4"]:::leaf
+    RExtra["R_extra"]:::leaf
+    RRoot --> RA
+    RRoot --> RB
+    RA --> R1
+    RA --> R2
+    RB --> R3
+    RB --> R4
+    RB --> RExtra
+  end
+
+  %% Traversal annotations
+  LRoot -. "hash mismatch" .- RRoot
+  LA -. "hash match (prune)" .- RA
+  LB -. "hash mismatch" .- RB
+  L3 -. "leaf mismatch" .- R3
+  L4 -. "leaf mismatch" .- R4
+  RB -. "extra leaf" .-> RExtra
+
+  classDef root fill:#fff6e0,stroke:#d39b00,color:#1f2a44;
+  classDef node fill:#e8f0ff,stroke:#3b73b9,color:#0f1c2d;
+  classDef leaf fill:#eef2f7,stroke:#5b6f82,color:#0f1c2d;
+```
+
+```mermaid
+flowchart TB
+  %% Balanced trees where only one leaf differs
+  subgraph TreeL2["Node A"]
+    LRoot2["root_A"]:::root
+    LA2["A1"]:::node
+    LB2["A2"]:::node
+    L1a["L1"]:::leaf
+    L2a["L2"]:::leaf
+    L3a["L3"]:::leaf
+    L4a["L4"]:::leaf
+    LRoot2 --> LA2
+    LRoot2 --> LB2
+    LA2 --> L1a
+    LA2 --> L2a
+    LB2 --> L3a
+    LB2 --> L4a
+  end
+
+  subgraph TreeR2["Node B"]
+    RRoot2["root_B"]:::root
+    RA2["B1"]:::node
+    RB2["B2"]:::node
+    R1a["R1"]:::leaf
+    R2a["R2_diff"]:::leaf
+    R3a["R3"]:::leaf
+    R4a["R4"]:::leaf
+    RRoot2 --> RA2
+    RRoot2 --> RB2
+    RA2 --> R1a
+    RA2 --> R2a
+    RB2 --> R3a
+    RB2 --> R4a
+  end
+
+  LRoot2 -. "hash mismatch" .- RRoot2
+  LA2 -. "hash mismatch" .- RA2
+  LB2 -. "hash match (prune)" .- RB2
+  L1a -. "match" .- R1a
+  L2a -. "leaf mismatch" .- R2a
+
+  classDef root fill:#fff6e0,stroke:#d39b00,color:#1f2a44;
+  classDef node fill:#e8f0ff,stroke:#3b73b9,color:#0f1c2d;
+  classDef leaf fill:#eef2f7,stroke:#5b6f82,color:#0f1c2d;
+```
+
+Notes:
+- Traversal proceeds until leaves are aligned or exhausted; missing peers (extra leaves) are flagged.
+- Parent XOR hashes speed pruning; leaf cryptographic hashes guard correctness.
+- Diffs are materialised only at mismatching leaves, limiting database reads.
+- In the unbalanced example above, the right-side tree has an extra leaf (`R_extra`). ACE descends until it exhausts matching parents; when it sees that `RB` has a child with no peer, it records that entire extra leaf as a mismatch (representing rows present only on Node B). Similarly, if Node A had more leaves, those would be marked as present-only-on-A. This ensures asymmetric splits/merges still surface as drift.
+
+## Operational Details and Limits
+
+- **Schema objects and lifecycle**: Build creates `ace_mtree_<schema>_<table>` plus a composite PK type when needed, metadata rows (block size, counts, timestamps), and adds the table to a publication/slot. Teardown drops these. Updates/diffs reuse the metadata; changing `block_size` requires a rebuild.
+- **Block size reuse**: `UpdateMtree` reads block size from metadata; you cannot “resize” a tree via update. Rebuild if you need a different block size.
+- **CDC drift and slot health**: If the logical slot is dropped or lags, WAL can bloat and trees become stale. Recover by rebuilding (init + build) and recreating the slot/publication entry. `--no-cdc` means you are diffing stale trees unless you run a rebuild first.
+- **Rebalance caveats**: `--rebalance` re-sequences leaves with a large temp offset and rebuilds parents; this is disruptive to parent/child hashes and can slow subsequent diffs temporarily. Use it sparingly, ideally in maintenance windows.
+- **XOR vs hash-of-hash**: Parent XORs are chosen for speed and incremental updates. Leaf hashes remain cryptographic; XOR parents are for pruning, not integrity on their own. Collisions at parent levels are extremely unlikely to hide a leaf difference because leaves are still compared directly on mismatch paths.
+- **Mtree-specific tuning knobs**: `max_cpu_ratio` influences worker count and pool sizing; `batch_size` controls how many ranges are compared per DB round-trip in diffs. Higher values increase throughput but raise DB and network load.
+- **Error handling**: If splits/merges or parent rebuilds fail (e.g., type issues, missing metadata), `update`/`diff` aborts; the remedy is usually to fix the schema/state and rerun, or rebuild the tree when metadata and actual table diverge.
+
+### Observability and Teardown
+- **Task records**: Mtree runs are recorded in `ace_tasks.db` (table `ace_tasks`) with context about block size, nodes, and statuses. Check logs for counts of dirty blocks, splits/merges applied, parent rebuilds, and extra-leaf mismatches during diff traversal.
+- **Slot health**: Monitor logical slot lag/WAL retention; a bloated slot suggests `update` hasn’t consumed changes. If the slot is dropped or stale, rebuild (init + build) and recreate the slot/publication entry.
+- **Teardown/reset**: Prefer the built-in `teardown`/`teardown-table` commands to remove mtree artifacts (mtree table, composite type, metadata, publication entry). Use manual drops only if automation fails, then rebuild with the desired block size and resume CDC.
