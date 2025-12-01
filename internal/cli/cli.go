@@ -304,6 +304,12 @@ func SetupCLI() *cli.App {
 			Usage:   "Rebalance the tree by merging small blocks",
 			Value:   false,
 		},
+		&cli.BoolFlag{
+			Name:    "skip-cdc",
+			Aliases: []string{"U"},
+			Usage:   "Skip CDC processing (only rehash dirty blocks)",
+			Value:   false,
+		},
 	}
 	mtreeUpdateFlags = append(mtreeUpdateFlags, commonFlags...)
 
@@ -314,12 +320,6 @@ func SetupCLI() *cli.App {
 			Usage:   "Max CPU for parallel operations",
 			Value:   0.5,
 		},
-		&cli.IntFlag{
-			Name:    "batch-size",
-			Aliases: []string{"h"},
-			Usage:   "Number of ranges to process in a batch",
-			Value:   100,
-		},
 		&cli.StringFlag{
 			Name:    "output",
 			Aliases: []string{"o"},
@@ -327,9 +327,9 @@ func SetupCLI() *cli.App {
 			Value:   "json",
 		},
 		&cli.BoolFlag{
-			Name:    "skip-update",
+			Name:    "skip-cdc",
 			Aliases: []string{"U"},
-			Usage:   "Skip updating the Merkle tree",
+			Usage:   "Skip CDC processing (only rehash dirty blocks and compare)",
 			Value:   false,
 		},
 	}
@@ -1064,6 +1064,7 @@ func MtreeUpdateCLI(ctx *cli.Context) error {
 	task.QuietMode = ctx.Bool("quiet")
 	task.MaxCpuRatio = ctx.Float64("max-cpu-ratio")
 	task.Rebalance = ctx.Bool("rebalance")
+	task.NoCDC = ctx.Bool("skip-cdc")
 	task.Mode = "update"
 	task.Ctx = context.Background()
 
@@ -1094,9 +1095,8 @@ func MtreeDiffCLI(ctx *cli.Context) error {
 	task.Nodes = ctx.String("nodes")
 	task.QuietMode = ctx.Bool("quiet")
 	task.MaxCpuRatio = ctx.Float64("max-cpu-ratio")
-	task.BatchSize = ctx.Int("batch-size")
 	task.Output = ctx.String("output")
-	task.NoCDC = ctx.Bool("skip-update")
+	task.NoCDC = ctx.Bool("skip-cdc")
 	task.Mode = "diff"
 	task.Ctx = context.Background()
 

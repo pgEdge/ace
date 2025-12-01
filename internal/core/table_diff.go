@@ -61,6 +61,10 @@ type TableDiffTask struct {
 	DBName             string
 	Nodes              string
 
+	BaseTable           string
+	FilteredViewName    string
+	FilteredViewCreated bool
+
 	BlockSize         int
 	ConcurrencyFactor int
 	Output            string
@@ -576,9 +580,15 @@ func (t *TableDiffTask) Validate() error {
 	return nil
 }
 
-func (t *TableDiffTask) RunChecks(skipValidation bool) error {
+func (t *TableDiffTask) RunChecks(skipValidation bool) (err error) {
+	defer func() {
+		if err != nil && t.FilteredViewCreated {
+			t.cleanupFilteredView()
+		}
+	}()
+
 	if !skipValidation {
-		if err := t.Validate(); err != nil {
+		if err = t.Validate(); err != nil {
 			return err
 		}
 	}
@@ -588,9 +598,13 @@ func (t *TableDiffTask) RunChecks(skipValidation bool) error {
 
 	schema := t.Schema
 	table := t.Table
+	if t.BaseTable == "" {
+		t.BaseTable = table
+	}
 	var filteredViewName string
 	if t.TableFilter != "" {
 		filteredViewName = buildFilteredViewName(t.TaskID, table)
+		t.FilteredViewName = filteredViewName
 	}
 
 	for _, nodeInfo := range t.ClusterNodes {
@@ -676,6 +690,7 @@ func (t *TableDiffTask) RunChecks(skipValidation bool) error {
 			if err != nil {
 				return fmt.Errorf("failed to create filtered view: %w", err)
 			}
+			t.FilteredViewCreated = true
 
 			hasRowsSQL := fmt.Sprintf("SELECT EXISTS (SELECT 1 FROM %s) AS has_rows", sanitisedViewName)
 			var hasRows bool
@@ -687,6 +702,8 @@ func (t *TableDiffTask) RunChecks(skipValidation bool) error {
 			if !hasRows {
 				return fmt.Errorf("table filter produced no rows")
 			}
+
+			t.FilteredViewCreated = true
 		}
 	}
 
@@ -741,6 +758,42 @@ func (t *TableDiffTask) RunChecks(skipValidation bool) error {
 	}
 
 	return nil
+}
+
+func (t *TableDiffTask) cleanupFilteredView() {
+	if t.TableFilter == "" || t.FilteredViewName == "" || !t.FilteredViewCreated {
+		return
+	}
+
+	schemaIdent := pgx.Identifier{t.Schema}.Sanitize()
+	viewIdent := pgx.Identifier{t.FilteredViewName}.Sanitize()
+	dropSQL := fmt.Sprintf("DROP MATERIALIZED VIEW IF EXISTS %s.%s", schemaIdent, viewIdent)
+
+	for _, nodeInfo := range t.ClusterNodes {
+		name, _ := nodeInfo["Name"].(string)
+		if len(t.NodeList) > 0 && !utils.Contains(t.NodeList, name) {
+			continue
+		}
+
+		pool, err := auth.GetClusterNodeConnection(context.Background(), nodeInfo, auth.ConnectionOptions{Role: t.ClientRole})
+		if err != nil {
+			logger.Warn("table-diff: failed to get connection for filtered view cleanup on node %s: %v", name, err)
+			continue
+		}
+
+		if _, err := pool.Exec(context.Background(), dropSQL); err != nil {
+			logger.Warn("table-diff: failed to drop filtered view %s.%s on node %s: %v", t.Schema, t.FilteredViewName, name, err)
+		} else {
+			logger.Info("table-diff: dropped filtered view %s.%s on node %s", t.Schema, t.FilteredViewName, name)
+		}
+
+		pool.Close()
+	}
+
+	t.FilteredViewCreated = false
+	if t.BaseTable != "" {
+		t.Table = t.BaseTable
+	}
 }
 
 func (t *TableDiffTask) CloneForSchedule(ctx context.Context) *TableDiffTask {
@@ -890,6 +943,8 @@ func (t *TableDiffTask) ExecuteTask() (err error) {
 			}
 		}
 	}
+
+	defer t.cleanupFilteredView()
 
 	defer func() {
 		finishedAt := time.Now()

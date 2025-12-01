@@ -1394,11 +1394,15 @@ func (m *MerkleTreeTask) UpdateMtree(skipAllChecks bool) (err error) {
 			timeout = time.Duration(cdcCfg.CDCProcessingTimeout) * time.Second
 		}
 
-		_, cancel := context.WithTimeout(m.Ctx, timeout)
+		baseCtx := m.Ctx
+		if baseCtx == nil {
+			baseCtx = context.Background()
+		}
+		ctx, cancel := context.WithTimeout(baseCtx, timeout)
 		defer cancel()
 
 		for _, nodeInfo := range m.ClusterNodes {
-			if err := cdc.UpdateFromCDC(nodeInfo); err != nil {
+			if err := cdc.UpdateFromCDC(ctx, nodeInfo); err != nil {
 				return fmt.Errorf("CDC update failed for node %s: %w", nodeInfo["Name"], err)
 			}
 		}

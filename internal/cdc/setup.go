@@ -48,6 +48,7 @@ func SetupReplicationSlot(ctx context.Context, nodeInfo map[string]any) (pglogre
 	}
 	defer pool.Close()
 
+	// Drop any existing slot to ensure a clean start point
 	err = queries.DropReplicationSlot(ctx, pool, slot)
 	if err != nil {
 		return 0, fmt.Errorf("failed to drop replication slot: %w", err)
@@ -63,14 +64,19 @@ func SetupReplicationSlot(ctx context.Context, nodeInfo map[string]any) (pglogre
 	if err != nil {
 		return 0, fmt.Errorf("IdentifySystem failed: %w", err)
 	}
-	startLSN := sys.XLogPos
-	logger.Info("SystemID: %s, Timeline: %d, XLogPos: %s, DBName: %s", sys.SystemID, sys.Timeline, startLSN, sys.DBName)
 
-	_, err = pglogrepl.CreateReplicationSlot(context.Background(), conn, slot, "pgoutput", pglogrepl.CreateReplicationSlotOptions{Mode: pglogrepl.LogicalReplication})
+	res, err := pglogrepl.CreateReplicationSlot(context.Background(), conn, slot, "pgoutput", pglogrepl.CreateReplicationSlotOptions{Mode: pglogrepl.LogicalReplication})
 	if err != nil {
 		return 0, fmt.Errorf("CreateReplicationSlot failed: %w", err)
 	}
-	logger.Info("Created replication slot '%s'", slot)
+
+	startLSN, err := pglogrepl.ParseLSN(res.ConsistentPoint)
+	if err != nil {
+		return 0, fmt.Errorf("failed to parse consistent point %s: %w", res.ConsistentPoint, err)
+	}
+
+	logger.Info("SystemID: %s, Timeline: %d, XLogPos: %s, DBName: %s", sys.SystemID, sys.Timeline, sys.XLogPos, sys.DBName)
+	logger.Info("Created replication slot '%s' at consistent point %s", slot, startLSN)
 
 	return startLSN, nil
 }

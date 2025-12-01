@@ -34,6 +34,7 @@ mtree:
     slot_name: "ace_mtree_slot"
     publication_name: "ace_mtree_pub"
     cdc_processing_timeout: 30
+    cdc_metadata_flush_seconds: 10
   schema: "spock"
 
   diff:
