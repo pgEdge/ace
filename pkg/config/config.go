@@ -60,6 +60,7 @@ type MTreeConfig struct {
 		SlotName             string `yaml:"slot_name"`
 		PublicationName      string `yaml:"publication_name"`
 		CDCProcessingTimeout int    `yaml:"cdc_processing_timeout"`
+		CDCMetadataFlushSec  int    `yaml:"cdc_metadata_flush_seconds"`
 	} `yaml:"cdc"`
 	Schema string `yaml:"schema"`
 	Diff   struct {

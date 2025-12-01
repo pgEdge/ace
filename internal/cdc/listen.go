@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/jackc/pglogrepl"
@@ -118,6 +119,14 @@ func processReplicationStream(ctx context.Context, nodeInfo map[string]any, cont
 	if slotConfirmedLSN != 0 && slotConfirmedLSN < lastLSN {
 		lastLSN = slotConfirmedLSN
 	}
+	var lastFlushedLSN pglogrepl.LSN = lastLSN
+	var lastLSNVal atomic.Uint64
+	lastLSNVal.Store(uint64(lastLSN))
+	flushInterval := 10 * time.Second
+	if config.Cfg.MTree.CDC.CDCMetadataFlushSec > 0 {
+		flushInterval = time.Duration(config.Cfg.MTree.CDC.CDCMetadataFlushSec) * time.Second
+	}
+	lastFlushTime := time.Now()
 	var conn *pgconn.PgConn
 
 	opts := pglogrepl.StartReplicationOptions{
@@ -160,6 +169,32 @@ func processReplicationStream(ctx context.Context, nodeInfo map[string]any, cont
 		maxWorkers = 4
 	}
 	workerSem := make(chan struct{}, maxWorkers)
+
+	var metaWg sync.WaitGroup
+	if continuous {
+		metaWg.Add(1)
+		go func() {
+			defer metaWg.Done()
+			ticker := time.NewTicker(flushInterval)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+					current := pglogrepl.LSN(lastLSNVal.Load())
+					if current > lastFlushedLSN {
+						if err := flushMetadata(ctx, pool, publication, slotName, current, tables); err != nil {
+							logger.Warn("failed to periodically flush CDC metadata: %v", err)
+						} else {
+							lastFlushedLSN = current
+							lastFlushTime = time.Now()
+						}
+					}
+				}
+			}
+		}()
+	}
 
 	for {
 		if stopStreaming {
@@ -331,6 +366,15 @@ func processReplicationStream(ctx context.Context, nodeInfo map[string]any, cont
 				}
 
 				lastLSN = xld.WALStart + pglogrepl.LSN(len(xld.WALData))
+				lastLSNVal.Store(uint64(lastLSN))
+				if continuous && time.Since(lastFlushTime) >= flushInterval {
+					if err := flushMetadata(ctx, pool, publication, slotName, lastLSN, tables); err != nil {
+						logger.Warn("failed to flush CDC metadata during streaming: %v", err)
+					} else {
+						lastFlushedLSN = lastLSN
+						lastFlushTime = time.Now()
+					}
+				}
 				if !continuous && targetFlushLSN != 0 && lastLSN >= targetFlushLSN {
 					logger.Info("Reached target WAL flush LSN %s; stopping replication stream", targetFlushLSN)
 					stopStreaming = true
@@ -354,6 +398,7 @@ func processReplicationStream(ctx context.Context, nodeInfo map[string]any, cont
 	}
 
 	wg.Wait()
+	metaWg.Wait()
 
 	if processingErr == nil {
 		select {
@@ -410,6 +455,14 @@ func processReplicationStream(ctx context.Context, nodeInfo map[string]any, cont
 		conn.Close(ctx)
 	}
 
+	if continuous && lastLSN > lastFlushedLSN {
+		if err := flushMetadata(ctx, pool, publication, slotName, lastLSN, tables); err != nil {
+			logger.Warn("failed to flush CDC metadata on shutdown: %v", err)
+		} else {
+			lastFlushedLSN = lastLSN
+		}
+	}
+
 	return nil
 }
 
@@ -443,6 +496,28 @@ func getCurrentWalFlushLSN(ctx context.Context, pool *pgxpool.Pool) (pglogrepl.L
 		return 0, fmt.Errorf("failed to parse pg_current_wal_flush_lsn %s: %w", lsnStr, err)
 	}
 	return lsn, nil
+}
+
+func flushMetadata(ctx context.Context, pool *pgxpool.Pool, publication, slotName string, lsn pglogrepl.LSN, tables []string) error {
+	if tables == nil {
+		tables = []string{}
+	}
+
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to begin metadata update transaction: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	if err := queries.UpdateCDCMetadata(ctx, tx, publication, slotName, lsn.String(), tables); err != nil {
+		return fmt.Errorf("failed to update cdc metadata: %w", err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("failed to commit cdc metadata update: %w", err)
+	}
+
+	return nil
 }
 
 // A map of PostgreSQL type OIDs that should be quoted in SQL literals.
