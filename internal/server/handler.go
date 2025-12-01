@@ -138,7 +138,6 @@ type mtreeDiffRequest struct {
 	DBName      string   `json:"dbname"`
 	Nodes       []string `json:"nodes"`
 	MaxCPURatio float64  `json:"max_cpu_ratio"`
-	BatchSize   int      `json:"batch_size"`
 	Output      string   `json:"output"`
 	SkipUpdate  bool     `json:"skip_update"`
 	Quiet       bool     `json:"quiet"`
@@ -1017,7 +1016,6 @@ func (s *APIServer) handleMtreeDiff(w http.ResponseWriter, r *http.Request) {
 	task.Nodes = s.resolveNodes(req.Nodes)
 	task.QuietMode = req.Quiet
 	task.MaxCpuRatio = s.resolveMtreeMaxCPURatio(req.MaxCPURatio)
-	task.BatchSize = s.resolveMtreeBatchSize(req.BatchSize)
 	task.Output = strings.TrimSpace(req.Output)
 	if task.Output == "" {
 		task.Output = "json"
@@ -1065,13 +1063,6 @@ func (s *APIServer) resolveMtreeMaxCPURatio(requested float64) float64 {
 		return requested
 	}
 	return 0.5
-}
-
-func (s *APIServer) resolveMtreeBatchSize(requested int) int {
-	if requested > 0 {
-		return requested
-	}
-	return 100
 }
 
 func (s *APIServer) handleTaskStatus(w http.ResponseWriter, r *http.Request) {

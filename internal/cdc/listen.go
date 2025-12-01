@@ -45,20 +45,23 @@ func ListenForChanges(ctx context.Context, nodeInfo map[string]any) {
 	processReplicationStream(ctx, nodeInfo, true)
 }
 
-func UpdateFromCDC(nodeInfo map[string]any) error {
-	return processReplicationStream(context.Background(), nodeInfo, false)
+func UpdateFromCDC(ctx context.Context, nodeInfo map[string]any) error {
+	return processReplicationStream(ctx, nodeInfo, false)
 }
 
 func processReplicationStream(ctx context.Context, nodeInfo map[string]any, continuous bool) error {
 	pool, err := auth.GetClusterNodeConnection(ctx, nodeInfo, auth.ConnectionOptions{})
 	if err != nil {
 		logger.Error("failed to get connection pool: %v", err)
+		return fmt.Errorf("failed to get connection pool: %w", err)
 	}
+	processingCtx := context.WithoutCancel(ctx)
 
 	cfg := config.Cfg.MTree.CDC
 	publication := cfg.PublicationName
 	slotName := cfg.SlotName
 	var startLSNStr string
+	var tables []string
 	func() {
 		tx, err := pool.Begin(ctx)
 		if err != nil {
@@ -66,10 +69,17 @@ func processReplicationStream(ctx context.Context, nodeInfo map[string]any, cont
 			return
 		}
 		defer tx.Rollback(ctx)
-		_, startLSNStr, _, err = queries.GetCDCMetadata(ctx, tx, publication)
+
+		metaSlot, metaLSN, metaTables, err := queries.GetCDCMetadata(ctx, tx, publication)
 		if err != nil {
 			logger.Error("failed to get cdc metadata: %v", err)
 			startLSNStr = ""
+			return
+		}
+		startLSNStr = metaLSN
+		tables = metaTables
+		if metaSlot != "" {
+			slotName = metaSlot
 		}
 	}()
 
@@ -84,7 +94,30 @@ func processReplicationStream(ctx context.Context, nodeInfo map[string]any, cont
 		return fmt.Errorf("failed to parse lsn: %v", err)
 	}
 
-	var lastLSN pglogrepl.LSN = startLSN
+	slotConfirmedLSN, err := getSlotConfirmedFlushLSN(ctx, pool, slotName)
+	if err != nil {
+		logger.Error("failed to get confirmed_flush_lsn for slot %s: %v", slotName, err)
+		return fmt.Errorf("failed to get confirmed_flush_lsn for slot %s: %w", slotName, err)
+	}
+
+	targetFlushLSN := pglogrepl.LSN(0)
+	if !continuous {
+		targetFlushLSN, err = getCurrentWalFlushLSN(ctx, pool)
+		if err != nil {
+			logger.Error("failed to get current WAL flush LSN: %v", err)
+			return fmt.Errorf("failed to get current WAL flush LSN: %w", err)
+		}
+
+		if targetFlushLSN == startLSN {
+			logger.Info("CDC already up-to-date at LSN %s; exiting", startLSN)
+			return nil
+		}
+	}
+
+	lastLSN := startLSN
+	if slotConfirmedLSN != 0 && slotConfirmedLSN < lastLSN {
+		lastLSN = slotConfirmedLSN
+	}
 	var conn *pgconn.PgConn
 
 	opts := pglogrepl.StartReplicationOptions{
@@ -100,7 +133,7 @@ func processReplicationStream(ctx context.Context, nodeInfo map[string]any, cont
 			return nil, fmt.Errorf("failed to get replication connection: %w", err)
 		}
 
-		if err := pglogrepl.StartReplication(context.Background(), c, slotName, lastLSN, opts); err != nil {
+		if err := pglogrepl.StartReplication(ctx, c, slotName, lastLSN, opts); err != nil {
 			c.Close(context.Background())
 			return nil, fmt.Errorf("StartReplication failed: %w", err)
 		}
@@ -119,14 +152,25 @@ func processReplicationStream(ctx context.Context, nodeInfo map[string]any, cont
 	txChanges := make(map[uint32][]cdcMsg)
 	var currentXID uint32
 	var wg sync.WaitGroup
+	errCh := make(chan error, 1)
+	stopStreaming := false
+	var processingErr error
+	maxWorkers := int(pool.Config().MaxConns)
+	if maxWorkers <= 0 {
+		maxWorkers = 4
+	}
+	workerSem := make(chan struct{}, maxWorkers)
 
 	for {
+		if stopStreaming {
+			break
+		}
 		if err := ctx.Err(); err != nil {
 			logger.Info("CDC listener stopping due to context error: %v", err)
 			if conn != nil {
 				conn.Close(ctx)
 			}
-			return nil
+			return err
 		}
 		if conn == nil {
 			logger.Info("No connection, trying to reconnect...")
@@ -174,15 +218,20 @@ func processReplicationStream(ctx context.Context, nodeInfo map[string]any, cont
 		cancel()
 
 		if err != nil {
+			if ctx.Err() != nil {
+				if conn != nil {
+					conn.Close(ctx)
+				}
+				if continuous {
+					logger.Info("Replication stopping due to context cancellation")
+					return nil
+				}
+				return ctx.Err()
+			}
 			if pgconn.Timeout(err) {
 				if !continuous {
 					logger.Info("Replication stream drained.")
-					wg.Wait()
-					if err := pglogrepl.SendStandbyStatusUpdate(ctx, conn, pglogrepl.StandbyStatusUpdate{WALWritePosition: lastLSN}); err != nil {
-						logger.Error("failed to send final standby status update: %v", err)
-					}
-					conn.Close(ctx)
-					return nil
+					stopStreaming = true
 				}
 				continue
 			}
@@ -237,7 +286,14 @@ func processReplicationStream(ctx context.Context, nodeInfo map[string]any, cont
 							wg.Add(1)
 							go func(c []cdcMsg) {
 								defer wg.Done()
-								processChanges(pool, c)
+								workerSem <- struct{}{}
+								defer func() { <-workerSem }()
+								if err := processChanges(processingCtx, pool, c); err != nil {
+									select {
+									case errCh <- err:
+									default:
+									}
+								}
 							}(changes)
 							logger.Info("Processed %d changes for XID %d", len(changes), currentXID)
 						}
@@ -275,11 +331,118 @@ func processReplicationStream(ctx context.Context, nodeInfo map[string]any, cont
 				}
 
 				lastLSN = xld.WALStart + pglogrepl.LSN(len(xld.WALData))
+				if !continuous && targetFlushLSN != 0 && lastLSN >= targetFlushLSN {
+					logger.Info("Reached target WAL flush LSN %s; stopping replication stream", targetFlushLSN)
+					stopStreaming = true
+				}
 			}
 		default:
 			logger.Info("Received unexpected message: %T", msg)
 		}
+
+		if !stopStreaming {
+			select {
+			case err := <-errCh:
+				if err != nil {
+					logger.Error("Error processing CDC changes: %v", err)
+					processingErr = err
+					stopStreaming = true
+				}
+			default:
+			}
+		}
 	}
+
+	wg.Wait()
+
+	if processingErr == nil {
+		select {
+		case err := <-errCh:
+			processingErr = err
+		default:
+		}
+	}
+
+	if processingErr != nil {
+		if conn != nil {
+			conn.Close(ctx)
+		}
+		return processingErr
+	}
+
+	if conn != nil {
+		if err := pglogrepl.SendStandbyStatusUpdate(processingCtx, conn, pglogrepl.StandbyStatusUpdate{WALWritePosition: lastLSN}); err != nil {
+			conn.Close(ctx)
+			return fmt.Errorf("failed to send final standby status update: %w", err)
+		}
+	}
+
+	if !continuous {
+		tx, err := pool.Begin(processingCtx)
+		if err != nil {
+			if conn != nil {
+				conn.Close(ctx)
+			}
+			return fmt.Errorf("failed to begin metadata update transaction: %w", err)
+		}
+		defer tx.Rollback(processingCtx)
+
+		if tables == nil {
+			tables = []string{}
+		}
+
+		if err := queries.UpdateCDCMetadata(processingCtx, tx, publication, slotName, lastLSN.String(), tables); err != nil {
+			if conn != nil {
+				conn.Close(ctx)
+			}
+			return fmt.Errorf("failed to update cdc metadata: %w", err)
+		}
+
+		if err := tx.Commit(processingCtx); err != nil {
+			if conn != nil {
+				conn.Close(ctx)
+			}
+			return fmt.Errorf("failed to commit cdc metadata update: %w", err)
+		}
+	}
+
+	if conn != nil {
+		conn.Close(ctx)
+	}
+
+	return nil
+}
+
+func getSlotConfirmedFlushLSN(ctx context.Context, pool *pgxpool.Pool, slotName string) (pglogrepl.LSN, error) {
+	var lsnStr string
+	err := pool.QueryRow(ctx, "SELECT confirmed_flush_lsn FROM pg_replication_slots WHERE slot_name = $1", slotName).Scan(&lsnStr)
+	if err != nil {
+		return 0, fmt.Errorf("failed to fetch confirmed_flush_lsn for slot %s: %w", slotName, err)
+	}
+	if lsnStr == "" {
+		return 0, fmt.Errorf("confirmed_flush_lsn empty for slot %s", slotName)
+	}
+	lsn, err := pglogrepl.ParseLSN(lsnStr)
+	if err != nil {
+		return 0, fmt.Errorf("failed to parse confirmed_flush_lsn %s for slot %s: %w", lsnStr, slotName, err)
+	}
+	return lsn, nil
+}
+
+func getCurrentWalFlushLSN(ctx context.Context, pool *pgxpool.Pool) (pglogrepl.LSN, error) {
+	var lsnStr string
+	err := pool.QueryRow(ctx, "SELECT pg_current_wal_flush_lsn()").Scan(&lsnStr)
+	if err != nil {
+		return 0, fmt.Errorf("failed to fetch pg_current_wal_flush_lsn: %w", err)
+	}
+	if lsnStr == "" {
+		return 0, fmt.Errorf("pg_current_wal_flush_lsn returned empty string")
+	}
+	lsn, err := pglogrepl.ParseLSN(lsnStr)
+	if err != nil {
+		return 0, fmt.Errorf("failed to parse pg_current_wal_flush_lsn %s: %w", lsnStr, err)
+	}
+	return lsn, nil
 }
 
 // A map of PostgreSQL type OIDs that should be quoted in SQL literals.
@@ -295,14 +458,13 @@ var quotedOIDs = map[uint32]bool{
 	2950: true, // uuid
 }
 
-func processChanges(pool *pgxpool.Pool, changes []cdcMsg) {
+func processChanges(ctx context.Context, pool *pgxpool.Pool, changes []cdcMsg) error {
 	logger.Debug("processChanges called with %d changes", len(changes))
-	tx, err := pool.Begin(context.Background())
+	tx, err := pool.Begin(ctx)
 	if err != nil {
-		logger.Error("failed to begin transaction for processing changes: %v", err)
-		return
+		return fmt.Errorf("failed to begin transaction for processing changes: %w", err)
 	}
-	defer tx.Rollback(context.Background())
+	defer tx.Rollback(ctx)
 
 	tables := make(map[string][]cdcMsg)
 	for _, change := range changes {
@@ -328,12 +490,11 @@ func processChanges(pool *pgxpool.Pool, changes []cdcMsg) {
 			if !isComposite {
 				for _, col := range relation.Columns {
 					if col.Flags == 1 {
-						typeName, err := getTypeNameFromOID(pool, col.DataType)
+						typeName, err := getTypeNameFromOID(ctx, pool, col.DataType)
 						if err != nil {
-							logger.Error("failed to get type name for oid %d: %v", col.DataType, err)
-						} else {
-							pkeyType = typeName
+							return fmt.Errorf("failed to get type name for oid %d: %w", col.DataType, err)
 						}
+						pkeyType = typeName
 						break
 					}
 				}
@@ -361,19 +522,18 @@ func processChanges(pool *pgxpool.Pool, changes []cdcMsg) {
 			}
 
 			logger.Debug("Calling UpdateMtreeCounters: inserts=%d, updates=%d, deletes=%d", len(inserts), len(updates), len(deletes))
-			err := queries.UpdateMtreeCounters(context.Background(), tx, mtreeTable, isComposite, compositeTypeName, pkeyType, inserts, deletes, updates)
+			err := queries.UpdateMtreeCounters(ctx, tx, mtreeTable, isComposite, compositeTypeName, pkeyType, inserts, deletes, updates)
 			if err != nil {
-				logger.Error("failed to update mtree counters for %s: %v", mtreeTable, err)
-				return
+				return fmt.Errorf("failed to update mtree counters for %s: %w", mtreeTable, err)
 			}
 			logger.Debug("Successfully updated mtree counters for %s", mtreeTable)
 		}
 	}
-	if err := tx.Commit(context.Background()); err != nil {
-		logger.Error("failed to commit CDC changes: %v", err)
-	} else {
-		logger.Debug("Successfully committed CDC changes")
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("failed to commit CDC changes: %w", err)
 	}
+	logger.Debug("Successfully committed CDC changes")
+	return nil
 }
 
 func getPKs(rel *pglogrepl.RelationMessage, tup *pglogrepl.TupleData) []string {
@@ -418,9 +578,9 @@ func tupleValueToString(tupCol *pglogrepl.TupleDataColumn, relCol *pglogrepl.Rel
 	}
 }
 
-func getTypeNameFromOID(pool *pgxpool.Pool, oid uint32) (string, error) {
+func getTypeNameFromOID(ctx context.Context, pool *pgxpool.Pool, oid uint32) (string, error) {
 	var typeName string
-	err := pool.QueryRow(context.Background(), "SELECT typname FROM pg_type WHERE oid = $1", oid).Scan(&typeName)
+	err := pool.QueryRow(ctx, "SELECT typname FROM pg_type WHERE oid = $1", oid).Scan(&typeName)
 	if err != nil {
 		return "", err
 	}

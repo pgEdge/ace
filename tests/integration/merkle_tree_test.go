@@ -279,6 +279,7 @@ func testMerkleTreeDiffBoundaryModifications(t *testing.T, tableName string) {
 	err = mtreeTask.MtreeInit()
 	require.NoError(t, err, "MtreeInit should succeed")
 	t.Cleanup(func() {
+		_, _ = pgCluster.Node1Pool.Exec(ctx, fmt.Sprintf("UPDATE %s SET email = regexp_replace(email, '\\\\.(cdc_hw|cdc_fallback)$', '')", qualifiedTableName))
 		err := mtreeTask.MtreeTeardown()
 		if err != nil {
 			t.Logf("Warning: MtreeTeardown failed during cleanup: %v", err)

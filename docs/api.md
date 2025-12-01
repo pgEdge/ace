@@ -317,9 +317,8 @@ Compares the Merkle trees of a table across nodes to find inconsistencies. It ge
 | `--dbname`        | `-d`  | Name of the database                                                   |         |
 | `--nodes`         | `-n`  | Nodes to include (comma-separated, or "all")                           | all     |
 | `--max-cpu-ratio` | `-m`  | Max CPU ratio for parallel operations                                  | 0.5     |
-| `--batch-size`    | `-h`  | Number of ranges to process in a batch when diffing                    | 100     |
 | `--output`        | `-o`  | Output format for the diff report (`json` or `html`)                   | json    |
-| `--skip-update`   | `-U`  | Skip updating the Merkle tree with CDC changes before the diff        | false   |
+| `--skip-cdc`      | `-U`  | Skip CDC processing (only rehash dirty blocks and compare)            | false   |
 | `--quiet`         | `-q`  | Suppress output                                                        | false   |
 | `--debug`         | `-v`  | Enable debug logging                                                   | false   |
 

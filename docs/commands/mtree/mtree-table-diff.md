@@ -20,9 +20,8 @@ By default, updates trees first using CDC.
 | `--dbname` | `-d` | Database name |  |
 | `--nodes` | `-n` | Nodes to include (comma or `all`) | `all` |
 | `--max-cpu-ratio` | `-m` | Max CPU ratio | `0.5` |
-| `--batch-size` | `-h` | Ranges per batch during diff | `100` |
 | `--output` | `-o` | `json` or `html` | `json` |
-| `--skip-update` | `-U` | Don’t apply CDC before diff | `false` |
+| `--skip-cdc` | `-U` | Skip CDC processing (only rehash and compare) | `false` |
 | `--quiet` | `-q` | Suppress output | `false` |
 | `--debug` | `-v` | Debug logging | `false` |
 

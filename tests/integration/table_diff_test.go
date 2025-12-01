@@ -1068,6 +1068,11 @@ func testTableDiff_TableFiltering(t *testing.T) {
 		t.Errorf("Expected modified row index 3 not found in filtered diffs")
 	}
 
+	viewName := tdTask.FilteredViewName
+	require.NotEmpty(t, viewName, "filtered view name should be recorded")
+	require.False(t, materializedViewExists(t, ctx, pgCluster.Node1Pool, testSchema, viewName), "Filtered materialized view should be dropped on %s", serviceN1)
+	require.False(t, materializedViewExists(t, ctx, pgCluster.Node2Pool, testSchema, viewName), "Filtered materialized view should be dropped on %s", serviceN2)
+
 	log.Println("TestTableDiff_TableFiltering completed.")
 }
 
