@@ -1,4 +1,4 @@
-# Merkle Tree Design
+# Merkle Tree Architecture
 
 Developing Merkle Trees for ACE is driven by the following requirements:
 

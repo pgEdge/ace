@@ -1,4 +1,4 @@
-# Table Diff Design
+# Table Diff Architecture
 
 The design of table diff is driven by the following requirements and constraints:
 

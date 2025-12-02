@@ -79,8 +79,7 @@ nav:
   - Scheduling ACE Runs: scheduling.md
   - The ACE API: api.md
   - Improving ACE Performance: performance.md
-  - Architecture and Design Documents: 
-    - ACE Architecture: design/index.md
+  - Architecture and Design: 
     - ACE table-diff Architecture: design/table_diff.md
     - Merkle Tree Architecture: design/merkle.md
   - Release Notes: CHANGELOG.md
