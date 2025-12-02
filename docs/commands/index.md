@@ -10,7 +10,7 @@ This section documents the ACE (Active Consistency Engine) CLI commands. Be sure
 | [schema-diff](diff/schema-diff.md)   | Compares objects (and optionally data via per-table diffs) across nodes for an entire schema.             |
 | [spock-diff](diff/spock-diff.md)     | Compares Spock metadata/state across nodes to find configuration divergences.                             |
 | [table-diff](diff/table-diff.md)     | Compares a single table across cluster nodes and writes a diff report (JSON/HTML/CSV).                    |
-| [table-repair](repair/table-repair.md) | Applies fixes from a diff file using a chosen source-of-truth node; supports dry-run, upsert/insert-only. |
+| [table-repair](repair/table-repair.md) | Applies fixes from a diff file using a chosen source-of-truth node; supports dry-run, upsert/insert-only, and `--fix-nulls` for NULL-only drifts. |
 | [table-rerun](diff/table-rerun.md)   | Re-runs a previous diff from a saved file to verify that inconsistencies were resolved.                   |
 
 
@@ -25,4 +25,3 @@ This section documents the ACE (Active Consistency Engine) CLI commands. Be sure
 | [mtree teardown](mtree/mtree-teardown.md)             | Removes all Merkle-related objects and CDC setup created by `mtree init`.                 |
 | [mtree teardown-table](mtree/mtree-teardown-table.md) | Drops Merkle data/metadata for one table and removes it from CDC publication.             |
 | [mtree update](mtree/mtree-update.md)                 | Applies captured CDC changes to refresh Merkle trees; optional rebalance.                 |
-

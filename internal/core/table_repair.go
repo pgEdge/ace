@@ -18,6 +18,8 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
+	"slices"
+	"sort"
 	"strings"
 	"time"
 
@@ -54,13 +56,13 @@ type TableRepairTask struct {
 	SourceOfTruth string
 
 	QuietMode      bool
-	DryRun         bool // TBD
+	DryRun         bool
 	InsertOnly     bool
 	UpsertOnly     bool
 	FireTriggers   bool
-	GenerateReport bool // TBD
+	GenerateReport bool
 	FixNulls       bool // TBD
-	Bidirectional  bool // TBD
+	Bidirectional  bool
 
 	InvokeMethod string // TBD
 	ClientRole   string // TBD
@@ -126,17 +128,14 @@ func (tr *TableRepairTask) checkRepairOptionsCompatibility() error {
 }
 
 func (tr *TableRepairTask) checkIfSourceOfTruthIsNeeded() bool {
-	casesNotNeeded := []struct {
-		condition bool
-		needed    bool
-	}{
-		{tr.FixNulls, false},
-		{tr.Bidirectional && tr.InsertOnly, false},
+	casesNotNeeded := []bool{
+		tr.FixNulls,
+		tr.Bidirectional && tr.InsertOnly,
 	}
 
-	for _, rule := range casesNotNeeded {
-		if rule.condition {
-			return rule.needed
+	for _, skip := range casesNotNeeded {
+		if skip {
+			return false
 		}
 	}
 
@@ -158,7 +157,7 @@ func (t *TableRepairTask) ValidateAndPrepare() error {
 		return fmt.Errorf("repair options are incompatible: %w", err)
 	}
 
-	if !t.checkIfSourceOfTruthIsNeeded() {
+	if t.checkIfSourceOfTruthIsNeeded() && t.SourceOfTruth == "" {
 		return fmt.Errorf("source_of_truth is required unless --fix-nulls or --bidirectional is specified")
 	}
 
@@ -527,6 +526,10 @@ func (t *TableRepairTask) Run(skipValidation bool) (err error) {
 		}
 	}()
 
+	if t.FixNulls {
+		return t.runFixNulls(startTime)
+	}
+
 	if t.DryRun {
 		output, err := getDryRunOutput(t)
 		if err != nil {
@@ -550,6 +553,550 @@ func (t *TableRepairTask) Run(skipValidation bool) (err error) {
 	}
 
 	return t.runUnidirectionalRepair(startTime)
+}
+
+type rowData struct {
+	data     map[string]any
+	pkValues []any
+	pkMap    map[string]any
+	pkKey    string
+}
+
+type nullUpdate struct {
+	pkValues []any
+	pkMap    map[string]any
+	columns  map[string]any
+}
+
+func (t *TableRepairTask) runFixNulls(startTime time.Time) error {
+	logger.Info("Starting fix-nulls repair for %s on cluster %s", t.QualifiedTableName, t.ClusterName)
+
+	nullUpdates, err := t.buildNullUpdates()
+	if err != nil {
+		return fmt.Errorf("failed to prepare null updates: %w", err)
+	}
+
+	if t.DryRun {
+		output, err := t.getFixNullsDryRunOutput(nullUpdates)
+		if err != nil {
+			return fmt.Errorf("failed to generate fix-nulls dry run output: %w", err)
+		}
+		fmt.Print(output)
+		return nil
+	}
+
+	defer func() {
+		for nodeName, pool := range t.Pools {
+			if pool != nil {
+				pool.Close()
+				logger.Debug("Closed connection pool for node: %s", nodeName)
+			}
+		}
+	}()
+
+	totalCellsUpdated := make(map[string]int)
+	var repairErrors []string
+
+	for nodeName, updates := range nullUpdates {
+		if len(updates) == 0 {
+			continue
+		}
+
+		pool, ok := t.Pools[nodeName]
+		if !ok || pool == nil {
+			logger.Debug("Connection pool for node %s not found, attempting to connect.", nodeName)
+			var nodeInfo map[string]any
+			for _, ni := range t.ClusterNodes {
+				if name, _ := ni["Name"].(string); name == nodeName {
+					nodeInfo = ni
+					break
+				}
+			}
+
+			if nodeInfo == nil {
+				errStr := fmt.Sprintf("no node info for %s", nodeName)
+				logger.Error("Could not find node info for %s. Skipping repairs for this node.", nodeName)
+				repairErrors = append(repairErrors, errStr)
+				continue
+			}
+
+			pool, err = auth.GetClusterNodeConnection(t.Ctx, nodeInfo, auth.ConnectionOptions{Role: t.ClientRole})
+			if err != nil {
+				logger.Error("Failed to connect to node %s: %v. Skipping repairs for this node.", nodeName, err)
+				repairErrors = append(repairErrors, fmt.Sprintf("connection failed for %s: %v", nodeName, err))
+				continue
+			}
+			t.Pools[nodeName] = pool
+			logger.Debug("Successfully connected to node %s and created a new connection pool.", nodeName)
+		}
+
+		tx, err := pool.Begin(t.Ctx)
+		if err != nil {
+			logger.Error("starting transaction on node %s: %v", nodeName, err)
+			repairErrors = append(repairErrors, fmt.Sprintf("tx begin failed for %s: %v", nodeName, err))
+			continue
+		}
+
+		spockRepairModeActive := false
+		if _, err := tx.Exec(context.Background(), "SELECT spock.repair_mode(true)"); err != nil {
+			tx.Rollback(t.Ctx)
+			logger.Error("enabling spock.repair_mode(true) on %s: %v", nodeName, err)
+			repairErrors = append(repairErrors, fmt.Sprintf("spock.repair_mode(true) failed for %s: %v", nodeName, err))
+			continue
+		}
+		spockRepairModeActive = true
+		logger.Debug("spock.repair_mode(true) set on %s", nodeName)
+
+		if t.FireTriggers {
+			_, err = tx.Exec(context.Background(), "SET session_replication_role = 'local'")
+		} else {
+			_, err = tx.Exec(context.Background(), "SET session_replication_role = 'replica'")
+		}
+		if err != nil {
+			tx.Rollback(t.Ctx)
+			logger.Error("setting session_replication_role on %s: %v", nodeName, err)
+			repairErrors = append(repairErrors, fmt.Sprintf("session_replication_role failed for %s: %v", nodeName, err))
+			continue
+		}
+		logger.Debug("session_replication_role set on %s (fire_triggers: %v)", nodeName, t.FireTriggers)
+
+		colTypes, _, err := t.getColTypesForNode(nodeName)
+		if err != nil {
+			tx.Rollback(t.Ctx)
+			logger.Error("%s", err.Error())
+			repairErrors = append(repairErrors, err.Error())
+			continue
+		}
+
+		columnSet := make(map[string]struct{})
+		for _, nu := range updates {
+			for col := range nu.columns {
+				columnSet[col] = struct{}{}
+			}
+		}
+		var columns []string
+		for col := range columnSet {
+			columns = append(columns, col)
+		}
+		sort.Strings(columns)
+
+		nodeCellsUpdated := 0
+		nodeFailed := false
+
+		for _, col := range columns {
+			colType, ok := colTypes[col]
+			if !ok {
+				nodeFailed = true
+				tx.Rollback(t.Ctx)
+				errStr := fmt.Sprintf("column type for %s not found on node %s", col, nodeName)
+				logger.Error("%s", errStr)
+				repairErrors = append(repairErrors, errStr)
+				break
+			}
+
+			var rowsForCol []*nullUpdate
+			for _, nu := range updates {
+				if _, ok := nu.columns[col]; ok {
+					rowsForCol = append(rowsForCol, nu)
+				}
+			}
+			if len(rowsForCol) == 0 {
+				continue
+			}
+
+			updatedCount, err := t.applyFixNullsUpdates(tx, col, colType, rowsForCol, colTypes)
+			if err != nil {
+				nodeFailed = true
+				tx.Rollback(t.Ctx)
+				logger.Error("executing fix-nulls updates for column %s on node %s: %v", col, nodeName, err)
+				repairErrors = append(repairErrors, fmt.Sprintf("fix-nulls updates failed for %s on %s: %v", col, nodeName, err))
+				break
+			}
+			nodeCellsUpdated += updatedCount
+			logger.Info("Updated %d column values for column %s on %s", updatedCount, col, nodeName)
+		}
+
+		if nodeFailed {
+			continue
+		}
+
+		if spockRepairModeActive {
+			_, err = tx.Exec(context.Background(), "SELECT spock.repair_mode(false)")
+			if err != nil {
+				tx.Rollback(t.Ctx)
+				logger.Error("disabling spock.repair_mode(false) on %s: %v", nodeName, err)
+				repairErrors = append(repairErrors, fmt.Sprintf("spock.repair_mode(false) failed for %s: %v", nodeName, err))
+				continue
+			}
+			logger.Debug("spock.repair_mode(false) set on %s", nodeName)
+		}
+
+		if err := tx.Commit(t.Ctx); err != nil {
+			logger.Error("committing transaction on %s: %v", nodeName, err)
+			repairErrors = append(repairErrors, fmt.Sprintf("commit failed for %s: %v", nodeName, err))
+			continue
+		}
+		logger.Debug("Transaction committed successfully on %s", nodeName)
+
+		totalCellsUpdated[nodeName] = nodeCellsUpdated
+
+		if t.report != nil && nodeCellsUpdated > 0 {
+			t.populateFixNullsReport(nodeName, updates, "updated_rows")
+		}
+	}
+
+	t.FinishedAt = time.Now()
+	t.TimeTaken = float64(t.FinishedAt.Sub(startTime).Milliseconds())
+	runTimeStr := fmt.Sprintf("%.3fs", t.TimeTaken/1000)
+
+	if len(repairErrors) > 0 {
+		logger.Error("Fix-nulls repair of %s failed in %s with errors: %s", t.QualifiedTableName, runTimeStr, strings.Join(repairErrors, "; "))
+		t.TaskStatus = "FAILED"
+		t.TaskContext = strings.Join(repairErrors, "; ")
+		return fmt.Errorf("fix-nulls repair encountered errors: %s", t.TaskContext)
+	}
+
+	totalCells := 0
+	totalRows := 0
+	var updatedNodes []string
+	for node, count := range totalCellsUpdated {
+		if count > 0 {
+			updatedNodes = append(updatedNodes, node)
+			totalCells += count
+			if updates, ok := nullUpdates[node]; ok {
+				totalRows += len(updates)
+			}
+		}
+	}
+	sort.Strings(updatedNodes)
+
+	if totalCells == 0 {
+		logger.Info("Fix-nulls repair of %s complete in %s. No null differences found.", t.QualifiedTableName, runTimeStr)
+		t.TaskStatus = "COMPLETED"
+		t.TaskContext = "No null repairs needed"
+		return nil
+	}
+
+	logger.Info("Fix-nulls repair of %s complete in %s. Nodes %s updated (%d column values across %d rows).",
+		t.QualifiedTableName,
+		runTimeStr,
+		strings.Join(updatedNodes, ", "),
+		totalCells,
+		totalRows,
+	)
+
+	t.TaskStatus = "COMPLETED"
+	t.TaskContext = fmt.Sprintf("Fix-nulls updated %d column values across %d rows on nodes: %s", totalCells, totalRows, strings.Join(updatedNodes, ", "))
+
+	return nil
+}
+
+func (t *TableRepairTask) buildNullUpdates() (map[string]map[string]*nullUpdate, error) {
+	updatesByNode := make(map[string]map[string]*nullUpdate)
+
+	for nodePair, diffs := range t.RawDiffs.NodeDiffs {
+		nodes := strings.Split(nodePair, "/")
+		if len(nodes) != 2 {
+			logger.Warn("Warning: Invalid node pair key '%s', skipping", nodePair)
+			continue
+		}
+		node1Name, node2Name := nodes[0], nodes[1]
+
+		node1Rows := diffs.Rows[node1Name]
+		node2Rows := diffs.Rows[node2Name]
+
+		node1Index, err := buildRowIndex(node1Rows, t.Key)
+		if err != nil {
+			return nil, fmt.Errorf("failed to index rows for %s: %w", node1Name, err)
+		}
+		node2Index, err := buildRowIndex(node2Rows, t.Key)
+		if err != nil {
+			return nil, fmt.Errorf("failed to index rows for %s: %w", node2Name, err)
+		}
+
+		for pkKey, row1 := range node1Index {
+			row2, ok := node2Index[pkKey]
+			if !ok {
+				continue
+			}
+
+			for _, col := range t.Cols {
+				isPk := slices.Contains(t.Key, col)
+				if isPk {
+					continue
+				}
+
+				val1 := row1.data[col]
+				val2 := row2.data[col]
+
+				if val1 == nil && val2 != nil {
+					addNullUpdate(updatesByNode, node1Name, row1, col, val2)
+				} else if val2 == nil && val1 != nil {
+					addNullUpdate(updatesByNode, node2Name, row2, col, val1)
+				}
+			}
+		}
+	}
+
+	return updatesByNode, nil
+}
+
+func buildRowIndex(rows []types.OrderedMap, keyCols []string) (map[string]rowData, error) {
+	index := make(map[string]rowData, len(rows))
+	for _, row := range rows {
+		rowMap := utils.StripSpockMetadata(utils.OrderedMapToMap(row))
+
+		pkVals := make([]any, len(keyCols))
+		pkMap := make(map[string]any, len(keyCols))
+		for i, key := range keyCols {
+			val, ok := rowMap[key]
+			if !ok {
+				return nil, fmt.Errorf("primary key column %s not found in row", key)
+			}
+			pkVals[i] = val
+			pkMap[key] = val
+		}
+
+		pkKey, err := utils.StringifyKey(rowMap, keyCols)
+		if err != nil {
+			return nil, fmt.Errorf("failed to stringify primary key: %w", err)
+		}
+
+		index[pkKey] = rowData{
+			data:     rowMap,
+			pkValues: pkVals,
+			pkMap:    pkMap,
+			pkKey:    pkKey,
+		}
+	}
+	return index, nil
+}
+
+func addNullUpdate(updates map[string]map[string]*nullUpdate, nodeName string, row rowData, col string, value any) {
+	if value == nil {
+		return
+	}
+
+	if _, ok := updates[nodeName]; !ok {
+		updates[nodeName] = make(map[string]*nullUpdate)
+	}
+
+	nodeUpdates := updates[nodeName]
+	nu, ok := nodeUpdates[row.pkKey]
+	if !ok {
+		nu = &nullUpdate{
+			pkValues: row.pkValues,
+			pkMap:    row.pkMap,
+			columns:  make(map[string]any),
+		}
+		nodeUpdates[row.pkKey] = nu
+	}
+
+	if _, exists := nu.columns[col]; !exists {
+		nu.columns[col] = value
+	}
+}
+
+func (t *TableRepairTask) getFixNullsDryRunOutput(updates map[string]map[string]*nullUpdate) (string, error) {
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("\n######## DRY RUN for table %s (fix-nulls) ########\n\n", t.QualifiedTableName))
+
+	if len(updates) == 0 {
+		sb.WriteString("  No null differences found. No repairs needed.\n")
+		sb.WriteString("\n######## END DRY RUN ########\n")
+		return sb.String(), nil
+	}
+
+	var nodeNames []string
+	for nodeName := range updates {
+		nodeNames = append(nodeNames, nodeName)
+	}
+	sort.Strings(nodeNames)
+
+	for _, nodeName := range nodeNames {
+		nodeUpdates := updates[nodeName]
+		if len(nodeUpdates) == 0 {
+			continue
+		}
+
+		columnSet := make(map[string]struct{})
+		cellCount := 0
+		for _, nu := range nodeUpdates {
+			cellCount += len(nu.columns)
+			for col := range nu.columns {
+				columnSet[col] = struct{}{}
+			}
+		}
+
+		var columns []string
+		for col := range columnSet {
+			columns = append(columns, col)
+		}
+		sort.Strings(columns)
+
+		sb.WriteString(fmt.Sprintf("  Node %s: Would update %d rows (%d column values) across columns [%s].\n",
+			nodeName,
+			len(nodeUpdates),
+			cellCount,
+			strings.Join(columns, ", "),
+		))
+
+		if t.report != nil && cellCount > 0 {
+			t.populateFixNullsReport(nodeName, nodeUpdates, "would_update_rows")
+		}
+	}
+
+	sb.WriteString("\n######## END DRY RUN ########\n")
+	return sb.String(), nil
+}
+
+func (t *TableRepairTask) populateFixNullsReport(nodeName string, nodeUpdates map[string]*nullUpdate, field string) {
+	if t.report == nil || len(nodeUpdates) == 0 {
+		return
+	}
+
+	rows := make([]map[string]any, 0, len(nodeUpdates))
+	for _, nu := range nodeUpdates {
+		rowEntry := make(map[string]any, len(nu.pkMap)+1)
+		for k, v := range nu.pkMap {
+			rowEntry[k] = v
+		}
+		updatesCopy := make(map[string]any, len(nu.columns))
+		for col, val := range nu.columns {
+			updatesCopy[col] = val
+		}
+		rowEntry["updates"] = updatesCopy
+		rows = append(rows, rowEntry)
+	}
+
+	if _, ok := t.report.Changes[nodeName]; !ok {
+		t.report.Changes[nodeName] = make(map[string]any)
+	}
+	t.report.Changes[nodeName].(map[string]any)[field] = rows
+}
+
+func (t *TableRepairTask) applyFixNullsUpdates(tx pgx.Tx, column string, columnType string, updates []*nullUpdate, colTypes map[string]string) (int, error) {
+	if len(updates) == 0 {
+		return 0, nil
+	}
+
+	totalUpdated := 0
+	batchSize := 500
+	for i := 0; i < len(updates); i += batchSize {
+		end := i + batchSize
+		if end > len(updates) {
+			end = len(updates)
+		}
+		batch := updates[i:end]
+
+		updateSQL, args, err := t.buildFixNullsBatchSQL(column, columnType, batch, colTypes)
+		if err != nil {
+			return totalUpdated, err
+		}
+
+		tag, err := tx.Exec(t.Ctx, updateSQL, args...)
+		if err != nil {
+			return totalUpdated, fmt.Errorf("error executing fix-nulls batch for column %s: %w", column, err)
+		}
+		totalUpdated += int(tag.RowsAffected())
+	}
+
+	return totalUpdated, nil
+}
+
+func (t *TableRepairTask) buildFixNullsBatchSQL(column string, columnType string, batch []*nullUpdate, colTypes map[string]string) (string, []any, error) {
+	var sb strings.Builder
+	args := make([]any, 0, len(batch)*(len(t.Key)+1))
+	paramIdx := 1
+
+	sb.WriteString("WITH updates(")
+	for i, pkCol := range t.Key {
+		if i > 0 {
+			sb.WriteString(", ")
+		}
+		sb.WriteString(pgx.Identifier{pkCol}.Sanitize())
+	}
+	sb.WriteString(", value) AS (VALUES ")
+
+	for i, nu := range batch {
+		if i > 0 {
+			sb.WriteString(", ")
+		}
+		sb.WriteString("(")
+		for j, pkCol := range t.Key {
+			if j > 0 {
+				sb.WriteString(", ")
+			}
+			pkType, ok := colTypes[pkCol]
+			if !ok {
+				return "", nil, fmt.Errorf("column type for primary key %s not found", pkCol)
+			}
+			convertedPK, err := convertValueForType(nu.pkValues[j], pkType)
+			if err != nil {
+				return "", nil, fmt.Errorf("convert primary key %s value: %w", pkCol, err)
+			}
+			sb.WriteString(fmt.Sprintf("$%d::%s", paramIdx, pkType))
+			args = append(args, convertedPK)
+			paramIdx++
+		}
+		sb.WriteString(", ")
+		convertedVal, err := convertValueForType(nu.columns[column], columnType)
+		if err != nil {
+			return "", nil, fmt.Errorf("convert value for column %s: %w", column, err)
+		}
+		sb.WriteString(fmt.Sprintf("$%d::%s", paramIdx, columnType))
+		args = append(args, convertedVal)
+		paramIdx++
+		sb.WriteString(")")
+	}
+
+	sb.WriteString(") UPDATE ")
+	sb.WriteString(pgx.Identifier{t.Schema}.Sanitize())
+	sb.WriteString(".")
+	sb.WriteString(pgx.Identifier{t.Table}.Sanitize())
+	sb.WriteString(" AS t SET ")
+	sb.WriteString(pgx.Identifier{column}.Sanitize())
+	sb.WriteString(" = updates.value::")
+	sb.WriteString(columnType)
+	sb.WriteString(" FROM updates WHERE ")
+
+	for i, pkCol := range t.Key {
+		if i > 0 {
+			sb.WriteString(" AND ")
+		}
+		ident := pgx.Identifier{pkCol}.Sanitize()
+		sb.WriteString("t.")
+		sb.WriteString(ident)
+		sb.WriteString(" = updates.")
+		sb.WriteString(ident)
+	}
+
+	return sb.String(), args, nil
+}
+
+func convertValueForType(val any, colType string) (any, error) {
+	if val == nil {
+		return nil, nil
+	}
+
+	if tVal, ok := val.(time.Time); ok {
+		return tVal, nil
+	}
+
+	return utils.ConvertToPgxType(val, colType)
+}
+
+func (t *TableRepairTask) getColTypesForNode(nodeName string) (map[string]string, string, error) {
+	for hostPort, mappedName := range t.HostMap {
+		if mappedName == nodeName {
+			if colTypes, ok := t.ColTypes[hostPort]; ok {
+				return colTypes, hostPort, nil
+			}
+			return nil, hostPort, fmt.Errorf("column types for target node '%s' (key: %s) not found", nodeName, hostPort)
+		}
+	}
+
+	return nil, "", fmt.Errorf("could not find host:port key for target node %s to get col types", nodeName)
 }
 
 func (t *TableRepairTask) runUnidirectionalRepair(startTime time.Time) error {

@@ -14,6 +14,7 @@ package integration
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log"
@@ -183,6 +184,64 @@ func getTableCount(t *testing.T, ctx context.Context, pool *pgxpool.Pool, qualif
 	err := pool.QueryRow(ctx, fmt.Sprintf("SELECT count(*) FROM %s", qualifiedTableName)).Scan(&count)
 	require.NoError(t, err, "Failed to count rows")
 	return count
+}
+
+func setupNullDivergence(t *testing.T, ctx context.Context, qualifiedTableName string) {
+	t.Helper()
+	log.Println("Setting up null divergence for", qualifiedTableName)
+
+	for i, pool := range []*pgxpool.Pool{pgCluster.Node1Pool, pgCluster.Node2Pool} {
+		nodeName := pgCluster.ClusterNodes[i]["Name"].(string)
+		_, err := pool.Exec(ctx, "SELECT spock.repair_mode(true)")
+		require.NoError(t, err, "Failed to enable repair mode on %s", nodeName)
+		_, err = pool.Exec(ctx, fmt.Sprintf("TRUNCATE TABLE %s CASCADE", qualifiedTableName))
+		require.NoError(t, err, "Failed to truncate table on node %s", nodeName)
+		_, err = pool.Exec(ctx, "SELECT spock.repair_mode(false)")
+		require.NoError(t, err, "Failed to disable repair mode on %s", nodeName)
+	}
+
+	insertSQL := fmt.Sprintf(
+		"INSERT INTO %s (index, customer_id, first_name, last_name, city) VALUES ($1, $2, $3, $4, $5)",
+		qualifiedTableName,
+	)
+
+	// Node1 rows: missing city for id 1, missing first_name for id 2
+	_, err := pgCluster.Node1Pool.Exec(ctx, "SELECT spock.repair_mode(true)")
+	require.NoError(t, err)
+	_, err = pgCluster.Node1Pool.Exec(ctx, insertSQL, 1, "CUST-1", "Michael", "Schumacher", nil)
+	require.NoError(t, err)
+	_, err = pgCluster.Node1Pool.Exec(ctx, insertSQL, 2, "CUST-2", nil, "Alonso", "Oviedo")
+	require.NoError(t, err)
+	_, err = pgCluster.Node1Pool.Exec(ctx, "SELECT spock.repair_mode(false)")
+	require.NoError(t, err)
+
+	// Node2 rows: missing last_name for id 1, missing city for id 2
+	_, err = pgCluster.Node2Pool.Exec(ctx, "SELECT spock.repair_mode(true)")
+	require.NoError(t, err)
+	_, err = pgCluster.Node2Pool.Exec(ctx, insertSQL, 1, "CUST-1", "Michael", nil, "Austria")
+	require.NoError(t, err)
+	_, err = pgCluster.Node2Pool.Exec(ctx, insertSQL, 2, "CUST-2", "Fernando", "Alonso", nil)
+	require.NoError(t, err)
+	_, err = pgCluster.Node2Pool.Exec(ctx, "SELECT spock.repair_mode(false)")
+	require.NoError(t, err)
+}
+
+type nameCity struct {
+	first *string
+	last  *string
+	city  *string
+}
+
+func getNameCity(t *testing.T, ctx context.Context, pool *pgxpool.Pool, qualifiedTableName string, index int, customerID string) nameCity {
+	t.Helper()
+	var first, last, city *string
+	err := pool.QueryRow(
+		ctx,
+		fmt.Sprintf("SELECT first_name, last_name, city FROM %s WHERE index = $1 AND customer_id = $2", qualifiedTableName),
+		index, customerID,
+	).Scan(&first, &last, &city)
+	require.NoError(t, err, "Failed to fetch row %d/%s", index, customerID)
+	return nameCity{first: first, last: last, city: city}
 }
 
 func TestTableRepair_UnidirectionalDefault(t *testing.T) {
@@ -597,6 +656,323 @@ func TestTableRepair_GenerateReport(t *testing.T) {
 			assert.True(t, len(data) > 0, "Report file is empty")
 			assert.Contains(t, string(data), "\"operation_type\": \"table-repair\"")
 			assert.Contains(t, string(data), fmt.Sprintf("\"source_of_truth\": \"%s\"", serviceN1))
+		})
+	}
+}
+
+func TestTableRepair_VariousDataTypes(t *testing.T) {
+	ctx := context.Background()
+	tableName := "data_type_repair"
+	qualifiedTableName := fmt.Sprintf("%s.%s", testSchema, tableName)
+	refTime := time.Date(2024, 1, 15, 10, 30, 0, 0, time.UTC)
+
+	createDataTypeTableSQL := fmt.Sprintf(`
+CREATE SCHEMA IF NOT EXISTS "%s";
+CREATE TABLE IF NOT EXISTS %s.%s (
+    id INT PRIMARY KEY,
+    col_smallint SMALLINT,
+    col_integer INTEGER,
+    col_bigint BIGINT,
+    col_numeric NUMERIC(10, 2),
+    col_real REAL,
+    col_double DOUBLE PRECISION,
+    col_varchar VARCHAR(100),
+    col_text TEXT,
+    col_char CHAR(10),
+    col_boolean BOOLEAN,
+    col_date DATE,
+    col_timestamp TIMESTAMP,
+    col_timestamptz TIMESTAMPTZ,
+    col_interval INTERVAL,
+    col_jsonb JSONB,
+    col_json JSON,
+    col_bytea BYTEA,
+    col_int_array INT[],
+	col_text_array TEXT[]
+);`, testSchema, testSchema, tableName)
+
+	for i, pool := range []*pgxpool.Pool{pgCluster.Node1Pool, pgCluster.Node2Pool} {
+		nodeName := pgCluster.ClusterNodes[i]["Name"].(string)
+		_, err := pool.Exec(ctx, createDataTypeTableSQL)
+		require.NoErrorf(t, err, "Failed to create data type table on %s", nodeName)
+		_, err = pool.Exec(ctx, fmt.Sprintf("TRUNCATE TABLE %s CASCADE", qualifiedTableName))
+		require.NoErrorf(t, err, "Failed to truncate data type table on %s", nodeName)
+		_, err = pool.Exec(ctx, fmt.Sprintf(`SELECT spock.repset_add_table('default', '%s');`, qualifiedTableName))
+		require.NoErrorf(t, err, "Failed to add table to repset on %s", nodeName)
+	}
+
+	t.Cleanup(func() {
+		_, _ = pgCluster.Node1Pool.Exec(ctx, fmt.Sprintf(`SELECT spock.repset_remove_table('default', '%s');`, qualifiedTableName))
+		for _, pool := range []*pgxpool.Pool{pgCluster.Node1Pool, pgCluster.Node2Pool} {
+			_, _ = pool.Exec(ctx, fmt.Sprintf("DROP TABLE IF EXISTS %s CASCADE", qualifiedTableName))
+		}
+		files, _ := filepath.Glob("*_diffs-*.json")
+		for _, f := range files {
+			_ = os.Remove(f)
+		}
+	})
+
+	insertRow := func(pool *pgxpool.Pool, data map[string]any) {
+		tx, err := pool.Begin(ctx)
+		require.NoError(t, err)
+		defer tx.Rollback(ctx)
+
+		_, err = tx.Exec(ctx, "SELECT spock.repair_mode(true)")
+		require.NoError(t, err)
+
+		_, err = tx.Exec(
+			ctx,
+			fmt.Sprintf(`INSERT INTO %s (id, col_smallint, col_integer, col_bigint, col_numeric, col_real, col_double, col_varchar, col_text, col_char, col_boolean, col_date, col_timestamp, col_timestamptz, col_interval, col_jsonb, col_json, col_bytea, col_int_array, col_text_array)
+				VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)`, qualifiedTableName),
+			data["id"], data["col_smallint"], data["col_integer"], data["col_bigint"],
+			data["col_numeric"], data["col_real"], data["col_double"], data["col_varchar"],
+			data["col_text"], data["col_char"], data["col_boolean"], data["col_date"],
+			data["col_timestamp"], data["col_timestamptz"], data["col_interval"], data["col_jsonb"], data["col_json"],
+			data["col_bytea"], data["col_int_array"], data["col_text_array"],
+		)
+		require.NoError(t, err)
+
+		_, err = tx.Exec(ctx, "SELECT spock.repair_mode(false)")
+		require.NoError(t, err)
+		require.NoError(t, tx.Commit(ctx))
+	}
+
+	row1 := map[string]any{
+		"id": 1, "col_smallint": int16(10), "col_integer": int32(100), "col_bigint": int64(1000),
+		"col_numeric": "123.45", "col_real": float32(1.23), "col_double": float64(4.56789),
+		"col_varchar": "varchar_data", "col_text": "text_data", "col_char": "char_data",
+		"col_boolean": true, "col_date": refTime.Format("2006-01-02"),
+		"col_timestamp": refTime, "col_timestamptz": refTime, "col_interval": "1 day 02:03:04",
+		"col_jsonb": `{"key": "value1"}`, "col_json": `{"key": "value1"}`,
+		"col_bytea": []byte("bytea_row1"), "col_int_array": []int32{1, 2, 3},
+		"col_text_array": []string{"alpha", "beta"},
+	}
+	row2OnlyN1 := map[string]any{
+		"id": 2, "col_smallint": int16(20), "col_integer": int32(200), "col_bigint": int64(2000),
+		"col_numeric": "222.22", "col_real": float32(2.34), "col_double": float64(5.6789),
+		"col_varchar": "only_on_n1", "col_text": "text_row2", "col_char": "char_row2",
+		"col_boolean": false, "col_date": refTime.AddDate(0, 1, 0).Format("2006-01-02"),
+		"col_timestamp": refTime.Add(time.Hour), "col_timestamptz": refTime.Add(time.Hour), "col_interval": "2 days",
+		"col_jsonb": `{"row": 2}`, "col_json": `{"row": 2}`,
+		"col_bytea": []byte("bytea_row2"), "col_int_array": []int32{4, 5},
+		"col_text_array": []string{"only", "n1"},
+	}
+	row3Base := map[string]any{
+		"id": 3, "col_smallint": int16(30), "col_integer": int32(300), "col_bigint": int64(3000),
+		"col_numeric": "333.33", "col_real": float32(3.45), "col_double": float64(6.789),
+		"col_varchar": "baseline_varchar", "col_text": "baseline_text", "col_char": "char_row3",
+		"col_boolean": true, "col_date": refTime.AddDate(0, 2, 0).Format("2006-01-02"),
+		"col_timestamp": refTime.Add(2 * time.Hour), "col_timestamptz": refTime.Add(2 * time.Hour), "col_interval": "3 hours",
+		"col_jsonb": `{"status": "good"}`, "col_json": `{"status": "good"}`,
+		"col_bytea": []byte("bytea_row3"), "col_int_array": []int32{7, 8, 9},
+		"col_text_array": []string{"one", "two", "three"},
+	}
+	row3ModifiedN2 := map[string]any{
+		"id": 3, "col_smallint": int16(30), "col_integer": int32(300), "col_bigint": int64(3000),
+		"col_numeric": "999.99", "col_real": float32(9.99), "col_double": float64(99.99),
+		"col_varchar": "modified_on_n2", "col_text": "modified_text", "col_char": "char_mod",
+		"col_boolean": false, "col_date": refTime.AddDate(0, 3, 0).Format("2006-01-02"),
+		"col_timestamp": refTime.Add(3 * time.Hour), "col_timestamptz": refTime.Add(3 * time.Hour), "col_interval": "9 hours",
+		"col_jsonb": `{"status": "bad"}`, "col_json": `{"status": "bad"}`,
+		"col_bytea": []byte("bytea_row3_mod"), "col_int_array": []int32{9, 9, 9},
+		"col_text_array": []string{"nine", "nine", "nine"},
+	}
+	row4OnlyN2 := map[string]any{
+		"id": 4, "col_smallint": int16(40), "col_integer": int32(400), "col_bigint": int64(4000),
+		"col_numeric": "444.44", "col_varchar": "only_on_n2",
+	}
+
+	insertRow(pgCluster.Node1Pool, row1)
+	insertRow(pgCluster.Node2Pool, row1)
+	insertRow(pgCluster.Node1Pool, row2OnlyN1)
+	insertRow(pgCluster.Node1Pool, row3Base)
+	insertRow(pgCluster.Node2Pool, row3ModifiedN2)
+	insertRow(pgCluster.Node2Pool, row4OnlyN2)
+
+	diffFile := runTableDiff(t, qualifiedTableName, []string{serviceN1, serviceN2})
+
+	repairTask := newTestTableRepairTask(serviceN1, qualifiedTableName, diffFile)
+	err := repairTask.Run(false)
+	require.NoError(t, err, "Table repair for various data types failed")
+
+	assertNoTableDiff(t, qualifiedTableName)
+
+	checkRow3 := func(pool *pgxpool.Pool) map[string]any {
+		var (
+			colNumeric  string
+			colJSONB    string
+			colBytea    []byte
+			colIntArr   []int32
+			colTxtArr   []string
+			colInterval string
+		)
+		err := pool.QueryRow(
+			ctx,
+			fmt.Sprintf(`SELECT col_numeric::text, col_jsonb::text, col_bytea, col_int_array, col_text_array, col_interval::text FROM %s WHERE id = 3`, qualifiedTableName),
+		).Scan(&colNumeric, &colJSONB, &colBytea, &colIntArr, &colTxtArr, &colInterval)
+		require.NoError(t, err)
+		var jsonVal map[string]any
+		require.NoError(t, json.Unmarshal([]byte(colJSONB), &jsonVal))
+		return map[string]any{
+			"col_numeric":  colNumeric,
+			"col_jsonb":    jsonVal,
+			"col_bytea":    colBytea,
+			"col_int_arr":  colIntArr,
+			"col_txt_arr":  colTxtArr,
+			"col_interval": colInterval,
+		}
+	}
+
+	row3N1 := checkRow3(pgCluster.Node1Pool)
+	row3N2 := checkRow3(pgCluster.Node2Pool)
+
+	assert.Equal(t, row3N1["col_numeric"], row3N2["col_numeric"])
+	assert.Equal(t, row3N1["col_jsonb"], row3N2["col_jsonb"])
+	assert.Equal(t, row3N1["col_int_arr"], row3N2["col_int_arr"])
+	assert.Equal(t, row3N1["col_txt_arr"], row3N2["col_txt_arr"])
+	assert.Equal(t, row3N1["col_interval"], row3N2["col_interval"])
+	assert.True(t, bytes.Equal(row3N1["col_bytea"].([]byte), row3N2["col_bytea"].([]byte)))
+
+	var row4Count int
+	err = pgCluster.Node2Pool.QueryRow(ctx, fmt.Sprintf("SELECT count(*) FROM %s WHERE id = 4", qualifiedTableName)).Scan(&row4Count)
+	require.NoError(t, err)
+	assert.Equal(t, 0, row4Count, "Row present only on node2 should be deleted")
+}
+
+func TestTableRepair_FixNulls(t *testing.T) {
+	tableName := "customers"
+	qualifiedTableName := fmt.Sprintf("%s.%s", testSchema, tableName)
+	ctx := context.Background()
+
+	testCases := []struct {
+		name      string
+		composite bool
+		setup     func()
+		teardown  func()
+	}{
+		{name: "simple_primary_key", composite: false, setup: func() {}, teardown: func() {}},
+		{
+			name:      "composite_primary_key",
+			composite: true,
+			setup: func() {
+				for _, pool := range []*pgxpool.Pool{pgCluster.Node1Pool, pgCluster.Node2Pool} {
+					_err := alterTableToCompositeKey(ctx, pool, testSchema, tableName)
+					require.NoError(t, _err)
+				}
+			},
+			teardown: func() {
+				for _, pool := range []*pgxpool.Pool{pgCluster.Node1Pool, pgCluster.Node2Pool} {
+					_err := revertTableToSimpleKey(ctx, pool, testSchema, tableName)
+					require.NoError(t, _err)
+				}
+			},
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			tc.setup()
+			t.Cleanup(tc.teardown)
+
+			setupNullDivergence(t, ctx, qualifiedTableName)
+
+			diffFile := runTableDiff(t, qualifiedTableName, []string{serviceN1, serviceN2})
+
+			repairTask := newTestTableRepairTask("", qualifiedTableName, diffFile)
+			repairTask.SourceOfTruth = ""
+			repairTask.FixNulls = true
+
+			err := repairTask.Run(false)
+			require.NoError(t, err, "Table repair (fix-nulls) failed")
+
+			assertNoTableDiff(t, qualifiedTableName)
+
+			row1N1 := getNameCity(t, ctx, pgCluster.Node1Pool, qualifiedTableName, 1, "CUST-1")
+			row1N2 := getNameCity(t, ctx, pgCluster.Node2Pool, qualifiedTableName, 1, "CUST-1")
+			row2N1 := getNameCity(t, ctx, pgCluster.Node1Pool, qualifiedTableName, 2, "CUST-2")
+			row2N2 := getNameCity(t, ctx, pgCluster.Node2Pool, qualifiedTableName, 2, "CUST-2")
+
+			require.NotNil(t, row1N1.city)
+			require.NotNil(t, row1N2.last)
+			require.NotNil(t, row2N1.first)
+			require.NotNil(t, row2N2.city)
+
+			assert.Equal(t, "Austria", *row1N1.city)
+			assert.Equal(t, "Schumacher", *row1N2.last)
+			assert.Equal(t, "Fernando", *row2N1.first)
+			assert.Equal(t, "Oviedo", *row2N2.city)
+		})
+	}
+}
+
+func TestTableRepair_FixNulls_DryRun(t *testing.T) {
+	tableName := "customers"
+	qualifiedTableName := fmt.Sprintf("%s.%s", testSchema, tableName)
+	ctx := context.Background()
+
+	testCases := []struct {
+		name      string
+		composite bool
+		setup     func()
+		teardown  func()
+	}{
+		{name: "simple_primary_key", composite: false, setup: func() {}, teardown: func() {}},
+		{
+			name:      "composite_primary_key",
+			composite: true,
+			setup: func() {
+				for _, pool := range []*pgxpool.Pool{pgCluster.Node1Pool, pgCluster.Node2Pool} {
+					_err := alterTableToCompositeKey(ctx, pool, testSchema, tableName)
+					require.NoError(t, _err)
+				}
+			},
+			teardown: func() {
+				for _, pool := range []*pgxpool.Pool{pgCluster.Node1Pool, pgCluster.Node2Pool} {
+					_err := revertTableToSimpleKey(ctx, pool, testSchema, tableName)
+					require.NoError(t, _err)
+				}
+			},
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			tc.setup()
+			t.Cleanup(tc.teardown)
+
+			setupNullDivergence(t, ctx, qualifiedTableName)
+
+			diffFile := runTableDiff(t, qualifiedTableName, []string{serviceN1, serviceN2})
+			repairTask := newTestTableRepairTask("", qualifiedTableName, diffFile)
+			repairTask.SourceOfTruth = ""
+			repairTask.FixNulls = true
+			repairTask.DryRun = true
+
+			output := captureOutput(t, func() {
+				err := repairTask.Run(false)
+				require.NoError(t, err, "Table repair (fix-nulls dry-run) failed")
+			})
+
+			assert.Contains(t, output, "fix-nulls")
+			assert.Contains(t, output, "Would update")
+
+			// Ensure data unchanged
+			row1N1 := getNameCity(t, ctx, pgCluster.Node1Pool, qualifiedTableName, 1, "CUST-1")
+			row1N2 := getNameCity(t, ctx, pgCluster.Node2Pool, qualifiedTableName, 1, "CUST-1")
+			row2N1 := getNameCity(t, ctx, pgCluster.Node1Pool, qualifiedTableName, 2, "CUST-2")
+			row2N2 := getNameCity(t, ctx, pgCluster.Node2Pool, qualifiedTableName, 2, "CUST-2")
+
+			assert.Nil(t, row1N1.city)
+			assert.Nil(t, row1N2.last)
+			assert.Nil(t, row2N1.first)
+			assert.Nil(t, row2N2.city)
+
+			// Cleanup: actually repair to leave table consistent for subsequent tests
+			fixTask := newTestTableRepairTask("", qualifiedTableName, diffFile)
+			fixTask.SourceOfTruth = ""
+			fixTask.FixNulls = true
+			err := fixTask.Run(false)
+			require.NoError(t, err, "Cleanup fix-nulls repair failed")
 		})
 	}
 }

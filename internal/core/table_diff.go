@@ -15,6 +15,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"maps"
 	"math"
@@ -275,7 +276,10 @@ func (t *TableDiffTask) fetchRows(nodeName string, r Range) ([]types.OrderedMap,
 		quotedColName := pgx.Identifier{colName}.Sanitize()
 
 		// We cast user defined types and arrays to TEXT to avoid scan errors with unknown OIDs
-		if strings.HasSuffix(colType, "[]") || !utils.IsKnownScalarType(colType) {
+		if strings.HasSuffix(colType, "[]") ||
+			strings.Contains(strings.ToLower(colType), "json") ||
+			strings.Contains(strings.ToLower(colType), "bytea") ||
+			!utils.IsKnownScalarType(colType) {
 			selectCols = append(selectCols, fmt.Sprintf("%s::TEXT AS %s", quotedColName, quotedColName))
 		} else {
 			selectCols = append(selectCols, quotedColName)
@@ -385,59 +389,91 @@ func (t *TableDiffTask) fetchRows(nodeName string, r Range) ([]types.OrderedMap,
 		for i, colD := range colsDesc {
 			val := rowValues[i]
 			var processedVal any
-			switch v := val.(type) {
-			case pgtype.Numeric:
-				var fValue float64
-				if v.Status == pgtype.Present {
-					v.AssignTo(&fValue)
-					processedVal = fValue
-				} else {
-					processedVal = nil
-				}
-			case pgtype.Timestamp:
-				if v.Status == pgtype.Present {
-					processedVal = v.Time
-				} else {
-					processedVal = nil
-				}
-			case pgtype.Timestamptz:
-				if v.Status == pgtype.Present {
-					processedVal = v.Time
-				} else {
-					processedVal = nil
-				}
-			case pgtype.Date:
-				if v.Status == pgtype.Present {
-					processedVal = v.Time
-				} else {
-					processedVal = nil
-				}
-			case pgtype.Bytea:
-				if v.Status == pgtype.Present {
-					processedVal = v.Bytes
-				} else {
-					processedVal = nil
-				}
-			case string:
-				processedVal = v
-			case pgtype.JSON, pgtype.JSONB:
-				if v == nil || v.(interface{ GetStatus() pgtype.Status }).GetStatus() != pgtype.Present {
-					processedVal = nil
-				} else {
-					var dataHolder any
-					if assignable, ok := v.(interface{ AssignTo(dst any) error }); ok {
-						err := assignable.AssignTo(&dataHolder)
-						if err != nil {
-							processedVal = nil
+			if val == nil {
+				processedVal = nil
+			} else {
+				switch v := val.(type) {
+				case pgtype.Numeric:
+					var fValue float64
+					if v.Status == pgtype.Present {
+						v.AssignTo(&fValue)
+						processedVal = fValue
+					} else {
+						processedVal = nil
+					}
+				case pgtype.Timestamp:
+					if v.Status == pgtype.Present {
+						processedVal = v.Time
+					} else {
+						processedVal = nil
+					}
+				case pgtype.Timestamptz:
+					if v.Status == pgtype.Present {
+						processedVal = v.Time
+					} else {
+						processedVal = nil
+					}
+				case pgtype.Date:
+					if v.Status == pgtype.Present {
+						processedVal = v.Time
+					} else {
+						processedVal = nil
+					}
+				case pgtype.Bytea:
+					if v.Status == pgtype.Present {
+						processedVal = v.Bytes
+					} else {
+						processedVal = nil
+					}
+				case pgtype.Interval:
+					if v.Status == pgtype.Present {
+						if encoded, err := v.EncodeText(nil, nil); err == nil {
+							processedVal = string(encoded)
 						} else {
-							processedVal = dataHolder
+							processedVal = nil
 						}
 					} else {
 						processedVal = nil
 					}
+				case string:
+					processedVal = v
+				case int8, int16, int32, int64, int,
+					uint8, uint16, uint32, uint64, uint,
+					float32, float64, bool:
+					processedVal = v
+				case pgtype.JSON, pgtype.JSONB:
+					if v == nil || v.(interface{ GetStatus() pgtype.Status }).GetStatus() != pgtype.Present {
+						processedVal = nil
+					} else {
+						var dataHolder any
+						if assignable, ok := v.(interface{ AssignTo(dst any) error }); ok {
+							err := assignable.AssignTo(&dataHolder)
+							if err == nil {
+								if marshalled, mErr := json.Marshal(dataHolder); mErr == nil {
+									processedVal = string(marshalled)
+								} else {
+									processedVal = fmt.Sprint(dataHolder)
+								}
+							} else {
+								processedVal = nil
+							}
+						} else {
+							processedVal = nil
+						}
+					}
+				default:
+					if marshaler, ok := val.(json.Marshaler); ok {
+						if marshalled, err := marshaler.MarshalJSON(); err == nil {
+							processedVal = string(marshalled)
+						} else {
+							processedVal = fmt.Sprint(val)
+						}
+					} else if stringer, ok := val.(fmt.Stringer); ok {
+						processedVal = stringer.String()
+					} else {
+						processedVal = fmt.Sprint(val)
+					}
 				}
-			default:
-				processedVal = val
 			}
 			rowData[i] = types.KVPair{Key: string(colD.Name), Value: processedVal}
 		}

@@ -13,6 +13,7 @@ package common
 
 import (
 	"bufio"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -497,10 +498,42 @@ func ConvertToPgxType(val any, pgType string) (any, error) {
 		return nil, nil
 	}
 
+	if s, ok := val.(string); ok {
+		if strings.TrimSpace(s) == "<nil>" {
+			return nil, nil
+		}
+	}
+
 	lowerPgType := strings.ToLower(pgType)
 	basePgType := strings.TrimSuffix(lowerPgType, "[]")
+	normalizedType := strings.Split(basePgType, "(")[0]
 
-	switch basePgType {
+	if strings.Contains(lowerPgType, "json") {
+		switch v := val.(type) {
+		case string:
+			return v, nil
+		case []byte:
+			return string(v), nil
+		case json.RawMessage:
+			return string(v), nil
+		default:
+			marshalled, err := json.Marshal(v)
+			if err == nil {
+				return string(marshalled), nil
+			}
+			return nil, fmt.Errorf("failed to marshal value to JSON for %s: %w", pgType, err)
+		}
+	}
+
+	if strings.HasSuffix(lowerPgType, "[]") {
+		literal, err := buildPgArrayLiteral(val)
+		if err != nil {
+			return nil, err
+		}
+		return literal, nil
+	}
+
+	switch normalizedType {
 
 	case "bool", "boolean":
 		if b, ok := val.(bool); ok {
@@ -540,7 +573,7 @@ func ConvertToPgxType(val any, pgType string) (any, error) {
 
 		return nil, fmt.Errorf("expected float/numeric type for %s, got %T", pgType, val)
 
-	case "text", "varchar", "char", "bpchar", "name", "citext":
+	case "text", "varchar", "character varying", "char", "character", "bpchar", "name", "citext":
 		if s, ok := val.(string); ok {
 			return s, nil
 		}
@@ -549,7 +582,7 @@ func ConvertToPgxType(val any, pgType string) (any, error) {
 
 	case "bytea":
 		// While writing the diff file, we had converted bytea to hex string.
-		// Now we convert it back to []byte.
+		// Now we convert it back to []byte. We also attempt base64 decode if no \x prefix.
 		if s, ok := val.(string); ok {
 			if strings.HasPrefix(s, "\\x") {
 				decoded, err := hex.DecodeString(s[2:])
@@ -557,11 +590,20 @@ func ConvertToPgxType(val any, pgType string) (any, error) {
 					return decoded, nil
 				}
 			}
-			return s, nil
+			if decoded, err := base64.StdEncoding.DecodeString(s); err == nil {
+				return decoded, nil
+			}
+			if decoded, err := hex.DecodeString(s); err == nil {
+				return decoded, nil
+			}
+			return []byte(s), nil
 		}
 
 		if b, ok := val.([]byte); ok {
 			return b, nil
+		}
+		if b, ok := val.([]uint8); ok {
+			return []byte(b), nil
 		}
 
 		return nil, fmt.Errorf("expected string (hex/base64) or []byte for bytea, got %T for %s", val, pgType)
@@ -577,6 +619,9 @@ func ConvertToPgxType(val any, pgType string) (any, error) {
 			if errFull == nil {
 				return tFull.Truncate(24 * time.Hour), nil
 			}
+
+			// Fallback: let Postgres cast from the raw string
+			return s, nil
 		}
 
 		return nil, fmt.Errorf("expected date string (YYYY-MM-DD) for %s, got %v (%T)", pgType, val, val)
@@ -597,9 +642,29 @@ func ConvertToPgxType(val any, pgType string) (any, error) {
 			if err == nil {
 				return t, nil
 			}
+
+			// Fallback: let Postgres cast from the raw string
+			return s, nil
 		}
 
 		return nil, fmt.Errorf("expected timestamp string (RFC3339Nano like) for %s, got %v (%T)", pgType, val, val)
+
+	case "interval":
+		if s, ok := val.(string); ok {
+			return s, nil
+		}
+		if iv, ok := val.(pgtype.Interval); ok {
+			if iv.Status != pgtype.Present {
+				return nil, nil
+			}
+			if encoded, err := iv.EncodeText(nil, nil); err == nil {
+				return string(encoded), nil
+			}
+			// Fallback: duration string based on microseconds
+			dur := time.Duration(iv.Microseconds) * time.Microsecond
+			return dur.String(), nil
+		}
+		return fmt.Sprintf("%v", val), nil
 
 	case "json", "jsonb":
 		if s, ok := val.(string); ok {
@@ -621,16 +686,108 @@ func ConvertToPgxType(val any, pgType string) (any, error) {
 		return nil, fmt.Errorf("expected UUID string for %s, got %T", pgType, val)
 
 	default:
-		// For now, all other types are passed as strings.
+		// For all other types, fall back to string representations to keep repairs viable.
 		if s, ok := val.(string); ok {
 			log.Printf("Warning: Passing raw string value '%s' for unknown or complex pgType '%s'", s, pgType)
 			return s, nil
 		}
+		if stringer, ok := val.(fmt.Stringer); ok {
+			str := stringer.String()
+			log.Printf("Warning: Stringified value '%s' for unknown or complex pgType '%s'", str, pgType)
+			return str, nil
+		}
+		log.Printf("Warning: Converting value of type %T to string for pgType '%s'", val, pgType)
+		return fmt.Sprint(val), nil
+	}
+}
 
-		return val, nil
+func buildPgArrayLiteral(val any) (string, error) {
+	// If caller already provided a string literal, normalise [] to {} and return.
+	if s, ok := val.(string); ok {
+		trimmed := strings.TrimSpace(s)
+		switch {
+		case strings.HasPrefix(trimmed, "{") && strings.HasSuffix(trimmed, "}"):
+			return trimmed, nil
+		case strings.HasPrefix(trimmed, "[") && strings.HasSuffix(trimmed, "]"):
+			return "{" + strings.TrimSuffix(strings.TrimPrefix(trimmed, "["), "]") + "}", nil
+		default:
+			return "{" + trimmed + "}", nil
+		}
 	}
 
-	// TODO: Array handling!
+	// Normalise known slice types to []any
+	toAnySlice := func(v any) []any {
+		switch slice := v.(type) {
+		case []any:
+			return slice
+		case []string:
+			res := make([]any, len(slice))
+			for i, e := range slice {
+				res[i] = e
+			}
+			return res
+		case []int:
+			res := make([]any, len(slice))
+			for i, e := range slice {
+				res[i] = e
+			}
+			return res
+		case []int64:
+			res := make([]any, len(slice))
+			for i, e := range slice {
+				res[i] = e
+			}
+			return res
+		case []float64:
+			res := make([]any, len(slice))
+			for i, e := range slice {
+				res[i] = e
+			}
+			return res
+		case []bool:
+			res := make([]any, len(slice))
+			for i, e := range slice {
+				res[i] = e
+			}
+			return res
+		default:
+			return nil
+		}
+	}
+
+	anySlice := toAnySlice(val)
+	if anySlice == nil {
+		return "", fmt.Errorf("unsupported array value type %T", val)
+	}
+
+	needsQuote := func(s string) bool {
+		return strings.ContainsAny(s, `{}, " \t\n\r`) || len(s) == 0
+	}
+
+	escapeElem := func(elem any) string {
+		if elem == nil {
+			return "NULL"
+		}
+		if s, ok := elem.(string); ok {
+			str := strings.ReplaceAll(s, `\`, `\\`)
+			str = strings.ReplaceAll(str, `"`, `\"`)
+			return `"` + str + `"`
+		}
+		str := fmt.Sprint(elem)
+		if needsQuote(str) {
+			str = strings.ReplaceAll(str, `\`, `\\`)
+			str = strings.ReplaceAll(str, `"`, `\"`)
+			return `"` + str + `"`
+		}
+		return str
+	}
+
+	parts := make([]string, len(anySlice))
+	for i, e := range anySlice {
+		parts[i] = escapeElem(e)
+	}
+
+	return "{" + strings.Join(parts, ",") + "}", nil
 }
 
 func SafeCut(s string, n int) string {

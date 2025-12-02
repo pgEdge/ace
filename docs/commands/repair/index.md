@@ -7,6 +7,7 @@ The `table-repair` command fixes data inconsistencies identified by `table-diff`
 **Typical scenarios**
 
 - **Spock exception repair**: Resolve conflicts from insert/update/delete exceptions.
+- **NULL-only drift**: Use `--fix-nulls` to cross-fill NULL columns without a single source-of-truth.
 - **Network partition repair**: Re‑align nodes after a partition.
 - **Temporary node outage**: Catch a lagging node up.
 

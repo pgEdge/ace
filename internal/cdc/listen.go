@@ -254,9 +254,7 @@ func processReplicationStream(ctx context.Context, nodeInfo map[string]any, cont
 
 		if err != nil {
 			if ctx.Err() != nil {
-				if conn != nil {
-					conn.Close(ctx)
-				}
+				conn.Close(ctx)
 				if continuous {
 					logger.Info("Replication stopping due to context cancellation")
 					return nil
