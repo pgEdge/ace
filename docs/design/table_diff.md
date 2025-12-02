@@ -1,11 +1,13 @@
 # Table Diff Design
 
-## Motivation
+The design of table diff is driven by the following requirements and constraints:
+
 - Whether a table is kept consistent via logical replication, physical replication, backup/restore, or bulk copy, operators need a fast, low-impact way to verify that the replicas really match.
 - Full-table comparisons that take hours are operationally risky (locks, lag, disk and network blow-ups). We need a method that scales down to quick “am I in sync?” checks and scales up to multi-billion-row tables without bringing the cluster to its knees.
 - The outcome should be actionable: pinpoint what differs (adds/deletes/changes) rather than a binary “good/bad,” so remediation can be targeted.
 
 ## Existing Approaches and Their Limitations
+
 - **Dump + file diff (e.g., `pg_dump` then `diff`)**
   - Pros: simple tooling, easy to script.
   - Limitations: requires extracting the entire table; dumps must be sorted or canonicalised to be diffable; produces huge intermediates; easily runs for hours on large tables; false positives from ordering/format differences.
@@ -158,6 +160,7 @@ flowchart LR
 ```
 
 ### Resource Utilisation and Tuning
+
 - **block_size**: Larger blocks reduce hash tasks and recursion but increase memory/IO per hash and slow mismatch localisation; smaller blocks do the opposite (more queries, finer locality).
 - **concurrency_factor**: Scales workers by `NumCPU`. Higher = faster hashing but more load on DB backends, network, and local CPU; can contend with other workloads and connection limits.
 - **compare_unit_size**: Lower values push recursion deeper (more queries, smaller fetches); higher values stop earlier (fewer queries, larger fetches on mismatched ranges).
@@ -167,6 +170,7 @@ flowchart LR
 - **output (json/html)**: HTML adds minor post-processing; DB load is unaffected.
 
 ### Failure Modes and Safeguards
+
 - **Diff limit hit**: `max_diff_rows` stops recursion early and marks the report; more differences may exist.
 - **Permission or schema/PK mismatch**: Validation fails before work starts; nothing is executed against the DB.
 - **Bytea >1 MB**: `CheckColumnSize` aborts to avoid runaway memory/IO.
@@ -179,18 +183,21 @@ flowchart LR
 - PK stability matters: changing PK values mid-run can reshuffle ordering and produce noisy diffs.
 
 ### Operational Tuning Playbook
+
 - Start conservative on busy systems: smaller `concurrency_factor`, moderate `block_size`.
 - For large but mostly consistent tables: increase `block_size` and `concurrency_factor` to hash faster; keep `compare_unit_size` reasonable to localise mismatches.
 - For drift-heavy tables: lower `block_size`/`compare_unit_size` to localise quickly; keep `max_diff_rows` low to bound runtime and report size.
 - After stats refresh or schema changes, re-evaluate sampling and block sizing.
 
 ### Limits and Edge Cases
+
 - Requires a declared PK; up to three-way diffs only.
 - `table_filter` creates per-node materialized views; filters must match exactly across nodes.
 - Sampling can under-represent skewed PK distributions; synthetic leading/open ranges and recursive narrowing mitigate, but extreme skew may need smaller blocks.
 - Wide JSON/bytea/UDT columns increase hash and fetch cost; oversized bytea (>1 MB) blocks execution.
 
 ### Observability
+
 - Logs show range hashing progress, mismatches, recursion, and diff limits.
 - Progress bars (mpb) reflect hash and mismatch-analysis stages.
 - Task status and summary are persisted to SQLite (`ace_tasks.db` by default, or the `ACE_TASKS_DB` path) via `taskstore` in table `ace_tasks` with columns: `task_id`, `task_type`, `task_status`, `cluster_name`, `task_context` (JSON), `schema`, `table_name`, `repset_name`, `diff_file_path`, `started_at`, `finished_at`, `time_taken`. Example rows:

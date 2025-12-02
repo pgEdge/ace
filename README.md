@@ -8,6 +8,7 @@
 - [Using Merkle Trees to Improve ACE Performance](./docs/merkle.md)
 - [Command Reference](./docs/commands/index.md)
 - [Performance Considerations](./docs/performance.md)
+- [Architecture and Design Documents](./docs/design/index.md)
 
 The Active Consistency Engine (ACE) is a tool designed to ensure eventual consistency between nodes in a cluster.
 
