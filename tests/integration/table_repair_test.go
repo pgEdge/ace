@@ -185,6 +185,64 @@ func getTableCount(t *testing.T, ctx context.Context, pool *pgxpool.Pool, qualif
 	return count
 }
 
+func setupNullDivergence(t *testing.T, ctx context.Context, qualifiedTableName string) {
+	t.Helper()
+	log.Println("Setting up null divergence for", qualifiedTableName)
+
+	for i, pool := range []*pgxpool.Pool{pgCluster.Node1Pool, pgCluster.Node2Pool} {
+		nodeName := pgCluster.ClusterNodes[i]["Name"].(string)
+		_, err := pool.Exec(ctx, "SELECT spock.repair_mode(true)")
+		require.NoError(t, err, "Failed to enable repair mode on %s", nodeName)
+		_, err = pool.Exec(ctx, fmt.Sprintf("TRUNCATE TABLE %s CASCADE", qualifiedTableName))
+		require.NoError(t, err, "Failed to truncate table on node %s", nodeName)
+		_, err = pool.Exec(ctx, "SELECT spock.repair_mode(false)")
+		require.NoError(t, err, "Failed to disable repair mode on %s", nodeName)
+	}
+
+	insertSQL := fmt.Sprintf(
+		"INSERT INTO %s (index, customer_id, first_name, last_name, city) VALUES ($1, $2, $3, $4, $5)",
+		qualifiedTableName,
+	)
+
+	// Node1 rows: missing city for id 1, missing first_name for id 2
+	_, err := pgCluster.Node1Pool.Exec(ctx, "SELECT spock.repair_mode(true)")
+	require.NoError(t, err)
+	_, err = pgCluster.Node1Pool.Exec(ctx, insertSQL, 1, "CUST-1", "Michael", "Schumacher", nil)
+	require.NoError(t, err)
+	_, err = pgCluster.Node1Pool.Exec(ctx, insertSQL, 2, "CUST-2", nil, "Alonso", "Oviedo")
+	require.NoError(t, err)
+	_, err = pgCluster.Node1Pool.Exec(ctx, "SELECT spock.repair_mode(false)")
+	require.NoError(t, err)
+
+	// Node2 rows: missing last_name for id 1, missing city for id 2
+	_, err = pgCluster.Node2Pool.Exec(ctx, "SELECT spock.repair_mode(true)")
+	require.NoError(t, err)
+	_, err = pgCluster.Node2Pool.Exec(ctx, insertSQL, 1, "CUST-1", "Michael", nil, "Austria")
+	require.NoError(t, err)
+	_, err = pgCluster.Node2Pool.Exec(ctx, insertSQL, 2, "CUST-2", "Fernando", "Alonso", nil)
+	require.NoError(t, err)
+	_, err = pgCluster.Node2Pool.Exec(ctx, "SELECT spock.repair_mode(false)")
+	require.NoError(t, err)
+}
+
+type nameCity struct {
+	first *string
+	last  *string
+	city  *string
+}
+
+func getNameCity(t *testing.T, ctx context.Context, pool *pgxpool.Pool, qualifiedTableName string, index int, customerID string) nameCity {
+	t.Helper()
+	var first, last, city *string
+	err := pool.QueryRow(
+		ctx,
+		fmt.Sprintf("SELECT first_name, last_name, city FROM %s WHERE index = $1 AND customer_id = $2", qualifiedTableName),
+		index, customerID,
+	).Scan(&first, &last, &city)
+	require.NoError(t, err, "Failed to fetch row %d/%s", index, customerID)
+	return nameCity{first: first, last: last, city: city}
+}
+
 func TestTableRepair_UnidirectionalDefault(t *testing.T) {
 	tableName := "customers"
 	qualifiedTableName := fmt.Sprintf("%s.%s", testSchema, tableName)
@@ -597,6 +655,144 @@ func TestTableRepair_GenerateReport(t *testing.T) {
 			assert.True(t, len(data) > 0, "Report file is empty")
 			assert.Contains(t, string(data), "\"operation_type\": \"table-repair\"")
 			assert.Contains(t, string(data), fmt.Sprintf("\"source_of_truth\": \"%s\"", serviceN1))
+		})
+	}
+}
+
+func TestTableRepair_FixNulls(t *testing.T) {
+	tableName := "customers"
+	qualifiedTableName := fmt.Sprintf("%s.%s", testSchema, tableName)
+	ctx := context.Background()
+
+	testCases := []struct {
+		name      string
+		composite bool
+		setup     func()
+		teardown  func()
+	}{
+		{name: "simple_primary_key", composite: false, setup: func() {}, teardown: func() {}},
+		{
+			name:      "composite_primary_key",
+			composite: true,
+			setup: func() {
+				for _, pool := range []*pgxpool.Pool{pgCluster.Node1Pool, pgCluster.Node2Pool} {
+					_err := alterTableToCompositeKey(ctx, pool, testSchema, tableName)
+					require.NoError(t, _err)
+				}
+			},
+			teardown: func() {
+				for _, pool := range []*pgxpool.Pool{pgCluster.Node1Pool, pgCluster.Node2Pool} {
+					_err := revertTableToSimpleKey(ctx, pool, testSchema, tableName)
+					require.NoError(t, _err)
+				}
+			},
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			tc.setup()
+			t.Cleanup(tc.teardown)
+
+			setupNullDivergence(t, ctx, qualifiedTableName)
+
+			diffFile := runTableDiff(t, qualifiedTableName, []string{serviceN1, serviceN2})
+
+			repairTask := newTestTableRepairTask("", qualifiedTableName, diffFile)
+			repairTask.SourceOfTruth = ""
+			repairTask.FixNulls = true
+
+			err := repairTask.Run(false)
+			require.NoError(t, err, "Table repair (fix-nulls) failed")
+
+			assertNoTableDiff(t, qualifiedTableName)
+
+			row1N1 := getNameCity(t, ctx, pgCluster.Node1Pool, qualifiedTableName, 1, "CUST-1")
+			row1N2 := getNameCity(t, ctx, pgCluster.Node2Pool, qualifiedTableName, 1, "CUST-1")
+			row2N1 := getNameCity(t, ctx, pgCluster.Node1Pool, qualifiedTableName, 2, "CUST-2")
+			row2N2 := getNameCity(t, ctx, pgCluster.Node2Pool, qualifiedTableName, 2, "CUST-2")
+
+			require.NotNil(t, row1N1.city)
+			require.NotNil(t, row1N2.last)
+			require.NotNil(t, row2N1.first)
+			require.NotNil(t, row2N2.city)
+
+			assert.Equal(t, "Austria", *row1N1.city)
+			assert.Equal(t, "Schumacher", *row1N2.last)
+			assert.Equal(t, "Fernando", *row2N1.first)
+			assert.Equal(t, "Oviedo", *row2N2.city)
+		})
+	}
+}
+
+func TestTableRepair_FixNulls_DryRun(t *testing.T) {
+	tableName := "customers"
+	qualifiedTableName := fmt.Sprintf("%s.%s", testSchema, tableName)
+	ctx := context.Background()
+
+	testCases := []struct {
+		name      string
+		composite bool
+		setup     func()
+		teardown  func()
+	}{
+		{name: "simple_primary_key", composite: false, setup: func() {}, teardown: func() {}},
+		{
+			name:      "composite_primary_key",
+			composite: true,
+			setup: func() {
+				for _, pool := range []*pgxpool.Pool{pgCluster.Node1Pool, pgCluster.Node2Pool} {
+					_err := alterTableToCompositeKey(ctx, pool, testSchema, tableName)
+					require.NoError(t, _err)
+				}
+			},
+			teardown: func() {
+				for _, pool := range []*pgxpool.Pool{pgCluster.Node1Pool, pgCluster.Node2Pool} {
+					_err := revertTableToSimpleKey(ctx, pool, testSchema, tableName)
+					require.NoError(t, _err)
+				}
+			},
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			tc.setup()
+			t.Cleanup(tc.teardown)
+
+			setupNullDivergence(t, ctx, qualifiedTableName)
+
+			diffFile := runTableDiff(t, qualifiedTableName, []string{serviceN1, serviceN2})
+			repairTask := newTestTableRepairTask("", qualifiedTableName, diffFile)
+			repairTask.SourceOfTruth = ""
+			repairTask.FixNulls = true
+			repairTask.DryRun = true
+
+			output := captureOutput(t, func() {
+				err := repairTask.Run(false)
+				require.NoError(t, err, "Table repair (fix-nulls dry-run) failed")
+			})
+
+			assert.Contains(t, output, "fix-nulls")
+			assert.Contains(t, output, "Would update")
+
+			// Ensure data unchanged
+			row1N1 := getNameCity(t, ctx, pgCluster.Node1Pool, qualifiedTableName, 1, "CUST-1")
+			row1N2 := getNameCity(t, ctx, pgCluster.Node2Pool, qualifiedTableName, 1, "CUST-1")
+			row2N1 := getNameCity(t, ctx, pgCluster.Node1Pool, qualifiedTableName, 2, "CUST-2")
+			row2N2 := getNameCity(t, ctx, pgCluster.Node2Pool, qualifiedTableName, 2, "CUST-2")
+
+			assert.Nil(t, row1N1.city)
+			assert.Nil(t, row1N2.last)
+			assert.Nil(t, row2N1.first)
+			assert.Nil(t, row2N2.city)
+
+			// Cleanup: actually repair to leave table consistent for subsequent tests
+			fixTask := newTestTableRepairTask("", qualifiedTableName, diffFile)
+			fixTask.SourceOfTruth = ""
+			fixTask.FixNulls = true
+			err := fixTask.Run(false)
+			require.NoError(t, err, "Cleanup fix-nulls repair failed")
 		})
 	}
 }

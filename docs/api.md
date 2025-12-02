@@ -69,12 +69,13 @@ Repairs table inconsistencies using a diff file.
 |---------------------|-------|----------------------------------------------------------------------|---------|
 | `--diff-file`       | `-f`  | Path to the diff file (**required**)                                 |         |
 | `--dbname`          | `-d`  | Name of the database                                                 |         |
-| `--source-of-truth` | `-r`  | Name of the node to be considered the source of truth                |         |
+| `--source-of-truth` | `-r`  | Name of the node to be considered the source of truth (not needed with `--fix-nulls` or bidirectional insert-only) |         |
 | `--nodes`           | `-n`  | Nodes to include for cluster info (comma-separated, or "all")        | all     |
 | `--dry-run`         | `-y`  | Show what would be done without executing                            | false   |
 | `--generate-report` | `-g`  | Write a JSON audit report under `reports/<date>/`                    | false   |
 | `--insert-only`     | `-i`  | Only perform inserts, no updates or deletes                          | false   |
 | `--upsert-only`     | `-P`  | Only perform upserts (insert or update), no deletes                  | false   |
+| `--fix-nulls`       | `-X`  | Fill NULL columns on each node using non-NULL values from its peers  | false   |
 | `--bidirectional`   | `-Z`  | Perform insert-only repairs in both directions                       | false   |
 | `--fire-triggers`   | `-t`  | Fire triggers during repairs                                         | false   |
 | `--quiet`           | `-q`  | Suppress output                                                      | false   |

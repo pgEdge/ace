@@ -196,6 +196,12 @@ func SetupCLI() *cli.App {
 			Usage:   "Whether to perform repairs in both directions. Can be used only with the insert-only option",
 			Value:   false,
 		},
+		&cli.BoolFlag{
+			Name:    "fix-nulls",
+			Aliases: []string{"X"},
+			Usage:   "Fill NULL columns on each node using non-NULL values from its peers (no source-of-truth required)",
+			Value:   false,
+		},
 	}
 
 	tableRepairFlags = append(commonFlags, tableRepairFlags...)

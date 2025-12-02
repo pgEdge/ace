@@ -50,5 +50,6 @@ It's a good practice to schedule diff jobs (schema/repset/table) during low-traf
 1. **Detect Differences Often**: Run a diff and review the JSON/HTML report.
 2. **Perform a Repair Dry-run**: `table-repair --dry-run` to preview actions.
 3. **Perform Conservative Repairs when Possible**: Prefer `--upsert-only` or `--insert-only` on critical tables where deletes are risky.
+4. **Use `--fix-nulls` for NULL-only drifts**: When nodes differ only by missing values, cross-fill without picking a single source-of-truth.
 4. **Verify the Repair**: `table-rerun` using the original diff to confirm resolution.
 5. **Iterate in Batches** if the number of diffs is large, narrow the scope with `--table-filter`/`-F` or segment work by replication set/schema.
