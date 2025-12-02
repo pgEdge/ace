@@ -37,3 +37,21 @@ func TestConvertToPgxType_ByteaBase64(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, []byte("hello-bytea"), val)
 }
+
+func TestConvertToPgxType_IntervalString(t *testing.T) {
+	val, err := ConvertToPgxType("1 day 02:03:04", "interval")
+	require.NoError(t, err)
+	require.Equal(t, "1 day 02:03:04", val)
+}
+
+type customStringer struct {
+	v string
+}
+
+func (c customStringer) String() string { return "stringer:" + c.v }
+
+func TestConvertToPgxType_FallbackStringer(t *testing.T) {
+	val, err := ConvertToPgxType(customStringer{v: "x"}, "unknown_type")
+	require.NoError(t, err)
+	require.Equal(t, "stringer:x", val)
+}

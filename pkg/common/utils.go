@@ -498,9 +498,32 @@ func ConvertToPgxType(val any, pgType string) (any, error) {
 		return nil, nil
 	}
 
+	if s, ok := val.(string); ok {
+		if strings.TrimSpace(s) == "<nil>" {
+			return nil, nil
+		}
+	}
+
 	lowerPgType := strings.ToLower(pgType)
 	basePgType := strings.TrimSuffix(lowerPgType, "[]")
 	normalizedType := strings.Split(basePgType, "(")[0]
+
+	if strings.Contains(lowerPgType, "json") {
+		switch v := val.(type) {
+		case string:
+			return v, nil
+		case []byte:
+			return string(v), nil
+		case json.RawMessage:
+			return string(v), nil
+		default:
+			marshalled, err := json.Marshal(v)
+			if err == nil {
+				return string(marshalled), nil
+			}
+			return nil, fmt.Errorf("failed to marshal value to JSON for %s: %w", pgType, err)
+		}
+	}
 
 	if strings.HasSuffix(lowerPgType, "[]") {
 		literal, err := buildPgArrayLiteral(val)
@@ -579,6 +602,9 @@ func ConvertToPgxType(val any, pgType string) (any, error) {
 		if b, ok := val.([]byte); ok {
 			return b, nil
 		}
+		if b, ok := val.([]uint8); ok {
+			return []byte(b), nil
+		}
 
 		return nil, fmt.Errorf("expected string (hex/base64) or []byte for bytea, got %T for %s", val, pgType)
 
@@ -593,6 +619,9 @@ func ConvertToPgxType(val any, pgType string) (any, error) {
 			if errFull == nil {
 				return tFull.Truncate(24 * time.Hour), nil
 			}
+
+			// Fallback: let Postgres cast from the raw string
+			return s, nil
 		}
 
 		return nil, fmt.Errorf("expected date string (YYYY-MM-DD) for %s, got %v (%T)", pgType, val, val)
@@ -613,9 +642,29 @@ func ConvertToPgxType(val any, pgType string) (any, error) {
 			if err == nil {
 				return t, nil
 			}
+
+			// Fallback: let Postgres cast from the raw string
+			return s, nil
 		}
 
 		return nil, fmt.Errorf("expected timestamp string (RFC3339Nano like) for %s, got %v (%T)", pgType, val, val)
+
+	case "interval":
+		if s, ok := val.(string); ok {
+			return s, nil
+		}
+		if iv, ok := val.(pgtype.Interval); ok {
+			if iv.Status != pgtype.Present {
+				return nil, nil
+			}
+			if encoded, err := iv.EncodeText(nil, nil); err == nil {
+				return string(encoded), nil
+			}
+			// Fallback: duration string based on microseconds
+			dur := time.Duration(iv.Microseconds) * time.Microsecond
+			return dur.String(), nil
+		}
+		return fmt.Sprintf("%v", val), nil
 
 	case "json", "jsonb":
 		if s, ok := val.(string); ok {
@@ -637,16 +686,19 @@ func ConvertToPgxType(val any, pgType string) (any, error) {
 		return nil, fmt.Errorf("expected UUID string for %s, got %T", pgType, val)
 
 	default:
-		// For now, all other types are passed as strings.
+		// For all other types, fall back to string representations to keep repairs viable.
 		if s, ok := val.(string); ok {
 			log.Printf("Warning: Passing raw string value '%s' for unknown or complex pgType '%s'", s, pgType)
 			return s, nil
 		}
-
-		return val, nil
+		if stringer, ok := val.(fmt.Stringer); ok {
+			str := stringer.String()
+			log.Printf("Warning: Stringified value '%s' for unknown or complex pgType '%s'", str, pgType)
+			return str, nil
+		}
+		log.Printf("Warning: Converting value of type %T to string for pgType '%s'", val, pgType)
+		return fmt.Sprint(val), nil
 	}
-
-	// TODO: Array handling!
 }
 
 func buildPgArrayLiteral(val any) (string, error) {

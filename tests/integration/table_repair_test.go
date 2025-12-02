@@ -683,6 +683,7 @@ CREATE TABLE IF NOT EXISTS %s.%s (
     col_date DATE,
     col_timestamp TIMESTAMP,
     col_timestamptz TIMESTAMPTZ,
+    col_interval INTERVAL,
     col_jsonb JSONB,
     col_json JSON,
     col_bytea BYTEA,
@@ -721,12 +722,12 @@ CREATE TABLE IF NOT EXISTS %s.%s (
 
 		_, err = tx.Exec(
 			ctx,
-			fmt.Sprintf(`INSERT INTO %s (id, col_smallint, col_integer, col_bigint, col_numeric, col_real, col_double, col_varchar, col_text, col_char, col_boolean, col_date, col_timestamp, col_timestamptz, col_jsonb, col_json, col_bytea, col_int_array, col_text_array)
-				VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)`, qualifiedTableName),
+			fmt.Sprintf(`INSERT INTO %s (id, col_smallint, col_integer, col_bigint, col_numeric, col_real, col_double, col_varchar, col_text, col_char, col_boolean, col_date, col_timestamp, col_timestamptz, col_interval, col_jsonb, col_json, col_bytea, col_int_array, col_text_array)
+				VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)`, qualifiedTableName),
 			data["id"], data["col_smallint"], data["col_integer"], data["col_bigint"],
 			data["col_numeric"], data["col_real"], data["col_double"], data["col_varchar"],
 			data["col_text"], data["col_char"], data["col_boolean"], data["col_date"],
-			data["col_timestamp"], data["col_timestamptz"], data["col_jsonb"], data["col_json"],
+			data["col_timestamp"], data["col_timestamptz"], data["col_interval"], data["col_jsonb"], data["col_json"],
 			data["col_bytea"], data["col_int_array"], data["col_text_array"],
 		)
 		require.NoError(t, err)
@@ -741,7 +742,7 @@ CREATE TABLE IF NOT EXISTS %s.%s (
 		"col_numeric": "123.45", "col_real": float32(1.23), "col_double": float64(4.56789),
 		"col_varchar": "varchar_data", "col_text": "text_data", "col_char": "char_data",
 		"col_boolean": true, "col_date": refTime.Format("2006-01-02"),
-		"col_timestamp": refTime, "col_timestamptz": refTime,
+		"col_timestamp": refTime, "col_timestamptz": refTime, "col_interval": "1 day 02:03:04",
 		"col_jsonb": `{"key": "value1"}`, "col_json": `{"key": "value1"}`,
 		"col_bytea": []byte("bytea_row1"), "col_int_array": []int32{1, 2, 3},
 		"col_text_array": []string{"alpha", "beta"},
@@ -751,7 +752,7 @@ CREATE TABLE IF NOT EXISTS %s.%s (
 		"col_numeric": "222.22", "col_real": float32(2.34), "col_double": float64(5.6789),
 		"col_varchar": "only_on_n1", "col_text": "text_row2", "col_char": "char_row2",
 		"col_boolean": false, "col_date": refTime.AddDate(0, 1, 0).Format("2006-01-02"),
-		"col_timestamp": refTime.Add(time.Hour), "col_timestamptz": refTime.Add(time.Hour),
+		"col_timestamp": refTime.Add(time.Hour), "col_timestamptz": refTime.Add(time.Hour), "col_interval": "2 days",
 		"col_jsonb": `{"row": 2}`, "col_json": `{"row": 2}`,
 		"col_bytea": []byte("bytea_row2"), "col_int_array": []int32{4, 5},
 		"col_text_array": []string{"only", "n1"},
@@ -761,7 +762,7 @@ CREATE TABLE IF NOT EXISTS %s.%s (
 		"col_numeric": "333.33", "col_real": float32(3.45), "col_double": float64(6.789),
 		"col_varchar": "baseline_varchar", "col_text": "baseline_text", "col_char": "char_row3",
 		"col_boolean": true, "col_date": refTime.AddDate(0, 2, 0).Format("2006-01-02"),
-		"col_timestamp": refTime.Add(2 * time.Hour), "col_timestamptz": refTime.Add(2 * time.Hour),
+		"col_timestamp": refTime.Add(2 * time.Hour), "col_timestamptz": refTime.Add(2 * time.Hour), "col_interval": "3 hours",
 		"col_jsonb": `{"status": "good"}`, "col_json": `{"status": "good"}`,
 		"col_bytea": []byte("bytea_row3"), "col_int_array": []int32{7, 8, 9},
 		"col_text_array": []string{"one", "two", "three"},
@@ -771,7 +772,7 @@ CREATE TABLE IF NOT EXISTS %s.%s (
 		"col_numeric": "999.99", "col_real": float32(9.99), "col_double": float64(99.99),
 		"col_varchar": "modified_on_n2", "col_text": "modified_text", "col_char": "char_mod",
 		"col_boolean": false, "col_date": refTime.AddDate(0, 3, 0).Format("2006-01-02"),
-		"col_timestamp": refTime.Add(3 * time.Hour), "col_timestamptz": refTime.Add(3 * time.Hour),
+		"col_timestamp": refTime.Add(3 * time.Hour), "col_timestamptz": refTime.Add(3 * time.Hour), "col_interval": "9 hours",
 		"col_jsonb": `{"status": "bad"}`, "col_json": `{"status": "bad"}`,
 		"col_bytea": []byte("bytea_row3_mod"), "col_int_array": []int32{9, 9, 9},
 		"col_text_array": []string{"nine", "nine", "nine"},
@@ -798,25 +799,27 @@ CREATE TABLE IF NOT EXISTS %s.%s (
 
 	checkRow3 := func(pool *pgxpool.Pool) map[string]any {
 		var (
-			colNumeric string
-			colJSONB   string
-			colBytea   []byte
-			colIntArr  []int32
-			colTxtArr  []string
+			colNumeric  string
+			colJSONB    string
+			colBytea    []byte
+			colIntArr   []int32
+			colTxtArr   []string
+			colInterval string
 		)
 		err := pool.QueryRow(
 			ctx,
-			fmt.Sprintf(`SELECT col_numeric::text, col_jsonb::text, col_bytea, col_int_array, col_text_array FROM %s WHERE id = 3`, qualifiedTableName),
-		).Scan(&colNumeric, &colJSONB, &colBytea, &colIntArr, &colTxtArr)
+			fmt.Sprintf(`SELECT col_numeric::text, col_jsonb::text, col_bytea, col_int_array, col_text_array, col_interval::text FROM %s WHERE id = 3`, qualifiedTableName),
+		).Scan(&colNumeric, &colJSONB, &colBytea, &colIntArr, &colTxtArr, &colInterval)
 		require.NoError(t, err)
 		var jsonVal map[string]any
 		require.NoError(t, json.Unmarshal([]byte(colJSONB), &jsonVal))
 		return map[string]any{
-			"col_numeric": colNumeric,
-			"col_jsonb":   jsonVal,
-			"col_bytea":   colBytea,
-			"col_int_arr": colIntArr,
-			"col_txt_arr": colTxtArr,
+			"col_numeric":  colNumeric,
+			"col_jsonb":    jsonVal,
+			"col_bytea":    colBytea,
+			"col_int_arr":  colIntArr,
+			"col_txt_arr":  colTxtArr,
+			"col_interval": colInterval,
 		}
 	}
 
@@ -827,6 +830,7 @@ CREATE TABLE IF NOT EXISTS %s.%s (
 	assert.Equal(t, row3N1["col_jsonb"], row3N2["col_jsonb"])
 	assert.Equal(t, row3N1["col_int_arr"], row3N2["col_int_arr"])
 	assert.Equal(t, row3N1["col_txt_arr"], row3N2["col_txt_arr"])
+	assert.Equal(t, row3N1["col_interval"], row3N2["col_interval"])
 	assert.True(t, bytes.Equal(row3N1["col_bytea"].([]byte), row3N2["col_bytea"].([]byte)))
 
 	var row4Count int
