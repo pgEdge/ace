@@ -1079,19 +1079,6 @@ func convertValueForType(val any, colType string) (any, error) {
 		return nil, nil
 	}
 
-	lowerType := strings.ToLower(colType)
-	if strings.HasSuffix(lowerType, "[]") {
-		switch v := val.(type) {
-		case string:
-			return v, nil
-		default:
-			if b, err := json.Marshal(v); err == nil {
-				return string(b), nil
-			}
-			return fmt.Sprintf("%v", v), nil
-		}
-	}
-
 	if tVal, ok := val.(time.Time); ok {
 		return tVal, nil
 	}
