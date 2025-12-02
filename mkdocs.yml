@@ -55,28 +55,31 @@ nav:
   - ACE Overview: index.md
   - Best Practices for Using ACE: best_practices.md
   - ACE Configuration: configuration.md
-  - 'ACE Commands':
-    - 'Command reference': commands/index.md
-    - 'Diff Commands':
-      - 'Overview': commands/diff/index.md
-      - 'table-diff': commands/diff/table-diff.md
-      - 'repset-diff': commands/diff/repset-diff.md
-      - 'schema-diff': commands/diff/schema-diff.md
-      - 'spock-diff': commands/diff/spock-diff.md
-      - 'table-rerun': commands/diff/table-rerun.md
-    - 'Repair Commands':
-      - 'Overview': commands/repair/index.md
-      - 'table-repair': commands/repair/table-repair.md
-    - 'Merkle Tree Commands':
-      - 'Overview': commands/mtree/index.md
-      - 'mtree-build': commands/mtree/mtree-build.md
-      - 'mtree-init': commands/mtree/mtree-init.md
-      - 'mtree-listen': commands/mtree/mtree-listen.md
-      - 'mtree-table-diff': commands/mtree/mtree-table-diff.md
-      - 'mtree-teardown-table': commands/mtree/mtree-teardown-table.md
-      - 'mtree-teardown': commands/mtree/mtree-teardown.md
-      - 'mtree-update': commands/mtree/mtree-update.md
+  - ACE Commands:
+    - Command reference: commands/index.md
+    - Diff Commands:
+      - Overview: commands/diff/index.md
+      - table-diff: commands/diff/table-diff.md
+      - repset-diff: commands/diff/repset-diff.md
+      - schema-diff: commands/diff/schema-diff.md
+      - spock-diff: commands/diff/spock-diff.md
+      - table-rerun: commands/diff/table-rerun.md
+    - Repair Commands:
+      - Overview: commands/repair/index.md
+      - table-repair: commands/repair/table-repair.md
+    - Merkle Tree Commands:
+      - Overview: commands/mtree/index.md
+      - mtree-build: commands/mtree/mtree-build.md
+      - mtree-init: commands/mtree/mtree-init.md
+      - mtree-listen: commands/mtree/mtree-listen.md
+      - mtree-table-diff: commands/mtree/mtree-table-diff.md
+      - mtree-teardown-table: commands/mtree/mtree-teardown-table.md
+      - mtree-teardown: commands/mtree/mtree-teardown.md
+      - mtree-update: commands/mtree/mtree-update.md
   - Scheduling ACE Runs: scheduling.md
   - The ACE API: api.md
   - Improving ACE Performance: performance.md
-  - Release Notes: CHANGELOG.md 
+  - Architecture and Design: 
+    - ACE table-diff Architecture: design/table_diff.md
+    - Merkle Tree Architecture: design/merkle.md
+  - Release Notes: CHANGELOG.md

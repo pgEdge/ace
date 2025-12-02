@@ -1,12 +1,14 @@
-# Merkle Tree Design
+# Merkle Tree Architecture
 
-## Motivation
+Developing Merkle Trees for ACE is driven by the following requirements:
+
 - Table-diff is efficient for one-off or infrequent checks, but rerunning it regularly recomputes block hashes across the entire table every time.
 - When most data is unchanged, re-hashing every block is wasteful—especially on very large tables (think ~1 TB or ~1B rows) where hash scans dominate runtime and resource use.
 - A Merkle tree lets us cache and reuse block hashes between runs. Unchanged subtrees are skipped; only branches covering modified rows are rehashed and compared, reducing I/O, CPU, and network load for recurring diffs.
 - The goal is fast, incremental validation for operators who need frequent consistency checks without paying the full-block hashing cost each run.
 
 ## What Is a Merkle Tree?
+
 - A Merkle tree is a hash tree: leaves hold hashes of data blocks; every internal node combines its children’s hashes into a parent hash. The root represents the entire dataset—if any leaf changes, all ancestors (and the root) change.
 - ACE optimisation: parent nodes are computed as XORs of child hashes rather than hashing the concatenation. XOR is fast, associative, and easy to update incrementally when a child changes, making rebuilds cheaper for large trees.
 
@@ -34,7 +36,8 @@ flowchart TB
   classDef root fill:#fff6e0,stroke:#d39b00,color:#1f2a44;
 ```
 
-## How It Works in ACE
+## How Merkle Trees Work in ACE
+
 - **Initial build (full scan once)**: ACE partitions the table into PK-ordered blocks (like table-diff) and computes leaf hashes for every block on each node—this is the only full-table scan. Parent hashes are built upward using XOR to form the root.
 - **Change capture (pgoutput + replication slot)**: The table is added to a publication; pgoutput changes are streamed into a logical replication slot. ACE marks affected blocks as dirty based on PK ranges (no full re-scan).
 - **Update step**: `UpdateMtree` reads accumulated changes from the slot, splits or merges blocks if needed, recomputes hashes only for dirty/new leaves, rebuilds parent XORs, and clears dirty flags. Block size is recovered from metadata to stay consistent with the build.
@@ -53,6 +56,7 @@ flowchart TD
 ```
 
 ## CDC Pipeline and Dirty Block Detection
+
 - **Capture**: Each node adds the table to a publication; pgoutput changes are streamed via a logical replication slot (see `UpdateFromCDC`). Inserts/deletes/updates are mapped to PK ranges; affected blocks are marked dirty—no rehash yet.
 - **Persist**: The slot retains WAL until ACE consumes it; long delays can bloat WAL. Ensure slot retention is acceptable and the service role has replication/publication privileges.
 - **Apply**: On `UpdateMtree`, ACE reads the slot, updates per-block counters/dirty flags, and resets `range_end` to NULL for the tail when new rows arrive past the last bound. Splits/merges are then decided from those dirty flags.
