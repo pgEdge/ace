@@ -657,7 +657,7 @@ func (t *TableDiffTask) RunChecks(skipValidation bool) (err error) {
 			continue
 		}
 
-		conn, err := auth.GetClusterNodeConnection(t.Ctx, nodeInfo, auth.ConnectionOptions{Role: t.ClientRole})
+		conn, err := auth.GetClusterNodeConnection(t.Ctx, nodeInfo, t.connOpts())
 		if err != nil {
 			return fmt.Errorf("failed to connect to node %s: %w", hostname, err)
 		}
@@ -811,7 +811,7 @@ func (t *TableDiffTask) cleanupFilteredView() {
 			continue
 		}
 
-		pool, err := auth.GetClusterNodeConnection(context.Background(), nodeInfo, auth.ConnectionOptions{Role: t.ClientRole})
+		pool, err := auth.GetClusterNodeConnection(context.Background(), nodeInfo, t.connOpts())
 		if err != nil {
 			logger.Warn("table-diff: failed to get connection for filtered view cleanup on node %s: %v", name, err)
 			continue
@@ -856,6 +856,13 @@ func (t *TableDiffTask) CloneForSchedule(ctx context.Context) *TableDiffTask {
 	return cloned
 }
 
+func (t *TableDiffTask) connOpts() auth.ConnectionOptions {
+	return auth.ConnectionOptions{
+		Role:           t.ClientRole,
+		DropPrivileges: true,
+	}
+}
+
 func (t *TableDiffTask) CheckColumnSize() error {
 	for hostPort, types := range t.ColTypes {
 		parts := strings.Split(hostPort, ":")
@@ -886,7 +893,7 @@ func (t *TableDiffTask) CheckColumnSize() error {
 
 			if nodeHost == host && int(nodePort) == port {
 				var err error
-				pool, err = auth.GetClusterNodeConnection(t.Ctx, nodeInfo, auth.ConnectionOptions{Role: t.ClientRole})
+				pool, err = auth.GetClusterNodeConnection(t.Ctx, nodeInfo, t.connOpts())
 				if err != nil {
 					return fmt.Errorf("failed to connect to node %s:%d: %w", host, port, err)
 				}
@@ -1046,7 +1053,7 @@ func (t *TableDiffTask) ExecuteTask() (err error) {
 	pools := make(map[string]*pgxpool.Pool)
 	for _, nodeInfo := range t.ClusterNodes {
 		name := nodeInfo["Name"].(string)
-		pool, err := auth.GetClusterNodeConnection(t.Ctx, nodeInfo, auth.ConnectionOptions{Role: t.ClientRole})
+		pool, err := auth.GetClusterNodeConnection(t.Ctx, nodeInfo, t.connOpts())
 		if err != nil {
 			return fmt.Errorf("failed to connect to node %s: %w", name, err)
 		}

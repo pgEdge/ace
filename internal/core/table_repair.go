@@ -117,6 +117,31 @@ func (t *TableRepairTask) closePools() {
 	}
 }
 
+func (t *TableRepairTask) connOpts() auth.ConnectionOptions {
+	return auth.ConnectionOptions{
+		Role:           t.ClientRole,
+		DropPrivileges: false,
+	}
+}
+
+func (t *TableRepairTask) setRole(tx pgx.Tx, nodeName string) error {
+	role := strings.TrimSpace(t.ClientRole)
+	requireRole := t.InvokeMethod != "cli"
+	if role == "" {
+		if requireRole {
+			return fmt.Errorf("client role in cert CN cannot be null")
+		}
+		return nil
+	}
+
+	roleSQL := fmt.Sprintf("SET ROLE %s", pgx.Identifier{role}.Sanitize())
+	if _, err := tx.Exec(t.Ctx, roleSQL); err != nil {
+		return fmt.Errorf("setting role %s on %s: %w", role, nodeName, err)
+	}
+	logger.Debug("SET ROLE %s on %s", role, nodeName)
+	return nil
+}
+
 func (tr *TableRepairTask) checkRepairOptionsCompatibility() error {
 	incompatibleOptions := []struct {
 		condition bool
@@ -290,7 +315,7 @@ func (t *TableRepairTask) ValidateAndPrepare() error {
 	for _, nodeInfo := range t.ClusterNodes {
 		nodeName, _ := nodeInfo["Name"].(string)
 		if nodeName == t.SourceOfTruth || involvedNodeNames[nodeName] {
-			connPool, err := auth.GetClusterNodeConnection(t.Ctx, nodeInfo, auth.ConnectionOptions{Role: t.ClientRole})
+			connPool, err := auth.GetClusterNodeConnection(t.Ctx, nodeInfo, t.connOpts())
 			if err != nil {
 				logger.Warn("Failed to connect to node %s: %v. Will attempt to proceed if it's not critical or SoT.", nodeName, err)
 				if nodeName == t.SourceOfTruth {
@@ -656,7 +681,7 @@ func (t *TableRepairTask) runFixNulls(startTime time.Time) error {
 				continue
 			}
 
-			pool, err = auth.GetClusterNodeConnection(t.Ctx, nodeInfo, auth.ConnectionOptions{Role: t.ClientRole})
+			pool, err = auth.GetClusterNodeConnection(t.Ctx, nodeInfo, t.connOpts())
 			if err != nil {
 				logger.Error("Failed to connect to node %s: %v. Skipping repairs for this node.", nodeName, err)
 				repairErrors = append(repairErrors, fmt.Sprintf("connection failed for %s: %v", nodeName, err))
@@ -695,6 +720,13 @@ func (t *TableRepairTask) runFixNulls(startTime time.Time) error {
 			continue
 		}
 		logger.Debug("session_replication_role set on %s (fire_triggers: %v)", nodeName, t.FireTriggers)
+
+		if err := t.setRole(tx, nodeName); err != nil {
+			tx.Rollback(t.Ctx)
+			logger.Error("%v", err)
+			repairErrors = append(repairErrors, err.Error())
+			continue
+		}
 
 		colTypes, _, err := t.getColTypesForNode(nodeName)
 		if err != nil {
@@ -1182,7 +1214,7 @@ func (t *TableRepairTask) runUnidirectionalRepair(startTime time.Time) error {
 			}
 
 			var err error
-			divergentPool, err = auth.GetClusterNodeConnection(t.Ctx, nodeInfo, auth.ConnectionOptions{Role: t.ClientRole})
+			divergentPool, err = auth.GetClusterNodeConnection(t.Ctx, nodeInfo, t.connOpts())
 			if err != nil {
 				logger.Error("Failed to connect to node %s: %v. Skipping repairs for this node.", nodeName, err)
 				repairErrors = append(repairErrors, fmt.Sprintf("connection failed for %s: %v", nodeName, err))
@@ -1222,6 +1254,13 @@ func (t *TableRepairTask) runUnidirectionalRepair(startTime time.Time) error {
 			continue
 		}
 		logger.Debug("session_replication_role set on %s (fire_triggers: %v)", nodeName, t.FireTriggers)
+
+		if err := t.setRole(tx, nodeName); err != nil {
+			tx.Rollback(t.Ctx)
+			logger.Error("%v", err)
+			repairErrors = append(repairErrors, err.Error())
+			continue
+		}
 
 		// TODO: DROP PRIVILEGES HERE!
 
@@ -1560,6 +1599,10 @@ func (t *TableRepairTask) performBirectionalInserts(nodeName string, inserts map
 		return 0, fmt.Errorf("failed to set session_replication_role on %s: %w", nodeName, err)
 	}
 	logger.Info("session_replication_role set on %s (fire_triggers: %v)", nodeName, t.FireTriggers)
+
+	if err := t.setRole(tx, nodeName); err != nil {
+		return 0, err
+	}
 
 	targetNodeHostPortKey := ""
 	for hostPort, mappedName := range t.HostMap {
