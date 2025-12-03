@@ -18,6 +18,7 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"sort"
 	"strings"
@@ -107,6 +108,15 @@ func NewTableRepairTask() *TableRepairTask {
 	}
 }
 
+func (t *TableRepairTask) closePools() {
+	for name, pool := range t.Pools {
+		if pool != nil {
+			pool.Close()
+		}
+		delete(t.Pools, name)
+	}
+}
+
 func (tr *TableRepairTask) checkRepairOptionsCompatibility() error {
 	incompatibleOptions := []struct {
 		condition bool
@@ -143,6 +153,13 @@ func (tr *TableRepairTask) checkIfSourceOfTruthIsNeeded() bool {
 }
 
 func (t *TableRepairTask) ValidateAndPrepare() error {
+	success := false
+	defer func() {
+		if !success {
+			t.closePools()
+		}
+	}()
+
 	if t.ClusterName == "" {
 		return fmt.Errorf("cluster_name is required")
 	}
@@ -217,6 +234,15 @@ func (t *TableRepairTask) ValidateAndPrepare() error {
 		return fmt.Errorf("failed to unmarshal diff file %s: %w", t.DiffFilePath, err)
 	}
 
+	diffSchema := strings.TrimSpace(t.RawDiffs.Summary.Schema)
+	diffTable := strings.TrimSpace(t.RawDiffs.Summary.Table)
+	if diffSchema == "" || diffTable == "" {
+		return fmt.Errorf("diff file %s is missing schema/table metadata; cannot verify repair target", t.DiffFilePath)
+	}
+	if diffSchema != t.Schema || diffTable != t.Table {
+		return fmt.Errorf("diff file %s was generated for %s.%s but repair target is %s.%s", t.DiffFilePath, diffSchema, diffTable, t.Schema, t.Table)
+	}
+
 	if t.RawDiffs.NodeDiffs == nil {
 		return fmt.Errorf("invalid diff file format: missing 'diffs' field or it's not a map")
 	}
@@ -256,6 +282,11 @@ func (t *TableRepairTask) ValidateAndPrepare() error {
 		TableDelete: true,
 	}
 
+	var refCols []string
+	var refKey []string
+	var refColTypes map[string]string
+	var refNode string
+
 	for _, nodeInfo := range t.ClusterNodes {
 		nodeName, _ := nodeInfo["Name"].(string)
 		if nodeName == t.SourceOfTruth || involvedNodeNames[nodeName] {
@@ -285,6 +316,19 @@ func (t *TableRepairTask) ValidateAndPrepare() error {
 			t.Key = pKey
 			t.SimplePrimaryKey = len(pKey) == 1
 
+			if refCols == nil {
+				refCols = cols
+				refKey = pKey
+				refNode = nodeName
+			} else {
+				if !slices.Equal(cols, refCols) {
+					return fmt.Errorf("table columns differ between nodes %s and %s", refNode, nodeName)
+				}
+				if !slices.Equal(pKey, refKey) {
+					return fmt.Errorf("primary key definition differs between nodes %s and %s", refNode, nodeName)
+				}
+			}
+
 			publicIP, _ := nodeInfo["PublicIP"].(string)
 			port, _ := nodeInfo["Port"].(string)
 			colTypes, err := queries.GetColumnTypes(t.Ctx, connPool, t.Schema, t.Table)
@@ -295,6 +339,12 @@ func (t *TableRepairTask) ValidateAndPrepare() error {
 				t.ColTypes = make(map[string]map[string]string)
 			}
 			t.ColTypes[fmt.Sprintf("%s:%s", publicIP, port)] = colTypes
+
+			if refColTypes == nil {
+				refColTypes = colTypes
+			} else if !reflect.DeepEqual(colTypes, refColTypes) {
+				return fmt.Errorf("column types differ between nodes %s and %s", refNode, nodeName)
+			}
 
 			dbUser, _ := nodeInfo["DBUser"].(string)
 			if dbUser == "" {
@@ -335,6 +385,7 @@ func (t *TableRepairTask) ValidateAndPrepare() error {
 	}
 
 	logger.Debug("Table repair task validated and prepared successfully.")
+	success = true
 	return nil
 }
 
@@ -413,6 +464,8 @@ func (t *TableRepairTask) Run(skipValidation bool) (err error) {
 			return fmt.Errorf("task validation and preparation failed: %w", err)
 		}
 	}
+
+	defer t.closePools()
 
 	startTime := time.Now()
 
@@ -539,15 +592,6 @@ func (t *TableRepairTask) Run(skipValidation bool) (err error) {
 		return nil
 	}
 
-	defer func() {
-		for nodeName, pool := range t.Pools {
-			if pool != nil {
-				pool.Close()
-				logger.Debug("Closed connection pool for node: %s", nodeName)
-			}
-		}
-	}()
-
 	if t.Bidirectional {
 		return t.runBidirectionalRepair()
 	}
@@ -570,6 +614,7 @@ type nullUpdate struct {
 
 func (t *TableRepairTask) runFixNulls(startTime time.Time) error {
 	logger.Info("Starting fix-nulls repair for %s on cluster %s", t.QualifiedTableName, t.ClusterName)
+	defer t.closePools()
 
 	nullUpdates, err := t.buildNullUpdates()
 	if err != nil {
@@ -584,15 +629,6 @@ func (t *TableRepairTask) runFixNulls(startTime time.Time) error {
 		fmt.Print(output)
 		return nil
 	}
-
-	defer func() {
-		for nodeName, pool := range t.Pools {
-			if pool != nil {
-				pool.Close()
-				logger.Debug("Closed connection pool for node: %s", nodeName)
-			}
-		}
-	}()
 
 	totalCellsUpdated := make(map[string]int)
 	var repairErrors []string

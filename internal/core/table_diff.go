@@ -442,7 +442,7 @@ func (t *TableDiffTask) fetchRows(nodeName string, r Range) ([]types.OrderedMap,
 					float32, float64, bool:
 					processedVal = v
 				case pgtype.JSON, pgtype.JSONB:
-					if v == nil || v.(interface{ GetStatus() pgtype.Status }).GetStatus() != pgtype.Present {
+					if v.(interface{ GetStatus() pgtype.Status }).GetStatus() != pgtype.Present {
 						processedVal = nil
 					} else {
 						var dataHolder any
@@ -1034,7 +1034,10 @@ func (t *TableDiffTask) ExecuteTask() (err error) {
 
 	logger.Debug("Using CompareUnitSize: %d", t.CompareUnitSize)
 
-	ctx := context.Background()
+	ctx := t.Ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
 
 	maxConcurrent := runtime.NumCPU() * t.ConcurrencyFactor
 	logger.Info("Using %d CPUs, max concurrent workers = %d", runtime.NumCPU(), maxConcurrent)
