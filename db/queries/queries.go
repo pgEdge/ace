@@ -738,6 +738,7 @@ func GetColumnTypes(ctx context.Context, db DBQuerier, schema, table string) (ma
 	return types, nil
 }
 
+// TODO: Need to add Spock privilege checks!!
 func CheckUserPrivileges(ctx context.Context, db DBQuerier, username, schema, table string) (*types.UserPrivileges, error) {
 	sql, err := RenderSQL(SQLTemplates.CheckUserPrivileges, nil)
 	if err != nil {

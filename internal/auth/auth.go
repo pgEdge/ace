@@ -26,9 +26,10 @@ import (
 )
 
 type ConnectionOptions struct {
-	DBName   string
-	Role     string
-	PoolSize int
+	DBName         string
+	Role           string
+	PoolSize       int
+	DropPrivileges bool
 }
 
 func toConnectionString(node map[string]any, dbName string) string {
@@ -268,7 +269,8 @@ func applyConnectionOptions(cfg *pgxpool.Config, opts ConnectionOptions) {
 		cfg.MaxConns = int32(opts.PoolSize)
 	}
 	role := strings.TrimSpace(opts.Role)
-	if role == "" {
+
+	if role == "" || !opts.DropPrivileges {
 		return
 	}
 

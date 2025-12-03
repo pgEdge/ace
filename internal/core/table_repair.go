@@ -18,6 +18,7 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"sort"
 	"strings"
@@ -107,6 +108,37 @@ func NewTableRepairTask() *TableRepairTask {
 	}
 }
 
+func (t *TableRepairTask) closePools() {
+	for name, pool := range t.Pools {
+		if pool != nil {
+			pool.Close()
+		}
+		delete(t.Pools, name)
+	}
+}
+
+func (t *TableRepairTask) connOpts() auth.ConnectionOptions {
+	return auth.ConnectionOptions{}
+}
+
+func (t *TableRepairTask) setRole(tx pgx.Tx, nodeName string) error {
+	role := strings.TrimSpace(t.ClientRole)
+	requireRole := t.InvokeMethod != "cli"
+	if role == "" {
+		if requireRole {
+			return fmt.Errorf("client role in cert CN cannot be null")
+		}
+		return nil
+	}
+
+	roleSQL := fmt.Sprintf("SET ROLE %s", pgx.Identifier{role}.Sanitize())
+	if _, err := tx.Exec(t.Ctx, roleSQL); err != nil {
+		return fmt.Errorf("setting role %s on %s: %w", role, nodeName, err)
+	}
+	logger.Debug("SET ROLE %s on %s", role, nodeName)
+	return nil
+}
+
 func (tr *TableRepairTask) checkRepairOptionsCompatibility() error {
 	incompatibleOptions := []struct {
 		condition bool
@@ -143,6 +175,13 @@ func (tr *TableRepairTask) checkIfSourceOfTruthIsNeeded() bool {
 }
 
 func (t *TableRepairTask) ValidateAndPrepare() error {
+	success := false
+	defer func() {
+		if !success {
+			t.closePools()
+		}
+	}()
+
 	if t.ClusterName == "" {
 		return fmt.Errorf("cluster_name is required")
 	}
@@ -217,6 +256,18 @@ func (t *TableRepairTask) ValidateAndPrepare() error {
 		return fmt.Errorf("failed to unmarshal diff file %s: %w", t.DiffFilePath, err)
 	}
 
+	diffSchema := strings.TrimSpace(t.RawDiffs.Summary.Schema)
+	diffTable := strings.TrimSpace(t.RawDiffs.Summary.Table)
+	if diffSchema == "" || diffTable == "" {
+		return fmt.Errorf("diff file %s is missing schema/table metadata; cannot verify repair target", t.DiffFilePath)
+	}
+	if diffSchema != t.Schema || diffTable != t.Table {
+		return fmt.Errorf("diff file %s was generated for %s.%s but repair target is %s.%s", t.DiffFilePath, diffSchema, diffTable, t.Schema, t.Table)
+	}
+	if t.RawDiffs.Summary.TableFilter != "" {
+		logger.Info("Diff file was generated with table filter: %s", t.RawDiffs.Summary.TableFilter)
+	}
+
 	if t.RawDiffs.NodeDiffs == nil {
 		return fmt.Errorf("invalid diff file format: missing 'diffs' field or it's not a map")
 	}
@@ -256,10 +307,15 @@ func (t *TableRepairTask) ValidateAndPrepare() error {
 		TableDelete: true,
 	}
 
+	var refCols []string
+	var refKey []string
+	var refColTypes map[string]string
+	var refNode string
+
 	for _, nodeInfo := range t.ClusterNodes {
 		nodeName, _ := nodeInfo["Name"].(string)
 		if nodeName == t.SourceOfTruth || involvedNodeNames[nodeName] {
-			connPool, err := auth.GetClusterNodeConnection(t.Ctx, nodeInfo, auth.ConnectionOptions{Role: t.ClientRole})
+			connPool, err := auth.GetClusterNodeConnection(t.Ctx, nodeInfo, t.connOpts())
 			if err != nil {
 				logger.Warn("Failed to connect to node %s: %v. Will attempt to proceed if it's not critical or SoT.", nodeName, err)
 				if nodeName == t.SourceOfTruth {
@@ -285,6 +341,19 @@ func (t *TableRepairTask) ValidateAndPrepare() error {
 			t.Key = pKey
 			t.SimplePrimaryKey = len(pKey) == 1
 
+			if refCols == nil {
+				refCols = cols
+				refKey = pKey
+				refNode = nodeName
+			} else {
+				if !slices.Equal(cols, refCols) {
+					return fmt.Errorf("table columns differ between nodes %s and %s", refNode, nodeName)
+				}
+				if !slices.Equal(pKey, refKey) {
+					return fmt.Errorf("primary key definition differs between nodes %s and %s", refNode, nodeName)
+				}
+			}
+
 			publicIP, _ := nodeInfo["PublicIP"].(string)
 			port, _ := nodeInfo["Port"].(string)
 			colTypes, err := queries.GetColumnTypes(t.Ctx, connPool, t.Schema, t.Table)
@@ -295,6 +364,12 @@ func (t *TableRepairTask) ValidateAndPrepare() error {
 				t.ColTypes = make(map[string]map[string]string)
 			}
 			t.ColTypes[fmt.Sprintf("%s:%s", publicIP, port)] = colTypes
+
+			if refColTypes == nil {
+				refColTypes = colTypes
+			} else if !reflect.DeepEqual(colTypes, refColTypes) {
+				return fmt.Errorf("column types differ between nodes %s and %s", refNode, nodeName)
+			}
 
 			dbUser, _ := nodeInfo["DBUser"].(string)
 			if dbUser == "" {
@@ -335,6 +410,7 @@ func (t *TableRepairTask) ValidateAndPrepare() error {
 	}
 
 	logger.Debug("Table repair task validated and prepared successfully.")
+	success = true
 	return nil
 }
 
@@ -413,6 +489,8 @@ func (t *TableRepairTask) Run(skipValidation bool) (err error) {
 			return fmt.Errorf("task validation and preparation failed: %w", err)
 		}
 	}
+
+	defer t.closePools()
 
 	startTime := time.Now()
 
@@ -539,15 +617,6 @@ func (t *TableRepairTask) Run(skipValidation bool) (err error) {
 		return nil
 	}
 
-	defer func() {
-		for nodeName, pool := range t.Pools {
-			if pool != nil {
-				pool.Close()
-				logger.Debug("Closed connection pool for node: %s", nodeName)
-			}
-		}
-	}()
-
 	if t.Bidirectional {
 		return t.runBidirectionalRepair()
 	}
@@ -570,6 +639,7 @@ type nullUpdate struct {
 
 func (t *TableRepairTask) runFixNulls(startTime time.Time) error {
 	logger.Info("Starting fix-nulls repair for %s on cluster %s", t.QualifiedTableName, t.ClusterName)
+	defer t.closePools()
 
 	nullUpdates, err := t.buildNullUpdates()
 	if err != nil {
@@ -584,15 +654,6 @@ func (t *TableRepairTask) runFixNulls(startTime time.Time) error {
 		fmt.Print(output)
 		return nil
 	}
-
-	defer func() {
-		for nodeName, pool := range t.Pools {
-			if pool != nil {
-				pool.Close()
-				logger.Debug("Closed connection pool for node: %s", nodeName)
-			}
-		}
-	}()
 
 	totalCellsUpdated := make(map[string]int)
 	var repairErrors []string
@@ -620,7 +681,7 @@ func (t *TableRepairTask) runFixNulls(startTime time.Time) error {
 				continue
 			}
 
-			pool, err = auth.GetClusterNodeConnection(t.Ctx, nodeInfo, auth.ConnectionOptions{Role: t.ClientRole})
+			pool, err = auth.GetClusterNodeConnection(t.Ctx, nodeInfo, t.connOpts())
 			if err != nil {
 				logger.Error("Failed to connect to node %s: %v. Skipping repairs for this node.", nodeName, err)
 				repairErrors = append(repairErrors, fmt.Sprintf("connection failed for %s: %v", nodeName, err))
@@ -659,6 +720,13 @@ func (t *TableRepairTask) runFixNulls(startTime time.Time) error {
 			continue
 		}
 		logger.Debug("session_replication_role set on %s (fire_triggers: %v)", nodeName, t.FireTriggers)
+
+		if err := t.setRole(tx, nodeName); err != nil {
+			tx.Rollback(t.Ctx)
+			logger.Error("%v", err)
+			repairErrors = append(repairErrors, err.Error())
+			continue
+		}
 
 		colTypes, _, err := t.getColTypesForNode(nodeName)
 		if err != nil {
@@ -1146,7 +1214,7 @@ func (t *TableRepairTask) runUnidirectionalRepair(startTime time.Time) error {
 			}
 
 			var err error
-			divergentPool, err = auth.GetClusterNodeConnection(t.Ctx, nodeInfo, auth.ConnectionOptions{Role: t.ClientRole})
+			divergentPool, err = auth.GetClusterNodeConnection(t.Ctx, nodeInfo, t.connOpts())
 			if err != nil {
 				logger.Error("Failed to connect to node %s: %v. Skipping repairs for this node.", nodeName, err)
 				repairErrors = append(repairErrors, fmt.Sprintf("connection failed for %s: %v", nodeName, err))
@@ -1186,6 +1254,13 @@ func (t *TableRepairTask) runUnidirectionalRepair(startTime time.Time) error {
 			continue
 		}
 		logger.Debug("session_replication_role set on %s (fire_triggers: %v)", nodeName, t.FireTriggers)
+
+		if err := t.setRole(tx, nodeName); err != nil {
+			tx.Rollback(t.Ctx)
+			logger.Error("%v", err)
+			repairErrors = append(repairErrors, err.Error())
+			continue
+		}
 
 		// TODO: DROP PRIVILEGES HERE!
 
@@ -1524,6 +1599,10 @@ func (t *TableRepairTask) performBirectionalInserts(nodeName string, inserts map
 		return 0, fmt.Errorf("failed to set session_replication_role on %s: %w", nodeName, err)
 	}
 	logger.Info("session_replication_role set on %s (fire_triggers: %v)", nodeName, t.FireTriggers)
+
+	if err := t.setRole(tx, nodeName); err != nil {
+		return 0, err
+	}
 
 	targetNodeHostPortKey := ""
 	for hostPort, mappedName := range t.HostMap {

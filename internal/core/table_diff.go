@@ -442,7 +442,7 @@ func (t *TableDiffTask) fetchRows(nodeName string, r Range) ([]types.OrderedMap,
 					float32, float64, bool:
 					processedVal = v
 				case pgtype.JSON, pgtype.JSONB:
-					if v == nil || v.(interface{ GetStatus() pgtype.Status }).GetStatus() != pgtype.Present {
+					if v.(interface{ GetStatus() pgtype.Status }).GetStatus() != pgtype.Present {
 						processedVal = nil
 					} else {
 						var dataHolder any
@@ -657,7 +657,7 @@ func (t *TableDiffTask) RunChecks(skipValidation bool) (err error) {
 			continue
 		}
 
-		conn, err := auth.GetClusterNodeConnection(t.Ctx, nodeInfo, auth.ConnectionOptions{Role: t.ClientRole})
+		conn, err := auth.GetClusterNodeConnection(t.Ctx, nodeInfo, t.connOpts())
 		if err != nil {
 			return fmt.Errorf("failed to connect to node %s: %w", hostname, err)
 		}
@@ -811,7 +811,7 @@ func (t *TableDiffTask) cleanupFilteredView() {
 			continue
 		}
 
-		pool, err := auth.GetClusterNodeConnection(context.Background(), nodeInfo, auth.ConnectionOptions{Role: t.ClientRole})
+		pool, err := auth.GetClusterNodeConnection(context.Background(), nodeInfo, t.connOpts())
 		if err != nil {
 			logger.Warn("table-diff: failed to get connection for filtered view cleanup on node %s: %v", name, err)
 			continue
@@ -856,6 +856,10 @@ func (t *TableDiffTask) CloneForSchedule(ctx context.Context) *TableDiffTask {
 	return cloned
 }
 
+func (t *TableDiffTask) connOpts() auth.ConnectionOptions {
+	return auth.ConnectionOptions{}
+}
+
 func (t *TableDiffTask) CheckColumnSize() error {
 	for hostPort, types := range t.ColTypes {
 		parts := strings.Split(hostPort, ":")
@@ -886,7 +890,7 @@ func (t *TableDiffTask) CheckColumnSize() error {
 
 			if nodeHost == host && int(nodePort) == port {
 				var err error
-				pool, err = auth.GetClusterNodeConnection(t.Ctx, nodeInfo, auth.ConnectionOptions{Role: t.ClientRole})
+				pool, err = auth.GetClusterNodeConnection(t.Ctx, nodeInfo, t.connOpts())
 				if err != nil {
 					return fmt.Errorf("failed to connect to node %s:%d: %w", host, port, err)
 				}
@@ -1034,7 +1038,10 @@ func (t *TableDiffTask) ExecuteTask() (err error) {
 
 	logger.Debug("Using CompareUnitSize: %d", t.CompareUnitSize)
 
-	ctx := context.Background()
+	ctx := t.Ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
 
 	maxConcurrent := runtime.NumCPU() * t.ConcurrencyFactor
 	logger.Info("Using %d CPUs, max concurrent workers = %d", runtime.NumCPU(), maxConcurrent)
@@ -1043,7 +1050,7 @@ func (t *TableDiffTask) ExecuteTask() (err error) {
 	pools := make(map[string]*pgxpool.Pool)
 	for _, nodeInfo := range t.ClusterNodes {
 		name := nodeInfo["Name"].(string)
-		pool, err := auth.GetClusterNodeConnection(t.Ctx, nodeInfo, auth.ConnectionOptions{Role: t.ClientRole})
+		pool, err := auth.GetClusterNodeConnection(t.Ctx, nodeInfo, t.connOpts())
 		if err != nil {
 			return fmt.Errorf("failed to connect to node %s: %w", name, err)
 		}
@@ -1095,7 +1102,8 @@ func (t *TableDiffTask) ExecuteTask() (err error) {
 		NodeDiffs: make(map[string]types.DiffByNodePair),
 		Summary: types.DiffSummary{
 			Schema:            t.Schema,
-			Table:             t.Table,
+			Table:             t.BaseTable,
+			TableFilter:       t.TableFilter,
 			Nodes:             t.NodeList,
 			BlockSize:         t.BlockSize,
 			CompareUnitSize:   t.CompareUnitSize,
@@ -1374,7 +1382,7 @@ func (t *TableDiffTask) ExecuteTask() (err error) {
 
 	t.AddPrimaryKeyToDiffSummary()
 
-	jsonPath, _, err := utils.WriteDiffReport(t.DiffResult, t.Schema, t.Table, t.Output)
+	jsonPath, _, err := utils.WriteDiffReport(t.DiffResult, t.Schema, t.BaseTable, t.Output)
 	if err != nil {
 		return err
 	}

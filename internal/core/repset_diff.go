@@ -55,6 +55,9 @@ type RepsetDiffCmd struct {
 	OverrideBlockSize bool
 	Ctx               context.Context
 
+	ClientRole   string
+	InvokeMethod string
+
 	SkipDBUpdate  bool
 	TaskStore     *taskstore.Store
 	TaskStorePath string
@@ -79,6 +82,10 @@ func NewRepsetDiffTask() *RepsetDiffCmd {
 		},
 		Ctx: context.Background(),
 	}
+}
+
+func (c *RepsetDiffCmd) connOpts() auth.ConnectionOptions {
+	return auth.ConnectionOptions{}
 }
 
 func (c *RepsetDiffCmd) parseSkipList() error {
@@ -134,7 +141,7 @@ func (c *RepsetDiffCmd) RunChecks(skipValidation bool) error {
 		}
 	}
 
-	pool, err := auth.GetClusterNodeConnection(c.Ctx, nodeWithDBInfo, auth.ConnectionOptions{})
+	pool, err := auth.GetClusterNodeConnection(c.Ctx, nodeWithDBInfo, c.connOpts())
 	if err != nil {
 		return fmt.Errorf("could not connect to database: %w", err)
 	}

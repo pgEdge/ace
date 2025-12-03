@@ -497,6 +497,7 @@ func (s *APIServer) handleSpockDiff(w http.ResponseWriter, r *http.Request) {
 	}
 	task.Ctx = r.Context()
 	task.ClientRole = clientInfo.role
+	task.InvokeMethod = "api"
 	task.SkipDBUpdate = false
 	task.TaskStore = s.taskStore
 	task.TaskStorePath = s.cfg.Server.TaskStorePath
@@ -629,6 +630,12 @@ func (s *APIServer) handleRepsetDiff(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	clientInfo, ok := getClientInfo(r.Context())
+	if !ok || strings.TrimSpace(clientInfo.role) == "" {
+		writeError(w, http.StatusUnauthorized, "client identity unavailable")
+		return
+	}
+
 	task := core.NewRepsetDiffTask()
 	task.ClusterName = cluster
 	task.RepsetName = repset
@@ -646,6 +653,8 @@ func (s *APIServer) handleRepsetDiff(w http.ResponseWriter, r *http.Request) {
 	}
 	task.OverrideBlockSize = req.OverrideBlockSize
 	task.Ctx = r.Context()
+	task.ClientRole = clientInfo.role
+	task.InvokeMethod = "api"
 	task.SkipDBUpdate = false
 	task.TaskStore = s.taskStore
 	task.TaskStorePath = s.cfg.Server.TaskStorePath
@@ -709,6 +718,12 @@ func (s *APIServer) handleMtreeInit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	clientInfo, ok := getClientInfo(r.Context())
+	if !ok || strings.TrimSpace(clientInfo.role) == "" {
+		writeError(w, http.StatusUnauthorized, "client identity unavailable")
+		return
+	}
+
 	task := core.NewMerkleTreeTask()
 	task.ClusterName = cluster
 	task.DBName = strings.TrimSpace(req.DBName)
@@ -716,6 +731,8 @@ func (s *APIServer) handleMtreeInit(w http.ResponseWriter, r *http.Request) {
 	task.QuietMode = req.Quiet
 	task.Mode = "init"
 	task.Ctx = r.Context()
+	task.ClientRole = clientInfo.role
+	task.InvokeMethod = "api"
 	task.SkipDBUpdate = false
 	task.TaskStore = s.taskStore
 	task.TaskStorePath = s.cfg.Server.TaskStorePath
@@ -759,6 +776,12 @@ func (s *APIServer) handleMtreeTeardown(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	clientInfo, ok := getClientInfo(r.Context())
+	if !ok || strings.TrimSpace(clientInfo.role) == "" {
+		writeError(w, http.StatusUnauthorized, "client identity unavailable")
+		return
+	}
+
 	task := core.NewMerkleTreeTask()
 	task.ClusterName = cluster
 	task.DBName = strings.TrimSpace(req.DBName)
@@ -766,6 +789,8 @@ func (s *APIServer) handleMtreeTeardown(w http.ResponseWriter, r *http.Request) 
 	task.QuietMode = req.Quiet
 	task.Mode = "teardown"
 	task.Ctx = r.Context()
+	task.ClientRole = clientInfo.role
+	task.InvokeMethod = "api"
 	task.SkipDBUpdate = false
 	task.TaskStore = s.taskStore
 	task.TaskStorePath = s.cfg.Server.TaskStorePath
@@ -814,6 +839,12 @@ func (s *APIServer) handleMtreeTeardownTable(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
+	clientInfo, ok := getClientInfo(r.Context())
+	if !ok || strings.TrimSpace(clientInfo.role) == "" {
+		writeError(w, http.StatusUnauthorized, "client identity unavailable")
+		return
+	}
+
 	task := core.NewMerkleTreeTask()
 	task.ClusterName = cluster
 	task.QualifiedTableName = table
@@ -822,6 +853,8 @@ func (s *APIServer) handleMtreeTeardownTable(w http.ResponseWriter, r *http.Requ
 	task.QuietMode = req.Quiet
 	task.Mode = "teardown-table"
 	task.Ctx = r.Context()
+	task.ClientRole = clientInfo.role
+	task.InvokeMethod = "api"
 	task.SkipDBUpdate = false
 	task.TaskStore = s.taskStore
 	task.TaskStorePath = s.cfg.Server.TaskStorePath
@@ -870,6 +903,12 @@ func (s *APIServer) handleMtreeBuild(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	clientInfo, ok := getClientInfo(r.Context())
+	if !ok || strings.TrimSpace(clientInfo.role) == "" {
+		writeError(w, http.StatusUnauthorized, "client identity unavailable")
+		return
+	}
+
 	task := core.NewMerkleTreeTask()
 	task.ClusterName = cluster
 	task.QualifiedTableName = table
@@ -885,6 +924,8 @@ func (s *APIServer) handleMtreeBuild(w http.ResponseWriter, r *http.Request) {
 	task.RangesFile = strings.TrimSpace(req.RangesFile)
 	task.Mode = "build"
 	task.Ctx = r.Context()
+	task.ClientRole = clientInfo.role
+	task.InvokeMethod = "api"
 	task.SkipDBUpdate = false
 	task.TaskStore = s.taskStore
 	task.TaskStorePath = s.cfg.Server.TaskStorePath
@@ -942,6 +983,12 @@ func (s *APIServer) handleMtreeUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	clientInfo, ok := getClientInfo(r.Context())
+	if !ok || strings.TrimSpace(clientInfo.role) == "" {
+		writeError(w, http.StatusUnauthorized, "client identity unavailable")
+		return
+	}
+
 	task := core.NewMerkleTreeTask()
 	task.ClusterName = cluster
 	task.QualifiedTableName = table
@@ -952,6 +999,8 @@ func (s *APIServer) handleMtreeUpdate(w http.ResponseWriter, r *http.Request) {
 	task.Rebalance = req.Rebalance
 	task.Mode = "update"
 	task.Ctx = r.Context()
+	task.ClientRole = clientInfo.role
+	task.InvokeMethod = "api"
 	task.SkipDBUpdate = false
 	task.TaskStore = s.taskStore
 	task.TaskStorePath = s.cfg.Server.TaskStorePath
@@ -1009,6 +1058,12 @@ func (s *APIServer) handleMtreeDiff(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	clientInfo, ok := getClientInfo(r.Context())
+	if !ok || strings.TrimSpace(clientInfo.role) == "" {
+		writeError(w, http.StatusUnauthorized, "client identity unavailable")
+		return
+	}
+
 	task := core.NewMerkleTreeTask()
 	task.ClusterName = cluster
 	task.QualifiedTableName = table
@@ -1023,6 +1078,8 @@ func (s *APIServer) handleMtreeDiff(w http.ResponseWriter, r *http.Request) {
 	task.NoCDC = req.SkipUpdate
 	task.Mode = "diff"
 	task.Ctx = r.Context()
+	task.ClientRole = clientInfo.role
+	task.InvokeMethod = "api"
 	task.SkipDBUpdate = false
 	task.TaskStore = s.taskStore
 	task.TaskStorePath = s.cfg.Server.TaskStorePath

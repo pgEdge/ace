@@ -48,8 +48,9 @@ type SpockDiffTask struct {
 	Nodes  string
 	Output string
 
-	ClientRole string
-	Pools      map[string]*pgxpool.Pool
+	ClientRole   string
+	InvokeMethod string
+	Pools        map[string]*pgxpool.Pool
 
 	DiffResult   *types.SpockDiffOutput
 	DiffFilePath string
@@ -84,11 +85,19 @@ func NewSpockDiffTask() *SpockDiffTask {
 		DerivedFields: types.DerivedFields{
 			HostMap: make(map[string]string),
 		},
-		Pools: make(map[string]*pgxpool.Pool),
+		InvokeMethod: "cli",
+		Pools:        make(map[string]*pgxpool.Pool),
 		DiffResult: &types.SpockDiffOutput{
 			SpockConfigs: make(map[string]any),
 			Diffs:        make(map[string]types.SpockPairDiff),
 		},
+	}
+}
+
+func (t *SpockDiffTask) connOpts() auth.ConnectionOptions {
+	return auth.ConnectionOptions{
+		Role:           t.ClientRole,
+		DropPrivileges: true,
 	}
 }
 
@@ -175,7 +184,7 @@ func (t *SpockDiffTask) RunChecks(skipValidation bool) error {
 			continue
 		}
 
-		conn, err := auth.GetClusterNodeConnection(t.Ctx, nodeInfo, auth.ConnectionOptions{Role: t.ClientRole})
+		conn, err := auth.GetClusterNodeConnection(t.Ctx, nodeInfo, t.connOpts())
 		if err != nil {
 			return fmt.Errorf("failed to connect to node %s: %w", hostname, err)
 		}
@@ -289,7 +298,7 @@ func (t *SpockDiffTask) ExecuteTask() (err error) {
 	pools := make(map[string]*pgxpool.Pool)
 	for _, nodeInfo := range t.ClusterNodes {
 		name := nodeInfo["Name"].(string)
-		pool, err := auth.GetClusterNodeConnection(t.Ctx, nodeInfo, auth.ConnectionOptions{Role: t.ClientRole})
+		pool, err := auth.GetClusterNodeConnection(t.Ctx, nodeInfo, t.connOpts())
 		if err != nil {
 			return fmt.Errorf("failed to connect to node %s: %w", name, err)
 		}
