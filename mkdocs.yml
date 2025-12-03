@@ -55,6 +55,7 @@ nav:
   - ACE Overview: index.md
   - Best Practices for Using ACE: best_practices.md
   - ACE Configuration: configuration.md
+  - Running ACE with Docker: docker.md
   - ACE Commands:
     - Command reference: commands/index.md
     - Diff Commands:

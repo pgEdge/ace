@@ -1384,7 +1384,11 @@ func (m *MerkleTreeTask) BuildMtree() (err error) {
 		}
 
 		logger.Info("Merkle tree built successfully on %s", nodeInfo["Name"])
-		tx.Commit(m.Ctx)
+		err = tx.Commit(m.Ctx)
+		if err != nil {
+			pool.Close()
+			return fmt.Errorf("failed to commit transaction on node %s: %w", nodeInfo["Name"], err)
+		}
 		pool.Close()
 	}
 
@@ -2378,31 +2382,31 @@ func (m *MerkleTreeTask) createMtreeObjects(tx pgx.Tx, totalRows int64, numBlock
 		return fmt.Errorf("failed to create metadata table: %w", err)
 	}
 
-	err = queries.UpdateMetadata(context.Background(), tx, m.Schema, m.Table, totalRows, m.BlockSize, numBlocks, !m.SimplePrimaryKey)
+	err = queries.UpdateMetadata(m.Ctx, tx, m.Schema, m.Table, totalRows, m.BlockSize, numBlocks, !m.SimplePrimaryKey)
 	if err != nil {
 		return fmt.Errorf("failed to update metadata: %w", err)
 	}
 
 	mtreeTableIdentifier := pgx.Identifier{aceSchema(), fmt.Sprintf("ace_mtree_%s_%s", m.Schema, m.Table)}
 	mtreeTableName := mtreeTableIdentifier.Sanitize()
-	err = queries.DropMtreeTable(context.Background(), tx, mtreeTableName)
+	err = queries.DropMtreeTable(m.Ctx, tx, mtreeTableName)
 	if err != nil {
 		return fmt.Errorf("failed to render drop mtree table sql: %w", err)
 	}
 
 	if m.SimplePrimaryKey {
-		pkeyType, err := queries.GetPkeyType(context.Background(), tx, m.Schema, m.Table, m.Key[0])
+		pkeyType, err := queries.GetPkeyType(m.Ctx, tx, m.Schema, m.Table, m.Key[0])
 		if err != nil {
 			return err
 		}
-		err = queries.CreateSimpleMtreeTable(context.Background(), tx, mtreeTableName, pkeyType)
+		err = queries.CreateSimpleMtreeTable(m.Ctx, tx, mtreeTableName, pkeyType)
 		if err != nil {
 			return fmt.Errorf("failed to render create simple mtree table sql: %w", err)
 		}
 	} else {
 		keyTypeColumns := make([]string, len(m.Key))
 		for i, col := range m.Key {
-			colType, err := queries.GetPkeyType(context.Background(), tx, m.Schema, m.Table, col)
+			colType, err := queries.GetPkeyType(m.Ctx, tx, m.Schema, m.Table, col)
 			if err != nil {
 				return err
 			}
@@ -2412,17 +2416,17 @@ func (m *MerkleTreeTask) createMtreeObjects(tx pgx.Tx, totalRows int64, numBlock
 		compositeTypeIdentifier := pgx.Identifier{aceSchema(), fmt.Sprintf("%s_%s_key_type", m.Schema, m.Table)}
 		compositeTypeName := compositeTypeIdentifier.Sanitize()
 
-		err = queries.DropCompositeType(context.Background(), tx, compositeTypeName)
+		err = queries.DropCompositeType(m.Ctx, tx, compositeTypeName)
 		if err != nil {
 			return fmt.Errorf("failed to render drop composite type sql: %w", err)
 		}
 
-		err = queries.CreateCompositeType(context.Background(), tx, compositeTypeName, strings.Join(keyTypeColumns, ", "))
+		err = queries.CreateCompositeType(m.Ctx, tx, compositeTypeName, strings.Join(keyTypeColumns, ", "))
 		if err != nil {
 			return fmt.Errorf("failed to render create composite type sql: %w", err)
 		}
 
-		err = queries.CreateCompositeMtreeTable(context.Background(), tx, mtreeTableName, compositeTypeName)
+		err = queries.CreateCompositeMtreeTable(m.Ctx, tx, mtreeTableName, compositeTypeName)
 		if err != nil {
 			return fmt.Errorf("failed to render create composite mtree table sql: %w", err)
 		}

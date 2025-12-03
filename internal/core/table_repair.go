@@ -699,7 +699,7 @@ func (t *TableRepairTask) runFixNulls(startTime time.Time) error {
 		}
 
 		spockRepairModeActive := false
-		if _, err := tx.Exec(context.Background(), "SELECT spock.repair_mode(true)"); err != nil {
+		if _, err := tx.Exec(t.Ctx, "SELECT spock.repair_mode(true)"); err != nil {
 			tx.Rollback(t.Ctx)
 			logger.Error("enabling spock.repair_mode(true) on %s: %v", nodeName, err)
 			repairErrors = append(repairErrors, fmt.Sprintf("spock.repair_mode(true) failed for %s: %v", nodeName, err))
@@ -709,9 +709,9 @@ func (t *TableRepairTask) runFixNulls(startTime time.Time) error {
 		logger.Debug("spock.repair_mode(true) set on %s", nodeName)
 
 		if t.FireTriggers {
-			_, err = tx.Exec(context.Background(), "SET session_replication_role = 'local'")
+			_, err = tx.Exec(t.Ctx, "SET session_replication_role = 'local'")
 		} else {
-			_, err = tx.Exec(context.Background(), "SET session_replication_role = 'replica'")
+			_, err = tx.Exec(t.Ctx, "SET session_replication_role = 'replica'")
 		}
 		if err != nil {
 			tx.Rollback(t.Ctx)
@@ -789,7 +789,7 @@ func (t *TableRepairTask) runFixNulls(startTime time.Time) error {
 		}
 
 		if spockRepairModeActive {
-			_, err = tx.Exec(context.Background(), "SELECT spock.repair_mode(false)")
+			_, err = tx.Exec(t.Ctx, "SELECT spock.repair_mode(false)")
 			if err != nil {
 				tx.Rollback(t.Ctx)
 				logger.Error("disabling spock.repair_mode(false) on %s: %v", nodeName, err)
@@ -1232,7 +1232,7 @@ func (t *TableRepairTask) runUnidirectionalRepair(startTime time.Time) error {
 		}
 
 		var spockRepairModeActive bool = false
-		_, err = tx.Exec(context.Background(), "SELECT spock.repair_mode(true)")
+		_, err = tx.Exec(t.Ctx, "SELECT spock.repair_mode(true)")
 		if err != nil {
 			tx.Rollback(t.Ctx)
 			logger.Error("enabling spock.repair_mode(true) on %s: %v", nodeName, err)
@@ -1243,9 +1243,9 @@ func (t *TableRepairTask) runUnidirectionalRepair(startTime time.Time) error {
 		logger.Debug("spock.repair_mode(true) set on %s", nodeName)
 
 		if t.FireTriggers {
-			_, err = tx.Exec(context.Background(), "SET session_replication_role = 'local'")
+			_, err = tx.Exec(t.Ctx, "SET session_replication_role = 'local'")
 		} else {
-			_, err = tx.Exec(context.Background(), "SET session_replication_role = 'replica'")
+			_, err = tx.Exec(t.Ctx, "SET session_replication_role = 'replica'")
 		}
 		if err != nil {
 			tx.Rollback(t.Ctx)
@@ -1346,7 +1346,7 @@ func (t *TableRepairTask) runUnidirectionalRepair(startTime time.Time) error {
 		if spockRepairModeActive {
 			// TODO: Need to elevate privileges here, but might be difficult
 			// with pgx transactions and connection pooling.
-			_, err = tx.Exec(context.Background(), "SELECT spock.repair_mode(false)")
+			_, err = tx.Exec(t.Ctx, "SELECT spock.repair_mode(false)")
 			if err != nil {
 				tx.Rollback(t.Ctx)
 				logger.Error("disabling spock.repair_mode(false) on %s: %v", nodeName, err)
@@ -1853,7 +1853,7 @@ func executeUpserts(tx pgx.Tx, task *TableRepairTask, upserts map[string]map[str
 			upsertSQL.WriteString(strings.Join(setClauses, ", "))
 		}
 
-		cmdTag, err := tx.Exec(context.Background(), upsertSQL.String(), args...)
+		cmdTag, err := tx.Exec(task.Ctx, upsertSQL.String(), args...)
 		if err != nil {
 			return totalUpsertedCount, fmt.Errorf("error executing upsert batch: %w (SQL: %s, Args: %v)", err, upsertSQL.String(), args)
 		}

@@ -7,6 +7,7 @@ on:
 
 permissions:
   contents: write
+  packages: write
 
 jobs:
   goreleaser:
@@ -32,3 +33,40 @@ jobs:
             -e CGO_ENABLED=1 \
             goreleaser/goreleaser-cross:v1.25.4 \
             release --clean
+
+  docker:
+    name: Publish Docker Image
+    runs-on: ubuntu-latest
+    needs: goreleaser
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up QEMU (for multi-arch)
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push image
+        run: |
+          docker buildx build \
+            --platform linux/amd64,linux/arm64 \
+            --tag ghcr.io/pgedge/ace:${{ github.ref_name }} \
+            --tag ghcr.io/pgedge/ace:latest \
+            --build-arg ACE_VERSION=${{ github.ref_name }} \
+            --file Dockerfile \
+            --push .

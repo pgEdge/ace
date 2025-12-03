@@ -811,19 +811,18 @@ func (t *TableDiffTask) cleanupFilteredView() {
 			continue
 		}
 
-		pool, err := auth.GetClusterNodeConnection(context.Background(), nodeInfo, t.connOpts())
+		pool, err := auth.GetClusterNodeConnection(t.Ctx, nodeInfo, t.connOpts())
 		if err != nil {
 			logger.Warn("table-diff: failed to get connection for filtered view cleanup on node %s: %v", name, err)
 			continue
 		}
+		defer pool.Close()
 
-		if _, err := pool.Exec(context.Background(), dropSQL); err != nil {
+		if _, err := pool.Exec(t.Ctx, dropSQL); err != nil {
 			logger.Warn("table-diff: failed to drop filtered view %s.%s on node %s: %v", t.Schema, t.FilteredViewName, name, err)
 		} else {
 			logger.Info("table-diff: dropped filtered view %s.%s on node %s", t.Schema, t.FilteredViewName, name)
 		}
-
-		pool.Close()
 	}
 
 	t.FilteredViewCreated = false
