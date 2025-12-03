@@ -857,10 +857,7 @@ func (t *TableDiffTask) CloneForSchedule(ctx context.Context) *TableDiffTask {
 }
 
 func (t *TableDiffTask) connOpts() auth.ConnectionOptions {
-	return auth.ConnectionOptions{
-		Role:           t.ClientRole,
-		DropPrivileges: true,
-	}
+	return auth.ConnectionOptions{}
 }
 
 func (t *TableDiffTask) CheckColumnSize() error {
@@ -1105,7 +1102,8 @@ func (t *TableDiffTask) ExecuteTask() (err error) {
 		NodeDiffs: make(map[string]types.DiffByNodePair),
 		Summary: types.DiffSummary{
 			Schema:            t.Schema,
-			Table:             t.Table,
+			Table:             t.BaseTable,
+			TableFilter:       t.TableFilter,
 			Nodes:             t.NodeList,
 			BlockSize:         t.BlockSize,
 			CompareUnitSize:   t.CompareUnitSize,
@@ -1384,7 +1382,7 @@ func (t *TableDiffTask) ExecuteTask() (err error) {
 
 	t.AddPrimaryKeyToDiffSummary()
 
-	jsonPath, _, err := utils.WriteDiffReport(t.DiffResult, t.Schema, t.Table, t.Output)
+	jsonPath, _, err := utils.WriteDiffReport(t.DiffResult, t.Schema, t.BaseTable, t.Output)
 	if err != nil {
 		return err
 	}

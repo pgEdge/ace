@@ -85,10 +85,7 @@ func NewRepsetDiffTask() *RepsetDiffCmd {
 }
 
 func (c *RepsetDiffCmd) connOpts() auth.ConnectionOptions {
-	return auth.ConnectionOptions{
-		Role:           c.ClientRole,
-		DropPrivileges: true,
-	}
+	return auth.ConnectionOptions{}
 }
 
 func (c *RepsetDiffCmd) parseSkipList() error {

@@ -118,10 +118,7 @@ func (t *TableRepairTask) closePools() {
 }
 
 func (t *TableRepairTask) connOpts() auth.ConnectionOptions {
-	return auth.ConnectionOptions{
-		Role:           t.ClientRole,
-		DropPrivileges: false,
-	}
+	return auth.ConnectionOptions{}
 }
 
 func (t *TableRepairTask) setRole(tx pgx.Tx, nodeName string) error {
@@ -266,6 +263,9 @@ func (t *TableRepairTask) ValidateAndPrepare() error {
 	}
 	if diffSchema != t.Schema || diffTable != t.Table {
 		return fmt.Errorf("diff file %s was generated for %s.%s but repair target is %s.%s", t.DiffFilePath, diffSchema, diffTable, t.Schema, t.Table)
+	}
+	if t.RawDiffs.Summary.TableFilter != "" {
+		logger.Info("Diff file was generated with table filter: %s", t.RawDiffs.Summary.TableFilter)
 	}
 
 	if t.RawDiffs.NodeDiffs == nil {

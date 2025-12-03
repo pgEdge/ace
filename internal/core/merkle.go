@@ -971,12 +971,14 @@ func NewMerkleTreeTask() *MerkleTreeTask {
 }
 
 func (m *MerkleTreeTask) connOpts() auth.ConnectionOptions {
-	return auth.ConnectionOptions{
-		Role:           m.ClientRole,
-		DropPrivileges: true,
-	}
+	return auth.ConnectionOptions{}
 }
 
+func (m *MerkleTreeTask) userConnOpts() auth.ConnectionOptions {
+	return auth.ConnectionOptions{
+		Role: m.ClientRole,
+	}
+}
 func (m *MerkleTreeTask) validateInit() error {
 	return m.validateCommon()
 }
@@ -1039,6 +1041,28 @@ func (m *MerkleTreeTask) validateCommon() error {
 	}
 
 	m.ClusterNodes = clusterNodes
+
+	// Fast fail if the caller role cannot read the target table on any node.
+	for _, nodeInfo := range m.ClusterNodes {
+		pool, err := auth.GetClusterNodeConnection(m.Ctx, nodeInfo, m.userConnOpts())
+		if err != nil {
+			return fmt.Errorf("failed to connect to node %s for privilege check: %w", nodeInfo["Name"], err)
+		}
+
+		dbUser, _ := nodeInfo["DBUser"].(string)
+		if dbUser == "" {
+			dbUser = m.Database.DBUser
+		}
+		privs, err := queries.CheckUserPrivileges(m.Ctx, pool, dbUser, m.Schema, m.Table)
+		pool.Close()
+		if err != nil {
+			return fmt.Errorf("failed to check user privileges on node %s: %w", nodeInfo["Name"], err)
+		}
+		if !privs.TableSelect {
+			return fmt.Errorf("user \"%s\" does not have SELECT privilege on table \"%s.%s\" on node \"%s\"",
+				dbUser, m.Schema, m.Table, nodeInfo["Name"])
+		}
+	}
 	return nil
 }
 

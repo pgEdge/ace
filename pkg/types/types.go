@@ -104,6 +104,7 @@ type DiffByNodePair struct {
 type DiffSummary struct {
 	Schema                string         `json:"schema"`
 	Table                 string         `json:"table"`
+	TableFilter           string         `json:"table_filter,omitempty"`
 	Nodes                 []string       `json:"nodes"`
 	BlockSize             int            `json:"block_size"`
 	CompareUnitSize       int            `json:"compare_unit_size"`
