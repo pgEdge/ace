@@ -53,6 +53,7 @@ repo_url: https://github.com/pgEdge/ace
 
 nav:
   - ACE Overview: index.md
+  - Installing ACE: install.md
   - Best Practices for Using ACE: best_practices.md
   - ACE Configuration: configuration.md
   - Running ACE with Docker: docker.md

@@ -8,7 +8,7 @@ before:
 builds:
   # Linux amd64 (native, with cgo + sqlite)
   - id: ace-linux-amd64
-    main: ./cmd/server
+    main: ./cmd/ace
     binary: ace
     env:
       - CGO_ENABLED=1
@@ -21,7 +21,7 @@ builds:
 
   # Linux arm64 (cgo, using cross-compiler)
   - id: ace-linux-arm64
-    main: ./cmd/server
+    main: ./cmd/ace
     binary: ace
     env:
       - CGO_ENABLED=1
@@ -38,7 +38,7 @@ builds:
   # NOTE: This only works if your code can compile with CGO_DISABLED=0
   # on these platforms (e.g. sqlite bits are behind //go:build cgo).
   - id: ace-darwin-windows
-    main: ./cmd/server
+    main: ./cmd/ace
     binary: ace
     env:
       - CGO_ENABLED=0

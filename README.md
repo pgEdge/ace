@@ -4,6 +4,7 @@
 ## Table of Contents
 - [ACE Best Practices](./docs/best_practices.md)
 - [Building ACE](README.md#building-ace)
+- [Installing ACE](./docs/install.md)
 - [Configuring ACE](./docs/configuration.md)
 - [Running ACE with Docker](./docs/docker.md)
 - [Using Merkle Trees to Improve ACE Performance](./docs/merkle.md)
@@ -25,7 +26,7 @@ Before building ACE, you need to install Go (version 1.18 or higher).
 
 2.  Build the executable:
     ```sh
-    go build -o ace ./cmd/server/
+    go build -o ace ./cmd/ace/
     ```
     This will create an executable file named `ace` in the current directory. You can move this file to a directory in your `PATH` (e.g., `/usr/local/bin`) to make it accessible from anywhere.
 
