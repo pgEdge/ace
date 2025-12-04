@@ -2,6 +2,18 @@
 
 All notable changes to ACE will be captured in this document. The project follows semantic versioning; the latest changes appear first.
 
+## [v1.4.2] - 2025-12-03
+
+### Added
+- Installation guide covering `go install`, release tarballs, and a Docker quickstart that links to the full container docs.
+
+### Changed
+- CLI entrypoint moved from `cmd/server` to `cmd/ace`, so `go install github.com/pgedge/ace/cmd/ace@…` produces an `ace` binary (no more `server`).
+- GoReleaser, README build snippets, and helper scripts updated to the new `cmd/ace` path.
+
+### Fixed
+- Avoids user confusion where `go install` previously emitted a `server` binary.
+
 ## [v1.4.1] - 2025-12-03
 
 ### Added
