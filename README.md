@@ -5,6 +5,7 @@
 - [ACE Best Practices](./docs/best_practices.md)
 - [Building ACE](README.md#building-ace)
 - [Configuring ACE](./docs/configuration.md)
+- [Running ACE with Docker](./docs/docker.md)
 - [Using Merkle Trees to Improve ACE Performance](./docs/merkle.md)
 - [Command Reference](./docs/commands/index.md)
 - [Performance Considerations](./docs/performance.md)
@@ -61,4 +62,3 @@ ACE checks the following locations in order for a pg_service.conf file:
 5. `/etc/pg_service.conf`.
 
 If none of these files contain entries for the requested cluster, ACE attempts to read the `<cluster>.json` file.
-

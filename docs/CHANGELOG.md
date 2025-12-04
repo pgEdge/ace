@@ -2,6 +2,21 @@
 
 All notable changes to ACE will be captured in this document. The project follows semantic versioning; the latest changes appear first.
 
+## [v1.4.1] - 2025-12-03
+
+### Added
+- `table-repair --fix-nulls` mode (with dry-run support) to cross-fill NULL-only drifts without a single source-of-truth, plus broader datatype coverage (arrays, JSON/JSONB, bytea, intervals) and dedicated integration tests.
+- CDC can run snapshot-style drains to the current WAL flush LSN, periodically flushes metadata via the new `mtree.cdc.cdc_metadata_flush_seconds` setting, and exposes `--skip-cdc` to bypass replication updates before Merkle diffs.
+- Documentation updates: Docker usage guide (GHCR images, config generation, ephemeral and long-running modes), design docs promoted into the docs nav, and mermaid diagrams enabled for architecture pages.
+
+### Changed
+- Connection pool lifecycle and privilege handling tightened across CLI/API paths; API handlers now require client roles, repairs set roles per transaction, and connection options avoid unnecessary privilege drops.
+- Table-diff now records the base table and table filter in diff summaries, cleans up filtered materialized views automatically, and handles JSON/bytea/interval/array casting more defensively.
+
+### Fixed
+- CDC processing handles slot `confirmed_flush_lsn` fallbacks, stops once it reaches the caller’s high-water mark, and flushes metadata during/after streaming to avoid re-chasing new WAL.
+- Table-repair validates diff-file schema/table metadata, enforces consistent column definitions across nodes, and closes connection pools reliably across all repair paths.
+
 ## [v1.4.0] - 2025-11-24
 
 ### Added
