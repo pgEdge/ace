@@ -9,7 +9,7 @@
 //
 // ///////////////////////////////////////////////////////////////////////////
 
-package core
+package repair
 
 import (
 	"context"
@@ -28,7 +28,8 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/pgedge/ace/db/queries"
-	"github.com/pgedge/ace/internal/auth"
+	"github.com/pgedge/ace/internal/consistency/repair/plan"
+	"github.com/pgedge/ace/internal/infra/db"
 	utils "github.com/pgedge/ace/pkg/common"
 	"github.com/pgedge/ace/pkg/logger"
 	"github.com/pgedge/ace/pkg/taskstore"
@@ -56,6 +57,9 @@ type TableRepairTask struct {
 	DiffFilePath  string
 	SourceOfTruth string
 
+	RepairPlanPath string
+	RepairPlan     *planner.RepairPlanFile
+
 	QuietMode      bool
 	DryRun         bool
 	InsertOnly     bool
@@ -77,6 +81,8 @@ type TableRepairTask struct {
 
 	RawDiffs types.DiffOutput
 	report   *RepairReport
+
+	planRuleMatches map[string]map[string]string // populated when using repair plans
 
 	Ctx context.Context
 }
@@ -149,6 +155,8 @@ func (tr *TableRepairTask) checkRepairOptionsCompatibility() error {
 		{tr.FixNulls && tr.InsertOnly, "insert_only and fix_nulls cannot be used together"},
 		{tr.FixNulls && tr.UpsertOnly, "upsert_only and fix_nulls cannot be used together"},
 		{tr.InsertOnly && tr.UpsertOnly, "insert_only and upsert_only cannot be used together"},
+		{strings.TrimSpace(tr.RepairPlanPath) != "" && tr.FixNulls, "repair-file and fix_nulls cannot be used together"},
+		{strings.TrimSpace(tr.RepairPlanPath) != "" && tr.Bidirectional, "repair-file and bidirectional cannot be used together"},
 	}
 
 	for _, rule := range incompatibleOptions {
@@ -160,6 +168,10 @@ func (tr *TableRepairTask) checkRepairOptionsCompatibility() error {
 }
 
 func (tr *TableRepairTask) checkIfSourceOfTruthIsNeeded() bool {
+	// Advanced repair plans can encode SOT choices per rule, so skip mandatory SoT when a plan is supplied.
+	if strings.TrimSpace(tr.RepairPlanPath) != "" || tr.RepairPlan != nil {
+		return false
+	}
 	casesNotNeeded := []bool{
 		tr.FixNulls,
 		tr.Bidirectional && tr.InsertOnly,
@@ -266,6 +278,12 @@ func (t *TableRepairTask) ValidateAndPrepare() error {
 	}
 	if t.RawDiffs.Summary.TableFilter != "" {
 		logger.Info("Diff file was generated with table filter: %s", t.RawDiffs.Summary.TableFilter)
+	}
+
+	if strings.TrimSpace(t.RepairPlanPath) != "" {
+		if err := t.loadRepairPlan(strings.TrimSpace(t.RepairPlanPath)); err != nil {
+			return err
+		}
 	}
 
 	if t.RawDiffs.NodeDiffs == nil {
@@ -414,6 +432,21 @@ func (t *TableRepairTask) ValidateAndPrepare() error {
 	return nil
 }
 
+func (t *TableRepairTask) loadRepairPlan(planPath string) error {
+	plan, err := planner.LoadRepairPlanFile(planPath)
+	if err != nil {
+		return fmt.Errorf("load repair plan: %w", err)
+	}
+
+	tableKey := fmt.Sprintf("%s.%s", t.Schema, t.Table)
+	if _, ok := plan.Tables[tableKey]; !ok {
+		return fmt.Errorf("repair plan %s does not include table %s", planPath, tableKey)
+	}
+
+	t.RepairPlan = plan
+	return nil
+}
+
 func (t *TableRepairTask) initialiseReport() *RepairReport {
 	report := &RepairReport{
 		Changes: make(map[string]any),
@@ -430,18 +463,19 @@ func (t *TableRepairTask) initialiseReport() *RepairReport {
 	report.Timestamp = now.Format("2006-01-02 15:04:05") + fmt.Sprintf(".%03d", now.Nanosecond()/1e6)
 
 	report.SuppliedArgs = map[string]any{
-		"cluster_name":    t.ClusterName,
-		"diff_file_path":  t.DiffFilePath,
-		"source_of_truth": t.SourceOfTruth,
-		"table_name":      t.QualifiedTableName,
-		"dbname":          t.DBName,
-		"dry_run":         t.DryRun,
-		"quiet":           t.QuietMode,
-		"insert_only":     t.InsertOnly,
-		"upsert_only":     t.UpsertOnly,
-		"fire_triggers":   t.FireTriggers,
-		"generate_report": t.GenerateReport,
-		"bidirectional":   t.Bidirectional,
+		"cluster_name":     t.ClusterName,
+		"diff_file_path":   t.DiffFilePath,
+		"repair_plan_path": t.RepairPlanPath,
+		"source_of_truth":  t.SourceOfTruth,
+		"table_name":       t.QualifiedTableName,
+		"dbname":           t.DBName,
+		"dry_run":          t.DryRun,
+		"quiet":            t.QuietMode,
+		"insert_only":      t.InsertOnly,
+		"upsert_only":      t.UpsertOnly,
+		"fire_triggers":    t.FireTriggers,
+		"generate_report":  t.GenerateReport,
+		"bidirectional":    t.Bidirectional,
 	}
 
 	dbInfoForReport := t.Database
@@ -516,15 +550,16 @@ func (t *TableRepairTask) Run(skipValidation bool) (err error) {
 			}
 
 			ctx := map[string]any{
-				"qualified_table": t.QualifiedTableName,
-				"diff_file":       t.DiffFilePath,
-				"source_of_truth": t.SourceOfTruth,
-				"dry_run":         t.DryRun,
-				"insert_only":     t.InsertOnly,
-				"upsert_only":     t.UpsertOnly,
-				"fire_triggers":   t.FireTriggers,
-				"bidirectional":   t.Bidirectional,
-				"generate_report": t.GenerateReport,
+				"qualified_table":  t.QualifiedTableName,
+				"diff_file":        t.DiffFilePath,
+				"repair_plan_path": t.RepairPlanPath,
+				"source_of_truth":  t.SourceOfTruth,
+				"dry_run":          t.DryRun,
+				"insert_only":      t.InsertOnly,
+				"upsert_only":      t.UpsertOnly,
+				"fire_triggers":    t.FireTriggers,
+				"bidirectional":    t.Bidirectional,
+				"generate_report":  t.GenerateReport,
 			}
 
 			record := taskstore.Record{
@@ -1194,6 +1229,8 @@ func (t *TableRepairTask) runUnidirectionalRepair(startTime time.Time) error {
 	 * most users are on spock 4.0 or above.
 	 */
 
+	skipDeletes := (t.UpsertOnly || t.InsertOnly) && t.RepairPlan == nil
+
 	for nodeName := range divergentNodes {
 		logger.Info("Processing repairs for divergent node: %s", nodeName)
 		divergentPool, ok := t.Pools[nodeName]
@@ -1265,7 +1302,7 @@ func (t *TableRepairTask) runUnidirectionalRepair(startTime time.Time) error {
 		// TODO: DROP PRIVILEGES HERE!
 
 		// Process deletes first
-		if !t.UpsertOnly && !t.InsertOnly {
+		if !skipDeletes {
 			nodeDeletes := fullDeletes[nodeName]
 			if len(nodeDeletes) > 0 {
 				deletedCount, err := executeDeletes(t.Ctx, tx, t, nodeDeletes)
@@ -1287,6 +1324,9 @@ func (t *TableRepairTask) runUnidirectionalRepair(startTime time.Time) error {
 						rows = append(rows, row)
 					}
 					t.report.Changes[nodeName].(map[string]any)["deleted_rows"] = rows
+					if t.RepairPlan != nil && len(t.planRuleMatches[nodeName]) > 0 {
+						t.report.Changes[nodeName].(map[string]any)["rule_matches"] = t.planRuleMatches[nodeName]
+					}
 				}
 			}
 		}
@@ -1335,11 +1375,10 @@ func (t *TableRepairTask) runUnidirectionalRepair(startTime time.Time) error {
 				for _, row := range nodeUpserts {
 					rows = append(rows, row)
 				}
-				changeType := "upserted_rows"
-				if t.InsertOnly {
-					changeType = "inserted_rows"
+				t.report.Changes[nodeName].(map[string]any)["upserted_rows"] = rows
+				if t.RepairPlan != nil && len(t.planRuleMatches[nodeName]) > 0 {
+					t.report.Changes[nodeName].(map[string]any)["rule_matches"] = t.planRuleMatches[nodeName]
 				}
-				t.report.Changes[nodeName].(map[string]any)[changeType] = rows
 			}
 		}
 
@@ -1956,7 +1995,11 @@ func getDryRunOutput(task *TableRepairTask) (string, error) {
 		}
 
 		if len(fullUpserts) == 0 && len(fullDeletes) == 0 {
-			sb.WriteString("  All nodes are in sync with the source of truth. No repairs needed.\n")
+			if task.RepairPlan != nil {
+				sb.WriteString("  All nodes are in sync according to the repair plan. No repairs needed.\n")
+			} else {
+				sb.WriteString("  All nodes are in sync with the source of truth. No repairs needed.\n")
+			}
 		} else {
 			// To ensure a consistent output order for nodes
 			var nodeNames []string
@@ -1994,16 +2037,21 @@ func getDryRunOutput(task *TableRepairTask) (string, error) {
 						for _, row := range deletes {
 							rows = append(rows, row)
 						}
-						if !task.UpsertOnly && !task.InsertOnly {
+						if task.RepairPlan != nil {
+							nodeChanges["would_delete"] = rows
+						} else if !task.UpsertOnly && !task.InsertOnly {
 							nodeChanges["would_delete"] = rows
 						} else {
 							nodeChanges["skipped_deletes"] = rows
 						}
 					}
+					if task.RepairPlan != nil && len(task.planRuleMatches[nodeName]) > 0 {
+						nodeChanges["rule_matches"] = task.planRuleMatches[nodeName]
+					}
 					task.report.Changes[nodeName] = nodeChanges
 				}
 
-				if !task.UpsertOnly && !task.InsertOnly {
+				if task.RepairPlan != nil || (!task.UpsertOnly && !task.InsertOnly) {
 					sb.WriteString(fmt.Sprintf("  Node %s: Would attempt to UPSERT %d rows and DELETE %d rows.\n", nodeName, len(upserts), len(deletes)))
 				} else if task.InsertOnly {
 					sb.WriteString(fmt.Sprintf("  Node %s: Would attempt to INSERT %d rows.\n", nodeName, len(upserts)))
@@ -2016,6 +2064,17 @@ func getDryRunOutput(task *TableRepairTask) (string, error) {
 						sb.WriteString(fmt.Sprintf("    Additionally, %d rows exist on %s that are not on %s (deletes skipped).\n", len(deletes), nodeName, task.SourceOfTruth))
 					}
 				}
+				if task.RepairPlan != nil && len(task.planRuleMatches[nodeName]) > 0 {
+					ruleCounts := make(map[string]int)
+					for _, ruleName := range task.planRuleMatches[nodeName] {
+						ruleCounts[ruleName]++
+					}
+					var parts []string
+					for rule, count := range ruleCounts {
+						parts = append(parts, fmt.Sprintf("%s=%d", rule, count))
+					}
+					sb.WriteString(fmt.Sprintf("    Rule usage: %s\n", strings.Join(parts, ", ")))
+				}
 			}
 		}
 	}
@@ -2024,6 +2083,13 @@ func getDryRunOutput(task *TableRepairTask) (string, error) {
 }
 
 func calculateRepairSets(task *TableRepairTask) (map[string]map[string]map[string]any, map[string]map[string]map[string]any, error) {
+	if task.RepairPlan != nil {
+		return CalculatePlanRepairSets(task)
+	}
+	return calculateRepairSetsWithSourceOfTruth(task)
+}
+
+func calculateRepairSetsWithSourceOfTruth(task *TableRepairTask) (map[string]map[string]map[string]any, map[string]map[string]map[string]any, error) {
 	fullRowsToUpsert := make(map[string]map[string]map[string]any) // nodeName -> string(pkey) -> rowData
 	fullRowsToDelete := make(map[string]map[string]map[string]any) // nodeName -> string(pkey) -> rowData
 

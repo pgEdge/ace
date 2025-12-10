@@ -27,8 +27,8 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/pgedge/ace/internal/cdc"
-	"github.com/pgedge/ace/internal/core"
+	"github.com/pgedge/ace/internal/consistency/mtree"
+	"github.com/pgedge/ace/internal/infra/cdc"
 	"github.com/pgedge/ace/pkg/config"
 	"github.com/stretchr/testify/require"
 )
@@ -98,9 +98,9 @@ func runMerkleTreeTests(t *testing.T, tableName string) {
 	})
 }
 
-func newTestMerkleTreeTask(t *testing.T, qualifiedTableName string, nodes []string) *core.MerkleTreeTask {
+func newTestMerkleTreeTask(t *testing.T, qualifiedTableName string, nodes []string) *mtree.MerkleTreeTask {
 	t.Helper()
-	task := core.NewMerkleTreeTask()
+	task := mtree.NewMerkleTreeTask()
 	task.ClusterName = "test_cluster"
 	task.DBName = dbName
 	task.QualifiedTableName = qualifiedTableName

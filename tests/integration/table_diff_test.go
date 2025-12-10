@@ -23,7 +23,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/pgedge/ace/internal/core"
+	"github.com/pgedge/ace/internal/consistency/diff"
 	"github.com/pgedge/ace/pkg/types"
 	"github.com/stretchr/testify/require"
 )
@@ -32,8 +32,8 @@ func newTestTableDiffTask(
 	t *testing.T,
 	qualifiedTableName string,
 	nodes []string,
-) *core.TableDiffTask {
-	task := core.NewTableDiffTask()
+) *diff.TableDiffTask {
+	task := diff.NewTableDiffTask()
 	task.ClusterName = "test_cluster"
 	task.DBName = dbName
 	task.QualifiedTableName = qualifiedTableName

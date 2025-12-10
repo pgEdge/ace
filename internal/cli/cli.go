@@ -26,10 +26,12 @@ import (
 
 	"github.com/charmbracelet/log"
 	"github.com/google/uuid"
-	"github.com/pgedge/ace/internal/cdc"
-	"github.com/pgedge/ace/internal/core"
-	"github.com/pgedge/ace/internal/scheduler"
-	"github.com/pgedge/ace/internal/server"
+	"github.com/pgedge/ace/internal/api/http"
+	"github.com/pgedge/ace/internal/consistency/diff"
+	"github.com/pgedge/ace/internal/consistency/mtree"
+	"github.com/pgedge/ace/internal/consistency/repair"
+	"github.com/pgedge/ace/internal/infra/cdc"
+	"github.com/pgedge/ace/internal/jobs"
 	"github.com/pgedge/ace/pkg/config"
 	"github.com/pgedge/ace/pkg/logger"
 	"github.com/urfave/cli/v2"
@@ -154,6 +156,11 @@ func SetupCLI() *cli.App {
 			Aliases:  []string{"f"},
 			Usage:    "Path to the diff file (required)",
 			Required: true,
+		},
+		&cli.StringFlag{
+			Name:    "repair-file",
+			Aliases: []string{"p"},
+			Usage:   "Path to the advanced repair file (YAML/JSON); skips source-of-truth requirement",
 		},
 		&cli.StringFlag{
 			Name:    "source-of-truth",
@@ -841,7 +848,7 @@ func TableDiffCLI(ctx *cli.Context) error {
 		return fmt.Errorf("invalid block size '%s': %w", blockSizeStr, err)
 	}
 
-	task := core.NewTableDiffTask()
+	task := diff.NewTableDiffTask()
 	task.ClusterName = clusterName
 	task.QualifiedTableName = positional[0]
 	task.DBName = ctx.String("dbname")
@@ -907,7 +914,7 @@ func MtreeInitCLI(ctx *cli.Context) error {
 	if err != nil {
 		return err
 	}
-	task := core.NewMerkleTreeTask()
+	task := mtree.NewMerkleTreeTask()
 	task.ClusterName = clusterName
 	task.DBName = ctx.String("dbname")
 	task.Nodes = ctx.String("nodes")
@@ -928,7 +935,7 @@ func MtreeListenCLI(ctx *cli.Context) error {
 	if err != nil {
 		return err
 	}
-	task := core.NewMerkleTreeTask()
+	task := mtree.NewMerkleTreeTask()
 	task.ClusterName = clusterName
 	task.DBName = ctx.String("dbname")
 	task.Nodes = ctx.String("nodes")
@@ -976,7 +983,7 @@ func MtreeTeardownCLI(ctx *cli.Context) error {
 	if err != nil {
 		return err
 	}
-	task := core.NewMerkleTreeTask()
+	task := mtree.NewMerkleTreeTask()
 	task.ClusterName = clusterName
 	task.DBName = ctx.String("dbname")
 	task.Nodes = ctx.String("nodes")
@@ -997,7 +1004,7 @@ func MtreeTeardownTableCLI(ctx *cli.Context) error {
 	if err != nil {
 		return err
 	}
-	task := core.NewMerkleTreeTask()
+	task := mtree.NewMerkleTreeTask()
 	task.ClusterName = clusterName
 	task.QualifiedTableName = positional[0]
 	task.DBName = ctx.String("dbname")
@@ -1025,7 +1032,7 @@ func MtreeBuildCLI(ctx *cli.Context) error {
 		return fmt.Errorf("invalid block size '%s': %w", blockSizeStr, err)
 	}
 
-	task := core.NewMerkleTreeTask()
+	task := mtree.NewMerkleTreeTask()
 	task.ClusterName = clusterName
 	task.QualifiedTableName = positional[0]
 	task.DBName = ctx.String("dbname")
@@ -1062,7 +1069,7 @@ func MtreeUpdateCLI(ctx *cli.Context) error {
 	if err != nil {
 		return err
 	}
-	task := core.NewMerkleTreeTask()
+	task := mtree.NewMerkleTreeTask()
 	task.ClusterName = clusterName
 	task.QualifiedTableName = positional[0]
 	task.DBName = ctx.String("dbname")
@@ -1094,7 +1101,7 @@ func MtreeDiffCLI(ctx *cli.Context) error {
 	if err != nil {
 		return err
 	}
-	task := core.NewMerkleTreeTask()
+	task := mtree.NewMerkleTreeTask()
 	task.ClusterName = clusterName
 	task.QualifiedTableName = positional[0]
 	task.DBName = ctx.String("dbname")
@@ -1127,7 +1134,7 @@ func TableRerunCLI(ctx *cli.Context) error {
 	if err != nil {
 		return err
 	}
-	task := core.NewTableDiffTask()
+	task := diff.NewTableDiffTask()
 	task.TaskID = uuid.NewString()
 	task.Mode = "rerun"
 	task.ClusterName = clusterName
@@ -1150,10 +1157,11 @@ func TableRepairCLI(ctx *cli.Context) error {
 	if err != nil {
 		return err
 	}
-	task := core.NewTableRepairTask()
+	task := repair.NewTableRepairTask()
 	task.ClusterName = clusterName
 	task.QualifiedTableName = positional[0]
 	task.DiffFilePath = ctx.String("diff-file")
+	task.RepairPlanPath = ctx.String("repair-file")
 	task.DBName = ctx.String("dbname")
 	task.Nodes = ctx.String("nodes")
 	task.SourceOfTruth = ctx.String("source-of-truth")
@@ -1185,7 +1193,7 @@ func SpockDiffCLI(ctx *cli.Context) error {
 	if err != nil {
 		return err
 	}
-	task := core.NewSpockDiffTask()
+	task := diff.NewSpockDiffTask()
 	task.ClusterName = clusterName
 	task.DBName = ctx.String("dbname")
 	task.Nodes = ctx.String("nodes")
@@ -1218,7 +1226,7 @@ func SchemaDiffCLI(ctx *cli.Context) error {
 		return fmt.Errorf("invalid block size '%s': %w", blockSizeStr, err)
 	}
 
-	task := core.NewSchemaDiffTask()
+	task := diff.NewSchemaDiffTask()
 	task.ClusterName = clusterName
 	task.SchemaName = positional[0]
 	task.DBName = ctx.String("dbname")
@@ -1300,7 +1308,7 @@ func RepsetDiffCLI(ctx *cli.Context) error {
 	scheduleEnabled := ctx.Bool("schedule")
 	scheduleEvery := ctx.String("every")
 
-	task := core.NewRepsetDiffTask()
+	task := diff.NewRepsetDiffTask()
 	task.ClusterName = clusterName
 	task.RepsetName = positional[0]
 	task.DBName = ctx.String("dbname")
@@ -1324,7 +1332,7 @@ func RepsetDiffCLI(ctx *cli.Context) error {
 		if err := task.RunChecks(true); err != nil {
 			return fmt.Errorf("checks failed: %w", err)
 		}
-		if err := core.RepsetDiff(task); err != nil {
+		if err := diff.RepsetDiff(task); err != nil {
 			return fmt.Errorf("error during repset diff: %w", err)
 		}
 		return nil
@@ -1347,7 +1355,7 @@ func RepsetDiffCLI(ctx *cli.Context) error {
 			if err := runTask.RunChecks(true); err != nil {
 				return fmt.Errorf("checks failed: %w", err)
 			}
-			if err := core.RepsetDiff(runTask); err != nil {
+			if err := diff.RepsetDiff(runTask); err != nil {
 				return fmt.Errorf("execution failed: %w", err)
 			}
 			return nil
