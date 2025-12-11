@@ -17,6 +17,7 @@ The `table-repair` command fixes data inconsistencies identified by `table-diff`
 - **Report generation**: write a detailed audit of actions taken.
 - **Upsert‑only**: prevent deletions on divergent nodes.
 - **Transaction safety**: changes are atomic; partial failures are rolled back.
+- **Advanced repair plans**: drive repairs from a versioned YAML/JSON file with per-table rules, overrides, and custom rows. See [Advanced repair](advanced-repair.md) and [Examples](advanced-repair-examples.md).
 
 **Helpful Tips**
 

@@ -25,11 +25,18 @@ Performs repairs on tables of divergent nodes based on the diff report generated
 | `--generate-report` | `-g` | Write a JSON repair report to `reports/<YYYY-MM-DD>/repair_report_<HHMMSS.mmm>.json` | `false` |
 | `--insert-only` | `-i` | Only insert missing rows; skip updates/deletes | `false` |
 | `--upsert-only` | `-P` | Insert or update rows; skip deletes | `false` |
+| `--repair-file <path>` | `-p` | Path to an advanced repair plan (YAML/JSON). Overrides `--source-of-truth` and uses rule-based actions. |  |
 | `--fix-nulls` | `-X` | Fill NULL columns on each node using non-NULL values from its peers (no source-of-truth needed) | `false` |
 | `--bidirectional` | `-Z` | Perform insert-only repairs in both directions | `false` |
 | `--fire-triggers` | `-t` | Execute triggers (otherwise runs with `session_replication_role='replica'`) | `false` |
 | `--quiet` | `-q` | Suppress non-essential logging | `false` |
 | `--debug` | `-v` | Enable verbose logging | `false` |
+
+### Advanced repair plans
+- Use `--repair-file` to drive repairs from a plan. Source-of-truth becomes optional; the plan sets per-row decisions.
+- Mutually exclusive with `--bidirectional` and `--fix-nulls` (those are separate modes).
+- Dry-run and reports include rule usage counts per node.
+- See [Advanced repair](advanced-repair.md) for grammar and [Examples](advanced-repair-examples.md) for recipes.
 
 ## Example
 
