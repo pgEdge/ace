@@ -21,6 +21,8 @@ type Templates struct {
 	CheckUserPrivileges  *template.Template
 	SpockNodeAndSubInfo  *template.Template
 	SpockRepSetInfo      *template.Template
+	EnsurePgcrypto       *template.Template
+	GetSpockNodeNames    *template.Template
 	CheckSchemaExists    *template.Template
 	GetTablesInSchema    *template.Template
 	GetViewsInSchema     *template.Template
@@ -553,6 +555,16 @@ var SQLTemplates = Templates{
 			set_name
 		ORDER BY
 			set_name;
+	`)),
+	EnsurePgcrypto: template.Must(template.New("ensurePgcrypto").Parse(`
+		CREATE EXTENSION IF NOT EXISTS pgcrypto;
+	`)),
+	GetSpockNodeNames: template.Must(template.New("getSpockNodeNames").Parse(`
+		SELECT
+			node_id::text,
+			node_name
+		FROM
+			spock.node;
 	`)),
 	CheckSchemaExists: template.Must(template.New("checkSchemaExists").Parse(
 		`SELECT EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = $1);`,

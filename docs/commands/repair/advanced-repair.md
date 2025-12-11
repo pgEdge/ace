@@ -23,6 +23,7 @@
   - `helpers.pick_freshest: { key: updated_at, tie: n1|n2 }` fills remaining columns from the fresher side (numeric, string, or RFC3339 timestamps).  
 - `skip`: do nothing.  
 - `delete`: remove the row (from the side(s) where it exists).
+- Spock metadata in plans: you can reference `commit_ts` and `node_origin` in `when` predicates and `custom_row` templates (e.g., `{{n1.commit_ts}}`, `when: "n2.node_origin = 'n3'"`). These fields are injected during diff collection (via `pg_xact_commit_timestamp(xmin)` and `spock.xact_commit_timestamp_origin(xmin)`), not stored in your table.
 
 ### Compatibility checks (fail fast)
 - `keep_n1`/`apply_from n1` require a row on n1; `keep_n2`/`apply_from n2` require a row on n2.  

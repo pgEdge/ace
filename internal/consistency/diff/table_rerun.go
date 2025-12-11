@@ -79,6 +79,10 @@ func (t *TableDiffTask) ExecuteRerunTask() error {
 		}
 	}()
 
+	if err := t.loadSpockNodeNames(); err != nil {
+		logger.Warn("table-diff rerun: unable to load spock node names; using raw node_origin values: %v", err)
+	}
+
 	// Collect all unique primary keys from the original diff report
 	allPkeys, err := t.collectPkeysFromDiff()
 	if err != nil {
@@ -370,12 +374,12 @@ func (t *TableDiffTask) reCompareDiffs(fetchedRowsByNode map[string]map[string]t
 				persistentDiffCount++
 				if nowOnNode1 {
 					rowAsMap := utils.OrderedMapToMap(newRow1)
-					rowWithMeta := utils.AddSpockMetadata(rowAsMap)
+					rowWithMeta := t.withSpockMetadata(rowAsMap)
 					newDiffsForPair.Rows[node1] = append(newDiffsForPair.Rows[node1], utils.MapToOrderedMap(rowWithMeta, t.Cols))
 				}
 				if nowOnNode2 {
 					rowAsMap := utils.OrderedMapToMap(newRow2)
-					rowWithMeta := utils.AddSpockMetadata(rowAsMap)
+					rowWithMeta := t.withSpockMetadata(rowAsMap)
 					newDiffsForPair.Rows[node2] = append(newDiffsForPair.Rows[node2], utils.MapToOrderedMap(rowWithMeta, t.Cols))
 				}
 			}

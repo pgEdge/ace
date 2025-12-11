@@ -800,6 +800,34 @@ func GetSpockNodeAndSubInfo(ctx context.Context, db DBQuerier) ([]types.SpockNod
 	return infos, nil
 }
 
+func GetSpockNodeNames(ctx context.Context, db DBQuerier) (map[string]string, error) {
+	sql, err := RenderSQL(SQLTemplates.GetSpockNodeNames, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	rows, err := db.Query(ctx, sql)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	names := make(map[string]string)
+	for rows.Next() {
+		var id, name string
+		if err := rows.Scan(&id, &name); err != nil {
+			return nil, err
+		}
+		names[id] = name
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	return names, nil
+}
+
 func GetSpockRepSetInfo(ctx context.Context, db DBQuerier) ([]types.SpockRepSetInfo, error) {
 	sql, err := RenderSQL(SQLTemplates.SpockRepSetInfo, nil)
 	if err != nil {
@@ -829,6 +857,17 @@ func GetSpockRepSetInfo(ctx context.Context, db DBQuerier) ([]types.SpockRepSetI
 	}
 
 	return infos, nil
+}
+
+func EnsurePgcrypto(ctx context.Context, db DBQuerier) error {
+	sql, err := RenderSQL(SQLTemplates.EnsurePgcrypto, nil)
+	if err != nil {
+		return fmt.Errorf("failed to render ensure-pgcrypto SQL: %w", err)
+	}
+	if _, err := db.Exec(ctx, sql); err != nil {
+		return fmt.Errorf("failed to ensure pgcrypto extension: %w", err)
+	}
+	return nil
 }
 
 func CheckSchemaExists(ctx context.Context, db DBQuerier, schema string) (bool, error) {

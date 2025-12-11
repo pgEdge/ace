@@ -91,6 +91,56 @@ tables:
               tie: n1
 ```
 
+## 5b) Use Spock commit metadata
+
+Pick the row with the newer replication commit timestamp (Spock metadata), else tie to n1:
+```yaml
+tables:
+  public.inventory:
+    rules:
+      - name: pick_newer_commit
+        diff_type: [row_mismatch]
+        action:
+          type: custom
+          helpers:
+            pick_freshest:
+              key: commit_ts     # from _spock_metadata_
+              tie: n1
+```
+
+## 5c) Use Spock node origin (route by producer)
+
+Treat rows produced on node `n3` as authoritative; otherwise fall back to n1:
+```yaml
+tables:
+  public.inventory:
+    default_action: { type: keep_n1 }
+    rules:
+      - name: prefer_n3_origin
+        diff_type: [row_mismatch, missing_on_n2]
+        when: "n1.node_origin = 'n3'"
+        action: { type: keep_n1 }
+      - name: prefer_n3_origin_missing
+        diff_type: [missing_on_n1]
+        when: "n2.node_origin = 'n3'"
+        action: { type: keep_n2 }
+```
+
+## 5d) Split by origin for batch decisions
+
+Use n2 when the origin is n2, otherwise use n1:
+```yaml
+tables:
+  public.orders:
+    rules:
+      - name: origin_n2
+        diff_type: [row_mismatch, missing_on_n1, missing_on_n2]
+        when: "n1.node_origin = 'n2' OR n2.node_origin = 'n2'"
+        action: { type: keep_n2 }
+      - name: default_to_n1
+        action: { type: keep_n1 }
+```
+
 ## 6) Custom row per PK
 
 Pin a specific PK to a hand-crafted row:

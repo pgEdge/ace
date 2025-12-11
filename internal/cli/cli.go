@@ -135,6 +135,11 @@ func SetupCLI() *cli.App {
 			Value:   "",
 		},
 		&cli.BoolFlag{
+			Name:  "ensure-pgcrypto",
+			Usage: "Ensure pgcrypto extension is installed on each node before diffing",
+			Value: false,
+		},
+		&cli.BoolFlag{
 			Name:    "schedule",
 			Aliases: []string{"S"},
 			Usage:   "Schedule a table-diff job to run periodically",
@@ -857,6 +862,7 @@ func TableDiffCLI(ctx *cli.Context) error {
 	task.CompareUnitSize = ctx.Int("compare-unit-size")
 	task.Output = strings.ToLower(ctx.String("output"))
 	task.Nodes = ctx.String("nodes")
+	task.EnsurePgcrypto = ctx.Bool("ensure-pgcrypto")
 	scheduleEnabled := ctx.Bool("schedule")
 	scheduleEvery := ctx.String("every")
 	task.TableFilter = ctx.String("table-filter")

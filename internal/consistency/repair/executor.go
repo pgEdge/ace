@@ -29,6 +29,8 @@ type planDiffRow struct {
 	node2Name      string
 	n1Row          map[string]any
 	n2Row          map[string]any
+	n1Meta         map[string]any
+	n2Meta         map[string]any
 	diffType       string   // missing_on_n1, missing_on_n2, row_mismatch
 	columnsChanged []string // only set for mismatches
 }
@@ -85,13 +87,17 @@ func buildPlanDiffRows(task *TableRepairTask, node1Name, node2Name string, diffs
 
 	node1RowsByPKey := make(map[string]map[string]any)
 	node1PkMaps := make(map[string]map[string]any)
+	node1MetaByPKey := make(map[string]map[string]any)
 	for _, row := range node1Rows {
 		pkeyStr, err := utils.StringifyOrderedMapKey(row, task.Key)
 		if err != nil {
 			return nil, fmt.Errorf("error stringifying pkey for row on %s: %w", node1Name, err)
 		}
-		cleanRow := utils.StripSpockMetadata(utils.OrderedMapToMap(row))
+		raw := utils.OrderedMapToMap(row)
+		meta := extractSpockMeta(raw)
+		cleanRow := utils.StripSpockMetadata(raw)
 		node1RowsByPKey[pkeyStr] = cleanRow
+		node1MetaByPKey[pkeyStr] = meta
 		pkMap, err := extractPkMap(task.Key, cleanRow)
 		if err != nil {
 			return nil, fmt.Errorf("node %s row %s: %w", node1Name, pkeyStr, err)
@@ -101,13 +107,17 @@ func buildPlanDiffRows(task *TableRepairTask, node1Name, node2Name string, diffs
 
 	node2RowsByPKey := make(map[string]map[string]any)
 	node2PkMaps := make(map[string]map[string]any)
+	node2MetaByPKey := make(map[string]map[string]any)
 	for _, row := range node2Rows {
 		pkeyStr, err := utils.StringifyOrderedMapKey(row, task.Key)
 		if err != nil {
 			return nil, fmt.Errorf("error stringifying pkey for row on %s: %w", node2Name, err)
 		}
-		cleanRow := utils.StripSpockMetadata(utils.OrderedMapToMap(row))
+		raw := utils.OrderedMapToMap(row)
+		meta := extractSpockMeta(raw)
+		cleanRow := utils.StripSpockMetadata(raw)
 		node2RowsByPKey[pkeyStr] = cleanRow
+		node2MetaByPKey[pkeyStr] = meta
 		pkMap, err := extractPkMap(task.Key, cleanRow)
 		if err != nil {
 			return nil, fmt.Errorf("node %s row %s: %w", node2Name, pkeyStr, err)
@@ -126,6 +136,8 @@ func buildPlanDiffRows(task *TableRepairTask, node1Name, node2Name string, diffs
 			node2Name: node2Name,
 			n1Row:     row,
 			n2Row:     node2RowsByPKey[pkStr],
+			n1Meta:    node1MetaByPKey[pkStr],
+			n2Meta:    node2MetaByPKey[pkStr],
 			diffType: func() string {
 				if _, ok := node2RowsByPKey[pkStr]; ok {
 					return "row_mismatch"
@@ -148,6 +160,8 @@ func buildPlanDiffRows(task *TableRepairTask, node1Name, node2Name string, diffs
 			node2Name:      node2Name,
 			n1Row:          node1RowsByPKey[pkStr],
 			n2Row:          row,
+			n1Meta:         node1MetaByPKey[pkStr],
+			n2Meta:         node2MetaByPKey[pkStr],
 			diffType:       "missing_on_n1",
 			columnsChanged: computeChangedColumns(node1RowsByPKey[pkStr], row),
 		})
@@ -217,22 +231,7 @@ func resolvePlanAction(task *TableRepairTask, tablePlan planner.RepairTablePlan,
 		}
 		if rule.CompiledWhen() != nil {
 			ok, err := rule.CompiledWhen().Eval(func(source, column string) (any, bool) {
-				switch source {
-				case "n1":
-					if row.n1Row == nil {
-						return nil, false
-					}
-					val, ok := row.n1Row[column]
-					return val, ok
-				case "n2":
-					if row.n2Row == nil {
-						return nil, false
-					}
-					val, ok := row.n2Row[column]
-					return val, ok
-				default:
-					return nil, false
-				}
+				return lookupValue(source, column, row)
 			})
 			if err != nil {
 				return nil, "", err
@@ -495,6 +494,60 @@ func copyMap(src map[string]any) map[string]any {
 	return dst
 }
 
+func extractSpockMeta(row map[string]any) map[string]any {
+	meta := make(map[string]any)
+	if rawMeta, ok := row["_spock_metadata_"].(map[string]any); ok {
+		for k, v := range rawMeta {
+			meta[k] = v
+		}
+	}
+	if val, ok := row["commit_ts"]; ok {
+		meta["commit_ts"] = val
+	}
+	if val, ok := row["node_origin"]; ok {
+		meta["node_origin"] = val
+	}
+	return meta
+}
+
+func lookupValue(source, column string, row planDiffRow) (any, bool) {
+	switch source {
+	case "n1":
+		if row.n1Row != nil {
+			if v, ok := row.n1Row[column]; ok {
+				return v, true
+			}
+		}
+		if row.n1Meta != nil {
+			if v, ok := row.n1Meta[column]; ok {
+				return v, true
+			}
+		}
+	case "n2":
+		if row.n2Row != nil {
+			if v, ok := row.n2Row[column]; ok {
+				return v, true
+			}
+		}
+		if row.n2Meta != nil {
+			if v, ok := row.n2Meta[column]; ok {
+				return v, true
+			}
+		}
+	}
+	return nil, false
+}
+
+func lookupTemplate(inner string, row planDiffRow) (any, bool) {
+	parts := strings.Split(inner, ".")
+	if len(parts) != 2 {
+		return nil, false
+	}
+	source := strings.ToLower(strings.TrimSpace(parts[0]))
+	col := strings.TrimSpace(parts[1])
+	return lookupValue(source, col, row)
+}
+
 func validateActionCompatibility(action *planner.RepairPlanAction, row planDiffRow) error {
 	switch action.Type {
 	case planner.RepairActionKeepN1:
@@ -603,24 +656,8 @@ func substituteValue(val any, row planDiffRow) any {
 	str := strings.TrimSpace(s)
 	if strings.HasPrefix(str, "{{") && strings.HasSuffix(str, "}}") {
 		inner := strings.TrimSpace(strings.TrimSuffix(strings.TrimPrefix(str, "{{"), "}}"))
-		parts := strings.Split(inner, ".")
-		if len(parts) == 2 {
-			source := strings.ToLower(strings.TrimSpace(parts[0]))
-			col := strings.TrimSpace(parts[1])
-			switch source {
-			case "n1":
-				if row.n1Row != nil {
-					if v, ok := row.n1Row[col]; ok {
-						return v
-					}
-				}
-			case "n2":
-				if row.n2Row != nil {
-					if v, ok := row.n2Row[col]; ok {
-						return v
-					}
-				}
-			}
+		if val, ok := lookupTemplate(inner, row); ok {
+			return val
 		}
 	}
 	return val

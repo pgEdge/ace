@@ -80,6 +80,8 @@ type TableDiffTask struct {
 	InvokeMethod string
 	ClientRole   string
 
+	EnsurePgcrypto bool
+
 	DiffSummary map[string]string
 
 	SkipDBUpdate bool
@@ -91,6 +93,8 @@ type TableDiffTask struct {
 
 	blockHashSQLCache map[hashBoundsKey]string
 	blockHashSQLMu    sync.Mutex
+
+	SpockNodeNames map[string]string
 
 	CompareUnitSize int
 	MaxDiffRows     int64
@@ -162,6 +166,45 @@ func (t *TableDiffTask) incrementDiffRowsLocked(delta int) bool {
 		return true
 	}
 	return false
+}
+
+func (t *TableDiffTask) loadSpockNodeNames() error {
+	if t.SpockNodeNames != nil {
+		return nil
+	}
+
+	var firstPool *pgxpool.Pool
+	for _, pool := range t.Pools {
+		firstPool = pool
+		break
+	}
+
+	if firstPool == nil {
+		t.SpockNodeNames = make(map[string]string)
+		return fmt.Errorf("no connection pool available to load spock node names")
+	}
+
+	names, err := queries.GetSpockNodeNames(t.Ctx, firstPool)
+	if err != nil {
+		t.SpockNodeNames = make(map[string]string)
+		return err
+	}
+
+	t.SpockNodeNames = names
+	return nil
+}
+
+func (t *TableDiffTask) withSpockMetadata(row map[string]any) map[string]any {
+	row["node_origin"] = utils.TranslateNodeOrigin(row["node_origin"], t.SpockNodeNames)
+	return utils.AddSpockMetadata(row)
+}
+
+func isPgcryptoMissing(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "digest(") || strings.Contains(msg, "function digest") || strings.Contains(msg, "pgcrypto")
 }
 
 type RecursiveDiffTask struct {
@@ -435,6 +478,8 @@ func (t *TableDiffTask) fetchRows(nodeName string, r Range) ([]types.OrderedMap,
 					} else {
 						processedVal = nil
 					}
+				case time.Time:
+					processedVal = v
 				case string:
 					processedVal = v
 				case int8, int16, int32, int64, int,
@@ -851,6 +896,7 @@ func (t *TableDiffTask) CloneForSchedule(ctx context.Context) *TableDiffTask {
 	cloned.InvokeMethod = t.InvokeMethod
 	cloned.CompareUnitSize = t.CompareUnitSize
 	cloned.MaxDiffRows = t.MaxDiffRows
+	cloned.EnsurePgcrypto = t.EnsurePgcrypto
 	cloned.Ctx = ctx
 	return cloned
 }
@@ -1057,6 +1103,18 @@ func (t *TableDiffTask) ExecuteTask() (err error) {
 		defer pool.Close()
 	}
 	t.Pools = pools
+
+	if t.EnsurePgcrypto {
+		for name, pool := range t.Pools {
+			if err := queries.EnsurePgcrypto(t.Ctx, pool); err != nil {
+				return fmt.Errorf("failed to ensure pgcrypto on node %s: %w", name, err)
+			}
+		}
+	}
+
+	if err := t.loadSpockNodeNames(); err != nil {
+		logger.Warn("table-diff: unable to load spock node names; using raw node_origin values: %v", err)
+	}
 
 	if _, err = t.getBlockHashSQL(true, true); err != nil {
 		return fmt.Errorf("failed to build block-hash SQL: %w", err)
@@ -1435,7 +1493,11 @@ func (t *TableDiffTask) hashRange(
 	if err != nil {
 		duration := time.Since(startTime)
 		logger.Debug("[%s] ERROR after %v for range Start=%v, End=%v (using query: '%s', args: %v): %v", node, duration, r.Start, r.End, query, args, err)
-		return "", fmt.Errorf("BlockHash query failed for %s range %v-%v: %w", node, r.Start, r.End, err)
+		baseErr := fmt.Errorf("BlockHash query failed for %s range %v-%v: %w", node, r.Start, r.End, err)
+		if isPgcryptoMissing(err) {
+			return "", fmt.Errorf("%w; pgcrypto extension not installed. Re-run with --ensure-pgcrypto or install via CREATE EXTENSION pgcrypto", baseErr)
+		}
+		return "", baseErr
 	}
 
 	duration := time.Since(startTime)
@@ -1709,7 +1771,7 @@ func (t *TableDiffTask) recursiveDiff(
 					break
 				}
 				rowAsMap := utils.OrderedMapToMap(row)
-				rowWithMeta := utils.AddSpockMetadata(rowAsMap)
+				rowWithMeta := t.withSpockMetadata(rowAsMap)
 				rowAsOrderedMap := utils.MapToOrderedMap(rowWithMeta, t.Cols)
 				t.DiffResult.NodeDiffs[pairKey].Rows[node1Name] = append(t.DiffResult.NodeDiffs[pairKey].Rows[node1Name], rowAsOrderedMap)
 				currentDiffRowsForPair++
@@ -1726,7 +1788,7 @@ func (t *TableDiffTask) recursiveDiff(
 						break
 					}
 					rowAsMap := utils.OrderedMapToMap(row)
-					rowWithMeta := utils.AddSpockMetadata(rowAsMap)
+					rowWithMeta := t.withSpockMetadata(rowAsMap)
 					rowAsOrderedMap := utils.MapToOrderedMap(rowWithMeta, t.Cols)
 					t.DiffResult.NodeDiffs[pairKey].Rows[node2Name] = append(t.DiffResult.NodeDiffs[pairKey].Rows[node2Name], rowAsOrderedMap)
 					currentDiffRowsForPair++
@@ -1744,12 +1806,12 @@ func (t *TableDiffTask) recursiveDiff(
 						break
 					}
 					node1DataAsMap := utils.OrderedMapToMap(modRow.Node1Data)
-					node1DataWithMeta := utils.AddSpockMetadata(node1DataAsMap)
+					node1DataWithMeta := t.withSpockMetadata(node1DataAsMap)
 					node1DataAsOrderedMap := utils.MapToOrderedMap(node1DataWithMeta, t.Cols)
 					t.DiffResult.NodeDiffs[pairKey].Rows[node1Name] = append(t.DiffResult.NodeDiffs[pairKey].Rows[node1Name], node1DataAsOrderedMap)
 
 					node2DataAsMap := utils.OrderedMapToMap(modRow.Node2Data)
-					node2DataWithMeta := utils.AddSpockMetadata(node2DataAsMap)
+					node2DataWithMeta := t.withSpockMetadata(node2DataAsMap)
 					node2DataAsOrderedMap := utils.MapToOrderedMap(node2DataWithMeta, t.Cols)
 					t.DiffResult.NodeDiffs[pairKey].Rows[node2Name] = append(t.DiffResult.NodeDiffs[pairKey].Rows[node2Name], node2DataAsOrderedMap)
 					currentDiffRowsForPair++

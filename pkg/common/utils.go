@@ -833,16 +833,35 @@ func AddSpockMetadata(row map[string]any) map[string]any {
 		return nil
 	}
 	metadata := make(map[string]any)
-	if commitTs, ok := row["commit_ts"]; ok {
-		metadata["commit_ts"] = commitTs
-		delete(row, "commit_ts")
-	}
 	if nodeOrigin, ok := row["node_origin"]; ok {
 		metadata["node_origin"] = nodeOrigin
 		delete(row, "node_origin")
 	}
+	if commitTs, ok := row["commit_ts"]; ok {
+		metadata["commit_ts"] = commitTs
+		delete(row, "commit_ts")
+	}
 	row["_spock_metadata_"] = metadata
 	return row
+}
+
+func TranslateNodeOrigin(raw any, nodeNames map[string]string) any {
+	if raw == nil {
+		return nil
+	}
+	origin := strings.TrimSpace(fmt.Sprintf("%v", raw))
+	if origin == "" {
+		return nil
+	}
+	if origin == "0" {
+		return "local"
+	}
+	if nodeNames != nil {
+		if name, ok := nodeNames[origin]; ok {
+			return name
+		}
+	}
+	return raw
 }
 
 func StripSpockMetadata(row map[string]any) map[string]any {
