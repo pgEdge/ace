@@ -2,7 +2,7 @@
 
 Catastrophic node failures leave a cluster with one node abruptly down mid‑replication. The failed node’s transactions may be partially replicated; survivors can drift. ACE helps you scope and repair that drift by focusing on the failed node’s origin and a known cutoff, then repairing from the best survivor.
 
-## A concrete scenario (human-readable LSNs)
+## An Example Scenario
 - Note: LSN numbers below are illustrative, not PostgreSQL-accurate.
 - Nodes: `n1` (failed), `n2`, `n3` (survivors).
 - At failure time:
@@ -37,7 +37,7 @@ sequenceDiagram
 
 Key idea: scope the diff to `node_origin = n1` and fence at the last trusted commit time/LSN, then repair from the survivor with the furthest origin LSN (here, n2).
 
-## Step-by-step commands
+## Steps to Recover from CNF Using ACE
 
 1) **Origin-scoped diff on survivors**  
    Run from an admin host that can reach the survivors:
