@@ -16,6 +16,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"maps"
 	"math"
@@ -230,6 +231,63 @@ type hashBoundsKey struct {
 	hasUpper bool
 }
 
+func extractPlanRowEstimate(planJSON []byte) (int64, error) {
+	var plans []map[string]any
+	if err := json.Unmarshal(planJSON, &plans); err != nil {
+		return 0, fmt.Errorf("failed to parse EXPLAIN output: %w", err)
+	}
+	if len(plans) == 0 {
+		return 0, fmt.Errorf("EXPLAIN returned no plan")
+	}
+
+	rootPlan, ok := plans[0]["Plan"].(map[string]any)
+	if !ok {
+		return 0, fmt.Errorf("unexpected EXPLAIN plan format")
+	}
+	if rowsVal, ok := rootPlan["Plan Rows"]; ok {
+		if rowsFloat, ok := rowsVal.(float64); ok {
+			return int64(rowsFloat), nil
+		}
+	}
+	return 0, fmt.Errorf("plan rows not found in EXPLAIN output")
+}
+
+func (t *TableDiffTask) estimateRowCount(pool *pgxpool.Pool, nodeName string) (int64, error) {
+	schemaIdent := pgx.Identifier{t.Schema}.Sanitize()
+	tableIdent := pgx.Identifier{t.Table}.Sanitize()
+
+	query := fmt.Sprintf("EXPLAIN (FORMAT JSON) SELECT 1 FROM %s.%s", schemaIdent, tableIdent)
+	if strings.TrimSpace(t.TableFilter) != "" {
+		query = fmt.Sprintf("%s WHERE %s", query, t.TableFilter)
+	}
+
+	var planJSON []byte
+	if err := pool.QueryRow(t.Ctx, query).Scan(&planJSON); err != nil {
+		return 0, fmt.Errorf("failed to estimate row count on node %s: %w", nodeName, err)
+	}
+
+	return extractPlanRowEstimate(planJSON)
+}
+
+func (t *TableDiffTask) ensureFilterHasRows(pool *pgxpool.Pool, nodeName string) error {
+	if strings.TrimSpace(t.TableFilter) == "" {
+		return nil
+	}
+
+	schemaIdent := pgx.Identifier{t.Schema}.Sanitize()
+	tableIdent := pgx.Identifier{t.Table}.Sanitize()
+	sql := fmt.Sprintf("SELECT 1 FROM %s.%s WHERE %s LIMIT 1", schemaIdent, tableIdent, t.TableFilter)
+
+	var one int
+	if err := pool.QueryRow(t.Ctx, sql).Scan(&one); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return fmt.Errorf("table filter produced no rows")
+		}
+		return fmt.Errorf("failed to validate table filter on node %s: %w", nodeName, err)
+	}
+	return nil
+}
+
 type RangeResults map[string]HashResult
 
 func (t *TableDiffTask) getBlockHashSQL(hasLower, hasUpper bool) (string, error) {
@@ -246,7 +304,7 @@ func (t *TableDiffTask) getBlockHashSQL(hasLower, hasUpper bool) (string, error)
 		return sql, nil
 	}
 
-	query, err := queries.BlockHashSQL(t.Schema, t.Table, t.Key, "TD_BLOCK_HASH" /* mode */, hasLower, hasUpper)
+	query, err := queries.BlockHashSQL(t.Schema, t.Table, t.Key, "TD_BLOCK_HASH" /* mode */, hasLower, hasUpper, t.TableFilter)
 	if err != nil {
 		return "", err
 	}
@@ -346,6 +404,10 @@ func (t *TableDiffTask) fetchRows(nodeName string, r Range) ([]types.OrderedMap,
 
 	var conditions []string
 	paramIndex := 1
+
+	if strings.TrimSpace(t.TableFilter) != "" {
+		conditions = append(conditions, fmt.Sprintf("(%s)", t.TableFilter))
+	}
 
 	if r.Start != nil {
 		startVal := r.Start
@@ -682,12 +744,6 @@ func (t *TableDiffTask) RunChecks(skipValidation bool) (err error) {
 	if t.BaseTable == "" {
 		t.BaseTable = table
 	}
-	var filteredViewName string
-	if t.TableFilter != "" {
-		filteredViewName = buildFilteredViewName(t.TaskID, table)
-		t.FilteredViewName = filteredViewName
-	}
-
 	for _, nodeInfo := range t.ClusterNodes {
 		hostname, _ := nodeInfo["Name"].(string)
 		hostIP, _ := nodeInfo["PublicIP"].(string)
@@ -761,30 +817,7 @@ func (t *TableDiffTask) RunChecks(skipValidation bool) (err error) {
 		hostMap[hostIP+":"+port] = hostname
 
 		if t.TableFilter != "" {
-			sanitisedViewName := pgx.Identifier{filteredViewName}.Sanitize()
-			sanitisedSchema := pgx.Identifier{schema}.Sanitize()
-			sanitisedTable := pgx.Identifier{table}.Sanitize()
-			viewSQL := fmt.Sprintf("CREATE MATERIALIZED VIEW IF NOT EXISTS %s AS SELECT * FROM %s.%s WHERE %s",
-				sanitisedViewName, sanitisedSchema, sanitisedTable, t.TableFilter)
-
-			_, err = conn.Exec(t.Ctx, viewSQL)
-			if err != nil {
-				return fmt.Errorf("failed to create filtered view: %w", err)
-			}
-			t.FilteredViewCreated = true
-
-			hasRowsSQL := fmt.Sprintf("SELECT EXISTS (SELECT 1 FROM %s) AS has_rows", sanitisedViewName)
-			var hasRows bool
-			err = conn.QueryRow(t.Ctx, hasRowsSQL).Scan(&hasRows)
-			if err != nil {
-				return fmt.Errorf("failed to check if view has rows: %w", err)
-			}
-
-			if !hasRows {
-				return fmt.Errorf("table filter produced no rows")
-			}
-
-			t.FilteredViewCreated = true
+			logger.Info("Applying table filter for diff: %s", t.TableFilter)
 		}
 	}
 
@@ -832,10 +865,6 @@ func (t *TableDiffTask) RunChecks(skipValidation bool) (err error) {
 
 	if err := t.CheckColumnSize(); err != nil {
 		return err
-	}
-
-	if t.TableFilter != "" {
-		t.Table = filteredViewName
 	}
 
 	return nil
@@ -1122,29 +1151,13 @@ func (t *TableDiffTask) ExecuteTask() (err error) {
 
 	var maxCount int64
 	var maxNode string
-	var totalEstimatedRowsAcrossNodes int64
 
 	for name, pool := range pools {
-		var count int64
-		// TODO: Estimates cannot be used on views. But we can't run a count(*)
-		// on millions of rows either. Need to find a better way to do this.
-		if t.TableFilter == "" {
-			count, err = queries.GetRowCountEstimate(t.Ctx, pool, t.Schema, t.Table)
-			if err != nil {
-				return fmt.Errorf("failed to render estimate row count query: %w", err)
-			}
-		} else {
-			sanitisedSchema := pgx.Identifier{t.Schema}.Sanitize()
-			sanitisedTable := pgx.Identifier{t.Table}.Sanitize()
-			countQuerySQL := fmt.Sprintf("SELECT COUNT(*) FROM %s.%s", sanitisedSchema, sanitisedTable)
-			logger.Debug("[%s] Executing count query for filtered table: %s", name, countQuerySQL)
-			err = pool.QueryRow(t.Ctx, countQuerySQL).Scan(&count)
-			if err != nil {
-				return fmt.Errorf("failed to get row count for %s.%s on node %s (query: %s): %w", t.Schema, t.Table, name, countQuerySQL, err)
-			}
+		count, err := t.estimateRowCount(pool, name)
+		if err != nil {
+			return fmt.Errorf("failed to estimate row count for %s on node %s: %w", t.QualifiedTableName, name, err)
 		}
 
-		totalEstimatedRowsAcrossNodes += int64(count)
 		logger.Debug("Table contains %d rows (estimated) on %s", count, name)
 		if count > maxCount {
 			maxCount = count
@@ -1153,6 +1166,9 @@ func (t *TableDiffTask) ExecuteTask() (err error) {
 	}
 	if maxNode == "" {
 		return fmt.Errorf("unable to determine node with highest row count (or any row counts)")
+	}
+	if err := t.ensureFilterHasRows(pools[maxNode], maxNode); err != nil {
+		return err
 	}
 
 	t.DiffResult = types.DiffOutput{
@@ -1210,7 +1226,7 @@ func (t *TableDiffTask) ExecuteTask() (err error) {
 		ntileCount = 1
 	}
 
-	querySQL, err := queries.GeneratePkeyOffsetsQuery(t.Schema, t.Table, t.Key, sampleMethod, samplePercent, ntileCount)
+	querySQL, err := queries.GeneratePkeyOffsetsQuery(t.Schema, t.Table, t.Key, sampleMethod, samplePercent, ntileCount, t.TableFilter)
 	logger.Debug("Generated offsets query: %s", querySQL)
 	if err != nil {
 		return fmt.Errorf("failed to generate offsets query: %w", err)

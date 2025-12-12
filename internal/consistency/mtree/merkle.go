@@ -1298,7 +1298,7 @@ func (m *MerkleTreeTask) BuildMtree() (err error) {
 
 		keyColumns := m.Key
 
-		offsetsQuery, err := queries.GeneratePkeyOffsetsQuery(m.Schema, m.Table, keyColumns, sampleMethod, samplePercent, numBlocks)
+		offsetsQuery, err := queries.GeneratePkeyOffsetsQuery(m.Schema, m.Table, keyColumns, sampleMethod, samplePercent, numBlocks, "")
 		if err != nil {
 			return fmt.Errorf("failed to generate pkey offsets query: %w", err)
 		}

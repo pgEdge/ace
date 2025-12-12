@@ -618,13 +618,17 @@ var SQLTemplates = Templates{
 			AND a.attname = ANY($3::text[])
 			AND a.attnum > 0 AND NOT a.attisdropped;
 	`)),
-	GetPkeyOffsets: template.Must(template.New("pkeyOffsets").Parse(`
+GetPkeyOffsets: template.Must(template.New("pkeyOffsets").Parse(`
 		WITH sampled_data AS (
 			SELECT
 				{{.KeyColumnsSelect}}
 			FROM
 				{{.SchemaIdent}}.{{.TableIdent}}
 			TABLESAMPLE {{.TableSampleMethod}}({{.SamplePercent}})
+				{{- if .HasFilter }}
+			WHERE
+				{{.Filter}}
+				{{- end }}
 			ORDER BY
 				{{.KeyColumnsOrder}}
 		),
@@ -633,6 +637,10 @@ var SQLTemplates = Templates{
 				{{.KeyColumnsSelect}}
 			FROM
 				{{.SchemaIdent}}.{{.TableIdent}}
+				{{- if .HasFilter }}
+			WHERE
+				{{.Filter}}
+				{{- end }}
 			ORDER BY
 				{{.KeyColumnsOrder}}
 			LIMIT 1
@@ -642,6 +650,10 @@ var SQLTemplates = Templates{
 				{{.KeyColumnsSelect}}
 			FROM
 				{{.SchemaIdent}}.{{.TableIdent}}
+				{{- if .HasFilter }}
+			WHERE
+				{{.Filter}}
+				{{- end }}
 			ORDER BY
 				{{.KeyColumnsOrderDesc}}
 			LIMIT 1

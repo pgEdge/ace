@@ -112,6 +112,7 @@ func runCustomerTableDiffTests(t *testing.T) {
 	t.Run("DataOnlyOnNode2", testTableDiff_DataOnlyOnNode2)
 	t.Run("ModifiedRows", testTableDiff_ModifiedRows)
 	t.Run("TableFiltering", testTableDiff_TableFiltering)
+	t.Run("TableFilterNoRows", testTableDiff_TableFilterNoRows)
 	t.Run("MaxDiffRowsLimit", testTableDiff_MaxDiffRowsLimit)
 }
 
@@ -1068,12 +1069,24 @@ func testTableDiff_TableFiltering(t *testing.T) {
 		t.Errorf("Expected modified row index 3 not found in filtered diffs")
 	}
 
-	viewName := tdTask.FilteredViewName
-	require.NotEmpty(t, viewName, "filtered view name should be recorded")
-	require.False(t, materializedViewExists(t, ctx, pgCluster.Node1Pool, testSchema, viewName), "Filtered materialized view should be dropped on %s", serviceN1)
-	require.False(t, materializedViewExists(t, ctx, pgCluster.Node2Pool, testSchema, viewName), "Filtered materialized view should be dropped on %s", serviceN2)
+	require.Empty(t, tdTask.FilteredViewName, "filtered view should no longer be created")
+	require.Equal(t, tdTask.TableFilter, tdTask.DiffResult.Summary.TableFilter, "diff summary should record the table filter used")
 
 	log.Println("TestTableDiff_TableFiltering completed.")
+}
+
+func testTableDiff_TableFilterNoRows(t *testing.T) {
+	tableName := "customers"
+	qualifiedTableName := fmt.Sprintf("%s.%s", testSchema, tableName)
+	nodesToCompare := []string{serviceN1, serviceN2}
+
+	tdTask := newTestTableDiffTask(t, qualifiedTableName, nodesToCompare)
+	tdTask.TableFilter = "index < 0" // no rows satisfy this
+
+	require.NoError(t, tdTask.RunChecks(false))
+	err := tdTask.ExecuteTask()
+	require.Error(t, err, "table-diff should fail when table filter produces no rows")
+	require.Contains(t, err.Error(), "table filter produced no rows")
 }
 
 func testTableDiff_MaxDiffRowsLimit(t *testing.T) {
@@ -1389,9 +1402,7 @@ func testTableDiff_WithSpockMetadata(t *testing.T, compositeKey bool) {
 		t.Fatal("Expected '_spock_metadata_' key in the diff row for node1")
 	}
 	metaMapN1, _ := metaN1.(map[string]any)
-	if val, ok := metaMapN1["node_origin"]; ok && val != nil && fmt.Sprintf("%v", val) != "0" {
-		t.Errorf("Expected 'node_origin' to be 0 for local update on node1, but got %v", val)
-	}
+	require.Equal(t, "local", fmt.Sprintf("%v", metaMapN1["node_origin"]), "node_origin should translate to 'local' for node1")
 
 	diffRowN2 := nodeDiffs.Rows[serviceN2][0]
 	dataN2, _ := diffRowN2.Get("data")
@@ -1403,8 +1414,10 @@ func testTableDiff_WithSpockMetadata(t *testing.T, compositeKey bool) {
 		t.Fatal("Expected '_spock_metadata_' key in the diff row for node2")
 	}
 	metaMapN2, _ := metaN2.(map[string]any)
-	if val, ok := metaMapN2["node_origin"]; !ok || val == nil || val == "" {
-		t.Errorf("Expected 'node_origin' in spock metadata for node2 to have a valid value, but got %v", val)
+	require.NotEmpty(t, metaMapN2["node_origin"], "node_origin should be populated for replicated rows on node2")
+	translated := fmt.Sprintf("%v", metaMapN2["node_origin"])
+	if translated != serviceN1 && translated != "n1" {
+		t.Fatalf("node_origin should map to the source node name (%s) or spock node name (n1); got %s", serviceN1, translated)
 	}
 
 	log.Println("TestTableDiff_WithSpockMetadata completed successfully.")

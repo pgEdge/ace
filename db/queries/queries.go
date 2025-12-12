@@ -81,6 +81,7 @@ func GeneratePkeyOffsetsQuery(
 	tableSampleMethod string,
 	samplePercent float64,
 	ntileCount int,
+	filter string,
 ) (string, error) {
 	if len(keyColumns) == 0 {
 		return "", fmt.Errorf("keyColumns cannot be empty")
@@ -162,6 +163,8 @@ func GeneratePkeyOffsetsQuery(
 		"RangeStartColumns":    strings.Join(rangeStarts, ",\n        "),
 		"RangeEndColumns":      strings.Join(rangeEnds, ",\n        "),
 		"RangeOutputColumns":   strings.Join(selectOutputCols, ",\n    "),
+		"HasFilter":            strings.TrimSpace(filter) != "",
+		"Filter":               strings.TrimSpace(filter),
 	}
 
 	return RenderSQL(SQLTemplates.GetPkeyOffsets, data)
@@ -498,7 +501,7 @@ func InsertBlockRangesBatchComposite(ctx context.Context, db DBQuerier, mtreeTab
 }
 
 func GetPkeyOffsets(ctx context.Context, db DBQuerier, schema, table string, keyColumns []string, tableSampleMethod string, samplePercent float64, ntileCount int) ([]types.PkeyOffset, error) {
-	sql, err := GeneratePkeyOffsetsQuery(schema, table, keyColumns, tableSampleMethod, samplePercent, ntileCount)
+	sql, err := GeneratePkeyOffsetsQuery(schema, table, keyColumns, tableSampleMethod, samplePercent, ntileCount, "")
 	if err != nil {
 		return nil, fmt.Errorf("failed to generate GetPkeyOffsets SQL: %w", err)
 	}
@@ -536,7 +539,7 @@ func GetPkeyOffsets(ctx context.Context, db DBQuerier, schema, table string, key
 	return offsets, nil
 }
 
-func BlockHashSQL(schema, table string, primaryKeyCols []string, mode string, includeLower, includeUpper bool) (string, error) {
+func BlockHashSQL(schema, table string, primaryKeyCols []string, mode string, includeLower, includeUpper bool, filter string) (string, error) {
 	if len(primaryKeyCols) == 0 {
 		return "", fmt.Errorf("primaryKeyCols cannot be empty")
 	}
@@ -608,6 +611,10 @@ func BlockHashSQL(schema, table string, primaryKeyCols []string, mode string, in
 			upperExpr = fmt.Sprintf("%s %s ROW(%s)", pkComparisonExpression, operator, strings.Join(endPlaceholders, ", "))
 		}
 		whereParts = append(whereParts, upperExpr)
+	}
+
+	if trimmed := strings.TrimSpace(filter); trimmed != "" {
+		whereParts = append(whereParts, fmt.Sprintf("(%s)", trimmed))
 	}
 
 	if len(whereParts) == 0 {
@@ -1114,7 +1121,7 @@ func ComputeLeafHashes(ctx context.Context, db DBQuerier, schema, table string, 
 	hasLower := len(start) > 0 && !sliceAllNil(start)
 	hasUpper := len(end) > 0 && !sliceAllNil(end)
 
-	sql, err := BlockHashSQL(schema, table, key, "MTREE_LEAF_HASH", hasLower, hasUpper)
+	sql, err := BlockHashSQL(schema, table, key, "MTREE_LEAF_HASH", hasLower, hasUpper, "")
 	if err != nil {
 		return nil, err
 	}
