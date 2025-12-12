@@ -9,7 +9,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/pgedge/ace/internal/core"
+	"github.com/pgedge/ace/internal/consistency/diff"
+	"github.com/pgedge/ace/internal/consistency/mtree"
+	"github.com/pgedge/ace/internal/consistency/repair"
 	"github.com/pgedge/ace/pkg/config"
 	"github.com/pgedge/ace/pkg/logger"
 	"github.com/pgedge/ace/pkg/taskstore"
@@ -43,6 +45,7 @@ type tableRepairRequest struct {
 	DBName         string   `json:"dbname"`
 	Nodes          []string `json:"nodes"`
 	DiffFile       string   `json:"diff_file"`
+	RepairPlan     string   `json:"repair_plan"`
 	SourceOfTruth  string   `json:"source_of_truth"`
 	Quiet          bool     `json:"quiet"`
 	DryRun         bool     `json:"dry_run"`
@@ -198,7 +201,7 @@ func (s *APIServer) handleTableDiff(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	task := core.NewTableDiffTask()
+	task := diff.NewTableDiffTask()
 	task.ClusterName = cluster
 	task.QualifiedTableName = tableName
 	task.DBName = strings.TrimSpace(req.DBName)
@@ -344,7 +347,7 @@ func (s *APIServer) handleTableRerun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	task := core.NewTableDiffTask()
+	task := diff.NewTableDiffTask()
 	task.Mode = "rerun"
 	task.ClusterName = cluster
 	task.DiffFilePath = diffFile
@@ -415,12 +418,13 @@ func (s *APIServer) handleTableRepair(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	task := core.NewTableRepairTask()
+	task := repair.NewTableRepairTask()
 	task.ClusterName = cluster
 	task.QualifiedTableName = tableName
 	task.DBName = strings.TrimSpace(req.DBName)
 	task.Nodes = s.resolveNodes(req.Nodes)
 	task.DiffFilePath = diffFile
+	task.RepairPlanPath = strings.TrimSpace(req.RepairPlan)
 	task.SourceOfTruth = strings.TrimSpace(req.SourceOfTruth)
 	task.QuietMode = req.Quiet
 	task.DryRun = req.DryRun
@@ -487,7 +491,7 @@ func (s *APIServer) handleSpockDiff(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	task := core.NewSpockDiffTask()
+	task := diff.NewSpockDiffTask()
 	task.ClusterName = cluster
 	task.DBName = strings.TrimSpace(req.DBName)
 	task.Nodes = s.resolveNodes(req.Nodes)
@@ -555,7 +559,7 @@ func (s *APIServer) handleSchemaDiff(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	task := core.NewSchemaDiffTask()
+	task := diff.NewSchemaDiffTask()
 	task.ClusterName = cluster
 	task.SchemaName = schema
 	task.DBName = strings.TrimSpace(req.DBName)
@@ -636,7 +640,7 @@ func (s *APIServer) handleRepsetDiff(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	task := core.NewRepsetDiffTask()
+	task := diff.NewRepsetDiffTask()
 	task.ClusterName = cluster
 	task.RepsetName = repset
 	task.DBName = strings.TrimSpace(req.DBName)
@@ -670,7 +674,7 @@ func (s *APIServer) handleRepsetDiff(w http.ResponseWriter, r *http.Request) {
 
 	if err := s.enqueueTask(task.TaskID, func(ctx context.Context) error {
 		task.Ctx = ctx
-		return core.RepsetDiff(task)
+		return diff.RepsetDiff(task)
 	}); err != nil {
 		logger.Error("failed to enqueue repset-diff task: %v", err)
 		writeError(w, http.StatusInternalServerError, "unable to enqueue task")
@@ -724,7 +728,7 @@ func (s *APIServer) handleMtreeInit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	task := core.NewMerkleTreeTask()
+	task := mtree.NewMerkleTreeTask()
 	task.ClusterName = cluster
 	task.DBName = strings.TrimSpace(req.DBName)
 	task.Nodes = s.resolveNodes(req.Nodes)
@@ -782,7 +786,7 @@ func (s *APIServer) handleMtreeTeardown(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	task := core.NewMerkleTreeTask()
+	task := mtree.NewMerkleTreeTask()
 	task.ClusterName = cluster
 	task.DBName = strings.TrimSpace(req.DBName)
 	task.Nodes = s.resolveNodes(req.Nodes)
@@ -845,7 +849,7 @@ func (s *APIServer) handleMtreeTeardownTable(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	task := core.NewMerkleTreeTask()
+	task := mtree.NewMerkleTreeTask()
 	task.ClusterName = cluster
 	task.QualifiedTableName = table
 	task.DBName = strings.TrimSpace(req.DBName)
@@ -909,7 +913,7 @@ func (s *APIServer) handleMtreeBuild(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	task := core.NewMerkleTreeTask()
+	task := mtree.NewMerkleTreeTask()
 	task.ClusterName = cluster
 	task.QualifiedTableName = table
 	task.DBName = strings.TrimSpace(req.DBName)
@@ -989,7 +993,7 @@ func (s *APIServer) handleMtreeUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	task := core.NewMerkleTreeTask()
+	task := mtree.NewMerkleTreeTask()
 	task.ClusterName = cluster
 	task.QualifiedTableName = table
 	task.DBName = strings.TrimSpace(req.DBName)
@@ -1064,7 +1068,7 @@ func (s *APIServer) handleMtreeDiff(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	task := core.NewMerkleTreeTask()
+	task := mtree.NewMerkleTreeTask()
 	task.ClusterName = cluster
 	task.QualifiedTableName = table
 	task.DBName = strings.TrimSpace(req.DBName)

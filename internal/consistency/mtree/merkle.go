@@ -9,7 +9,7 @@
 //
 // ///////////////////////////////////////////////////////////////////////////
 
-package core
+package mtree
 
 import (
 	"context"
@@ -36,8 +36,8 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/pgedge/ace/db/queries"
-	"github.com/pgedge/ace/internal/auth"
-	"github.com/pgedge/ace/internal/cdc"
+	"github.com/pgedge/ace/internal/infra/cdc"
+	"github.com/pgedge/ace/internal/infra/db"
 	utils "github.com/pgedge/ace/pkg/common"
 	"github.com/pgedge/ace/pkg/config"
 	"github.com/pgedge/ace/pkg/logger"
@@ -88,6 +88,7 @@ type MerkleTreeTask struct {
 	diffMutex      sync.Mutex
 	diffRowKeySets map[string]map[string]map[string]struct{}
 	StartTime      time.Time
+	SpockNodeNames map[string]string
 
 	Ctx context.Context
 }
@@ -489,6 +490,35 @@ func (m *MerkleTreeTask) processWorkItem(work CompareRangesWorkItem, pool1, pool
 	return nil
 }
 
+func (m *MerkleTreeTask) loadSpockNodeNames() error {
+	if m.SpockNodeNames != nil {
+		return nil
+	}
+
+	var lastErr error
+	for _, nodeInfo := range m.ClusterNodes {
+		pool, err := auth.GetClusterNodeConnection(m.Ctx, nodeInfo, m.connOpts())
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		names, err := queries.GetSpockNodeNames(m.Ctx, pool)
+		pool.Close()
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		m.SpockNodeNames = names
+		return nil
+	}
+
+	m.SpockNodeNames = make(map[string]string)
+	if lastErr != nil {
+		return lastErr
+	}
+	return fmt.Errorf("no nodes available to load spock node names")
+}
+
 func (m *MerkleTreeTask) appendDiffs(nodePairKey string, work CompareRangesWorkItem, pr1, pr2 []types.OrderedMap) error {
 	diffResult, err := utils.CompareRowSets(pr1, pr2, m.Key, m.Cols)
 	if err != nil {
@@ -557,6 +587,11 @@ func (m *MerkleTreeTask) addRowToDiff(nodePairKey, nodeName string, row types.Or
 		m.diffRowKeySets = make(map[string]map[string]map[string]struct{})
 	}
 
+	rowMap := utils.OrderedMapToMap(row)
+	rowMap["node_origin"] = utils.TranslateNodeOrigin(rowMap["node_origin"], m.SpockNodeNames)
+	rowWithMeta := utils.AddSpockMetadata(rowMap)
+	orderedRow := utils.MapToOrderedMap(rowWithMeta, m.Cols)
+
 	pairSet, ok := m.diffRowKeySets[nodePairKey]
 	if !ok {
 		pairSet = make(map[string]map[string]struct{})
@@ -569,7 +604,7 @@ func (m *MerkleTreeTask) addRowToDiff(nodePairKey, nodeName string, row types.Or
 		pairSet[nodeName] = nodeSet
 	}
 
-	key, err := m.buildRowKey(row)
+	key, err := m.buildRowKey(orderedRow)
 	if err != nil {
 		return false, err
 	}
@@ -579,7 +614,7 @@ func (m *MerkleTreeTask) addRowToDiff(nodePairKey, nodeName string, row types.Or
 	}
 
 	nodeSet[key] = struct{}{}
-	m.DiffResult.NodeDiffs[nodePairKey].Rows[nodeName] = append(m.DiffResult.NodeDiffs[nodePairKey].Rows[nodeName], row)
+	m.DiffResult.NodeDiffs[nodePairKey].Rows[nodeName] = append(m.DiffResult.NodeDiffs[nodePairKey].Rows[nodeName], orderedRow)
 	return true, nil
 }
 
@@ -663,7 +698,8 @@ func buildFetchRowsSQLSimple(tableName, pk string, orderBy string, keys []any) (
 		args[i] = keys[i]
 	}
 	where := fmt.Sprintf("%s IN (%s)", pgx.Identifier{pk}.Sanitize(), strings.Join(placeholders, ","))
-	q := fmt.Sprintf("SELECT * FROM %s WHERE %s ORDER BY %s", tableName, where, orderBy)
+	selectCols := "pg_xact_commit_timestamp(xmin) as commit_ts, to_json(spock.xact_commit_timestamp_origin(xmin))->>'roident' as node_origin, *"
+	q := fmt.Sprintf("SELECT %s FROM %s WHERE %s ORDER BY %s", selectCols, tableName, where, orderBy)
 	return q, args
 }
 
@@ -685,7 +721,8 @@ func buildFetchRowsSQLComposite(tableName string, pk []string, orderBy string, k
 		tuples = append(tuples, fmt.Sprintf("(%s)", strings.Join(ph, ",")))
 	}
 	where := fmt.Sprintf("( %s ) IN ( %s )", strings.Join(tupleCols, ","), strings.Join(tuples, ","))
-	q := fmt.Sprintf("SELECT * FROM %s WHERE %s ORDER BY %s", tableName, where, orderBy)
+	selectCols := "pg_xact_commit_timestamp(xmin) as commit_ts, to_json(spock.xact_commit_timestamp_origin(xmin))->>'roident' as node_origin, *"
+	q := fmt.Sprintf("SELECT %s FROM %s WHERE %s ORDER BY %s", selectCols, tableName, where, orderBy)
 	return q, args
 }
 
@@ -1130,7 +1167,7 @@ func (m *MerkleTreeTask) RunChecks(skipValidation bool) error {
 		}
 		defer pool.Close()
 
-		if _, err := pool.Exec(m.Ctx, "CREATE EXTENSION IF NOT EXISTS pgcrypto;"); err != nil {
+		if err := queries.EnsurePgcrypto(m.Ctx, pool); err != nil {
 			return fmt.Errorf("failed to ensure pgcrypto is installed on %s: %w", nodeInfo["Name"], err)
 		}
 		tx, err := pool.Begin(m.Ctx)
@@ -1261,7 +1298,7 @@ func (m *MerkleTreeTask) BuildMtree() (err error) {
 
 		keyColumns := m.Key
 
-		offsetsQuery, err := queries.GeneratePkeyOffsetsQuery(m.Schema, m.Table, keyColumns, sampleMethod, samplePercent, numBlocks)
+		offsetsQuery, err := queries.GeneratePkeyOffsetsQuery(m.Schema, m.Table, keyColumns, sampleMethod, samplePercent, numBlocks, "")
 		if err != nil {
 			return fmt.Errorf("failed to generate pkey offsets query: %w", err)
 		}
@@ -1788,6 +1825,9 @@ func (m *MerkleTreeTask) DiffMtree() (err error) {
 
 	if err = m.UpdateMtree(true); err != nil {
 		return fmt.Errorf("failed to update merkle tree before diff: %w", err)
+	}
+	if err := m.loadSpockNodeNames(); err != nil {
+		logger.Warn("mtree diff: unable to load spock node names; using raw node_origin values: %v", err)
 	}
 	nodePairs := getNodePairs(m.ClusterNodes)
 	mtreeTableIdentifier := pgx.Identifier{aceSchema(), fmt.Sprintf("ace_mtree_%s_%s", m.Schema, m.Table)}

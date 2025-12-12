@@ -21,6 +21,8 @@ type Templates struct {
 	CheckUserPrivileges  *template.Template
 	SpockNodeAndSubInfo  *template.Template
 	SpockRepSetInfo      *template.Template
+	EnsurePgcrypto       *template.Template
+	GetSpockNodeNames    *template.Template
 	CheckSchemaExists    *template.Template
 	GetTablesInSchema    *template.Template
 	GetViewsInSchema     *template.Template
@@ -116,6 +118,8 @@ type Templates struct {
 	AlterPublicationDropTable        *template.Template
 	DeleteMetadata                   *template.Template
 	RemoveTableFromCDCMetadata       *template.Template
+	GetSpockOriginLSNForNode         *template.Template
+	GetSpockSlotLSNForNode           *template.Template
 }
 
 var SQLTemplates = Templates{
@@ -554,6 +558,16 @@ var SQLTemplates = Templates{
 		ORDER BY
 			set_name;
 	`)),
+	EnsurePgcrypto: template.Must(template.New("ensurePgcrypto").Parse(`
+		CREATE EXTENSION IF NOT EXISTS pgcrypto;
+	`)),
+	GetSpockNodeNames: template.Must(template.New("getSpockNodeNames").Parse(`
+		SELECT
+			node_id::text,
+			node_name
+		FROM
+			spock.node;
+	`)),
 	CheckSchemaExists: template.Must(template.New("checkSchemaExists").Parse(
 		`SELECT EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = $1);`,
 	)),
@@ -613,6 +627,10 @@ var SQLTemplates = Templates{
 			FROM
 				{{.SchemaIdent}}.{{.TableIdent}}
 			TABLESAMPLE {{.TableSampleMethod}}({{.SamplePercent}})
+				{{- if .HasFilter }}
+			WHERE
+				{{.Filter}}
+				{{- end }}
 			ORDER BY
 				{{.KeyColumnsOrder}}
 		),
@@ -621,6 +639,10 @@ var SQLTemplates = Templates{
 				{{.KeyColumnsSelect}}
 			FROM
 				{{.SchemaIdent}}.{{.TableIdent}}
+				{{- if .HasFilter }}
+			WHERE
+				{{.Filter}}
+				{{- end }}
 			ORDER BY
 				{{.KeyColumnsOrder}}
 			LIMIT 1
@@ -630,6 +652,10 @@ var SQLTemplates = Templates{
 				{{.KeyColumnsSelect}}
 			FROM
 				{{.SchemaIdent}}.{{.TableIdent}}
+				{{- if .HasFilter }}
+			WHERE
+				{{.Filter}}
+				{{- end }}
 			ORDER BY
 				{{.KeyColumnsOrderDesc}}
 			LIMIT 1
@@ -1498,5 +1524,23 @@ var SQLTemplates = Templates{
 	`)),
 	CreateSchema: template.Must(template.New("createSchema").Parse(`
 		CREATE SCHEMA IF NOT EXISTS {{.SchemaName}}
+	`)),
+	GetSpockOriginLSNForNode: template.Must(template.New("getSpockOriginLSNForNode").Parse(`
+		SELECT ros.remote_lsn::text
+		FROM pg_catalog.pg_replication_origin_status ros
+		JOIN pg_catalog.pg_replication_origin ro ON ro.roident = ros.local_id
+		WHERE ro.roname LIKE 'spk_%_' || $1 || '_sub_' || $1 || '_' || $2
+			AND ros.remote_lsn IS NOT NULL
+		LIMIT 1
+	`)),
+	GetSpockSlotLSNForNode: template.Must(template.New("getSpockSlotLSNForNode").Parse(`
+		SELECT rs.confirmed_flush_lsn::text
+		FROM pg_catalog.pg_replication_slots rs
+		JOIN spock.subscription s ON rs.slot_name = s.sub_slot_name
+		JOIN spock.node o ON o.node_id = s.sub_origin
+		WHERE o.node_name = $1
+			AND rs.confirmed_flush_lsn IS NOT NULL
+		ORDER BY rs.confirmed_flush_lsn DESC
+		LIMIT 1
 	`)),
 }

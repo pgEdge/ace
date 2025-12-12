@@ -22,7 +22,7 @@ import (
 	"github.com/jackc/pglogrepl"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/pgedge/ace/db/queries"
-	"github.com/pgedge/ace/internal/cdc"
+	"github.com/pgedge/ace/internal/infra/cdc"
 	"github.com/pgedge/ace/pkg/config"
 	"github.com/stretchr/testify/require"
 )

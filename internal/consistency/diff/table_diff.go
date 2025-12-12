@@ -9,13 +9,14 @@
 //
 // ///////////////////////////////////////////////////////////////////////////
 
-package core
+package diff
 
 import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"maps"
 	"math"
@@ -34,7 +35,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/pgedge/ace/db/queries"
-	"github.com/pgedge/ace/internal/auth"
+	"github.com/pgedge/ace/internal/infra/db"
 	utils "github.com/pgedge/ace/pkg/common"
 	"github.com/pgedge/ace/pkg/config"
 	"github.com/pgedge/ace/pkg/logger"
@@ -72,6 +73,11 @@ type TableDiffTask struct {
 	TableFilter       string
 	QuietMode         bool
 
+	OnlyOrigin string
+	Until      string
+
+	EffectiveFilter string
+
 	Mode              string
 	OverrideBlockSize bool
 
@@ -79,6 +85,8 @@ type TableDiffTask struct {
 
 	InvokeMethod string
 	ClientRole   string
+
+	EnsurePgcrypto bool
 
 	DiffSummary map[string]string
 
@@ -92,6 +100,8 @@ type TableDiffTask struct {
 	blockHashSQLCache map[hashBoundsKey]string
 	blockHashSQLMu    sync.Mutex
 
+	SpockNodeNames map[string]string
+
 	CompareUnitSize int
 	MaxDiffRows     int64
 
@@ -103,6 +113,9 @@ type TableDiffTask struct {
 
 	totalDiffRows      atomic.Int64
 	diffLimitTriggered atomic.Bool
+
+	resolvedOnlyOrigin string
+	untilTime          *time.Time
 
 	Ctx context.Context
 }
@@ -164,6 +177,101 @@ func (t *TableDiffTask) incrementDiffRowsLocked(delta int) bool {
 	return false
 }
 
+func (t *TableDiffTask) loadSpockNodeNames() error {
+	if t.SpockNodeNames != nil {
+		return nil
+	}
+
+	var firstPool *pgxpool.Pool
+	for _, pool := range t.Pools {
+		firstPool = pool
+		break
+	}
+
+	if firstPool == nil {
+		t.SpockNodeNames = make(map[string]string)
+		return fmt.Errorf("no connection pool available to load spock node names")
+	}
+
+	names, err := queries.GetSpockNodeNames(t.Ctx, firstPool)
+	if err != nil {
+		t.SpockNodeNames = make(map[string]string)
+		return err
+	}
+
+	t.SpockNodeNames = names
+	return nil
+}
+
+func (t *TableDiffTask) resolveOnlyOrigin() error {
+	if strings.TrimSpace(t.OnlyOrigin) == "" {
+		return nil
+	}
+	if len(t.SpockNodeNames) == 0 {
+		return fmt.Errorf("unable to resolve --only-origin: spock node names not available")
+	}
+
+	orig := strings.TrimSpace(t.OnlyOrigin)
+	// direct match on id
+	if _, ok := t.SpockNodeNames[orig]; ok {
+		t.resolvedOnlyOrigin = orig
+		return nil
+	}
+
+	// match on name
+	for id, name := range t.SpockNodeNames {
+		if name == orig {
+			t.resolvedOnlyOrigin = id
+			return nil
+		}
+	}
+
+	return fmt.Errorf("unable to resolve only-origin %q to a spock node id", t.OnlyOrigin)
+}
+
+func (t *TableDiffTask) buildEffectiveFilter() (string, error) {
+	if t.untilTime == nil && strings.TrimSpace(t.Until) != "" {
+		parsed, err := time.Parse(time.RFC3339, strings.TrimSpace(t.Until))
+		if err != nil {
+			return "", fmt.Errorf("invalid value for --until (expected RFC3339 timestamp): %w", err)
+		}
+		t.untilTime = &parsed
+	}
+
+	var parts []string
+	trimmed := strings.TrimSpace(t.TableFilter)
+	if trimmed != "" {
+		parts = append(parts, fmt.Sprintf("(%s)", trimmed))
+	}
+
+	if t.resolvedOnlyOrigin != "" {
+		escaped := strings.ReplaceAll(t.resolvedOnlyOrigin, "'", "''")
+		parts = append(parts, fmt.Sprintf("(to_json(spock.xact_commit_timestamp_origin(xmin))->>'roident' = '%s')", escaped))
+	}
+
+	if t.untilTime != nil {
+		parts = append(parts, fmt.Sprintf("(pg_xact_commit_timestamp(xmin) <= '%s'::timestamptz)", t.untilTime.Format(time.RFC3339)))
+	}
+
+	if len(parts) == 0 {
+		return "", nil
+	}
+	return strings.Join(parts, " AND "), nil
+}
+
+func (t *TableDiffTask) withSpockMetadata(row map[string]any) map[string]any {
+	row["node_origin"] = utils.TranslateNodeOrigin(row["node_origin"], t.SpockNodeNames)
+	return utils.AddSpockMetadata(row)
+}
+
+func isPgcryptoMissing(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "digest(") || strings.Contains(msg, "function digest") || strings.Contains(msg, "pgcrypto")
+}
+
 type RecursiveDiffTask struct {
 	Node1Name                 string
 	Node2Name                 string
@@ -187,6 +295,63 @@ type hashBoundsKey struct {
 	hasUpper bool
 }
 
+func extractPlanRowEstimate(planJSON []byte) (int64, error) {
+	var plans []map[string]any
+	if err := json.Unmarshal(planJSON, &plans); err != nil {
+		return 0, fmt.Errorf("failed to parse EXPLAIN output: %w", err)
+	}
+	if len(plans) == 0 {
+		return 0, fmt.Errorf("EXPLAIN returned no plan")
+	}
+
+	rootPlan, ok := plans[0]["Plan"].(map[string]any)
+	if !ok {
+		return 0, fmt.Errorf("unexpected EXPLAIN plan format")
+	}
+	if rowsVal, ok := rootPlan["Plan Rows"]; ok {
+		if rowsFloat, ok := rowsVal.(float64); ok {
+			return int64(rowsFloat), nil
+		}
+	}
+	return 0, fmt.Errorf("plan rows not found in EXPLAIN output")
+}
+
+func (t *TableDiffTask) estimateRowCount(pool *pgxpool.Pool, nodeName string) (int64, error) {
+	schemaIdent := pgx.Identifier{t.Schema}.Sanitize()
+	tableIdent := pgx.Identifier{t.Table}.Sanitize()
+
+	query := fmt.Sprintf("EXPLAIN (FORMAT JSON) SELECT 1 FROM %s.%s", schemaIdent, tableIdent)
+	if strings.TrimSpace(t.EffectiveFilter) != "" {
+		query = fmt.Sprintf("%s WHERE %s", query, t.EffectiveFilter)
+	}
+
+	var planJSON []byte
+	if err := pool.QueryRow(t.Ctx, query).Scan(&planJSON); err != nil {
+		return 0, fmt.Errorf("failed to estimate row count on node %s: %w", nodeName, err)
+	}
+
+	return extractPlanRowEstimate(planJSON)
+}
+
+func (t *TableDiffTask) ensureFilterHasRows(pool *pgxpool.Pool, nodeName string) error {
+	if strings.TrimSpace(t.EffectiveFilter) == "" {
+		return nil
+	}
+
+	schemaIdent := pgx.Identifier{t.Schema}.Sanitize()
+	tableIdent := pgx.Identifier{t.Table}.Sanitize()
+	sql := fmt.Sprintf("SELECT 1 FROM %s.%s WHERE %s LIMIT 1", schemaIdent, tableIdent, t.EffectiveFilter)
+
+	var one int
+	if err := pool.QueryRow(t.Ctx, sql).Scan(&one); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return fmt.Errorf("table filter produced no rows")
+		}
+		return fmt.Errorf("failed to validate table filter on node %s: %w", nodeName, err)
+	}
+	return nil
+}
+
 type RangeResults map[string]HashResult
 
 func (t *TableDiffTask) getBlockHashSQL(hasLower, hasUpper bool) (string, error) {
@@ -203,7 +368,7 @@ func (t *TableDiffTask) getBlockHashSQL(hasLower, hasUpper bool) (string, error)
 		return sql, nil
 	}
 
-	query, err := queries.BlockHashSQL(t.Schema, t.Table, t.Key, "TD_BLOCK_HASH" /* mode */, hasLower, hasUpper)
+	query, err := queries.BlockHashSQL(t.Schema, t.Table, t.Key, "TD_BLOCK_HASH" /* mode */, hasLower, hasUpper, t.EffectiveFilter)
 	if err != nil {
 		return "", err
 	}
@@ -303,6 +468,10 @@ func (t *TableDiffTask) fetchRows(nodeName string, r Range) ([]types.OrderedMap,
 
 	var conditions []string
 	paramIndex := 1
+
+	if strings.TrimSpace(t.EffectiveFilter) != "" {
+		conditions = append(conditions, fmt.Sprintf("(%s)", t.EffectiveFilter))
+	}
 
 	if r.Start != nil {
 		startVal := r.Start
@@ -435,6 +604,8 @@ func (t *TableDiffTask) fetchRows(nodeName string, r Range) ([]types.OrderedMap,
 					} else {
 						processedVal = nil
 					}
+				case time.Time:
+					processedVal = v
 				case string:
 					processedVal = v
 				case int8, int16, int32, int64, int,
@@ -539,6 +710,14 @@ func (t *TableDiffTask) Validate() error {
 		return fmt.Errorf("table-diff currently supports only json and html output formats")
 	}
 
+	if trimmed := strings.TrimSpace(t.Until); trimmed != "" {
+		parsed, err := time.Parse(time.RFC3339, trimmed)
+		if err != nil {
+			return fmt.Errorf("invalid value for --until (expected RFC3339 timestamp): %w", err)
+		}
+		t.untilTime = &parsed
+	}
+
 	nodeList, err := utils.ParseNodes(t.Nodes)
 	if err != nil {
 		return fmt.Errorf("nodes should be a comma-separated list of nodenames. E.g., nodes=\"n1,n2\". Error: %w", err)
@@ -637,12 +816,6 @@ func (t *TableDiffTask) RunChecks(skipValidation bool) (err error) {
 	if t.BaseTable == "" {
 		t.BaseTable = table
 	}
-	var filteredViewName string
-	if t.TableFilter != "" {
-		filteredViewName = buildFilteredViewName(t.TaskID, table)
-		t.FilteredViewName = filteredViewName
-	}
-
 	for _, nodeInfo := range t.ClusterNodes {
 		hostname, _ := nodeInfo["Name"].(string)
 		hostIP, _ := nodeInfo["PublicIP"].(string)
@@ -716,30 +889,7 @@ func (t *TableDiffTask) RunChecks(skipValidation bool) (err error) {
 		hostMap[hostIP+":"+port] = hostname
 
 		if t.TableFilter != "" {
-			sanitisedViewName := pgx.Identifier{filteredViewName}.Sanitize()
-			sanitisedSchema := pgx.Identifier{schema}.Sanitize()
-			sanitisedTable := pgx.Identifier{table}.Sanitize()
-			viewSQL := fmt.Sprintf("CREATE MATERIALIZED VIEW IF NOT EXISTS %s AS SELECT * FROM %s.%s WHERE %s",
-				sanitisedViewName, sanitisedSchema, sanitisedTable, t.TableFilter)
-
-			_, err = conn.Exec(t.Ctx, viewSQL)
-			if err != nil {
-				return fmt.Errorf("failed to create filtered view: %w", err)
-			}
-			t.FilteredViewCreated = true
-
-			hasRowsSQL := fmt.Sprintf("SELECT EXISTS (SELECT 1 FROM %s) AS has_rows", sanitisedViewName)
-			var hasRows bool
-			err = conn.QueryRow(t.Ctx, hasRowsSQL).Scan(&hasRows)
-			if err != nil {
-				return fmt.Errorf("failed to check if view has rows: %w", err)
-			}
-
-			if !hasRows {
-				return fmt.Errorf("table filter produced no rows")
-			}
-
-			t.FilteredViewCreated = true
+			logger.Info("Applying table filter for diff: %s", t.TableFilter)
 		}
 	}
 
@@ -787,10 +937,6 @@ func (t *TableDiffTask) RunChecks(skipValidation bool) (err error) {
 
 	if err := t.CheckColumnSize(); err != nil {
 		return err
-	}
-
-	if t.TableFilter != "" {
-		t.Table = filteredViewName
 	}
 
 	return nil
@@ -851,6 +997,9 @@ func (t *TableDiffTask) CloneForSchedule(ctx context.Context) *TableDiffTask {
 	cloned.InvokeMethod = t.InvokeMethod
 	cloned.CompareUnitSize = t.CompareUnitSize
 	cloned.MaxDiffRows = t.MaxDiffRows
+	cloned.EnsurePgcrypto = t.EnsurePgcrypto
+	cloned.OnlyOrigin = t.OnlyOrigin
+	cloned.Until = t.Until
 	cloned.Ctx = ctx
 	return cloned
 }
@@ -1058,35 +1207,41 @@ func (t *TableDiffTask) ExecuteTask() (err error) {
 	}
 	t.Pools = pools
 
+	if t.EnsurePgcrypto {
+		for name, pool := range t.Pools {
+			if err := queries.EnsurePgcrypto(t.Ctx, pool); err != nil {
+				return fmt.Errorf("failed to ensure pgcrypto on node %s: %w", name, err)
+			}
+		}
+	}
+
+	if err := t.loadSpockNodeNames(); err != nil {
+		logger.Warn("table-diff: unable to load spock node names; using raw node_origin values: %v", err)
+	}
+
+	if err := t.resolveOnlyOrigin(); err != nil {
+		return err
+	}
+	effectiveFilter, err := t.buildEffectiveFilter()
+	if err != nil {
+		return err
+	}
+	t.EffectiveFilter = effectiveFilter
+	t.DiffSummary["effective_filter"] = effectiveFilter
+
 	if _, err = t.getBlockHashSQL(true, true); err != nil {
 		return fmt.Errorf("failed to build block-hash SQL: %w", err)
 	}
 
 	var maxCount int64
 	var maxNode string
-	var totalEstimatedRowsAcrossNodes int64
 
 	for name, pool := range pools {
-		var count int64
-		// TODO: Estimates cannot be used on views. But we can't run a count(*)
-		// on millions of rows either. Need to find a better way to do this.
-		if t.TableFilter == "" {
-			count, err = queries.GetRowCountEstimate(t.Ctx, pool, t.Schema, t.Table)
-			if err != nil {
-				return fmt.Errorf("failed to render estimate row count query: %w", err)
-			}
-		} else {
-			sanitisedSchema := pgx.Identifier{t.Schema}.Sanitize()
-			sanitisedTable := pgx.Identifier{t.Table}.Sanitize()
-			countQuerySQL := fmt.Sprintf("SELECT COUNT(*) FROM %s.%s", sanitisedSchema, sanitisedTable)
-			logger.Debug("[%s] Executing count query for filtered table: %s", name, countQuerySQL)
-			err = pool.QueryRow(t.Ctx, countQuerySQL).Scan(&count)
-			if err != nil {
-				return fmt.Errorf("failed to get row count for %s.%s on node %s (query: %s): %w", t.Schema, t.Table, name, countQuerySQL, err)
-			}
+		count, err := t.estimateRowCount(pool, name)
+		if err != nil {
+			return fmt.Errorf("failed to estimate row count for %s on node %s: %w", t.QualifiedTableName, name, err)
 		}
 
-		totalEstimatedRowsAcrossNodes += int64(count)
 		logger.Debug("Table contains %d rows (estimated) on %s", count, name)
 		if count > maxCount {
 			maxCount = count
@@ -1096,6 +1251,9 @@ func (t *TableDiffTask) ExecuteTask() (err error) {
 	if maxNode == "" {
 		return fmt.Errorf("unable to determine node with highest row count (or any row counts)")
 	}
+	if err := t.ensureFilterHasRows(pools[maxNode], maxNode); err != nil {
+		return err
+	}
 
 	t.DiffResult = types.DiffOutput{
 		NodeDiffs: make(map[string]types.DiffByNodePair),
@@ -1103,6 +1261,7 @@ func (t *TableDiffTask) ExecuteTask() (err error) {
 			Schema:            t.Schema,
 			Table:             t.BaseTable,
 			TableFilter:       t.TableFilter,
+			EffectiveFilter:   t.EffectiveFilter,
 			Nodes:             t.NodeList,
 			BlockSize:         t.BlockSize,
 			CompareUnitSize:   t.CompareUnitSize,
@@ -1111,6 +1270,22 @@ func (t *TableDiffTask) ExecuteTask() (err error) {
 			StartTime:         startTime.Format(time.RFC3339),
 			TotalRowsChecked:  int64(maxCount),
 			DiffRowsCount:     make(map[string]int),
+			OnlyOrigin:        t.resolvedOnlyOrigin,
+			OnlyOriginResolved: func() string {
+				if t.resolvedOnlyOrigin != "" && t.SpockNodeNames != nil {
+					if name, ok := t.SpockNodeNames[t.resolvedOnlyOrigin]; ok {
+						return name
+					}
+				}
+				return ""
+			}(),
+			Until: func() string {
+				if t.untilTime != nil {
+					return t.untilTime.Format(time.RFC3339)
+				}
+				return strings.TrimSpace(t.Until)
+			}(),
+			OriginOnly: t.resolvedOnlyOrigin != "",
 		},
 	}
 
@@ -1152,7 +1327,7 @@ func (t *TableDiffTask) ExecuteTask() (err error) {
 		ntileCount = 1
 	}
 
-	querySQL, err := queries.GeneratePkeyOffsetsQuery(t.Schema, t.Table, t.Key, sampleMethod, samplePercent, ntileCount)
+	querySQL, err := queries.GeneratePkeyOffsetsQuery(t.Schema, t.Table, t.Key, sampleMethod, samplePercent, ntileCount, t.EffectiveFilter)
 	logger.Debug("Generated offsets query: %s", querySQL)
 	if err != nil {
 		return fmt.Errorf("failed to generate offsets query: %w", err)
@@ -1435,7 +1610,11 @@ func (t *TableDiffTask) hashRange(
 	if err != nil {
 		duration := time.Since(startTime)
 		logger.Debug("[%s] ERROR after %v for range Start=%v, End=%v (using query: '%s', args: %v): %v", node, duration, r.Start, r.End, query, args, err)
-		return "", fmt.Errorf("BlockHash query failed for %s range %v-%v: %w", node, r.Start, r.End, err)
+		baseErr := fmt.Errorf("BlockHash query failed for %s range %v-%v: %w", node, r.Start, r.End, err)
+		if isPgcryptoMissing(err) {
+			return "", fmt.Errorf("%w; pgcrypto extension not installed. Re-run with --ensure-pgcrypto or install via CREATE EXTENSION pgcrypto", baseErr)
+		}
+		return "", baseErr
 	}
 
 	duration := time.Since(startTime)
@@ -1709,7 +1888,7 @@ func (t *TableDiffTask) recursiveDiff(
 					break
 				}
 				rowAsMap := utils.OrderedMapToMap(row)
-				rowWithMeta := utils.AddSpockMetadata(rowAsMap)
+				rowWithMeta := t.withSpockMetadata(rowAsMap)
 				rowAsOrderedMap := utils.MapToOrderedMap(rowWithMeta, t.Cols)
 				t.DiffResult.NodeDiffs[pairKey].Rows[node1Name] = append(t.DiffResult.NodeDiffs[pairKey].Rows[node1Name], rowAsOrderedMap)
 				currentDiffRowsForPair++
@@ -1726,7 +1905,7 @@ func (t *TableDiffTask) recursiveDiff(
 						break
 					}
 					rowAsMap := utils.OrderedMapToMap(row)
-					rowWithMeta := utils.AddSpockMetadata(rowAsMap)
+					rowWithMeta := t.withSpockMetadata(rowAsMap)
 					rowAsOrderedMap := utils.MapToOrderedMap(rowWithMeta, t.Cols)
 					t.DiffResult.NodeDiffs[pairKey].Rows[node2Name] = append(t.DiffResult.NodeDiffs[pairKey].Rows[node2Name], rowAsOrderedMap)
 					currentDiffRowsForPair++
@@ -1744,12 +1923,12 @@ func (t *TableDiffTask) recursiveDiff(
 						break
 					}
 					node1DataAsMap := utils.OrderedMapToMap(modRow.Node1Data)
-					node1DataWithMeta := utils.AddSpockMetadata(node1DataAsMap)
+					node1DataWithMeta := t.withSpockMetadata(node1DataAsMap)
 					node1DataAsOrderedMap := utils.MapToOrderedMap(node1DataWithMeta, t.Cols)
 					t.DiffResult.NodeDiffs[pairKey].Rows[node1Name] = append(t.DiffResult.NodeDiffs[pairKey].Rows[node1Name], node1DataAsOrderedMap)
 
 					node2DataAsMap := utils.OrderedMapToMap(modRow.Node2Data)
-					node2DataWithMeta := utils.AddSpockMetadata(node2DataAsMap)
+					node2DataWithMeta := t.withSpockMetadata(node2DataAsMap)
 					node2DataAsOrderedMap := utils.MapToOrderedMap(node2DataWithMeta, t.Cols)
 					t.DiffResult.NodeDiffs[pairKey].Rows[node2Name] = append(t.DiffResult.NodeDiffs[pairKey].Rows[node2Name], node2DataAsOrderedMap)
 					currentDiffRowsForPair++

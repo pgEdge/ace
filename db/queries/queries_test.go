@@ -138,6 +138,7 @@ func TestGeneratePkeyOffsetsQuery(t *testing.T) {
 		tableSampleMethod string
 		samplePercent     float64
 		ntileCount        int
+		filter            string
 		wantQueryContains []string
 		wantErr           bool
 	}{
@@ -149,6 +150,7 @@ func TestGeneratePkeyOffsetsQuery(t *testing.T) {
 			tableSampleMethod: "BERNOULLI",
 			samplePercent:     10,
 			ntileCount:        100,
+			filter:            "",
 			wantQueryContains: []string{
 				`FROM "public"."users"`,
 				`TABLESAMPLE BERNOULLI(10)`,
@@ -166,6 +168,7 @@ func TestGeneratePkeyOffsetsQuery(t *testing.T) {
 			tableSampleMethod: "SYSTEM",
 			samplePercent:     5.5,
 			ntileCount:        50,
+			filter:            "",
 			wantQueryContains: []string{
 				`FROM "myschema"."orders"`,
 				`TABLESAMPLE SYSTEM(5.5)`,
@@ -215,7 +218,24 @@ func TestGeneratePkeyOffsetsQuery(t *testing.T) {
 			tableSampleMethod: "BERNOULLI",
 			samplePercent:     10,
 			ntileCount:        100,
+			filter:            "",
 			wantErr:           true, // Assuming empty key columns is an invalid input causing SanitiseIdentifier to err
+		},
+		{
+			name:              "valid inputs - with filter clause",
+			schema:            "public",
+			table:             "users",
+			keyColumns:        []string{"id"},
+			tableSampleMethod: "SYSTEM_ROWS",
+			samplePercent:     1000,
+			ntileCount:        10,
+			filter:            `status = 'active'`,
+			wantQueryContains: []string{
+				`FROM "public"."users"`,
+				`WHERE status = 'active'`,
+				`TABLESAMPLE SYSTEM_ROWS(1000)`,
+			},
+			wantErr: false,
 		},
 	}
 
@@ -228,6 +248,7 @@ func TestGeneratePkeyOffsetsQuery(t *testing.T) {
 				tt.tableSampleMethod,
 				tt.samplePercent,
 				tt.ntileCount,
+				tt.filter,
 			)
 
 			if (err != nil) != tt.wantErr {
@@ -258,6 +279,7 @@ func TestBlockHashSQL(t *testing.T) {
 		primaryKeyCols    []string
 		includeLower      bool
 		includeUpper      bool
+		filter            string
 		wantQueryContains []string
 		wantErr           bool
 	}{
@@ -268,6 +290,7 @@ func TestBlockHashSQL(t *testing.T) {
 			primaryKeyCols: []string{"event_id"},
 			includeLower:   true,
 			includeUpper:   true,
+			filter:         "",
 			wantQueryContains: []string{
 				`FROM "public"."events" AS _tbl_`,
 				`ORDER BY "event_id"`,
@@ -283,6 +306,7 @@ func TestBlockHashSQL(t *testing.T) {
 			primaryKeyCols: []string{"order_id", "item_seq"},
 			includeLower:   true,
 			includeUpper:   true,
+			filter:         "",
 			wantQueryContains: []string{
 				`FROM "commerce"."line_items" AS _tbl_`,
 				`ORDER BY "order_id", "item_seq"`,
@@ -296,6 +320,7 @@ func TestBlockHashSQL(t *testing.T) {
 			schema:         "bad-schema!",
 			table:          "events",
 			primaryKeyCols: []string{"event_id"},
+			filter:         "",
 			wantErr:        true,
 		},
 		{
@@ -303,6 +328,7 @@ func TestBlockHashSQL(t *testing.T) {
 			schema:         "public",
 			table:          "events 123",
 			primaryKeyCols: []string{"event_id"},
+			filter:         "",
 			wantErr:        true,
 		},
 		{
@@ -310,6 +336,7 @@ func TestBlockHashSQL(t *testing.T) {
 			schema:         "public",
 			table:          "events",
 			primaryKeyCols: []string{"event-id"},
+			filter:         "",
 			wantErr:        true,
 		},
 		{
@@ -317,13 +344,27 @@ func TestBlockHashSQL(t *testing.T) {
 			schema:         "public",
 			table:          "events",
 			primaryKeyCols: []string{},
+			filter:         "",
 			wantErr:        true, // We need this to error out here
+		},
+		{
+			name:           "valid inputs - with filter",
+			schema:         "public",
+			table:          "events",
+			primaryKeyCols: []string{"event_id"},
+			includeLower:   false,
+			includeUpper:   false,
+			filter:         "status = 'live'",
+			wantQueryContains: []string{
+				`WHERE (status = 'live')`,
+			},
+			wantErr: false,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			query, err := BlockHashSQL(tt.schema, tt.table, tt.primaryKeyCols, "TD_BLOCK_HASH" /* mode */, tt.includeLower, tt.includeUpper)
+			query, err := BlockHashSQL(tt.schema, tt.table, tt.primaryKeyCols, "TD_BLOCK_HASH" /* mode */, tt.includeLower, tt.includeUpper, tt.filter)
 
 			if (err != nil) != tt.wantErr {
 				t.Errorf("BlockHashSQL() error = %v, wantErr %v", err, tt.wantErr)

@@ -24,7 +24,7 @@ import (
 	"github.com/jackc/pgx/v5/pgproto3"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/pgedge/ace/db/queries"
-	"github.com/pgedge/ace/internal/auth"
+	"github.com/pgedge/ace/internal/infra/db"
 	"github.com/pgedge/ace/pkg/config"
 	"github.com/pgedge/ace/pkg/logger"
 )

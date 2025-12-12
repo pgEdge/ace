@@ -14,6 +14,7 @@ package queries
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"regexp"
 	"strings"
@@ -81,6 +82,7 @@ func GeneratePkeyOffsetsQuery(
 	tableSampleMethod string,
 	samplePercent float64,
 	ntileCount int,
+	filter string,
 ) (string, error) {
 	if len(keyColumns) == 0 {
 		return "", fmt.Errorf("keyColumns cannot be empty")
@@ -162,6 +164,8 @@ func GeneratePkeyOffsetsQuery(
 		"RangeStartColumns":    strings.Join(rangeStarts, ",\n        "),
 		"RangeEndColumns":      strings.Join(rangeEnds, ",\n        "),
 		"RangeOutputColumns":   strings.Join(selectOutputCols, ",\n    "),
+		"HasFilter":            strings.TrimSpace(filter) != "",
+		"Filter":               strings.TrimSpace(filter),
 	}
 
 	return RenderSQL(SQLTemplates.GetPkeyOffsets, data)
@@ -498,7 +502,7 @@ func InsertBlockRangesBatchComposite(ctx context.Context, db DBQuerier, mtreeTab
 }
 
 func GetPkeyOffsets(ctx context.Context, db DBQuerier, schema, table string, keyColumns []string, tableSampleMethod string, samplePercent float64, ntileCount int) ([]types.PkeyOffset, error) {
-	sql, err := GeneratePkeyOffsetsQuery(schema, table, keyColumns, tableSampleMethod, samplePercent, ntileCount)
+	sql, err := GeneratePkeyOffsetsQuery(schema, table, keyColumns, tableSampleMethod, samplePercent, ntileCount, "")
 	if err != nil {
 		return nil, fmt.Errorf("failed to generate GetPkeyOffsets SQL: %w", err)
 	}
@@ -536,7 +540,7 @@ func GetPkeyOffsets(ctx context.Context, db DBQuerier, schema, table string, key
 	return offsets, nil
 }
 
-func BlockHashSQL(schema, table string, primaryKeyCols []string, mode string, includeLower, includeUpper bool) (string, error) {
+func BlockHashSQL(schema, table string, primaryKeyCols []string, mode string, includeLower, includeUpper bool, filter string) (string, error) {
 	if len(primaryKeyCols) == 0 {
 		return "", fmt.Errorf("primaryKeyCols cannot be empty")
 	}
@@ -608,6 +612,10 @@ func BlockHashSQL(schema, table string, primaryKeyCols []string, mode string, in
 			upperExpr = fmt.Sprintf("%s %s ROW(%s)", pkComparisonExpression, operator, strings.Join(endPlaceholders, ", "))
 		}
 		whereParts = append(whereParts, upperExpr)
+	}
+
+	if trimmed := strings.TrimSpace(filter); trimmed != "" {
+		whereParts = append(whereParts, fmt.Sprintf("(%s)", trimmed))
 	}
 
 	if len(whereParts) == 0 {
@@ -800,6 +808,64 @@ func GetSpockNodeAndSubInfo(ctx context.Context, db DBQuerier) ([]types.SpockNod
 	return infos, nil
 }
 
+func GetSpockNodeNames(ctx context.Context, db DBQuerier) (map[string]string, error) {
+	sql, err := RenderSQL(SQLTemplates.GetSpockNodeNames, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	rows, err := db.Query(ctx, sql)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	names := make(map[string]string)
+	for rows.Next() {
+		var id, name string
+		if err := rows.Scan(&id, &name); err != nil {
+			return nil, err
+		}
+		names[id] = name
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	return names, nil
+}
+
+func GetSpockOriginLSNForNode(ctx context.Context, db DBQuerier, failedNode, survivor string) (*string, error) {
+	sql, err := RenderSQL(SQLTemplates.GetSpockOriginLSNForNode, nil)
+	if err != nil {
+		return nil, err
+	}
+	var lsn *string
+	if err := db.QueryRow(ctx, sql, failedNode, survivor).Scan(&lsn); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("failed to fetch spock origin lsn: %w", err)
+	}
+	return lsn, nil
+}
+
+func GetSpockSlotLSNForNode(ctx context.Context, db DBQuerier, failedNode string) (*string, error) {
+	sql, err := RenderSQL(SQLTemplates.GetSpockSlotLSNForNode, nil)
+	if err != nil {
+		return nil, err
+	}
+	var lsn *string
+	if err := db.QueryRow(ctx, sql, failedNode).Scan(&lsn); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("failed to fetch spock slot lsn: %w", err)
+	}
+	return lsn, nil
+}
+
 func GetSpockRepSetInfo(ctx context.Context, db DBQuerier) ([]types.SpockRepSetInfo, error) {
 	sql, err := RenderSQL(SQLTemplates.SpockRepSetInfo, nil)
 	if err != nil {
@@ -829,6 +895,17 @@ func GetSpockRepSetInfo(ctx context.Context, db DBQuerier) ([]types.SpockRepSetI
 	}
 
 	return infos, nil
+}
+
+func EnsurePgcrypto(ctx context.Context, db DBQuerier) error {
+	sql, err := RenderSQL(SQLTemplates.EnsurePgcrypto, nil)
+	if err != nil {
+		return fmt.Errorf("failed to render ensure-pgcrypto SQL: %w", err)
+	}
+	if _, err := db.Exec(ctx, sql); err != nil {
+		return fmt.Errorf("failed to ensure pgcrypto extension: %w", err)
+	}
+	return nil
 }
 
 func CheckSchemaExists(ctx context.Context, db DBQuerier, schema string) (bool, error) {
@@ -1075,7 +1152,7 @@ func ComputeLeafHashes(ctx context.Context, db DBQuerier, schema, table string, 
 	hasLower := len(start) > 0 && !sliceAllNil(start)
 	hasUpper := len(end) > 0 && !sliceAllNil(end)
 
-	sql, err := BlockHashSQL(schema, table, key, "MTREE_LEAF_HASH", hasLower, hasUpper)
+	sql, err := BlockHashSQL(schema, table, key, "MTREE_LEAF_HASH", hasLower, hasUpper, "")
 	if err != nil {
 		return nil, err
 	}

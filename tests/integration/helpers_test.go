@@ -26,7 +26,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/pgedge/ace/internal/core"
+	"github.com/pgedge/ace/internal/consistency/repair"
 	"github.com/stretchr/testify/require"
 )
 
@@ -284,8 +284,8 @@ func loadDataFromCSV(
 	return nil
 }
 
-func newTestTableRepairTask(sourceOfTruthNode, qualifiedTableName, diffFilePath string) *core.TableRepairTask {
-	task := core.NewTableRepairTask()
+func newTestTableRepairTask(sourceOfTruthNode, qualifiedTableName, diffFilePath string) *repair.TableRepairTask {
+	task := repair.NewTableRepairTask()
 	task.ClusterName = "test_cluster"
 	task.DBName = dbName
 	task.SourceOfTruth = sourceOfTruthNode

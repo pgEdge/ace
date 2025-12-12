@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/pgedge/ace/internal/core"
+	"github.com/pgedge/ace/internal/consistency/diff"
 	"github.com/pgedge/ace/pkg/config"
 )
 
@@ -92,7 +92,7 @@ func buildTableDiffJob(cfg *config.Config, def config.JobDef, spec scheduleSpec)
 		return Job{}, fmt.Errorf("table_name is required for table-diff jobs")
 	}
 
-	base := core.NewTableDiffTask()
+	base := diff.NewTableDiffTask()
 	base.ClusterName = selectCluster(cfg, def.ClusterName)
 	base.QualifiedTableName = def.TableName
 	base.DBName = stringArg(def.Args, "dbname")
@@ -160,7 +160,7 @@ func buildSchemaDiffJob(cfg *config.Config, def config.JobDef, spec scheduleSpec
 		return Job{}, fmt.Errorf("schema_name is required for schema-diff jobs")
 	}
 
-	base := core.NewSchemaDiffTask()
+	base := diff.NewSchemaDiffTask()
 	base.ClusterName = selectCluster(cfg, def.ClusterName)
 	base.SchemaName = def.SchemaName
 	base.DBName = stringArg(def.Args, "dbname")
@@ -232,7 +232,7 @@ func buildRepsetDiffJob(cfg *config.Config, def config.JobDef, spec scheduleSpec
 		return Job{}, fmt.Errorf("repset_name is required for repset-diff jobs")
 	}
 
-	base := core.NewRepsetDiffTask()
+	base := diff.NewRepsetDiffTask()
 	base.ClusterName = selectCluster(cfg, def.ClusterName)
 	base.RepsetName = def.RepsetName
 	base.DBName = stringArg(def.Args, "dbname")
@@ -286,7 +286,7 @@ func buildRepsetDiffJob(cfg *config.Config, def config.JobDef, spec scheduleSpec
 			if err := runTask.RunChecks(true); err != nil {
 				return fmt.Errorf("checks failed: %w", err)
 			}
-			if err := core.RepsetDiff(runTask); err != nil {
+			if err := diff.RepsetDiff(runTask); err != nil {
 				return fmt.Errorf("execution failed: %w", err)
 			}
 			return nil

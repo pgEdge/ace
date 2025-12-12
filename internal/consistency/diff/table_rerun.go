@@ -9,7 +9,7 @@
 //
 // ///////////////////////////////////////////////////////////////////////////
 
-package core
+package diff
 
 import (
 	"context"
@@ -26,7 +26,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/pgedge/ace/db/queries"
-	"github.com/pgedge/ace/internal/auth"
+	"github.com/pgedge/ace/internal/infra/db"
 	utils "github.com/pgedge/ace/pkg/common"
 	"github.com/pgedge/ace/pkg/logger"
 	"github.com/pgedge/ace/pkg/types"
@@ -78,6 +78,10 @@ func (t *TableDiffTask) ExecuteRerunTask() error {
 			p.Close()
 		}
 	}()
+
+	if err := t.loadSpockNodeNames(); err != nil {
+		logger.Warn("table-diff rerun: unable to load spock node names; using raw node_origin values: %v", err)
+	}
 
 	// Collect all unique primary keys from the original diff report
 	allPkeys, err := t.collectPkeysFromDiff()
@@ -370,12 +374,12 @@ func (t *TableDiffTask) reCompareDiffs(fetchedRowsByNode map[string]map[string]t
 				persistentDiffCount++
 				if nowOnNode1 {
 					rowAsMap := utils.OrderedMapToMap(newRow1)
-					rowWithMeta := utils.AddSpockMetadata(rowAsMap)
+					rowWithMeta := t.withSpockMetadata(rowAsMap)
 					newDiffsForPair.Rows[node1] = append(newDiffsForPair.Rows[node1], utils.MapToOrderedMap(rowWithMeta, t.Cols))
 				}
 				if nowOnNode2 {
 					rowAsMap := utils.OrderedMapToMap(newRow2)
-					rowWithMeta := utils.AddSpockMetadata(rowAsMap)
+					rowWithMeta := t.withSpockMetadata(rowAsMap)
 					newDiffsForPair.Rows[node2] = append(newDiffsForPair.Rows[node2], utils.MapToOrderedMap(rowWithMeta, t.Cols))
 				}
 			}
