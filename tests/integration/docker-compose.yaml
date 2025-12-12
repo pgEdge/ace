@@ -38,6 +38,10 @@ configs:
           {
             "name": "n2",
             "hostname": "postgres-n2"
+          },
+          {
+            "name": "n3",
+            "hostname": "postgres-n3"
           }
         ]
       }
@@ -66,3 +70,15 @@ services:
     ports:
       - target: 5432
         published: 6433
+  postgres-n3:
+    image: pgedge/pgedge:pg17-latest
+    environment:
+      - NODE_NAME=n3
+    configs:
+      - source: db-spec
+        target: /home/pgedge/db.json
+        gid: "1020"
+        uid: "1020"
+    ports:
+      - target: 5432
+        published: 6434

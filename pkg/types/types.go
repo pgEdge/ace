@@ -113,12 +113,14 @@ type DiffSummary struct {
 	StartTime             string         `json:"start_time"`
 	EndTime               string         `json:"end_time"`
 	TimeTaken             string         `json:"time_taken"`
-	DiffRowsCount         map[string]int `json:"diff_rows_count"`    // Key: "nodeA/nodeB", Value: count of differing rows
+	DiffRowsCount         map[string]int `json:"diff_rows_count"` // Key: "nodeA/nodeB", Value: count of differing rows
 	DiffRowLimitReached   bool           `json:"diff_row_limit_reached"`
 	TotalRowsChecked      int64          `json:"total_rows_checked"` // Estimated
 	InitialRangesCount    int            `json:"initial_ranges_count"`
 	MismatchedRangesCount int            `json:"mismatched_ranges_count"`
 	PrimaryKey            []string       `json:"primary_key"`
+	OnlyOrigin            string         `json:"only_origin,omitempty"`
+	Until                 string         `json:"until,omitempty"`
 }
 
 type KVPair struct {

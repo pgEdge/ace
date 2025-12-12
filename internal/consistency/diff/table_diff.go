@@ -73,6 +73,11 @@ type TableDiffTask struct {
 	TableFilter       string
 	QuietMode         bool
 
+	OnlyOrigin string
+	Until      string
+
+	EffectiveFilter string
+
 	Mode              string
 	OverrideBlockSize bool
 
@@ -108,6 +113,9 @@ type TableDiffTask struct {
 
 	totalDiffRows      atomic.Int64
 	diffLimitTriggered atomic.Bool
+
+	resolvedOnlyOrigin string
+	untilTime          *time.Time
 
 	Ctx context.Context
 }
@@ -195,6 +203,62 @@ func (t *TableDiffTask) loadSpockNodeNames() error {
 	return nil
 }
 
+func (t *TableDiffTask) resolveOnlyOrigin() error {
+	if strings.TrimSpace(t.OnlyOrigin) == "" {
+		return nil
+	}
+	if len(t.SpockNodeNames) == 0 {
+		return fmt.Errorf("unable to resolve --only-origin: spock node names not available")
+	}
+
+	orig := strings.TrimSpace(t.OnlyOrigin)
+	// direct match on id
+	if _, ok := t.SpockNodeNames[orig]; ok {
+		t.resolvedOnlyOrigin = orig
+		return nil
+	}
+
+	// match on name
+	for id, name := range t.SpockNodeNames {
+		if name == orig {
+			t.resolvedOnlyOrigin = id
+			return nil
+		}
+	}
+
+	return fmt.Errorf("unable to resolve only-origin %q to a spock node id", t.OnlyOrigin)
+}
+
+func (t *TableDiffTask) buildEffectiveFilter() (string, error) {
+	if t.untilTime == nil && strings.TrimSpace(t.Until) != "" {
+		parsed, err := time.Parse(time.RFC3339, strings.TrimSpace(t.Until))
+		if err != nil {
+			return "", fmt.Errorf("invalid value for --until (expected RFC3339 timestamp): %w", err)
+		}
+		t.untilTime = &parsed
+	}
+
+	var parts []string
+	trimmed := strings.TrimSpace(t.TableFilter)
+	if trimmed != "" {
+		parts = append(parts, fmt.Sprintf("(%s)", trimmed))
+	}
+
+	if t.resolvedOnlyOrigin != "" {
+		escaped := strings.ReplaceAll(t.resolvedOnlyOrigin, "'", "''")
+		parts = append(parts, fmt.Sprintf("(to_json(spock.xact_commit_timestamp_origin(xmin))->>'roident' = '%s')", escaped))
+	}
+
+	if t.untilTime != nil {
+		parts = append(parts, fmt.Sprintf("(pg_xact_commit_timestamp(xmin) <= '%s'::timestamptz)", t.untilTime.Format(time.RFC3339)))
+	}
+
+	if len(parts) == 0 {
+		return "", nil
+	}
+	return strings.Join(parts, " AND "), nil
+}
+
 func (t *TableDiffTask) withSpockMetadata(row map[string]any) map[string]any {
 	row["node_origin"] = utils.TranslateNodeOrigin(row["node_origin"], t.SpockNodeNames)
 	return utils.AddSpockMetadata(row)
@@ -257,8 +321,8 @@ func (t *TableDiffTask) estimateRowCount(pool *pgxpool.Pool, nodeName string) (i
 	tableIdent := pgx.Identifier{t.Table}.Sanitize()
 
 	query := fmt.Sprintf("EXPLAIN (FORMAT JSON) SELECT 1 FROM %s.%s", schemaIdent, tableIdent)
-	if strings.TrimSpace(t.TableFilter) != "" {
-		query = fmt.Sprintf("%s WHERE %s", query, t.TableFilter)
+	if strings.TrimSpace(t.EffectiveFilter) != "" {
+		query = fmt.Sprintf("%s WHERE %s", query, t.EffectiveFilter)
 	}
 
 	var planJSON []byte
@@ -270,13 +334,13 @@ func (t *TableDiffTask) estimateRowCount(pool *pgxpool.Pool, nodeName string) (i
 }
 
 func (t *TableDiffTask) ensureFilterHasRows(pool *pgxpool.Pool, nodeName string) error {
-	if strings.TrimSpace(t.TableFilter) == "" {
+	if strings.TrimSpace(t.EffectiveFilter) == "" {
 		return nil
 	}
 
 	schemaIdent := pgx.Identifier{t.Schema}.Sanitize()
 	tableIdent := pgx.Identifier{t.Table}.Sanitize()
-	sql := fmt.Sprintf("SELECT 1 FROM %s.%s WHERE %s LIMIT 1", schemaIdent, tableIdent, t.TableFilter)
+	sql := fmt.Sprintf("SELECT 1 FROM %s.%s WHERE %s LIMIT 1", schemaIdent, tableIdent, t.EffectiveFilter)
 
 	var one int
 	if err := pool.QueryRow(t.Ctx, sql).Scan(&one); err != nil {
@@ -304,7 +368,7 @@ func (t *TableDiffTask) getBlockHashSQL(hasLower, hasUpper bool) (string, error)
 		return sql, nil
 	}
 
-	query, err := queries.BlockHashSQL(t.Schema, t.Table, t.Key, "TD_BLOCK_HASH" /* mode */, hasLower, hasUpper, t.TableFilter)
+	query, err := queries.BlockHashSQL(t.Schema, t.Table, t.Key, "TD_BLOCK_HASH" /* mode */, hasLower, hasUpper, t.EffectiveFilter)
 	if err != nil {
 		return "", err
 	}
@@ -405,8 +469,8 @@ func (t *TableDiffTask) fetchRows(nodeName string, r Range) ([]types.OrderedMap,
 	var conditions []string
 	paramIndex := 1
 
-	if strings.TrimSpace(t.TableFilter) != "" {
-		conditions = append(conditions, fmt.Sprintf("(%s)", t.TableFilter))
+	if strings.TrimSpace(t.EffectiveFilter) != "" {
+		conditions = append(conditions, fmt.Sprintf("(%s)", t.EffectiveFilter))
 	}
 
 	if r.Start != nil {
@@ -644,6 +708,14 @@ func (t *TableDiffTask) Validate() error {
 
 	if t.Output != "json" && t.Output != "html" {
 		return fmt.Errorf("table-diff currently supports only json and html output formats")
+	}
+
+	if trimmed := strings.TrimSpace(t.Until); trimmed != "" {
+		parsed, err := time.Parse(time.RFC3339, trimmed)
+		if err != nil {
+			return fmt.Errorf("invalid value for --until (expected RFC3339 timestamp): %w", err)
+		}
+		t.untilTime = &parsed
 	}
 
 	nodeList, err := utils.ParseNodes(t.Nodes)
@@ -926,6 +998,8 @@ func (t *TableDiffTask) CloneForSchedule(ctx context.Context) *TableDiffTask {
 	cloned.CompareUnitSize = t.CompareUnitSize
 	cloned.MaxDiffRows = t.MaxDiffRows
 	cloned.EnsurePgcrypto = t.EnsurePgcrypto
+	cloned.OnlyOrigin = t.OnlyOrigin
+	cloned.Until = t.Until
 	cloned.Ctx = ctx
 	return cloned
 }
@@ -1145,6 +1219,15 @@ func (t *TableDiffTask) ExecuteTask() (err error) {
 		logger.Warn("table-diff: unable to load spock node names; using raw node_origin values: %v", err)
 	}
 
+	if err := t.resolveOnlyOrigin(); err != nil {
+		return err
+	}
+	effectiveFilter, err := t.buildEffectiveFilter()
+	if err != nil {
+		return err
+	}
+	t.EffectiveFilter = effectiveFilter
+
 	if _, err = t.getBlockHashSQL(true, true); err != nil {
 		return fmt.Errorf("failed to build block-hash SQL: %w", err)
 	}
@@ -1176,7 +1259,7 @@ func (t *TableDiffTask) ExecuteTask() (err error) {
 		Summary: types.DiffSummary{
 			Schema:            t.Schema,
 			Table:             t.BaseTable,
-			TableFilter:       t.TableFilter,
+			TableFilter:       t.EffectiveFilter,
 			Nodes:             t.NodeList,
 			BlockSize:         t.BlockSize,
 			CompareUnitSize:   t.CompareUnitSize,
@@ -1185,6 +1268,13 @@ func (t *TableDiffTask) ExecuteTask() (err error) {
 			StartTime:         startTime.Format(time.RFC3339),
 			TotalRowsChecked:  int64(maxCount),
 			DiffRowsCount:     make(map[string]int),
+			OnlyOrigin:        t.resolvedOnlyOrigin,
+			Until: func() string {
+				if t.untilTime != nil {
+					return t.untilTime.Format(time.RFC3339)
+				}
+				return strings.TrimSpace(t.Until)
+			}(),
 		},
 	}
 
@@ -1226,7 +1316,7 @@ func (t *TableDiffTask) ExecuteTask() (err error) {
 		ntileCount = 1
 	}
 
-	querySQL, err := queries.GeneratePkeyOffsetsQuery(t.Schema, t.Table, t.Key, sampleMethod, samplePercent, ntileCount, t.TableFilter)
+	querySQL, err := queries.GeneratePkeyOffsetsQuery(t.Schema, t.Table, t.Key, sampleMethod, samplePercent, ntileCount, t.EffectiveFilter)
 	logger.Debug("Generated offsets query: %s", querySQL)
 	if err != nil {
 		return fmt.Errorf("failed to generate offsets query: %w", err)

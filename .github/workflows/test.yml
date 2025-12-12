@@ -36,3 +36,6 @@ jobs:
 
     - name: Run CDC regression tests
       run: go test -count=1 -v ./tests/integration -run 'CDC'
+
+    - name: Run crash recovery origin-filter test
+      run: go test -count=1 -v ./tests/integration -run 'TestTableDiffOnlyOriginWithUntil'

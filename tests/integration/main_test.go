@@ -15,6 +15,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"path/filepath"
@@ -26,6 +27,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/pgedge/ace/pkg/config"
 	"github.com/pgedge/ace/pkg/types"
+	tcLog "github.com/testcontainers/testcontainers-go/log"
 	"github.com/testcontainers/testcontainers-go/modules/compose"
 	"github.com/testcontainers/testcontainers-go/wait"
 )
@@ -38,8 +40,10 @@ const (
 	dbName          = "example_db"
 	serviceN1       = "postgres-n1"
 	serviceN2       = "postgres-n2"
+	serviceN3       = "postgres-n3"
 	hostPortN1      = "6432"
 	hostPortN2      = "6433"
+	hostPortN3      = "6434"
 	containerPort   = "5432/tcp"
 	composeFilePath = "docker-compose.yaml"
 	startupTimeout  = 3 * time.Minute
@@ -56,6 +60,9 @@ var pgCluster struct {
 	Node2Host    string
 	Node2Port    string
 	Node2Pool    *pgxpool.Pool
+	Node3Host    string
+	Node3Port    string
+	Node3Pool    *pgxpool.Pool
 	ClusterName  string
 	ClusterNodes []map[string]any
 }
@@ -172,6 +179,44 @@ func setupPostgresCluster(t *testing.T) error {
 	pgCluster.Node2Pool = poolN2
 	log.Printf("Successfully connected to %s", serviceN2)
 
+	n3Container, err := composeStack.ServiceContainer(context.Background(), serviceN3)
+	if err != nil {
+		return fmt.Errorf("failed to get container for service %s: %w", serviceN3, err)
+	}
+	hostN3, err := n3Container.Host(context.Background())
+	if err != nil {
+		return fmt.Errorf("failed to get host for %s: %w", serviceN3, err)
+	}
+	cPortN3, err := nat.NewPort("tcp", strings.Split(containerPort, "/")[0])
+	if err != nil {
+		return fmt.Errorf("failed to create nat.Port for %s: %w", serviceN3, err)
+	}
+	portN3Mapped, err := n3Container.MappedPort(context.Background(), cPortN3)
+	if err != nil {
+		return fmt.Errorf("failed to get mapped port for %s: %w", serviceN3, err)
+	}
+	pgCluster.Node3Host = hostN3
+	pgCluster.Node3Port = portN3Mapped.Port()
+	log.Printf(
+		"Node 3 (%s) accessible at %s:%s",
+		serviceN3,
+		pgCluster.Node3Host,
+		pgCluster.Node3Port,
+	)
+
+	poolN3, err := connectToNode(
+		pgCluster.Node3Host,
+		pgCluster.Node3Port,
+		pgEdgeUser,
+		pgEdgePassword,
+		dbName,
+	)
+	if err != nil {
+		return fmt.Errorf("failed to connect to %s: %w", serviceN3, err)
+	}
+	pgCluster.Node3Pool = poolN3
+	log.Printf("Successfully connected to %s", serviceN3)
+
 	pgCluster.ClusterName = "test_cluster"
 	pgCluster.ClusterNodes = []map[string]any{
 		{
@@ -190,6 +235,14 @@ func setupPostgresCluster(t *testing.T) error {
 			"DBPassword": pgEdgePassword,
 			"DBName":     dbName,
 		},
+		{
+			"Name":       serviceN3,
+			"PublicIP":   pgCluster.Node3Host,
+			"Port":       float64(6434),
+			"DBUser":     pgEdgeUser,
+			"DBPassword": pgEdgePassword,
+			"DBName":     dbName,
+		},
 	}
 
 	// Need this for using pg's 'digest' function
@@ -200,6 +253,7 @@ func setupPostgresCluster(t *testing.T) error {
 	}{
 		{serviceN1, pgCluster.Node1Pool},
 		{serviceN2, pgCluster.Node2Pool},
+		{serviceN3, pgCluster.Node3Pool},
 	}
 
 	for _, node := range poolsToConfigure {
@@ -320,6 +374,7 @@ func TestMain(m *testing.M) {
 		"TESTCONTAINERS_RYUK_DISABLED",
 		"true",
 	)
+	tcLog.SetDefault(log.New(io.Discard, "", 0))
 
 	if err := config.Init("../../ace.yaml"); err != nil {
 		log.Fatalf("Failed to load config: %v", err)
@@ -388,7 +443,7 @@ func setupSharedCustomersTable(tableName string) error {
 	ctx := context.Background()
 	qualifiedTableName := fmt.Sprintf("%s.%s", testSchema, tableName)
 
-	for _, pool := range []*pgxpool.Pool{pgCluster.Node1Pool, pgCluster.Node2Pool} {
+	for _, pool := range []*pgxpool.Pool{pgCluster.Node1Pool, pgCluster.Node2Pool, pgCluster.Node3Pool} {
 		if err := createTestTable(ctx, pool, testSchema, tableName); err != nil {
 			return fmt.Errorf("failed to create shared table %s: %w", qualifiedTableName, err)
 		}

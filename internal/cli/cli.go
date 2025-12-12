@@ -134,6 +134,16 @@ func SetupCLI() *cli.App {
 			Usage:   "Where clause expression to use while diffing tables",
 			Value:   "",
 		},
+		&cli.StringFlag{
+			Name:  "only-origin",
+			Usage: "Restrict diff to rows whose node_origin matches this Spock node id or name",
+			Value: "",
+		},
+		&cli.StringFlag{
+			Name:  "until",
+			Usage: "Optional commit timestamp upper bound (RFC3339) for rows to include",
+			Value: "",
+		},
 		&cli.BoolFlag{
 			Name:  "ensure-pgcrypto",
 			Usage: "Ensure pgcrypto extension is installed on each node before diffing",
@@ -866,6 +876,8 @@ func TableDiffCLI(ctx *cli.Context) error {
 	scheduleEnabled := ctx.Bool("schedule")
 	scheduleEvery := ctx.String("every")
 	task.TableFilter = ctx.String("table-filter")
+	task.OnlyOrigin = ctx.String("only-origin")
+	task.Until = ctx.String("until")
 	task.QuietMode = ctx.Bool("quiet")
 	task.OverrideBlockSize = ctx.Bool("override-block-size")
 	task.Ctx = context.Background()
