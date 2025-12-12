@@ -1227,6 +1227,7 @@ func (t *TableDiffTask) ExecuteTask() (err error) {
 		return err
 	}
 	t.EffectiveFilter = effectiveFilter
+	t.DiffSummary["effective_filter"] = effectiveFilter
 
 	if _, err = t.getBlockHashSQL(true, true); err != nil {
 		return fmt.Errorf("failed to build block-hash SQL: %w", err)
@@ -1259,7 +1260,8 @@ func (t *TableDiffTask) ExecuteTask() (err error) {
 		Summary: types.DiffSummary{
 			Schema:            t.Schema,
 			Table:             t.BaseTable,
-			TableFilter:       t.EffectiveFilter,
+			TableFilter:       t.TableFilter,
+			EffectiveFilter:   t.EffectiveFilter,
 			Nodes:             t.NodeList,
 			BlockSize:         t.BlockSize,
 			CompareUnitSize:   t.CompareUnitSize,

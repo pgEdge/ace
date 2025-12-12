@@ -119,6 +119,7 @@ type DiffSummary struct {
 	InitialRangesCount    int            `json:"initial_ranges_count"`
 	MismatchedRangesCount int            `json:"mismatched_ranges_count"`
 	PrimaryKey            []string       `json:"primary_key"`
+	EffectiveFilter       string         `json:"effective_filter,omitempty"`
 	OnlyOrigin            string         `json:"only_origin,omitempty"`
 	Until                 string         `json:"until,omitempty"`
 }
