@@ -14,6 +14,7 @@ package queries
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"regexp"
 	"strings"
@@ -833,6 +834,36 @@ func GetSpockNodeNames(ctx context.Context, db DBQuerier) (map[string]string, er
 	}
 
 	return names, nil
+}
+
+func GetSpockOriginLSNForNode(ctx context.Context, db DBQuerier, failedNode, survivor string) (*string, error) {
+	sql, err := RenderSQL(SQLTemplates.GetSpockOriginLSNForNode, nil)
+	if err != nil {
+		return nil, err
+	}
+	var lsn *string
+	if err := db.QueryRow(ctx, sql, failedNode, survivor).Scan(&lsn); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("failed to fetch spock origin lsn: %w", err)
+	}
+	return lsn, nil
+}
+
+func GetSpockSlotLSNForNode(ctx context.Context, db DBQuerier, failedNode string) (*string, error) {
+	sql, err := RenderSQL(SQLTemplates.GetSpockSlotLSNForNode, nil)
+	if err != nil {
+		return nil, err
+	}
+	var lsn *string
+	if err := db.QueryRow(ctx, sql, failedNode).Scan(&lsn); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("failed to fetch spock slot lsn: %w", err)
+	}
+	return lsn, nil
 }
 
 func GetSpockRepSetInfo(ctx context.Context, db DBQuerier) ([]types.SpockRepSetInfo, error) {

@@ -121,7 +121,9 @@ type DiffSummary struct {
 	PrimaryKey            []string       `json:"primary_key"`
 	EffectiveFilter       string         `json:"effective_filter,omitempty"`
 	OnlyOrigin            string         `json:"only_origin,omitempty"`
+	OnlyOriginResolved    string         `json:"only_origin_resolved,omitempty"`
 	Until                 string         `json:"until,omitempty"`
+	OriginOnly            bool           `json:"origin_only,omitempty"`
 }
 
 type KVPair struct {

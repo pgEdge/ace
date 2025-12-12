@@ -1271,12 +1271,21 @@ func (t *TableDiffTask) ExecuteTask() (err error) {
 			TotalRowsChecked:  int64(maxCount),
 			DiffRowsCount:     make(map[string]int),
 			OnlyOrigin:        t.resolvedOnlyOrigin,
+			OnlyOriginResolved: func() string {
+				if t.resolvedOnlyOrigin != "" && t.SpockNodeNames != nil {
+					if name, ok := t.SpockNodeNames[t.resolvedOnlyOrigin]; ok {
+						return name
+					}
+				}
+				return ""
+			}(),
 			Until: func() string {
 				if t.untilTime != nil {
 					return t.untilTime.Format(time.RFC3339)
 				}
 				return strings.TrimSpace(t.Until)
 			}(),
+			OriginOnly: t.resolvedOnlyOrigin != "",
 		},
 	}
 

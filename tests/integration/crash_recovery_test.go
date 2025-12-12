@@ -10,6 +10,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/pgedge/ace/internal/consistency/diff"
+	"github.com/pgedge/ace/internal/consistency/repair"
 	"github.com/stretchr/testify/require"
 )
 
@@ -157,6 +158,24 @@ func TestTableDiffOnlyOriginWithUntil(t *testing.T) {
 		t.Fatalf("diff summary should record until cutoff")
 	}
 	log.Printf("only-origin diff detected %d row missing on %s (origin n3)", len(nodeDiffs.Rows[serviceN1]), serviceN2)
+
+	// Run recovery-mode repair using the diff file and ensure n2 is healed
+	repairTask := repair.NewTableRepairTask()
+	repairTask.ClusterName = pgCluster.ClusterName
+	repairTask.QualifiedTableName = qualified
+	repairTask.DBName = dbName
+	repairTask.Nodes = strings.Join([]string{serviceN1, serviceN2}, ",")
+	repairTask.DiffFilePath = task.DiffFilePath
+	repairTask.RecoveryMode = true
+	repairTask.SourceOfTruth = serviceN1 // explicit SoT to avoid relying on LSN availability in test container setup
+	repairTask.Ctx = context.Background()
+
+	require.NoError(t, repairTask.ValidateAndPrepare())
+	require.NoError(t, repairTask.Run(true))
+
+	var countAfter int
+	require.NoError(t, pgCluster.Node2Pool.QueryRow(ctx, fmt.Sprintf("SELECT count(*) FROM %s WHERE id=$1", qualified), insertedIDs[0]).Scan(&countAfter))
+	require.Equal(t, 1, countAfter, "recovery repair should restore missing row on n2")
 }
 
 func addNetemDelay(ctx context.Context, service, delay string) error {

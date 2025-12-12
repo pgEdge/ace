@@ -219,6 +219,11 @@ func SetupCLI() *cli.App {
 			Value:   false,
 		},
 		&cli.BoolFlag{
+			Name:  "recovery-mode",
+			Usage: "Enable recovery-mode repair using origin-only diffs",
+			Value: false,
+		},
+		&cli.BoolFlag{
 			Name:    "fix-nulls",
 			Aliases: []string{"X"},
 			Usage:   "Fill NULL columns on each node using non-NULL values from its peers (no source-of-truth required)",
@@ -1193,6 +1198,7 @@ func TableRepairCLI(ctx *cli.Context) error {
 	task.FixNulls = ctx.Bool("fix-nulls")
 	task.Bidirectional = ctx.Bool("bidirectional")
 	task.GenerateReport = ctx.Bool("generate-report")
+	task.RecoveryMode = ctx.Bool("recovery-mode")
 
 	if err := task.ValidateAndPrepare(); err != nil {
 		return fmt.Errorf("validation failed: %w", err)

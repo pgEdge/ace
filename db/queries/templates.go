@@ -118,6 +118,8 @@ type Templates struct {
 	AlterPublicationDropTable        *template.Template
 	DeleteMetadata                   *template.Template
 	RemoveTableFromCDCMetadata       *template.Template
+	GetSpockOriginLSNForNode         *template.Template
+	GetSpockSlotLSNForNode           *template.Template
 }
 
 var SQLTemplates = Templates{
@@ -618,7 +620,7 @@ var SQLTemplates = Templates{
 			AND a.attname = ANY($3::text[])
 			AND a.attnum > 0 AND NOT a.attisdropped;
 	`)),
-GetPkeyOffsets: template.Must(template.New("pkeyOffsets").Parse(`
+	GetPkeyOffsets: template.Must(template.New("pkeyOffsets").Parse(`
 		WITH sampled_data AS (
 			SELECT
 				{{.KeyColumnsSelect}}
@@ -1522,5 +1524,23 @@ GetPkeyOffsets: template.Must(template.New("pkeyOffsets").Parse(`
 	`)),
 	CreateSchema: template.Must(template.New("createSchema").Parse(`
 		CREATE SCHEMA IF NOT EXISTS {{.SchemaName}}
+	`)),
+	GetSpockOriginLSNForNode: template.Must(template.New("getSpockOriginLSNForNode").Parse(`
+		SELECT ros.remote_lsn::text
+		FROM pg_catalog.pg_replication_origin_status ros
+		JOIN pg_catalog.pg_replication_origin ro ON ro.roident = ros.local_id
+		WHERE ro.roname LIKE 'spk_%_' || $1 || '_sub_' || $1 || '_' || $2
+			AND ros.remote_lsn IS NOT NULL
+		LIMIT 1
+	`)),
+	GetSpockSlotLSNForNode: template.Must(template.New("getSpockSlotLSNForNode").Parse(`
+		SELECT rs.confirmed_flush_lsn::text
+		FROM pg_catalog.pg_replication_slots rs
+		JOIN spock.subscription s ON rs.slot_name = s.sub_slot_name
+		JOIN spock.node o ON o.node_id = s.sub_origin
+		WHERE o.node_name = $1
+			AND rs.confirmed_flush_lsn IS NOT NULL
+		ORDER BY rs.confirmed_flush_lsn DESC
+		LIMIT 1
 	`)),
 }

@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pglogrepl"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/pgedge/ace/db/queries"
@@ -68,6 +69,7 @@ type TableRepairTask struct {
 	GenerateReport bool
 	FixNulls       bool // TBD
 	Bidirectional  bool
+	RecoveryMode   bool
 
 	InvokeMethod string // TBD
 	ClientRole   string // TBD
@@ -83,6 +85,10 @@ type TableRepairTask struct {
 	report   *RepairReport
 
 	planRuleMatches map[string]map[string]string // populated when using repair plans
+
+	autoSelectedSourceOfTruth string
+	autoSelectionFailedNode   string
+	autoSelectionDetails      map[string]map[string]string
 
 	Ctx context.Context
 }
@@ -170,6 +176,10 @@ func (tr *TableRepairTask) checkRepairOptionsCompatibility() error {
 func (tr *TableRepairTask) checkIfSourceOfTruthIsNeeded() bool {
 	// Advanced repair plans can encode SOT choices per rule, so skip mandatory SoT when a plan is supplied.
 	if strings.TrimSpace(tr.RepairPlanPath) != "" || tr.RepairPlan != nil {
+		return false
+	}
+	if tr.RecoveryMode {
+		// in recovery mode we'll auto-select if missing
 		return false
 	}
 	casesNotNeeded := []bool{
@@ -279,6 +289,9 @@ func (t *TableRepairTask) ValidateAndPrepare() error {
 	if t.RawDiffs.Summary.TableFilter != "" {
 		logger.Info("Diff file was generated with table filter: %s", t.RawDiffs.Summary.TableFilter)
 	}
+	if strings.TrimSpace(t.RawDiffs.Summary.OnlyOrigin) != "" && !t.RecoveryMode {
+		return fmt.Errorf("diff file indicates origin-only comparison; re-run table-repair with --recovery-mode or provide an explicit source_of_truth")
+	}
 
 	if strings.TrimSpace(t.RepairPlanPath) != "" {
 		if err := t.loadRepairPlan(strings.TrimSpace(t.RepairPlanPath)); err != nil {
@@ -315,6 +328,25 @@ func (t *TableRepairTask) ValidateAndPrepare() error {
 	}
 
 	t.ClusterNodes = clusterNodes
+
+	if strings.TrimSpace(t.RawDiffs.Summary.OnlyOrigin) != "" && t.RecoveryMode && t.SourceOfTruth == "" {
+		failedNode := strings.TrimSpace(t.RawDiffs.Summary.OnlyOriginResolved)
+		if failedNode == "" {
+			failedNode = strings.TrimSpace(t.RawDiffs.Summary.OnlyOrigin)
+		}
+		if failedNode == "" {
+			return fmt.Errorf("recovery-mode requires failed node information in diff summary")
+		}
+		selected, details, err := t.autoSelectSourceOfTruth(failedNode, involvedNodeNames)
+		if err != nil {
+			return err
+		}
+		t.autoSelectedSourceOfTruth = selected
+		t.autoSelectionFailedNode = failedNode
+		t.autoSelectionDetails = details
+		t.SourceOfTruth = selected
+		logger.Info("table-repair: recovery-mode selected %s as source_of_truth (failed node: %s)", selected, failedNode)
+	}
 
 	// Repair needs these privileges. Perhaps we can pare this down depending
 	// on the repair options, but for now we'll keep it as is.
@@ -476,6 +508,15 @@ func (t *TableRepairTask) initialiseReport() *RepairReport {
 		"fire_triggers":    t.FireTriggers,
 		"generate_report":  t.GenerateReport,
 		"bidirectional":    t.Bidirectional,
+		"recovery_mode":    t.RecoveryMode,
+	}
+
+	if t.autoSelectedSourceOfTruth != "" {
+		report.Changes["auto_source_of_truth"] = map[string]any{
+			"selected":    t.autoSelectedSourceOfTruth,
+			"failed_node": t.autoSelectionFailedNode,
+			"lsn_probe":   t.autoSelectionDetails,
+		}
 	}
 
 	dbInfoForReport := t.Database
@@ -2150,4 +2191,107 @@ func calculateRepairSetsWithSourceOfTruth(task *TableRepairTask) (map[string]map
 		}
 	}
 	return fullRowsToUpsert, fullRowsToDelete, nil
+}
+
+func (t *TableRepairTask) fetchLSNsForNode(pool *pgxpool.Pool, failedNode, survivor string) (originLSN *uint64, slotLSN *uint64, err error) {
+	var originStr *string
+	originStr, err = queries.GetSpockOriginLSNForNode(t.Ctx, pool, failedNode, survivor)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to fetch origin lsn on %s: %w", survivor, err)
+	}
+	if originStr != nil {
+		if val, parseErr := pglogrepl.ParseLSN(*originStr); parseErr == nil {
+			tmp := uint64(val)
+			originLSN = &tmp
+		}
+	}
+
+	var slotStr *string
+	slotStr, err = queries.GetSpockSlotLSNForNode(t.Ctx, pool, failedNode)
+	if err != nil {
+		return originLSN, nil, fmt.Errorf("failed to fetch slot lsn on %s: %w", survivor, err)
+	}
+	if slotStr != nil {
+		if val, parseErr := pglogrepl.ParseLSN(*slotStr); parseErr == nil {
+			tmp := uint64(val)
+			slotLSN = &tmp
+		}
+	}
+
+	return originLSN, slotLSN, nil
+}
+
+func formatLSN(val *uint64) string {
+	if val == nil {
+		return ""
+	}
+	return pglogrepl.LSN(*val).String()
+}
+
+func (t *TableRepairTask) autoSelectSourceOfTruth(failedNode string, involved map[string]bool) (string, map[string]map[string]string, error) {
+	lsnDetails := make(map[string]map[string]string)
+
+	type candidate struct {
+		node    string
+		val     uint64
+		valType string
+	}
+	var best *candidate
+
+	for _, nodeInfo := range t.ClusterNodes {
+		nodeName, _ := nodeInfo["Name"].(string)
+		if nodeName == "" || nodeName == failedNode {
+			continue
+		}
+		if len(involved) > 0 && !involved[nodeName] {
+			continue
+		}
+
+		pool, err := auth.GetClusterNodeConnection(t.Ctx, nodeInfo, t.connOpts())
+		if err != nil {
+			logger.Warn("recovery-mode: failed to connect to %s for LSN probe: %v", nodeName, err)
+			continue
+		}
+		originLSN, slotLSN, err := t.fetchLSNsForNode(pool, failedNode, nodeName)
+		if err != nil {
+			logger.Warn("recovery-mode: failed to fetch LSNs on %s: %v", nodeName, err)
+			pool.Close()
+			continue
+		}
+
+		if t.Pools[nodeName] == nil {
+			t.Pools[nodeName] = pool
+		} else {
+			pool.Close()
+		}
+
+		lsnDetails[nodeName] = map[string]string{
+			"origin_lsn": formatLSN(originLSN),
+			"slot_lsn":   formatLSN(slotLSN),
+		}
+
+		var candidateVal uint64
+		var candidateType string
+		if originLSN != nil {
+			candidateVal = *originLSN
+			candidateType = "origin"
+		} else if slotLSN != nil {
+			candidateVal = *slotLSN
+			candidateType = "slot"
+		} else {
+			continue
+		}
+
+		if best == nil || candidateVal > best.val {
+			best = &candidate{node: nodeName, val: candidateVal, valType: candidateType}
+		} else if candidateVal == best.val {
+			return "", lsnDetails, fmt.Errorf("nodes %s and %s have identical %s LSNs; specify source_of_truth explicitly", best.node, nodeName, candidateType)
+		}
+	}
+
+	if best == nil {
+		return "", lsnDetails, fmt.Errorf("unable to determine source_of_truth in recovery-mode: no LSNs available for failed node %s", failedNode)
+	}
+
+	return best.node, lsnDetails, nil
 }
