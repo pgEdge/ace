@@ -283,11 +283,20 @@ func matchPKIn(matchers []planner.RepairPKMatcher, rowPk map[string]any, pkOrder
 		return true
 	}
 
+	equal := func(a, b any) bool {
+		if af, ok := asFloat(a); ok {
+			if bf, ok2 := asFloat(b); ok2 {
+				return af == bf
+			}
+		}
+		return reflect.DeepEqual(a, b)
+	}
+
 	for _, m := range matchers {
 		if simple {
 			val := rowPk[pkOrder[0]]
 			for _, eq := range m.Equals {
-				if reflect.DeepEqual(eq, val) {
+				if equal(eq, val) {
 					return true
 				}
 			}
@@ -305,7 +314,7 @@ func matchPKIn(matchers []planner.RepairPKMatcher, rowPk map[string]any, pkOrder
 				}
 				all := true
 				for i, col := range pkOrder {
-					if !reflect.DeepEqual(rowPk[col], tuple[i]) {
+					if !equal(rowPk[col], tuple[i]) {
 						all = false
 						break
 					}
