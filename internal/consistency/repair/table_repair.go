@@ -290,7 +290,7 @@ func (t *TableRepairTask) ValidateAndPrepare() error {
 		logger.Info("Diff file was generated with table filter: %s", t.RawDiffs.Summary.TableFilter)
 	}
 	if strings.TrimSpace(t.RawDiffs.Summary.OnlyOrigin) != "" && !t.RecoveryMode {
-		return fmt.Errorf("diff file indicates origin-only comparison; re-run table-repair with --recovery-mode or provide an explicit source_of_truth")
+		return fmt.Errorf("diff file indicates an origin-scoped comparison (--against-origin); re-run table-repair with --recovery-mode or provide an explicit source_of_truth")
 	}
 
 	if strings.TrimSpace(t.RepairPlanPath) != "" {

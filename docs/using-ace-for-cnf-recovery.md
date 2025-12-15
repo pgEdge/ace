@@ -31,7 +31,7 @@ sequenceDiagram
     rect rgb(255, 240, 230)
     N2->>N2: local writes after failure
     N3->>N3: local writes after failure
-    Note right of N2: table-diff --only-origin n1 --until ... ignores these
+    Note right of N2: table-diff --against-origin n1 --until ... ignores these
     end
 ```
 
@@ -44,12 +44,12 @@ Key idea: scope the diff to `node_origin = n1` and fence at the last trusted com
    ```sh
    ./ace table-diff \
      --nodes n2,n3 \
-     --only-origin n1 \
+     --against-origin n1 \
      --until 2025-12-12T16:00:00Z \
      --output json \
      mycluster public.customers
    ```
-   - `--only-origin n1` limits rows to those whose `node_origin` is `n1`.
+   - `--against-origin n1` limits rows to those whose `node_origin` is `n1`.
    - `--until` fences at the last trusted commit from the failed node (timestamp or LSN converted to timestamp).
    - The diff summary records `only_origin`, `only_origin_resolved`, `until`, `table_filter`, and `effective_filter`.
 
@@ -88,7 +88,7 @@ Key idea: scope the diff to `node_origin = n1` and fence at the last trusted com
    ```
 
 3) **Validate convergence**  
-   Re-run `table-diff` without `--only-origin` (or with it) to ensure survivors agree:
+   Re-run `table-diff` without `--against-origin` (or with it) to ensure survivors agree:
    ```sh
    ./ace table-diff \
      --nodes n2,n3 \
@@ -100,4 +100,4 @@ Key idea: scope the diff to `node_origin = n1` and fence at the last trusted com
 - Pick a defensible `--until` cutoff: the failed node’s last confirmed commit time (or convert its last LSN to a timestamp).
 - If LSNs are missing on survivors, auto SoT selection will fail; provide `--source-of-truth`.
 - Advanced plans are allowed in recovery-mode; use them for upsert-only/coalesce patterns instead of default delete/update behavior.
-- For large tables, combine `--table-filter` with `--only-origin` and iterate in chunks.
+- For large tables, combine `--table-filter` with `--against-origin` and iterate in chunks.

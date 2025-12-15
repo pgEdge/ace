@@ -22,8 +22,8 @@ This command compares the data in the specified table across nodes in a cluster 
 | `--output <json\|html>` | `-o` | Report format. Default `json`. When `html`, both JSON and HTML files share the same timestamped prefix. |
 | `--nodes <list>` | `-n` | Comma-separated node list or `all`. Up to three-way diffs are supported. |
 | `--table-filter <WHERE>` | `-F` | Optional SQL `WHERE` clause applied on every node before hashing. |
-| `--only-origin <node>` |  | Limit the diff to rows whose `node_origin` matches this Spock node id or name (useful for failed-node recovery). |
-| `--until <timestamp>` |  | Optional commit timestamp fence (RFC3339) applied with `--only-origin` and `--table-filter`; excludes newer rows. |
+| `--against-origin <node>` |  | Limit the diff to rows whose `node_origin` matches this Spock node id or name (useful for failed-node recovery). |
+| `--until <timestamp>` |  | Optional commit timestamp fence (RFC3339) applied with `--against-origin` and `--table-filter`; excludes newer rows. |
 | `--override-block-size` | `-B` | Skip block-size safety checks defined in `ace.yaml`. |
 | `--quiet` | `-q` | Suppress progress output. Results still write to the diff file. |
 | `--debug` | `-v` | Enable verbose logging. |
@@ -76,13 +76,13 @@ ACE optimises comparisons with multiprocessing and block hashing:
 ### Tuning tips
 1. Tune `--block-size` and `--concurrency-factor` for your hardware and data profile.
 2. Use `--table-filter`/`-F` to narrow scope on very large tables.
-   - Filters are applied inline (no temporary views) and recorded in the diff summary as both the raw filter and the effective filter (which also includes `--only-origin`/`--until` if set).
+   - Filters are applied inline (no temporary views) and recorded in the diff summary as both the raw filter and the effective filter (which also includes `--against-origin`/`--until` if set).
 3. Prefer `--output html` when you’ll manually review diffs.
 4. Use `--override-block-size` sparingly; the guardrails in `ace.yaml` prevent allocations that can overwhelm memory.
 
 ### Recovery-focused options
 
-Use `--only-origin` when you need a diff scoped to transactions from a failed node; combine with `--until` to fence at a known commit timestamp. The diff summary records:
+Use `--against-origin` when you need a diff scoped to transactions from a failed node; combine with `--until` to fence at a known commit timestamp. The diff summary records:
 - `only_origin` (raw id), `only_origin_resolved` (node name if known), `origin_only` (bool)
 - `until` (commit timestamp fence)
 - `table_filter` (raw) and `effective_filter` (combined predicates)

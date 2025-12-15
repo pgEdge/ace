@@ -73,8 +73,8 @@ type TableDiffTask struct {
 	TableFilter       string
 	QuietMode         bool
 
-	OnlyOrigin string
-	Until      string
+	AgainstOrigin string
+	Until         string
 
 	EffectiveFilter string
 
@@ -114,8 +114,8 @@ type TableDiffTask struct {
 	totalDiffRows      atomic.Int64
 	diffLimitTriggered atomic.Bool
 
-	resolvedOnlyOrigin string
-	untilTime          *time.Time
+	resolvedAgainstOrigin string
+	untilTime             *time.Time
 
 	Ctx context.Context
 }
@@ -203,30 +203,30 @@ func (t *TableDiffTask) loadSpockNodeNames() error {
 	return nil
 }
 
-func (t *TableDiffTask) resolveOnlyOrigin() error {
-	if strings.TrimSpace(t.OnlyOrigin) == "" {
+func (t *TableDiffTask) resolveAgainstOrigin() error {
+	if strings.TrimSpace(t.AgainstOrigin) == "" {
 		return nil
 	}
 	if len(t.SpockNodeNames) == 0 {
-		return fmt.Errorf("unable to resolve --only-origin: spock node names not available")
+		return fmt.Errorf("unable to resolve --against-origin: spock node names not available")
 	}
 
-	orig := strings.TrimSpace(t.OnlyOrigin)
+	orig := strings.TrimSpace(t.AgainstOrigin)
 	// direct match on id
 	if _, ok := t.SpockNodeNames[orig]; ok {
-		t.resolvedOnlyOrigin = orig
+		t.resolvedAgainstOrigin = orig
 		return nil
 	}
 
 	// match on name
 	for id, name := range t.SpockNodeNames {
 		if name == orig {
-			t.resolvedOnlyOrigin = id
+			t.resolvedAgainstOrigin = id
 			return nil
 		}
 	}
 
-	return fmt.Errorf("unable to resolve only-origin %q to a spock node id", t.OnlyOrigin)
+	return fmt.Errorf("unable to resolve against-origin %q to a spock node id", t.AgainstOrigin)
 }
 
 func (t *TableDiffTask) buildEffectiveFilter() (string, error) {
@@ -244,8 +244,8 @@ func (t *TableDiffTask) buildEffectiveFilter() (string, error) {
 		parts = append(parts, fmt.Sprintf("(%s)", trimmed))
 	}
 
-	if t.resolvedOnlyOrigin != "" {
-		escaped := strings.ReplaceAll(t.resolvedOnlyOrigin, "'", "''")
+	if t.resolvedAgainstOrigin != "" {
+		escaped := strings.ReplaceAll(t.resolvedAgainstOrigin, "'", "''")
 		parts = append(parts, fmt.Sprintf("(to_json(spock.xact_commit_timestamp_origin(xmin))->>'roident' = '%s')", escaped))
 	}
 
@@ -998,7 +998,7 @@ func (t *TableDiffTask) CloneForSchedule(ctx context.Context) *TableDiffTask {
 	cloned.CompareUnitSize = t.CompareUnitSize
 	cloned.MaxDiffRows = t.MaxDiffRows
 	cloned.EnsurePgcrypto = t.EnsurePgcrypto
-	cloned.OnlyOrigin = t.OnlyOrigin
+	cloned.AgainstOrigin = t.AgainstOrigin
 	cloned.Until = t.Until
 	cloned.Ctx = ctx
 	return cloned
@@ -1219,7 +1219,7 @@ func (t *TableDiffTask) ExecuteTask() (err error) {
 		logger.Warn("table-diff: unable to load spock node names; using raw node_origin values: %v", err)
 	}
 
-	if err := t.resolveOnlyOrigin(); err != nil {
+	if err := t.resolveAgainstOrigin(); err != nil {
 		return err
 	}
 	effectiveFilter, err := t.buildEffectiveFilter()
@@ -1270,10 +1270,10 @@ func (t *TableDiffTask) ExecuteTask() (err error) {
 			StartTime:         startTime.Format(time.RFC3339),
 			TotalRowsChecked:  int64(maxCount),
 			DiffRowsCount:     make(map[string]int),
-			OnlyOrigin:        t.resolvedOnlyOrigin,
+			OnlyOrigin:        t.AgainstOrigin,
 			OnlyOriginResolved: func() string {
-				if t.resolvedOnlyOrigin != "" && t.SpockNodeNames != nil {
-					if name, ok := t.SpockNodeNames[t.resolvedOnlyOrigin]; ok {
+				if t.resolvedAgainstOrigin != "" && t.SpockNodeNames != nil {
+					if name, ok := t.SpockNodeNames[t.resolvedAgainstOrigin]; ok {
 						return name
 					}
 				}
@@ -1285,7 +1285,7 @@ func (t *TableDiffTask) ExecuteTask() (err error) {
 				}
 				return strings.TrimSpace(t.Until)
 			}(),
-			OriginOnly: t.resolvedOnlyOrigin != "",
+			OriginOnly: t.resolvedAgainstOrigin != "",
 		},
 	}
 

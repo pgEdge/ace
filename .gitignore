@@ -4,6 +4,7 @@ python/
 *diffs-*.json
 *diffs-*.html
 reports
+tests/integration/ace_tasks.db
 # Added by goreleaser init:
 dist/
 

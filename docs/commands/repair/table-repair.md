@@ -29,7 +29,7 @@ Performs repairs on tables of divergent nodes based on the diff report generated
 | `--fix-nulls` | `-X` | Fill NULL columns on each node using non-NULL values from its peers (no source-of-truth needed) | `false` |
 | `--bidirectional` | `-Z` | Perform insert-only repairs in both directions | `false` |
 | `--fire-triggers` | `-t` | Execute triggers (otherwise runs with `session_replication_role='replica'`) | `false` |
-| `--recovery-mode` |  | Enable recovery-mode repair when the diff was generated with `--only-origin`; can auto-select a source of truth using Spock LSNs | `false` |
+| `--recovery-mode` |  | Enable recovery-mode repair when the diff was generated with `--against-origin`; can auto-select a source of truth using Spock LSNs | `false` |
 | `--quiet` | `-q` | Suppress non-essential logging | `false` |
 | `--debug` | `-v` | Enable verbose logging | `false` |
 

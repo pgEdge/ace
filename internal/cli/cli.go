@@ -135,7 +135,7 @@ func SetupCLI() *cli.App {
 			Value:   "",
 		},
 		&cli.StringFlag{
-			Name:  "only-origin",
+			Name:  "against-origin",
 			Usage: "Restrict diff to rows whose node_origin matches this Spock node id or name",
 			Value: "",
 		},
@@ -881,7 +881,7 @@ func TableDiffCLI(ctx *cli.Context) error {
 	scheduleEnabled := ctx.Bool("schedule")
 	scheduleEvery := ctx.String("every")
 	task.TableFilter = ctx.String("table-filter")
-	task.OnlyOrigin = ctx.String("only-origin")
+	task.AgainstOrigin = ctx.String("against-origin")
 	task.Until = ctx.String("until")
 	task.QuietMode = ctx.Bool("quiet")
 	task.OverrideBlockSize = ctx.Bool("override-block-size")

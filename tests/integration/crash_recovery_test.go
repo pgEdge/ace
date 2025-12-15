@@ -14,7 +14,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestTableDiffOnlyOriginWithUntil(t *testing.T) {
+func TestTableDiffAgainstOriginWithUntil(t *testing.T) {
 	ctx := context.Background()
 
 	// Light netem delay on n3 to mimic slower replication
@@ -119,7 +119,7 @@ func TestTableDiffOnlyOriginWithUntil(t *testing.T) {
 	task.CompareUnitSize = 100
 	task.ConcurrencyFactor = 1
 	task.MaxDiffRows = 100
-	task.OnlyOrigin = "n3"
+	task.AgainstOrigin = "n3"
 	fence := time.Now().Add(5 * time.Minute)
 	task.Until = fence.Format(time.RFC3339)
 
@@ -157,7 +157,7 @@ func TestTableDiffOnlyOriginWithUntil(t *testing.T) {
 	if got := task.DiffResult.Summary.Until; got == "" {
 		t.Fatalf("diff summary should record until cutoff")
 	}
-	log.Printf("only-origin diff detected %d row missing on %s (origin n3)", len(nodeDiffs.Rows[serviceN1]), serviceN2)
+	log.Printf("against-origin diff detected %d row missing on %s (origin n3)", len(nodeDiffs.Rows[serviceN1]), serviceN2)
 
 	// Run recovery-mode repair using the diff file and ensure n2 is healed
 	repairTask := repair.NewTableRepairTask()
