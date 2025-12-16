@@ -37,6 +37,11 @@ func writeHTMLDiffReport(diffResult types.DiffOutput, jsonFilePath string) (stri
 		return "", nil
 	}
 
+	rawJSON, err := json.Marshal(diffResult)
+	if err != nil {
+		return "", fmt.Errorf("failed to marshal diff result for HTML embedding: %w", err)
+	}
+
 	htmlPath := strings.TrimSuffix(jsonFilePath, filepath.Ext(jsonFilePath)) + ".html"
 	summary := diffResult.Summary
 
@@ -57,10 +62,14 @@ func writeHTMLDiffReport(diffResult types.DiffOutput, jsonFilePath string) (stri
 		NodeAClass string
 		NodeBHTML  template.HTML
 		NodeBClass string
+		HasDiff    bool
 	}
 
 	type row struct {
-		Cells []cell
+		PKey     string
+		Cells    []cell
+		RowType  string // "value_diff", "missing_in_a", "missing_in_b"
+		HasDiffs bool
 	}
 
 	type missingGroup struct {
@@ -79,8 +88,9 @@ func writeHTMLDiffReport(diffResult types.DiffOutput, jsonFilePath string) (stri
 	}
 
 	type reportData struct {
-		Summary summaryData
-		Pairs   []pairSection
+		Summary     summaryData
+		Pairs       []pairSection
+		RawDiffJSON template.JS
 	}
 
 	summaryItems := []summaryItem{
@@ -199,25 +209,34 @@ func writeHTMLDiffReport(diffResult types.DiffOutput, jsonFilePath string) (stri
 			}
 
 			var cells []cell
+			hasDiffs := false
 			for _, col := range columns {
 				valA := stringifyCellValue(rowA[col])
 				valB := stringifyCellValue(rowB[col])
 				_, isPK := pkSet[col]
 
 				htmlA, htmlB := highlightDifference(valA, valB)
+				hasDiff := valA != valB
 				c := cell{
 					Column:    col,
 					IsKey:     isPK,
 					NodeAHTML: htmlA,
 					NodeBHTML: htmlB,
+					HasDiff:   hasDiff,
 				}
-				if valA != valB {
+				if hasDiff {
 					c.NodeAClass = "value-diff"
 					c.NodeBClass = "value-diff"
+					hasDiffs = true
 				}
 				cells = append(cells, c)
 			}
-			valueDiffs = append(valueDiffs, row{Cells: cells})
+			valueDiffs = append(valueDiffs, row{
+				PKey:     key,
+				Cells:    cells,
+				RowType:  "value_diff",
+				HasDiffs: hasDiffs,
+			})
 		}
 
 		missingGroups := make([]missingGroup, 0)
@@ -235,9 +254,15 @@ func writeHTMLDiffReport(diffResult types.DiffOutput, jsonFilePath string) (stri
 						NodeAHTML:  plainHTML(valA),
 						NodeBHTML:  plainHTML("MISSING"),
 						NodeBClass: "missing",
+						HasDiff:    false,
 					})
 				}
-				group.Rows = append(group.Rows, row{Cells: cells})
+				group.Rows = append(group.Rows, row{
+					PKey:     key,
+					Cells:    cells,
+					RowType:  "missing_in_b",
+					HasDiffs: true,
+				})
 			}
 			missingGroups = append(missingGroups, group)
 		}
@@ -256,9 +281,15 @@ func writeHTMLDiffReport(diffResult types.DiffOutput, jsonFilePath string) (stri
 						NodeAHTML:  plainHTML("MISSING"),
 						NodeAClass: "missing",
 						NodeBHTML:  plainHTML(valB),
+						HasDiff:    false,
 					})
 				}
-				group.Rows = append(group.Rows, row{Cells: cells})
+				group.Rows = append(group.Rows, row{
+					PKey:     key,
+					Cells:    cells,
+					RowType:  "missing_in_a",
+					HasDiffs: true,
+				})
 			}
 			if len(missingGroups) > 0 {
 				group.DividerBefore = true
@@ -282,7 +313,8 @@ func writeHTMLDiffReport(diffResult types.DiffOutput, jsonFilePath string) (stri
 			Items:     filteredItems,
 			Breakdown: buildDiffBreakdown(summary.DiffRowsCount),
 		},
-		Pairs: pairs,
+		Pairs:       pairs,
+		RawDiffJSON: template.JS(rawJSON),
 	}
 
 	tmpl, err := template.New("tableDiffReport").Parse(htmlDiffTemplate)
@@ -375,6 +407,7 @@ const htmlDiffTemplate = `<!DOCTYPE html>
     <style>
         :root {
             --primary-color: #1f6feb;
+            --primary-strong: #1557b0;
             --success-color: #1a7f37;
             --warning-color: #bf8700;
             --danger-color: #d73a49;
@@ -395,7 +428,7 @@ const htmlDiffTemplate = `<!DOCTYPE html>
             font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
             line-height: 1.5;
             color: var(--text-primary);
-            background-color: var(--bg-secondary);
+            background: linear-gradient(180deg, #f4f7fb 0%, #eef1f7 100%);
         }
 
         .container {
@@ -423,6 +456,38 @@ const htmlDiffTemplate = `<!DOCTYPE html>
             padding: 1.5rem;
             margin: 1.5rem 0;
             box-shadow: 0 6px 16px rgba(27, 31, 35, 0.07);
+        }
+
+        .plan-builder {
+            margin: 1.5rem 0;
+            padding: 1rem 1.25rem;
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            background: #eef6ff;
+        }
+
+        .plan-builder h3 {
+            margin-bottom: 0.5rem;
+        }
+
+        .plan-builder button {
+            background: var(--primary-color);
+            color: #fff;
+            border: none;
+            padding: 0.6rem 1rem;
+            border-radius: 6px;
+            cursor: pointer;
+            font-weight: 600;
+        }
+
+        .plan-builder button:hover {
+            background: #1557b0;
+        }
+
+        .plan-builder .note {
+            margin-top: 0.35rem;
+            color: var(--text-secondary);
+            font-size: 0.9rem;
         }
 
         .summary-grid {
@@ -514,31 +579,60 @@ const htmlDiffTemplate = `<!DOCTYPE html>
         }
 
         .diff-header {
-            background: var(--primary-color);
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 1rem;
+            background: linear-gradient(120deg, #1f6feb 0%, #1b5dcc 100%);
             color: white;
             padding: 1rem 1.5rem;
-            font-size: 1.1rem;
-            font-weight: 550;
+            font-size: 1.05rem;
+            font-weight: 650;
+        }
+
+        .pair-title {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 0.5rem;
+            align-items: center;
+        }
+
+        .diff-count-pill {
+            background: rgba(255, 255, 255, 0.14);
+            border: 1px solid rgba(255, 255, 255, 0.3);
+            padding: 0.25rem 0.65rem;
+            border-radius: 999px;
+            font-variant-numeric: tabular-nums;
+            font-size: 0.9rem;
+            color: #f6f8fa;
+            box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.03);
         }
 
         .table-wrapper {
             width: 100%;
             overflow-x: auto;
+            background: var(--bg-secondary);
+            border-top: 1px solid var(--border-color);
         }
 
-        table {
+        .diff-table {
             width: 100%;
-            border-collapse: separate;
-            border-spacing: 0;
+            border-collapse: collapse;
             font-size: 0.92rem;
-            min-width: 640px;
         }
 
-        th {
+        .diff-table .action-cell,
+        .diff-table .action-header {
+            width: 220px;
+            min-width: 220px;
+            max-width: 280px;
+        }
+
+        .diff-table thead th {
             background: var(--bg-secondary);
             padding: 0.75rem 1rem;
             text-align: left;
-            font-weight: 600;
+            font-weight: 650;
             color: var(--text-secondary);
             border-bottom: 2px solid var(--border-color);
             position: sticky;
@@ -546,21 +640,170 @@ const htmlDiffTemplate = `<!DOCTYPE html>
             z-index: 5;
         }
 
-        td {
-            padding: 0.75rem 1rem;
+        .inner-columns-table {
+            width: 100%;
+            border-collapse: collapse;
+            table-layout: auto;
+        }
+
+        .diff-row {
             border-bottom: 1px solid var(--border-color);
+        }
+
+        .diff-row:hover {
+            background-color: rgba(31, 111, 235, 0.02);
+        }
+
+        .diff-row .action-cell {
+            background: #eef3ff;
+            border-right: 2px solid var(--border-color);
             vertical-align: top;
+            padding: 1rem;
+        }
+
+        .diff-row .columns-cell {
+            padding: 0;
+            vertical-align: top;
+        }
+
+        .action-wrapper {
+            display: flex;
+            flex-direction: column;
+            gap: 0.5rem;
+        }
+
+        .action-label {
+            display: block;
+            font-size: 0.75rem;
+            letter-spacing: 0.04em;
+            text-transform: uppercase;
+            color: var(--text-secondary);
+            font-weight: 600;
+        }
+
+        .plan-action {
+            width: 100%;
+            padding: 0.5rem;
+            border-radius: 6px;
+            border: 1px solid var(--border-color);
+            background: var(--bg-primary);
+            font-size: 0.85rem;
+            cursor: pointer;
+        }
+
+        .plan-action:hover {
+            border-color: var(--primary-color);
+        }
+
+        .row-key {
+            padding: 0.4rem 0.6rem;
+            background: rgba(31, 111, 235, 0.08);
+            border-radius: 4px;
+            color: var(--text-primary);
+            font-size: 0.8rem;
+            font-family: 'Courier New', monospace;
+            word-break: break-all;
+            font-weight: 500;
+        }
+
+        .inner-columns-table thead {
+            position: sticky;
+            top: 0;
+            z-index: 2;
+        }
+
+        .inner-columns-table th {
+            background: #e8ecf3;
+            padding: 0.6rem 1rem;
+            text-align: left;
+            font-weight: 600;
+            font-size: 0.85rem;
+            color: var(--text-primary);
+            border-bottom: 2px solid var(--border-color);
+            border-right: 1px solid #d8dde5;
+        }
+
+        .inner-columns-table th:last-child {
+            border-right: none;
+        }
+
+        .inner-columns-table .inner-col-header {
+            width: 150px;
+            min-width: 150px;
+            max-width: 200px;
+            color: var(--text-secondary);
+        }
+
+        .inner-columns-table .inner-node-header {
+            min-width: 250px;
+            text-align: left;
+        }
+
+        .inner-columns-table tbody tr {
+            border-bottom: 1px solid #e8ecf0;
+        }
+
+        .inner-columns-table tbody tr:last-child {
+            border-bottom: none;
+        }
+
+        .inner-columns-table tbody tr.has-diff {
+            background: rgba(255, 247, 230, 0.5);
+        }
+
+        .inner-columns-table td {
+            padding: 0.75rem 1rem;
+            vertical-align: top;
+            border-right: 1px solid #e8ecf0;
+        }
+
+        .inner-columns-table td:last-child {
+            border-right: none;
+        }
+
+        .col-name {
+            font-weight: 600;
+            color: var(--text-secondary);
+            background: #f8f9fb;
+            white-space: nowrap;
+            width: 150px;
+            min-width: 150px;
+            max-width: 200px;
+        }
+
+        .col-name.key-column {
+            background: #e3f2fd;
+            color: var(--primary-color);
+            font-weight: 700;
+        }
+
+        .col-name.key-column::after {
+            content: " 🔑";
+            font-size: 0.75em;
+            opacity: 0.7;
+        }
+
+        .value-cell {
             background: var(--bg-primary);
             white-space: pre-wrap;
             word-break: break-word;
-        }
-
-        tr:hover td {
-            background-color: rgba(31, 111, 235, 0.04);
+            min-width: 200px;
         }
 
         .value-diff {
-            background-color: rgba(215, 58, 73, 0.08);
+            background-color: rgba(255, 235, 238, 0.6);
+            border-left: 3px solid var(--danger-color);
+            position: relative;
+        }
+
+        .value-diff::before {
+            content: "";
+            position: absolute;
+            left: -3px;
+            top: 0;
+            bottom: 0;
+            width: 3px;
+            background: var(--danger-color);
         }
 
         .diff-chunk {
@@ -582,27 +825,33 @@ const htmlDiffTemplate = `<!DOCTYPE html>
             font-weight: 600;
         }
 
-        .row-separator {
-            background: rgba(31, 111, 235, 0.08);
+        .row-separator td {
+            background: rgba(31, 111, 235, 0.1);
             color: var(--primary-color);
-            font-weight: 600;
+            font-weight: 650;
             text-align: center;
-            padding: 0.75rem;
+            padding: 0.85rem;
             letter-spacing: 0.04em;
+            text-transform: uppercase;
+            border-bottom: 2px solid var(--primary-color);
+            font-size: 0.9rem;
         }
 
-        .row-subseparator {
-            background: rgba(31, 111, 235, 0.04);
-            color: var(--text-secondary);
-            font-weight: 500;
+        .row-subseparator td {
+            background: rgba(31, 111, 235, 0.05);
+            color: var(--text-primary);
+            font-weight: 600;
             text-align: center;
-            padding: 0.65rem;
+            padding: 0.7rem;
+            letter-spacing: 0.02em;
+            border-bottom: 1px solid var(--border-color);
+            font-size: 0.88rem;
         }
 
         .row-divider td {
             background: var(--bg-secondary);
             border-bottom: none;
-            height: 0.4rem;
+            height: 0.75rem;
             padding: 0;
         }
 
@@ -610,6 +859,46 @@ const htmlDiffTemplate = `<!DOCTYPE html>
             padding: 1.5rem;
             color: var(--text-secondary);
             text-align: center;
+            background: var(--bg-secondary);
+            border: 1px dashed var(--border-color);
+        }
+
+        .bulk-bar {
+            display: flex;
+            align-items: center;
+            gap: 0.65rem;
+            padding: 0.9rem 1.5rem;
+            background: #f7f9ff;
+            border-bottom: 1px solid var(--border-color);
+        }
+
+        .bulk-label {
+            font-weight: 600;
+            color: var(--text-primary);
+            white-space: nowrap;
+        }
+
+        .bulk-select {
+            min-width: 200px;
+            padding: 0.45rem 0.5rem;
+            border-radius: 6px;
+            border: 1px solid var(--border-color);
+            background: var(--bg-primary);
+        }
+
+        .bulk-apply {
+            padding: 0.45rem 0.85rem;
+            border: 1px solid var(--primary-strong);
+            background: var(--primary-color);
+            color: #fff;
+            border-radius: 6px;
+            font-weight: 600;
+            cursor: pointer;
+            box-shadow: 0 6px 16px rgba(27, 31, 35, 0.12);
+        }
+
+        .bulk-apply:hover {
+            background: var(--primary-strong);
         }
 
         @media (max-width: 768px) {
@@ -617,17 +906,60 @@ const htmlDiffTemplate = `<!DOCTYPE html>
                 padding: 0 0.5rem 2rem;
             }
 
-            table {
-                min-width: 100%;
+            h1 {
+                font-size: 1.5rem;
             }
 
-            td, th {
-                padding: 0.65rem;
+            .diff-table .action-cell,
+            .diff-table .action-header {
+                width: 180px;
+                min-width: 180px;
+            }
+
+            .inner-columns-table th,
+            .inner-columns-table td {
+                padding: 0.5rem 0.75rem;
+                font-size: 0.85rem;
+            }
+
+            .inner-columns-table .inner-col-header,
+            .col-name {
+                width: 100px;
+                min-width: 100px;
+                max-width: 120px;
+            }
+
+            .value-cell {
+                min-width: 150px;
+            }
+
+            .action-cell {
+                padding: 0.75rem;
+            }
+
+            .plan-action {
+                font-size: 0.8rem;
+                padding: 0.4rem;
+            }
+
+            .row-key {
+                font-size: 0.75rem;
+                padding: 0.3rem 0.5rem;
             }
 
             .summary-breakdown-items {
                 flex-direction: column;
                 gap: 0.75rem;
+            }
+
+            .bulk-bar {
+                flex-direction: column;
+                align-items: stretch;
+                gap: 0.5rem;
+            }
+
+            .bulk-select {
+                min-width: 100%;
             }
         }
     </style>
@@ -635,6 +967,12 @@ const htmlDiffTemplate = `<!DOCTYPE html>
 <body>
     <div class="container">
         <h1>ACE Table Diff Report</h1>
+        <div class="plan-builder">
+            <h3>Build an advanced repair plan</h3>
+            <p>Create a starter repair file (YAML) from this diff. The plan will set <code>keep_n1</code> for mismatches, <code>apply_from n1 insert</code> for rows missing on node2, and <code>apply_from n2 insert</code> for rows missing on node1. You can edit the file to add rules or change actions.</p>
+            <button id="download-plan">Download repair plan</button>
+            <div class="note">Generated plan uses per-row overrides. For large diffs, convert repeating patterns into rules manually.</div>
+        </div>
         <div class="summary-box">
             <h2>Summary</h2>
             <div class="summary-grid">
@@ -662,50 +1000,115 @@ const htmlDiffTemplate = `<!DOCTYPE html>
 
         {{if .Pairs}}
             {{range .Pairs}}
-            <div class="diff-section">
-                <div class="diff-header">Differences between {{.NodeA}} and {{.NodeB}} ({{.DiffCount}} entries)</div>
+            <div class="diff-section" data-nodea="{{.NodeA}}" data-nodeb="{{.NodeB}}">
+                {{ $nodeA := .NodeA }}{{ $nodeB := .NodeB }}
+                <div class="diff-header">
+                    <div class="pair-title">Differences between {{.NodeA}} and {{.NodeB}}</div>
+                    <span class="diff-count-pill">{{.DiffCount}} entries</span>
+                </div>
                 <div class="table-wrapper">
-                    <table>
-                        <tr>
-                            <th>Column</th>
-                            <th>{{.NodeA}}</th>
-                            <th>{{.NodeB}}</th>
-                        </tr>
-                        {{if .ValueDiffs}}
-                        <tr><td colspan="3" class="row-separator">Value Differences</td></tr>
-                        {{range $i, $row := .ValueDiffs}}
-                            {{if $i}}<tr class="row-divider"><td colspan="3"></td></tr>{{end}}
-                            {{range $row.Cells}}
+                    <table class="diff-table">
+                        <thead>
                             <tr>
-                                <td{{if .IsKey}} class="key-column"{{end}}>{{.Column}}</td>
-                                <td{{if .NodeAClass}} class="{{.NodeAClass}}"{{end}}>{{.NodeAHTML}}</td>
-                                <td{{if .NodeBClass}} class="{{.NodeBClass}}"{{end}}>{{.NodeBHTML}}</td>
+                                <th class="action-header">Action</th>
+                                <th class="data-header">Row Data</th>
                             </tr>
-                            {{end}}
+                        </thead>
+                        <tbody>
+                        {{if .ValueDiffs}}
+                        <tr class="row-separator"><td colspan="100%">Value Differences</td></tr>
+                        {{range $i, $row := .ValueDiffs}}
+                            {{if $i}}<tr class="row-divider"><td colspan="100%"></td></tr>{{end}}
+                            <tr class="diff-row">
+                                <td class="action-cell">
+                                    <div class="action-wrapper">
+                                        <span class="action-label">Row Action</span>
+                                        <select class="plan-action" data-type="mismatch" data-pk="{{$row.PKey}}" data-nodea="{{ $nodeA }}" data-nodeb="{{ $nodeB }}">
+                                            <option value="">Use default (keep_n1)</option>
+                                            <option value="keep_n1">Keep {{$nodeA}}</option>
+                                            <option value="keep_n2">Keep {{$nodeB}}</option>
+                                            <option value="apply_from_n1_insert">Apply from {{$nodeA}} (insert if missing)</option>
+                                            <option value="apply_from_n2_insert">Apply from {{$nodeB}} (insert if missing)</option>
+                                            <option value="delete">Delete</option>
+                                            <option value="skip">Skip</option>
+                                        </select>
+                                        <div class="row-key" title="Primary key">{{$row.PKey}}</div>
+                                    </div>
+                                </td>
+                                <td class="columns-cell">
+                                    <table class="inner-columns-table">
+                                        <thead>
+                                            <tr>
+                                                <th class="inner-col-header">Column</th>
+                                                <th class="inner-node-header">{{ $nodeA }}</th>
+                                                <th class="inner-node-header">{{ $nodeB }}</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody>
+                                            {{range $row.Cells}}
+                                            <tr{{if .HasDiff}} class="has-diff"{{end}}>
+                                                <td class="col-name{{if .IsKey}} key-column{{end}}">{{.Column}}</td>
+                                                <td class="value-cell{{if .NodeAClass}} {{.NodeAClass}}{{end}}">{{.NodeAHTML}}</td>
+                                                <td class="value-cell{{if .NodeBClass}} {{.NodeBClass}}{{end}}">{{.NodeBHTML}}</td>
+                                            </tr>
+                                            {{end}}
+                                        </tbody>
+                                    </table>
+                                </td>
+                            </tr>
                         {{end}}
                         {{end}}
 
                         {{if .Missing}}
-                        <tr><td colspan="3" class="row-separator">Missing Rows</td></tr>
+                        <tr class="row-separator"><td colspan="100%">Missing Rows</td></tr>
                         {{range $gIndex, $group := .Missing}}
-                            {{if $group.DividerBefore}}<tr class="row-divider"><td colspan="3"></td></tr>{{end}}
-                            <tr><td colspan="3" class="row-subseparator">{{$group.Title}}</td></tr>
+                            {{if $group.DividerBefore}}<tr class="row-divider"><td colspan="100%"></td></tr>{{end}}
+                            <tr class="row-subseparator"><td colspan="100%">{{$group.Title}}</td></tr>
                             {{range $rIndex, $row := $group.Rows}}
-                                {{if $rIndex}}<tr class="row-divider"><td colspan="3"></td></tr>{{end}}
-                                {{range $row.Cells}}
-                                <tr>
-                                    <td{{if .IsKey}} class="key-column"{{end}}>{{.Column}}</td>
-                                    <td{{if .NodeAClass}} class="{{.NodeAClass}}"{{end}}>{{.NodeAHTML}}</td>
-                                    <td{{if .NodeBClass}} class="{{.NodeBClass}}"{{end}}>{{.NodeBHTML}}</td>
+                                {{if $rIndex}}<tr class="row-divider"><td colspan="100%"></td></tr>{{end}}
+                                <tr class="diff-row">
+                                    <td class="action-cell">
+                                        <div class="action-wrapper">
+                                            <span class="action-label">Row Action</span>
+                                            <select class="plan-action" data-type="{{if eq $group.Title (print "Missing in " $nodeB)}}missing_in_b{{else}}missing_in_a{{end}}" data-pk="{{$row.PKey}}" data-nodea="{{ $nodeA }}" data-nodeb="{{ $nodeB }}">
+                                                <option value="">Use default</option>
+                                                <option value="apply_from_n1_insert">Insert from {{$nodeA}}</option>
+                                                <option value="apply_from_n2_insert">Insert from {{$nodeB}}</option>
+                                                <option value="delete">Delete</option>
+                                                <option value="skip">Skip</option>
+                                            </select>
+                                            <div class="row-key" title="Primary key">{{$row.PKey}}</div>
+                                        </div>
+                                    </td>
+                                    <td class="columns-cell">
+                                        <table class="inner-columns-table">
+                                            <thead>
+                                                <tr>
+                                                    <th class="inner-col-header">Column</th>
+                                                    <th class="inner-node-header">{{ $nodeA }}</th>
+                                                    <th class="inner-node-header">{{ $nodeB }}</th>
+                                                </tr>
+                                            </thead>
+                                            <tbody>
+                                                {{range $row.Cells}}
+                                                <tr>
+                                                    <td class="col-name{{if .IsKey}} key-column{{end}}">{{.Column}}</td>
+                                                    <td class="value-cell{{if .NodeAClass}} {{.NodeAClass}}{{end}}">{{.NodeAHTML}}</td>
+                                                    <td class="value-cell{{if .NodeBClass}} {{.NodeBClass}}{{end}}">{{.NodeBHTML}}</td>
+                                                </tr>
+                                                {{end}}
+                                            </tbody>
+                                        </table>
+                                    </td>
                                 </tr>
-                                {{end}}
                             {{end}}
                         {{end}}
                         {{end}}
 
                         {{if not .HasDiffs}}
-                        <tr><td colspan="3" class="empty-message">No column level differences detected for this node pair.</td></tr>
+                        <tr><td colspan="2" class="empty-message">No column level differences detected for this node pair.</td></tr>
                         {{end}}
+                        </tbody>
                     </table>
                 </div>
             </div>
@@ -715,6 +1118,209 @@ const htmlDiffTemplate = `<!DOCTYPE html>
                 <div class="empty-message">No row-level differences were recorded.</div>
             </div>
         {{end}}
+        <script id="diff-data" type="application/json">{{ .RawDiffJSON }}</script>
+        <script>
+            (function () {
+                const diffDataEl = document.getElementById('diff-data');
+                const downloadBtn = document.getElementById('download-plan');
+                const sections = document.querySelectorAll('.diff-section');
+                if (!diffDataEl || !downloadBtn) return;
+
+                const diff = JSON.parse(diffDataEl.textContent);
+
+                sections.forEach(section => {
+                    const controls = section.querySelectorAll('.plan-action');
+                    if (controls.length === 0) return;
+                    const nodeALabel = section.dataset.nodea || 'node A';
+                    const nodeBLabel = section.dataset.nodeb || 'node B';
+                    const bulkBar = document.createElement('div');
+                    bulkBar.className = 'bulk-bar';
+                    const label = document.createElement('span');
+                    label.className = 'bulk-label';
+                    label.textContent = 'Apply to all for ' + nodeALabel + ' vs ' + nodeBLabel + ':';
+                    const select = document.createElement('select');
+                    select.className = 'bulk-select';
+                    select.setAttribute('aria-label', 'Bulk action for ' + nodeALabel + ' and ' + nodeBLabel);
+                    [
+                        { value: '', label: 'Choose action' },
+                        { value: 'keep_n1', label: 'Keep ' + nodeALabel },
+                        { value: 'keep_n2', label: 'Keep ' + nodeBLabel },
+                        { value: 'apply_from_n1_insert', label: 'Insert from ' + nodeALabel },
+                        { value: 'apply_from_n2_insert', label: 'Insert from ' + nodeBLabel },
+                        { value: 'delete', label: 'Delete' },
+                        { value: 'skip', label: 'Skip' }
+                    ].forEach(opt => {
+                        const option = document.createElement('option');
+                        option.value = opt.value;
+                        option.textContent = opt.label;
+                        select.appendChild(option);
+                    });
+                    const applyBtn = document.createElement('button');
+                    applyBtn.type = 'button';
+                    applyBtn.className = 'bulk-apply';
+                    applyBtn.textContent = 'Apply';
+                    applyBtn.addEventListener('click', () => {
+                        const val = select.value;
+                        if (!val) return;
+                        controls.forEach(sel => sel.value = val);
+                    });
+                    bulkBar.appendChild(label);
+                    bulkBar.appendChild(select);
+                    bulkBar.appendChild(applyBtn);
+                    section.insertBefore(bulkBar, section.children[1]);
+                });
+
+                downloadBtn.addEventListener('click', () => {
+                    try {
+                        const yaml = buildPlanYaml(diff);
+                        const blob = new Blob([yaml], { type: 'text/yaml' });
+                        const url = URL.createObjectURL(blob);
+                        const a = document.createElement('a');
+                        a.href = url;
+                        const tableKey = diff.summary.schema + '.' + diff.summary.table;
+                        a.download = tableKey.replace('.', '_') + '_repair_plan.yaml';
+                        document.body.appendChild(a);
+                        a.click();
+                        document.body.removeChild(a);
+                        URL.revokeObjectURL(url);
+                    } catch (e) {
+                        alert('Failed to build repair plan: ' + e);
+                    }
+                });
+
+                function buildPlanYaml(diff) {
+                    const pkCols = diff.summary.primary_key || [];
+                    if (!pkCols.length) throw new Error('No primary key info available');
+                    const tableKey = diff.summary.schema + '.' + diff.summary.table;
+
+                    const overrides = [];
+                    const seen = new Set();
+
+                    const nodeDiffs = diff.NodeDiffs || diff.diffs || {};
+                    for (const pairKey of Object.keys(nodeDiffs)) {
+                        const nodeDiff = nodeDiffs[pairKey];
+                        if (!nodeDiff || !nodeDiff.Rows && !nodeDiff.rows) continue;
+                        const rowsMap = nodeDiff.Rows || nodeDiff.rows;
+                        const nodeNames = Object.keys(rowsMap || {}).sort();
+                        if (nodeNames.length < 2) continue;
+                        const n1 = nodeNames[0];
+                        const n2 = nodeNames[1];
+                        const rows1 = rowsMap[n1] || [];
+                        const rows2 = rowsMap[n2] || [];
+
+                        const map1 = rowsToMap(rows1, pkCols);
+                        const map2 = rowsToMap(rows2, pkCols);
+
+                        const keys = new Set([...map1.keys(), ...map2.keys()]);
+                        for (const key of keys) {
+                            if (seen.has(key)) continue;
+                            seen.add(key);
+                            const row1 = map1.get(key);
+                            const row2 = map2.get(key);
+                            const pkMap = keyToPkMap(key, pkCols);
+
+                            let action = selectionForKey(key) || { type: 'keep_n1' };
+                            let name = 'pk_' + key.replace(/\|/g, '_');
+                            if (row1 && !row2) {
+                                action = selectionForKey(key) || { type: 'apply_from', from: n1, mode: 'insert' };
+                            } else if (row2 && !row1) {
+                                action = selectionForKey(key) || { type: 'apply_from', from: n2, mode: 'insert' };
+                            }
+
+                            overrides.push({ name, pk: pkMap, action });
+                        }
+                    }
+
+                    const lines = [];
+                    lines.push('version: 1');
+                    lines.push('tables:');
+                    lines.push('  ' + tableKey + ':');
+                    lines.push('    default_action:');
+                    lines.push('      type: keep_n1');
+                    if (overrides.length) {
+                        lines.push('    row_overrides:');
+                        for (const ov of overrides) {
+                            lines.push('      - name: ' + quote(ov.name));
+                            lines.push('        pk:');
+                            for (const col of pkCols) {
+                                const v = ov.pk[col];
+                                lines.push('          ' + col + ': ' + scalar(v));
+                            }
+                            lines.push('        action:');
+                            lines.push('          type: ' + ov.action.type);
+                            if (ov.action.from) lines.push('          from: ' + ov.action.from);
+                            if (ov.action.mode) lines.push('          mode: ' + ov.action.mode);
+                        }
+                    }
+                    return lines.join('\n') + '\n';
+                }
+
+                function selectionForKey(key) {
+                    const sel = document.querySelector('.plan-action[data-pk="' + key + '"]');
+                    if (!sel) return null;
+                    const val = sel.value;
+                    if (!val) return null;
+                    switch (val) {
+                        case 'keep_n1':
+                            return { type: 'keep_n1' };
+                        case 'keep_n2':
+                            return { type: 'keep_n2' };
+                        case 'apply_from_n1_insert':
+                            return { type: 'apply_from', from: sel.dataset.nodea, mode: 'insert' };
+                        case 'apply_from_n2_insert':
+                            return { type: 'apply_from', from: sel.dataset.nodeb, mode: 'insert' };
+                        case 'delete':
+                            return { type: 'delete' };
+                        case 'skip':
+                            return { type: 'skip' };
+                        default:
+                            return null;
+                    }
+                }
+
+                function rowsToMap(rows, pkCols) {
+                    const m = new Map();
+                    for (const r of rows) {
+                        const keyParts = pkCols.map(c => stringify(r[c]));
+                        const k = keyParts.join('|');
+                        m.set(k, r);
+                    }
+                    return m;
+                }
+
+                function keyToPkMap(key, pkCols) {
+                    const parts = key.split('|');
+                    const pk = {};
+                    pkCols.forEach((c, i) => pk[c] = parseMaybeNumber(parts[i]));
+                    return pk;
+                }
+
+                function stringify(v) {
+                    if (v === null || v === undefined) return '';
+                    return '' + v;
+                }
+
+                function parseMaybeNumber(v) {
+                    if (v === undefined || v === null) return v;
+                    const n = Number(v);
+                    if (!Number.isNaN(n) && v !== '') return n;
+                    return v;
+                }
+
+                function quote(s) {
+                    if (/^[A-Za-z0-9._-]+$/.test(s)) return s;
+                    return JSON.stringify(s);
+                }
+
+                function scalar(v) {
+                    if (v === null || v === undefined) return 'null';
+                    if (typeof v === 'number' || typeof v === 'boolean') return String(v);
+                    const str = String(v);
+                    if (/^[A-Za-z0-9._-]+$/.test(str)) return str;
+                    return JSON.stringify(str);
+                }
+            })();
+        </script>
     </div>
 </body>
 </html>`
