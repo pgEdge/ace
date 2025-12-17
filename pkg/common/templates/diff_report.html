@@ -1,0 +1,166 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>ACE Table Diff Report</title>
+    <style>{{.CSS}}</style>
+</head>
+<body>
+    <div class="container">
+        <h1>ACE Table Diff Report</h1>
+        <div class="plan-builder">
+            <h3>Build an advanced repair plan</h3>
+            <p>Create a starter repair file (YAML) from this diff. The plan will set <code>keep_n1</code> for mismatches, <code>apply_from n1 insert</code> for rows missing on node2, and <code>apply_from n2 insert</code> for rows missing on node1. You can edit the file to add rules or change actions.</p>
+            <button id="download-plan">Download repair plan</button>
+            <div class="note">Generated plan uses per-row overrides. For large diffs, convert repeating patterns into rules manually.</div>
+        </div>
+        <div class="summary-box">
+            <h2>Summary</h2>
+            <div class="summary-grid">
+                {{range .Summary.Items}}
+                <div class="summary-item">
+                    <div class="summary-label">{{.Label}}</div>
+                    <div class="summary-value">{{.Value}}</div>
+                </div>
+                {{end}}
+            </div>
+            {{if .Summary.Breakdown}}
+            <div class="summary-breakdown">
+                <div class="summary-breakdown-title">Diffs by node pair</div>
+                <div class="summary-breakdown-items">
+                    {{range .Summary.Breakdown}}
+                    <div class="breakdown-item">
+                        <span class="breakdown-name">{{.Name}}</span>
+                        <span class="breakdown-count">{{.Count}}</span>
+                    </div>
+                    {{end}}
+                </div>
+            </div>
+            {{end}}
+        </div>
+
+        {{if .Pairs}}
+            {{range .Pairs}}
+            <div class="diff-section" data-nodea="{{.NodeA}}" data-nodeb="{{.NodeB}}">
+                {{ $nodeA := .NodeA }}{{ $nodeB := .NodeB }}
+                <div class="diff-header">
+                    <div class="pair-title">Differences between {{.NodeA}} and {{.NodeB}}</div>
+                    <span class="diff-count-pill">{{.DiffCount}} entries</span>
+                </div>
+                <div class="table-wrapper">
+                    <table class="diff-table">
+                        <thead>
+                            <tr>
+                                <th class="action-header">Action</th>
+                                <th class="data-header">Row Data</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                        {{if .ValueDiffs}}
+                        <tr class="row-separator"><td colspan="100%">Value Differences</td></tr>
+                        {{range $i, $row := .ValueDiffs}}
+                            {{if $i}}<tr class="row-divider"><td colspan="100%"></td></tr>{{end}}
+                            <tr class="diff-row">
+                                <td class="action-cell">
+                                    <div class="action-wrapper">
+                                        <span class="action-label">Row Action</span>
+                                        <select class="plan-action" data-type="mismatch" data-pk="{{$row.PKey}}" data-nodea="{{ $nodeA }}" data-nodeb="{{ $nodeB }}">
+                                            <option value="">Use default (keep_n1)</option>
+                                            <option value="keep_n1">Keep {{$nodeA}}</option>
+                                            <option value="keep_n2">Keep {{$nodeB}}</option>
+                                            <option value="apply_from_n1_insert">Apply from {{$nodeA}} (insert if missing)</option>
+                                            <option value="apply_from_n2_insert">Apply from {{$nodeB}} (insert if missing)</option>
+                                            <option value="delete">Delete</option>
+                                            <option value="skip">Skip</option>
+                                        </select>
+                                        <div class="row-key" title="Primary key">{{$row.PKey}}</div>
+                                    </div>
+                                </td>
+                                <td class="columns-cell">
+                                    <table class="inner-columns-table">
+                                        <thead>
+                                            <tr>
+                                                <th class="inner-col-header">Column</th>
+                                                <th class="inner-node-header">{{ $nodeA }}</th>
+                                                <th class="inner-node-header">{{ $nodeB }}</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody>
+                                            {{range $row.Cells}}
+                                            <tr{{if .HasDiff}} class="has-diff"{{end}}>
+                                                <td class="col-name{{if .IsKey}} key-column{{end}}">{{.Column}}</td>
+                                                <td class="value-cell{{if .NodeAClass}} {{.NodeAClass}}{{end}}">{{.NodeAHTML}}</td>
+                                                <td class="value-cell{{if .NodeBClass}} {{.NodeBClass}}{{end}}">{{.NodeBHTML}}</td>
+                                            </tr>
+                                            {{end}}
+                                        </tbody>
+                                    </table>
+                                </td>
+                            </tr>
+                        {{end}}
+                        {{end}}
+
+                        {{if .Missing}}
+                        <tr class="row-separator"><td colspan="100%">Missing Rows</td></tr>
+                        {{range $gIndex, $group := .Missing}}
+                            {{if $group.DividerBefore}}<tr class="row-divider"><td colspan="100%"></td></tr>{{end}}
+                            <tr class="row-subseparator"><td colspan="100%">{{$group.Title}}</td></tr>
+                            {{range $rIndex, $row := $group.Rows}}
+                                {{if $rIndex}}<tr class="row-divider"><td colspan="100%"></td></tr>{{end}}
+                                <tr class="diff-row">
+                                    <td class="action-cell">
+                                        <div class="action-wrapper">
+                                            <span class="action-label">Row Action</span>
+                                            <select class="plan-action" data-type="{{if eq $group.Title (print "Missing in " $nodeB)}}missing_in_b{{else}}missing_in_a{{end}}" data-pk="{{$row.PKey}}" data-nodea="{{ $nodeA }}" data-nodeb="{{ $nodeB }}">
+                                                <option value="">Use default</option>
+                                                <option value="apply_from_n1_insert">Insert from {{$nodeA}}</option>
+                                                <option value="apply_from_n2_insert">Insert from {{$nodeB}}</option>
+                                                <option value="delete">Delete</option>
+                                                <option value="skip">Skip</option>
+                                            </select>
+                                            <div class="row-key" title="Primary key">{{$row.PKey}}</div>
+                                        </div>
+                                    </td>
+                                    <td class="columns-cell">
+                                        <table class="inner-columns-table">
+                                            <thead>
+                                                <tr>
+                                                    <th class="inner-col-header">Column</th>
+                                                    <th class="inner-node-header">{{ $nodeA }}</th>
+                                                    <th class="inner-node-header">{{ $nodeB }}</th>
+                                                </tr>
+                                            </thead>
+                                            <tbody>
+                                                {{range $row.Cells}}
+                                                <tr>
+                                                    <td class="col-name{{if .IsKey}} key-column{{end}}">{{.Column}}</td>
+                                                    <td class="value-cell{{if .NodeAClass}} {{.NodeAClass}}{{end}}">{{.NodeAHTML}}</td>
+                                                    <td class="value-cell{{if .NodeBClass}} {{.NodeBClass}}{{end}}">{{.NodeBHTML}}</td>
+                                                </tr>
+                                                {{end}}
+                                            </tbody>
+                                        </table>
+                                    </td>
+                                </tr>
+                            {{end}}
+                        {{end}}
+                        {{end}}
+
+                        {{if not .HasDiffs}}
+                        <tr><td colspan="2" class="empty-message">No column level differences detected for this node pair.</td></tr>
+                        {{end}}
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+            {{end}}
+        {{else}}
+            <div class="diff-section">
+                <div class="empty-message">No row-level differences were recorded.</div>
+            </div>
+        {{end}}
+        <script id="diff-data" type="application/json">{{ .RawDiffJSON }}</script>
+        <script>{{.JS}}</script>
+    </div>
+</body>
+</html>
