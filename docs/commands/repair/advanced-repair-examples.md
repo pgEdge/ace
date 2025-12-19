@@ -1,6 +1,6 @@
 # Advanced repair examples
 
-This page shows practical repair-file snippets you can adapt. All examples assume `version: 1` at the top and a `tables:` section; only the relevant table entry is shown.
+This page shows practical repair-plan snippets you can adapt. All examples assume `version: 1` at the top and a `tables:` section; only the relevant table entry is shown.
 
 ## 1) Classic source-of-truth per batch
 

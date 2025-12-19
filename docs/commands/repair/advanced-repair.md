@@ -1,6 +1,6 @@
-# Advanced repair (repair files)
+# Advanced repair (repair plans)
 
-`table-repair` can run from a repair file instead of a single source-of-truth flag. The repair file is a versioned YAML/JSON document that describes per-table defaults, ordered rules, and explicit row overrides. This lets you pick different sources of truth (or custom rows) per batch, and keep a reproducible plan on disk.
+`table-repair` can run from a repair plan instead of a single source-of-truth flag. The repair plan is a versioned YAML/JSON document that describes per-table defaults, ordered rules, and explicit row overrides. This lets you pick different sources of truth (or custom rows) per batch, and keep a reproducible plan on disk.
 
 ## File structure and precedence
 
@@ -31,19 +31,19 @@
 - `diff_type` is validated; incompatible action/diff combos are rejected at parse time and at execution.  
 - `custom` requires `custom_row` or `helpers`.
 
-## Running with a repair file
+## Running with a repair plan
 
 ```bash
 ./ace table-repair <cluster> <schema.table> \
   --diff-file=public_customers_diffs-20251210.json \
-  --repair-file=repair.yaml \
+  --repair-plan=repair.yaml \
   --dry-run  # optional
 ```
 
 Notes:
-- When `--repair-file` is provided, `--source-of-truth` is not required.  
+- When `--repair-plan` is provided, `--source-of-truth` is not required.  
 - Dry-run and reports include rule usage counts per node.  
-- `--fix-nulls` and `--bidirectional` cannot be combined with a repair file (they’re separate modes).
+- `--fix-nulls` and `--bidirectional` cannot be combined with a repair plan (they’re separate modes).
 
 ## Minimal skeleton
 

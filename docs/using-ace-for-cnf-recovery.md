@@ -83,7 +83,7 @@ Key idea: scope the diff to `node_origin = n1` and fence at the last trusted com
      --diff-file=public_customers_diffs-20251212160000.json \
      --nodes n2,n3 \
      --recovery-mode \
-     --repair-file=plan.yaml \
+    --repair-plan=plan.yaml \
      mycluster public.customers
    ```
 

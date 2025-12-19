@@ -161,8 +161,8 @@ func (tr *TableRepairTask) checkRepairOptionsCompatibility() error {
 		{tr.FixNulls && tr.InsertOnly, "insert_only and fix_nulls cannot be used together"},
 		{tr.FixNulls && tr.UpsertOnly, "upsert_only and fix_nulls cannot be used together"},
 		{tr.InsertOnly && tr.UpsertOnly, "insert_only and upsert_only cannot be used together"},
-		{strings.TrimSpace(tr.RepairPlanPath) != "" && tr.FixNulls, "repair-file and fix_nulls cannot be used together"},
-		{strings.TrimSpace(tr.RepairPlanPath) != "" && tr.Bidirectional, "repair-file and bidirectional cannot be used together"},
+		{strings.TrimSpace(tr.RepairPlanPath) != "" && tr.FixNulls, "repair-plan and fix_nulls cannot be used together"},
+		{strings.TrimSpace(tr.RepairPlanPath) != "" && tr.Bidirectional, "repair-plan and bidirectional cannot be used together"},
 	}
 
 	for _, rule := range incompatibleOptions {

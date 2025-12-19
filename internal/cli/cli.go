@@ -173,9 +173,9 @@ func SetupCLI() *cli.App {
 			Required: true,
 		},
 		&cli.StringFlag{
-			Name:    "repair-file",
+			Name:    "repair-plan",
 			Aliases: []string{"p"},
-			Usage:   "Path to the advanced repair file (YAML/JSON); skips source-of-truth requirement",
+			Usage:   "Path to the advanced repair plan (YAML/JSON); skips source-of-truth requirement",
 		},
 		&cli.StringFlag{
 			Name:    "source-of-truth",
@@ -1184,7 +1184,7 @@ func TableRepairCLI(ctx *cli.Context) error {
 	task.ClusterName = clusterName
 	task.QualifiedTableName = positional[0]
 	task.DiffFilePath = ctx.String("diff-file")
-	task.RepairPlanPath = ctx.String("repair-file")
+	task.RepairPlanPath = ctx.String("repair-plan")
 	task.DBName = ctx.String("dbname")
 	task.Nodes = ctx.String("nodes")
 	task.SourceOfTruth = ctx.String("source-of-truth")

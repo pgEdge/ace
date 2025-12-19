@@ -21,7 +21,7 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// Advanced repair-file schema notes:
+// Advanced repair-plan schema notes:
 //   - Versioned YAML/JSON document describing fallbacks, ordered rules, and explicit row overrides.
 //   - Precedence: row_overrides > first matching rule > table.default_action > global default_action.
 //   - Selectors: pk_in (values or ranges for simple PKs), diff_type, columns_changed, when (restricted expr over n1./n2.).
@@ -52,7 +52,7 @@ const (
 	RepairApplyModeInsert  RepairApplyMode = "insert"
 )
 
-// RepairPlanFile represents a versioned repair-file describing defaults, rules, and per-row overrides.
+// RepairPlanFile represents a versioned repair plan describing defaults, rules, and per-row overrides.
 type RepairPlanFile struct {
 	Version       int                        `json:"version" yaml:"version"`
 	DefaultAction *RepairPlanAction          `json:"default_action,omitempty" yaml:"default_action,omitempty"`
