@@ -35,7 +35,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/pgedge/ace/db/queries"
-	"github.com/pgedge/ace/internal/infra/db"
+	auth "github.com/pgedge/ace/internal/infra/db"
 	utils "github.com/pgedge/ace/pkg/common"
 	"github.com/pgedge/ace/pkg/config"
 	"github.com/pgedge/ace/pkg/logger"
@@ -1270,8 +1270,8 @@ func (t *TableDiffTask) ExecuteTask() (err error) {
 			StartTime:         startTime.Format(time.RFC3339),
 			TotalRowsChecked:  int64(maxCount),
 			DiffRowsCount:     make(map[string]int),
-			OnlyOrigin:        t.AgainstOrigin,
-			OnlyOriginResolved: func() string {
+			AgainstOrigin:     t.AgainstOrigin,
+			AgainstOriginResolved: func() string {
 				if t.resolvedAgainstOrigin != "" && t.SpockNodeNames != nil {
 					if name, ok := t.SpockNodeNames[t.resolvedAgainstOrigin]; ok {
 						return name

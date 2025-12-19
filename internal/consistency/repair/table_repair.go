@@ -29,8 +29,8 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/pgedge/ace/db/queries"
-	"github.com/pgedge/ace/internal/consistency/repair/plan"
-	"github.com/pgedge/ace/internal/infra/db"
+	planner "github.com/pgedge/ace/internal/consistency/repair/plan"
+	auth "github.com/pgedge/ace/internal/infra/db"
 	utils "github.com/pgedge/ace/pkg/common"
 	"github.com/pgedge/ace/pkg/logger"
 	"github.com/pgedge/ace/pkg/taskstore"
@@ -289,7 +289,7 @@ func (t *TableRepairTask) ValidateAndPrepare() error {
 	if t.RawDiffs.Summary.TableFilter != "" {
 		logger.Info("Diff file was generated with table filter: %s", t.RawDiffs.Summary.TableFilter)
 	}
-	if strings.TrimSpace(t.RawDiffs.Summary.OnlyOrigin) != "" && !t.RecoveryMode {
+	if strings.TrimSpace(t.RawDiffs.Summary.AgainstOrigin) != "" && !t.RecoveryMode {
 		return fmt.Errorf("diff file indicates an origin-scoped comparison (--against-origin); re-run table-repair with --recovery-mode or provide an explicit source_of_truth")
 	}
 
@@ -329,10 +329,10 @@ func (t *TableRepairTask) ValidateAndPrepare() error {
 
 	t.ClusterNodes = clusterNodes
 
-	if strings.TrimSpace(t.RawDiffs.Summary.OnlyOrigin) != "" && t.RecoveryMode && t.SourceOfTruth == "" {
-		failedNode := strings.TrimSpace(t.RawDiffs.Summary.OnlyOriginResolved)
+	if strings.TrimSpace(t.RawDiffs.Summary.AgainstOrigin) != "" && t.RecoveryMode && t.SourceOfTruth == "" {
+		failedNode := strings.TrimSpace(t.RawDiffs.Summary.AgainstOriginResolved)
 		if failedNode == "" {
-			failedNode = strings.TrimSpace(t.RawDiffs.Summary.OnlyOrigin)
+			failedNode = strings.TrimSpace(t.RawDiffs.Summary.AgainstOrigin)
 		}
 		if failedNode == "" {
 			return fmt.Errorf("recovery-mode requires failed node information in diff summary")

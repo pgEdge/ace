@@ -151,7 +151,7 @@ func TestTableDiffAgainstOriginWithUntil(t *testing.T) {
 			require.Contains(t, m, "node_origin", "spock metadata should include node_origin")
 		}
 	}
-	if task.DiffResult.Summary.OnlyOrigin == "" {
+	if task.DiffResult.Summary.AgainstOrigin == "" {
 		t.Fatalf("diff summary should record only_origin")
 	}
 	if got := task.DiffResult.Summary.Until; got == "" {
