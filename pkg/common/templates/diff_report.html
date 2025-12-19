@@ -11,8 +11,7 @@
         <div class="plan-builder">
             <h3>Build an advanced repair plan</h3>
             <p>Create a starter repair file (YAML) from this diff. The plan will set <code>keep_n1</code> for mismatches, <code>apply_from n1 insert</code> for rows missing on node2, and <code>apply_from n2 insert</code> for rows missing on node1. You can edit the file to add rules or change actions.</p>
-            <button id="download-plan">Download repair plan</button>
-            <div class="note">Generated plan uses per-row overrides. For large diffs, convert repeating patterns into rules manually.</div>
+            <div class="note">Generated plan uses per-row overrides. For large diffs, convert repeating patterns into rules manually. Use the Copy/Download repair plan buttons in each diff section toolbar to export the YAML.</div>
         </div>
         <div class="summary-box">
             <h2>Summary</h2>
@@ -51,6 +50,7 @@
                     <table class="diff-table">
                         <thead>
                             <tr>
+                                <th class="select-header">Select</th>
                                 <th class="action-header">Action</th>
                                 <th class="data-header">Row Data</th>
                             </tr>
@@ -61,6 +61,9 @@
                         {{range $i, $row := .ValueDiffs}}
                             {{if $i}}<tr class="row-divider"><td colspan="100%"></td></tr>{{end}}
                             <tr class="diff-row">
+                                <td class="select-cell">
+                                    <input type="checkbox" class="row-select" data-pk="{{$row.PKey}}" data-type="{{$row.RowType}}" data-nodea="{{ $nodeA }}" data-nodeb="{{ $nodeB }}" aria-label="Select row {{$row.PKey}}">
+                                </td>
                                 <td class="action-cell">
                                     <div class="action-wrapper">
                                         <span class="action-label">Row Action</span>
@@ -72,8 +75,39 @@
                                             <option value="apply_from_n2_insert">Apply from {{$nodeB}} (insert if missing)</option>
                                             <option value="delete">Delete</option>
                                             <option value="skip">Skip</option>
+                                            <option value="custom">Custom...</option>
                                         </select>
                                         <div class="row-key" title="Primary key">{{$row.PKey}}</div>
+                                        <div class="custom-editor" data-pk="{{$row.PKey}}" data-nodea="{{ $nodeA }}" data-nodeb="{{ $nodeB }}">
+                                            <div class="custom-editor-header">Custom action</div>
+                                            <label class="custom-field">
+                                                <span>Custom row (JSON)</span>
+                                                <textarea class="custom-row-input" data-default-json='{{.NodeAJSON}}' placeholder='{"col":"value"}'>{{- .NodeAJSON -}}</textarea>
+                                            </label>
+                                                <div class="custom-helpers">
+                                                    <label class="custom-field">
+                                                        <span>Coalesce priority</span>
+                                                        <select class="helper-coalesce">
+                                                            <option value="">None</option>
+                                                            <option value="{{$nodeA}},{{$nodeB}}">Prefer {{$nodeA}} then {{$nodeB}}</option>
+                                                            <option value="{{$nodeB}},{{$nodeA}}">Prefer {{$nodeB}} then {{$nodeA}}</option>
+                                                        </select>
+                                                    </label>
+                                                    <div class="custom-field freshest-row">
+                                                        <span class="freshest-label">Pick freshest</span>
+                                                        <div class="freshest-row-controls">
+                                                            <label class="freshest-toggle">
+                                                                <input type="checkbox" class="helper-freshest-toggle">
+                                                                <span>Enable (commit_ts)</span>
+                                                            </label>
+                                                            <select class="helper-freshest-tie">
+                                                                <option value="{{$nodeA}}">Tie → {{$nodeA}}</option>
+                                                                <option value="{{$nodeB}}">Tie → {{$nodeB}}</option>
+                                                            </select>
+                                                        </div>
+                                                    </div>
+                                                </div>
+                                            </div>
                                     </div>
                                 </td>
                                 <td class="columns-cell">
@@ -108,6 +142,9 @@
                             {{range $rIndex, $row := $group.Rows}}
                                 {{if $rIndex}}<tr class="row-divider"><td colspan="100%"></td></tr>{{end}}
                                 <tr class="diff-row">
+                                    <td class="select-cell">
+                                        <input type="checkbox" class="row-select" data-pk="{{$row.PKey}}" data-type="{{$row.RowType}}" data-nodea="{{ $nodeA }}" data-nodeb="{{ $nodeB }}" aria-label="Select row {{$row.PKey}}">
+                                    </td>
                                     <td class="action-cell">
                                         <div class="action-wrapper">
                                             <span class="action-label">Row Action</span>
@@ -117,8 +154,39 @@
                                                 <option value="apply_from_n2_insert">Insert from {{$nodeB}}</option>
                                                 <option value="delete">Delete</option>
                                                 <option value="skip">Skip</option>
+                                                <option value="custom">Custom...</option>
                                             </select>
                                             <div class="row-key" title="Primary key">{{$row.PKey}}</div>
+                                            <div class="custom-editor" data-pk="{{$row.PKey}}" data-nodea="{{ $nodeA }}" data-nodeb="{{ $nodeB }}">
+                                                <div class="custom-editor-header">Custom action</div>
+                                                <label class="custom-field">
+                                                    <span>Custom row (JSON)</span>
+                                                    <textarea class="custom-row-input" data-default-json='{{.NodeAJSON}}' placeholder='{"col":"value"}'>{{- .NodeAJSON -}}</textarea>
+                                                </label>
+                                                <div class="custom-helpers">
+                                                    <label class="custom-field">
+                                                        <span>Coalesce priority</span>
+                                                        <select class="helper-coalesce">
+                                                            <option value="">None</option>
+                                                            <option value="{{$nodeA}},{{$nodeB}}">Prefer {{$nodeA}} then {{$nodeB}}</option>
+                                                            <option value="{{$nodeB}},{{$nodeA}}">Prefer {{$nodeB}} then {{$nodeA}}</option>
+                                                        </select>
+                                                    </label>
+                                                    <div class="custom-field freshest-row">
+                                                        <span class="freshest-label">Pick freshest</span>
+                                                        <div class="freshest-row-controls">
+                                                            <label class="freshest-toggle">
+                                                                <input type="checkbox" class="helper-freshest-toggle">
+                                                                <span>Enable (commit_ts)</span>
+                                                            </label>
+                                                            <select class="helper-freshest-tie">
+                                                                <option value="{{$nodeA}}">Tie → {{$nodeA}}</option>
+                                                                <option value="{{$nodeB}}">Tie → {{$nodeB}}</option>
+                                                            </select>
+                                                        </div>
+                                                    </div>
+                                                </div>
+                                            </div>
                                         </div>
                                     </td>
                                     <td class="columns-cell">
@@ -147,7 +215,7 @@
                         {{end}}
 
                         {{if not .HasDiffs}}
-                        <tr><td colspan="2" class="empty-message">No column level differences detected for this node pair.</td></tr>
+                        <tr><td colspan="3" class="empty-message">No column level differences detected for this node pair.</td></tr>
                         {{end}}
                         </tbody>
                     </table>

@@ -6,7 +6,7 @@ FROM debian:bookworm-slim AS downloader
 
 ARG ACE_VERSION
 ARG TARGETOS=linux
-ARG TARGETARCH=amd64
+ARG TARGETARCH
 
 RUN set -eux; \
     apt-get update; \

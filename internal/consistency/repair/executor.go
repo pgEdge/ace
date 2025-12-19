@@ -270,8 +270,18 @@ func pkMatchesOverride(pkOrder []string, rowPk map[string]any, overridePk map[st
 	if len(overridePk) != len(pkOrder) {
 		return false
 	}
+
+	equal := func(a, b any) bool {
+		if af, ok := asFloat(a); ok {
+			if bf, ok2 := asFloat(b); ok2 {
+				return af == bf
+			}
+		}
+		return reflect.DeepEqual(a, b)
+	}
+
 	for _, col := range pkOrder {
-		if !reflect.DeepEqual(rowPk[col], overridePk[col]) {
+		if !equal(rowPk[col], overridePk[col]) {
 			return false
 		}
 	}

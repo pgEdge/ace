@@ -76,10 +76,11 @@ func writeHTMLDiffReport(diffResult types.DiffOutput, jsonFilePath string) (stri
 	}
 
 	type row struct {
-		PKey     string
-		Cells    []cell
-		RowType  string // "value_diff", "missing_in_a", "missing_in_b"
-		HasDiffs bool
+		PKey      string
+		Cells     []cell
+		RowType   string // "value_diff", "missing_in_a", "missing_in_b"
+		HasDiffs  bool
+		NodeAJSON string
 	}
 
 	type missingGroup struct {
@@ -208,9 +209,9 @@ func writeHTMLDiffReport(diffResult types.DiffOutput, jsonFilePath string) (stri
 			}
 		}
 
-		sort.Strings(commonKeys)
-		sort.Strings(missingInA)
-		sort.Strings(missingInB)
+		sortPKKeys(commonKeys)
+		sortPKKeys(missingInA)
+		sortPKKeys(missingInB)
 
 		valueDiffs := make([]row, 0, len(commonKeys))
 		for _, key := range commonKeys {
@@ -244,10 +245,11 @@ func writeHTMLDiffReport(diffResult types.DiffOutput, jsonFilePath string) (stri
 				cells = append(cells, c)
 			}
 			valueDiffs = append(valueDiffs, row{
-				PKey:     key,
-				Cells:    cells,
-				RowType:  "value_diff",
-				HasDiffs: hasDiffs,
+				PKey:      key,
+				Cells:     cells,
+				RowType:   "value_diff",
+				HasDiffs:  hasDiffs,
+				NodeAJSON: buildRowJSONPretty(rowMapA[key], columns),
 			})
 		}
 
@@ -270,10 +272,11 @@ func writeHTMLDiffReport(diffResult types.DiffOutput, jsonFilePath string) (stri
 					})
 				}
 				group.Rows = append(group.Rows, row{
-					PKey:     key,
-					Cells:    cells,
-					RowType:  "missing_in_b",
-					HasDiffs: true,
+					PKey:      key,
+					Cells:     cells,
+					RowType:   "missing_in_b",
+					HasDiffs:  true,
+					NodeAJSON: buildRowJSONPretty(rowMapA[key], columns),
 				})
 			}
 			missingGroups = append(missingGroups, group)
@@ -609,4 +612,85 @@ func formatPrimaryKey(pk []string) string {
 		return "N/A"
 	}
 	return strings.Join(pk, ", ")
+}
+
+// buildRowJSON returns a deterministic JSON object string for the given row using the provided column order.
+func buildRowJSONPretty(row types.OrderedMap, columns []string) string {
+	if len(row) == 0 || len(columns) == 0 {
+		return ""
+	}
+	rowMap := OrderedMapToMap(row)
+	ordered := make(map[string]any, len(columns))
+	for _, col := range columns {
+		if val, ok := rowMap[col]; ok {
+			ordered[col] = val
+		}
+	}
+	b, err := json.MarshalIndent(ordered, "", "  ")
+	if err != nil {
+		return ""
+	}
+	return string(b)
+}
+
+// sortPKKeys orders primary key strings using numeric-aware comparison so 2 sorts before 10.
+func sortPKKeys(keys []string) {
+	sort.Slice(keys, func(i, j int) bool {
+		return comparePKKey(keys[i], keys[j]) < 0
+	})
+}
+
+func comparePKKey(a, b string) int {
+	partsA := strings.Split(a, "|")
+	partsB := strings.Split(b, "|")
+	max := len(partsA)
+	if len(partsB) < max {
+		max = len(partsB)
+	}
+	for idx := 0; idx < max; idx++ {
+		if cmp := comparePKComponent(partsA[idx], partsB[idx]); cmp != 0 {
+			return cmp
+		}
+	}
+	switch {
+	case len(partsA) < len(partsB):
+		return -1
+	case len(partsA) > len(partsB):
+		return 1
+	default:
+		return 0
+	}
+}
+
+func comparePKComponent(a, b string) int {
+	numA, okA := parseNumeric(a)
+	numB, okB := parseNumeric(b)
+	if okA && okB {
+		switch {
+		case numA < numB:
+			return -1
+		case numA > numB:
+			return 1
+		default:
+			return 0
+		}
+	}
+	if a < b {
+		return -1
+	}
+	if a > b {
+		return 1
+	}
+	return 0
+}
+
+func parseNumeric(val string) (float64, bool) {
+	if val == "" {
+		return 0, false
+	}
+	num, err := strconv.ParseFloat(val, 64)
+	if err != nil {
+		return 0, false
+	}
+	return num, true
 }
