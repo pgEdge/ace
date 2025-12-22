@@ -1503,7 +1503,6 @@ func (t *TableRepairTask) runUnidirectionalRepair(startTime time.Time) error {
 		t.TaskContext = strings.TrimSpace(summary.String())
 	}
 
-	// TODO: Update task metrics in a local DB
 	return nil
 }
 
@@ -1950,6 +1949,7 @@ func getDryRunOutput(task *TableRepairTask) (string, error) {
 
 	if task.Bidirectional {
 		// TODO: Need to ensure that no more than 2 nodes are specified for bidirectional repair
+		// Or we just leave it as a footgun, but warn in the docs.
 		anyInserts := false
 		for nodePairKey, diffs := range task.RawDiffs.NodeDiffs {
 			nodes := strings.Split(nodePairKey, "/")

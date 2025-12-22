@@ -1307,21 +1307,6 @@ func (t *TableDiffTask) ExecuteTask() (err error) {
 	}
 
 	var ranges []Range
-	/* Determine if we should use direct PKey offset generation.
-	 * Essentially, we don't want to use probabilistic sampling for tables with
-	 * less than 10,000 rows to avoid non-deterministic results.
-
-	 * TODO: table-filter should also support probabilistic sampling.
-	 */
-	// if (maxCount > 0 && maxCount <= 10000) || t.TableFilter != "" {
-	// 	logger.Info("Using direct primary key offset generation for table %s.%s (maxCount: %d, tableFilter: '%s')",
-	// 		t.Schema, t.Table, maxCount, t.TableFilter)
-	// 	r, err := t.getPkeyOffsets(ctx, pools[maxNode])
-	// 	if err != nil {
-	// 		return logger.Error("failed to get pkey offsets directly: %w", err)
-	// 	}
-	// 	ranges = r
-	// } else {
 	ntileCount := int(math.Ceil(float64(maxCount) / float64(t.BlockSize)))
 	if ntileCount == 0 && maxCount > 0 {
 		ntileCount = 1
