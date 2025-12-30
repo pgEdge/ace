@@ -20,6 +20,8 @@ Server-side settings used by the API:
 - `server.allowed_common_names` (optional)
 - `server.taskstore_path` (optional; defaults to `ACE_TASKS_DB` or `./ace_tasks.db`)
 
+For certificate generation, PostgreSQL SSL setup, and role mapping examples, see [Certificate setup](certs.md).
+
 ## Common request/response behavior
 
 - All write endpoints are `POST` and accept `application/json`.
