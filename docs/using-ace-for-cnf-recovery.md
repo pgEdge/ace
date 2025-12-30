@@ -101,3 +101,12 @@ Key idea: scope the diff to `node_origin = n1` and fence at the last trusted com
 - If LSNs are missing on survivors, auto SoT selection will fail; provide `--source-of-truth`.
 - Advanced plans are allowed in recovery-mode; use them for upsert-only/coalesce patterns instead of default delete/update behavior.
 - For large tables, combine `--table-filter` with `--against-origin` and iterate in chunks.
+
+## Scenarios tables could be out of sync after recovery
+- Local survivor writes: after `n1` fails, `n2` and `n3` can diverge from each other due to new local writes; an origin-only diff/repair will not reconcile those differences.
+- Writes between diff and repair: rows captured in the diff can be updated before repair runs, so a follow-up diff sees new or different mismatches.
+- Partial targeting: a table filter or repair plan may intentionally touch only a subset of rows; remaining differences are expected until the next stage.
+- Diff caps or skipped operations: if `max_diff_rows` truncates the diff or repair runs in insert-only/upsert-only mode, some differences will remain.
+- Partial repair execution: repair errors, permission issues, or connectivity problems can leave a subset of rows unmodified; check the repair output/report.
+- Node set mismatch: if diff or repair only covered a subset of surviving nodes, other nodes can still drift; re-run with the full survivor set.
+- Live traffic during validation: table-diff does not coordinate a single snapshot across nodes, so concurrent writes can produce transient diffs.
