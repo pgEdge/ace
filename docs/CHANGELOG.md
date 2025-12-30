@@ -2,6 +2,16 @@
 
 All notable changes to ACE will be captured in this document. The project follows semantic versioning; the latest changes appear first.
 
+## [v1.5.2] - 2025-12-30
+
+### Added
+- Repair plans can set `allow_stale_repairs: false` per action to skip repairs when the target row has a newer commit timestamp than the diff snapshot, with skipped rows logged to `reports/<YYYY-MM-DD>/stale_repair_skips_<HHMMSS.mmm>.json`.
+- HTTP API documentation plus an OpenAPI 3.1 spec covering async task endpoints.
+- Certificate/mTLS setup guide for the HTTP API server and Postgres client cert auth.
+
+### Changed
+- Documentation navigation now links the HTTP API docs, certificate guide, and OpenAPI spec.
+
 ## [v1.5.1] - 2025-12-22
 
 ### Changed
