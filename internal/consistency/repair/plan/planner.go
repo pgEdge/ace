@@ -102,6 +102,7 @@ type RepairPlanAction struct {
 	Type          RepairActionType  `json:"type" yaml:"type"`
 	From          string            `json:"from,omitempty" yaml:"from,omitempty"` // n1 or n2 for apply_from
 	Mode          RepairApplyMode   `json:"mode,omitempty" yaml:"mode,omitempty"` // replace|upsert|insert for apply_from
+	AllowStaleRepairs *bool             `json:"allow_stale_repairs,omitempty" yaml:"allow_stale_repairs,omitempty"`
 	CustomRow     map[string]any    `json:"custom_row,omitempty" yaml:"custom_row,omitempty"`
 	CustomHelpers *CustomHelperSpec `json:"helpers,omitempty" yaml:"helpers,omitempty"`
 }

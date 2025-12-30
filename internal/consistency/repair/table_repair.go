@@ -85,6 +85,8 @@ type TableRepairTask struct {
 	report   *RepairReport
 
 	planRuleMatches map[string]map[string]string // populated when using repair plans
+	planStaleChecks map[string]map[string]planStaleCheck
+	staleSkipLog    *staleSkipLogger
 
 	autoSelectedSourceOfTruth string
 	autoSelectionFailedNode   string
@@ -566,6 +568,7 @@ func (t *TableRepairTask) Run(skipValidation bool) (err error) {
 	}
 
 	defer t.closePools()
+	defer t.closeStaleSkipLog()
 
 	startTime := time.Now()
 
@@ -1346,7 +1349,7 @@ func (t *TableRepairTask) runUnidirectionalRepair(startTime time.Time) error {
 		if !skipDeletes {
 			nodeDeletes := fullDeletes[nodeName]
 			if len(nodeDeletes) > 0 {
-				deletedCount, err := executeDeletes(t.Ctx, tx, t, nodeDeletes)
+				deletedCount, err := executeDeletes(t.Ctx, tx, t, nodeName, nodeDeletes, nil)
 				if err != nil {
 					tx.Rollback(t.Ctx)
 					logger.Error("executing deletes on node %s: %v", nodeName, err)
@@ -1375,30 +1378,16 @@ func (t *TableRepairTask) runUnidirectionalRepair(startTime time.Time) error {
 		// And now for the upserts
 		nodeUpserts := fullUpserts[nodeName]
 		if len(nodeUpserts) > 0 {
-			targetNodeHostPortKey := ""
-			for hostPort, mappedName := range t.HostMap {
-				if mappedName == nodeName {
-					targetNodeHostPortKey = hostPort
-					break
-				}
-			}
-			if targetNodeHostPortKey == "" {
+			targetNodeColTypes, _, err := t.getColTypesForNode(nodeName)
+			if err != nil {
 				tx.Rollback(t.Ctx)
-				errStr := fmt.Sprintf("could not find host:port key for target node %s to get col types", nodeName)
-				logger.Error("%s", errStr)
-				repairErrors = append(repairErrors, errStr)
-				continue
-			}
-			targetNodeColTypes, ok := t.ColTypes[targetNodeHostPortKey]
-			if !ok {
-				tx.Rollback(t.Ctx)
-				errStr := fmt.Sprintf("column types for target node '%s' (key: %s) not found for upserts", nodeName, targetNodeHostPortKey)
+				errStr := fmt.Sprintf("column types for target node '%s' not found for upserts: %v", nodeName, err)
 				logger.Error("%s", errStr)
 				repairErrors = append(repairErrors, errStr)
 				continue
 			}
 
-			upsertedCount, err := executeUpserts(tx, t, nodeUpserts, targetNodeColTypes)
+			upsertedCount, err := executeUpserts(tx, t, nodeName, nodeUpserts, targetNodeColTypes)
 			if err != nil {
 				tx.Rollback(t.Ctx)
 				logger.Error("executing upserts on node %s: %v", nodeName, err)
@@ -1701,7 +1690,7 @@ func (t *TableRepairTask) performBirectionalInserts(nodeName string, inserts map
 	// Bidirectional is always insert only
 	originalInsertOnly := t.InsertOnly
 	t.InsertOnly = true
-	insertedCount, err := executeUpserts(tx, t, inserts, targetNodeColTypes)
+	insertedCount, err := executeUpserts(tx, t, nodeName, inserts, targetNodeColTypes)
 	t.InsertOnly = originalInsertOnly
 
 	if err != nil {
@@ -1724,7 +1713,11 @@ func (t *TableRepairTask) performBirectionalInserts(nodeName string, inserts map
 }
 
 // executeDeletes handles deleting rows in batches.
-func executeDeletes(ctx context.Context, tx pgx.Tx, task *TableRepairTask, deletes map[string]map[string]any) (int, error) {
+func executeDeletes(ctx context.Context, tx pgx.Tx, task *TableRepairTask, nodeName string, deletes map[string]map[string]any, colTypes map[string]string) (int, error) {
+	if err := task.filterStaleRepairs(ctx, tx, nodeName, deletes, colTypes, "delete"); err != nil {
+		return 0, err
+	}
+
 	keysToDelete := make([]any, 0, len(deletes))
 
 	for pkeyString := range deletes {
@@ -1826,7 +1819,11 @@ func executeDeletes(ctx context.Context, tx pgx.Tx, task *TableRepairTask, delet
 }
 
 // executeUpserts handles upserting rows in batches.
-func executeUpserts(tx pgx.Tx, task *TableRepairTask, upserts map[string]map[string]any, colTypes map[string]string) (int, error) {
+func executeUpserts(tx pgx.Tx, task *TableRepairTask, nodeName string, upserts map[string]map[string]any, colTypes map[string]string) (int, error) {
+	if err := task.filterStaleRepairs(task.Ctx, tx, nodeName, upserts, colTypes, "upsert"); err != nil {
+		return 0, err
+	}
+
 	rowsToUpsert := make([][]any, 0, len(upserts))
 	orderedCols := task.Cols
 

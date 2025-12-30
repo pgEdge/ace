@@ -141,6 +141,34 @@ tables:
         action: { type: keep_n1 }
 ```
 
+## 5e) Skip if target looks newer (snapshot-based)
+
+Avoid overwriting rows that already appear newer on the target side in the diff snapshot (does not re-check current DB state):
+```yaml
+tables:
+  public.orders:
+    default_action: { type: keep_n1 }
+    rules:
+      - name: skip_if_target_newer
+        diff_type: [row_mismatch]
+        when: "n2.updated_at > n1.updated_at"
+        action: { type: skip }
+```
+
+## 5f) Skip stale repairs (current commit timestamp)
+
+Protect against overwriting rows that changed after the diff:
+```yaml
+tables:
+  public.orders:
+    rules:
+      - name: n1_to_n2_no_stale
+        diff_type: [row_mismatch, missing_on_n2]
+        action:
+          type: keep_n1
+          allow_stale_repairs: false
+```
+
 ## 6) Custom row per PK
 
 Pin a specific PK to a hand-crafted row:

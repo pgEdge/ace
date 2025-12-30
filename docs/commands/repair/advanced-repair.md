@@ -23,6 +23,7 @@
   - `helpers.pick_freshest: { key: updated_at, tie: n1|n2 }` fills remaining columns from the fresher side (numeric, string, or RFC3339 timestamps).  
 - `skip`: do nothing.  
 - `delete`: remove the row (from the side(s) where it exists).
+- Action option: `allow_stale_repairs` (default `true`) set to `false` to skip repairs when the current row on the target node has a newer commit timestamp than the diff snapshot. Skipped rows are logged to `reports/<YYYY-MM-DD>/stale_repair_skips_<HHMMSS.mmm>.json`.
 - Spock metadata in plans: you can reference `commit_ts` and `node_origin` in `when` predicates and `custom_row` templates (e.g., `{{n1.commit_ts}}`, `when: "n2.node_origin = 'n3'"`). These fields are injected during diff collection (via `pg_xact_commit_timestamp(xmin)` and `spock.xact_commit_timestamp_origin(xmin)`), not stored in your table.
 
 ### Compatibility checks (fail fast)
@@ -30,6 +31,9 @@
 - `apply_from mode: insert` is invalid on `row_mismatch`.  
 - `diff_type` is validated; incompatible action/diff combos are rejected at parse time and at execution.  
 - `custom` requires `custom_row` or `helpers`.
+
+### Diff timing and stale rows
+Repair plans (and `table-repair` in general) only act on the rows captured in the diff file. The plan engine does not re-fetch current row values at repair time, and `when` predicates/helpers only see `n1`/`n2` values (plus optional `commit_ts`/`node_origin`) from the diff snapshot. If you need protection against stale repairs, set `allow_stale_repairs: false` on the relevant action: ACE will compare the target row's current commit timestamp with the diff snapshot and skip repairs where the current row is newer. Skipped rows are logged (see above). Re-running `table-diff` close to the repair window is still recommended when consistency is critical.
 
 ## Running with a repair plan
 
