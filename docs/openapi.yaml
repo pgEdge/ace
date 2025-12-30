@@ -1,0 +1,711 @@
+openapi: 3.1.0
+info:
+  title: ACE HTTP API
+  version: "1.0"
+  description: |
+    ACE exposes an asynchronous HTTP API that mirrors a subset of CLI commands.
+    All write endpoints enqueue a task and return a task ID for polling.
+servers:
+  - url: https://{host}:{port}
+    variables:
+      host:
+        default: localhost
+      port:
+        default: "5000"
+tags:
+  - name: table
+    description: Table diff/repair endpoints.
+  - name: spock
+    description: Spock metadata diff endpoints.
+  - name: schema
+    description: Schema diff endpoints.
+  - name: repset
+    description: Replication set diff endpoints.
+  - name: mtree
+    description: Merkle tree endpoints.
+  - name: tasks
+    description: Task status endpoints.
+security:
+  - mutualTLS: []
+paths:
+  /api/v1/table-diff:
+    post:
+      tags: [table]
+      summary: Compare a table between nodes and generate a diff report.
+      description: |
+        Returns a task ID; results are written to diff files on the server.
+        Output is always JSON; HTML output is not exposed via HTTP.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TableDiffRequest"
+            examples:
+              basic:
+                value:
+                  cluster: my-cluster
+                  table: public.customers
+                  nodes: [n1, n2]
+                  table_filter: "region = 'us-east'"
+      responses:
+        "202":
+          $ref: "#/components/responses/TaskAccepted"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+  /api/v1/table-rerun:
+    post:
+      tags: [table]
+      summary: Re-run a diff from an existing diff file.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TableRerunRequest"
+      responses:
+        "202":
+          $ref: "#/components/responses/TaskAccepted"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+  /api/v1/table-repair:
+    post:
+      tags: [table]
+      summary: Repair table inconsistencies from a diff file.
+      description: |
+        Recovery-mode is not available via HTTP; origin-only diff files require
+        a CLI repair or explicit source of truth in the diff.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TableRepairRequest"
+            examples:
+              dry_run:
+                value:
+                  cluster: my-cluster
+                  table: public.customers
+                  diff_file: /workspace/public_customers_diffs.json
+                  source_of_truth: n1
+                  dry_run: true
+      responses:
+        "202":
+          $ref: "#/components/responses/TaskAccepted"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+  /api/v1/spock-diff:
+    post:
+      tags: [spock]
+      summary: Diff Spock metadata across nodes.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SpockDiffRequest"
+      responses:
+        "202":
+          $ref: "#/components/responses/TaskAccepted"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+  /api/v1/schema-diff:
+    post:
+      tags: [schema]
+      summary: Diff all tables in a schema or compare schema DDL only.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SchemaDiffRequest"
+      responses:
+        "202":
+          $ref: "#/components/responses/TaskAccepted"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+  /api/v1/repset-diff:
+    post:
+      tags: [repset]
+      summary: Diff all tables in a replication set.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RepsetDiffRequest"
+      responses:
+        "202":
+          $ref: "#/components/responses/TaskAccepted"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+  /api/v1/mtree/init:
+    post:
+      tags: [mtree]
+      summary: Initialize Merkle tree metadata for a cluster.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MtreeClusterRequest"
+      responses:
+        "202":
+          $ref: "#/components/responses/TaskAccepted"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+  /api/v1/mtree/teardown:
+    post:
+      tags: [mtree]
+      summary: Remove Merkle tree metadata for a cluster.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MtreeClusterRequest"
+      responses:
+        "202":
+          $ref: "#/components/responses/TaskAccepted"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+  /api/v1/mtree/teardown-table:
+    post:
+      tags: [mtree]
+      summary: Remove Merkle tree metadata for a specific table.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MtreeTableRequest"
+      responses:
+        "202":
+          $ref: "#/components/responses/TaskAccepted"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+  /api/v1/mtree/build:
+    post:
+      tags: [mtree]
+      summary: Build Merkle tree blocks for a table.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MtreeBuildRequest"
+      responses:
+        "202":
+          $ref: "#/components/responses/TaskAccepted"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+  /api/v1/mtree/update:
+    post:
+      tags: [mtree]
+      summary: Update Merkle tree blocks for a table.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MtreeUpdateRequest"
+      responses:
+        "202":
+          $ref: "#/components/responses/TaskAccepted"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+  /api/v1/mtree/diff:
+    post:
+      tags: [mtree]
+      summary: Diff Merkle tree blocks for a table.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MtreeDiffRequest"
+      responses:
+        "202":
+          $ref: "#/components/responses/TaskAccepted"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+  /api/v1/tasks/{task_id}:
+    get:
+      tags: [tasks]
+      summary: Fetch status for a task.
+      parameters:
+        - name: task_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          $ref: "#/components/responses/TaskStatusOk"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+components:
+  securitySchemes:
+    mutualTLS:
+      type: mutualTLS
+      description: |
+        Client certificate auth. The client certificate CN is used as the role
+        for API-initiated tasks when role enforcement applies.
+  responses:
+    TaskAccepted:
+      description: Task enqueued.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/TaskSubmissionResponse"
+    TaskStatusOk:
+      description: Task status.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/TaskStatusResponse"
+    BadRequest:
+      description: Invalid input.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    Unauthorized:
+      description: Client certificate missing or invalid.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    NotFound:
+      description: Task not found.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    MethodNotAllowed:
+      description: Method not allowed.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    InternalServerError:
+      description: Internal server error.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+  schemas:
+    ErrorResponse:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: string
+    TaskSubmissionResponse:
+      type: object
+      required: [task_id, status]
+      properties:
+        task_id:
+          type: string
+        status:
+          type: string
+          enum: [QUEUED]
+    TaskStatusResponse:
+      type: object
+      required: [task_id, task_type, status, cluster]
+      properties:
+        task_id:
+          type: string
+        task_type:
+          type: string
+          enum:
+            - TABLE_DIFF
+            - TABLE_REPAIR
+            - TABLE_RERUN
+            - SCHEMA_DIFF
+            - REPSET_DIFF
+            - SPOCK_DIFF
+            - MTREE_BUILD
+            - MTREE_UPDATE
+            - MTREE_DIFF
+            - MTREE_INIT
+            - MTREE_TEARDOWN
+            - MTREE_TEARDOWN_TABLE
+        status:
+          type: string
+          enum: [PENDING, RUNNING, COMPLETED, FAILED]
+        cluster:
+          type: string
+        schema:
+          type: string
+        table:
+          type: string
+        repset:
+          type: string
+        started_at:
+          type: string
+          format: date-time
+        finished_at:
+          type: string
+          format: date-time
+        time_taken:
+          type: number
+        task_context:
+          type: object
+          additionalProperties: true
+    Nodes:
+      type: array
+      items:
+        type: string
+      description: |
+        Node names. If omitted or empty, defaults to "all".
+    TableDiffRequest:
+      type: object
+      required: [table]
+      properties:
+        cluster:
+          type: string
+          description: Defaults to default_cluster from ace.yaml.
+        table:
+          type: string
+          description: Fully-qualified table name (schema.table).
+        dbname:
+          type: string
+        nodes:
+          $ref: "#/components/schemas/Nodes"
+        block_size:
+          type: integer
+          description: Defaults to table_diff.diff_block_size or 100000.
+        concurrency_factor:
+          type: integer
+          description: Defaults to table_diff.concurrency_factor or 1.
+        compare_unit_size:
+          type: integer
+          description: Defaults to table_diff.compare_unit_size or 10000.
+        max_diff_rows:
+          type: integer
+          description: Defaults to table_diff.max_diff_rows or 0 (no limit).
+        table_filter:
+          type: string
+          description: SQL WHERE predicate (without WHERE).
+        override_block_size:
+          type: boolean
+        quiet:
+          type: boolean
+    TableRerunRequest:
+      type: object
+      required: [diff_file]
+      properties:
+        cluster:
+          type: string
+        diff_file:
+          type: string
+          description: Path on the API server filesystem.
+        dbname:
+          type: string
+        nodes:
+          $ref: "#/components/schemas/Nodes"
+        quiet:
+          type: boolean
+    TableRepairRequest:
+      type: object
+      required: [table, diff_file]
+      properties:
+        cluster:
+          type: string
+        table:
+          type: string
+          description: Fully-qualified table name (schema.table).
+        dbname:
+          type: string
+        nodes:
+          $ref: "#/components/schemas/Nodes"
+        diff_file:
+          type: string
+          description: Path on the API server filesystem.
+        repair_plan:
+          type: string
+          description: Path to a repair plan file on the API server filesystem.
+        source_of_truth:
+          type: string
+          description: Required unless using fix_nulls or bidirectional insert-only.
+        quiet:
+          type: boolean
+        dry_run:
+          type: boolean
+        insert_only:
+          type: boolean
+        upsert_only:
+          type: boolean
+        fire_triggers:
+          type: boolean
+        generate_report:
+          type: boolean
+        fix_nulls:
+          type: boolean
+        bidirectional:
+          type: boolean
+    SpockDiffRequest:
+      type: object
+      properties:
+        cluster:
+          type: string
+        dbname:
+          type: string
+        nodes:
+          $ref: "#/components/schemas/Nodes"
+        output:
+          type: string
+          enum: [json]
+          description: JSON output only.
+    SchemaDiffRequest:
+      type: object
+      required: [schema]
+      properties:
+        cluster:
+          type: string
+        schema:
+          type: string
+        dbname:
+          type: string
+        nodes:
+          $ref: "#/components/schemas/Nodes"
+        skip_tables:
+          type: string
+          description: Comma-separated list.
+        skip_file:
+          type: string
+          description: Path on the API server filesystem.
+        ddl_only:
+          type: boolean
+        block_size:
+          type: integer
+          description: Defaults to table_diff.diff_block_size or 100000.
+        concurrency_factor:
+          type: integer
+          description: Defaults to table_diff.concurrency_factor or 1.
+        compare_unit_size:
+          type: integer
+          description: Defaults to table_diff.compare_unit_size or 10000.
+        output:
+          type: string
+          enum: [json, html]
+        override_block_size:
+          type: boolean
+        quiet:
+          type: boolean
+    RepsetDiffRequest:
+      type: object
+      required: [repset]
+      properties:
+        cluster:
+          type: string
+        repset:
+          type: string
+        dbname:
+          type: string
+        nodes:
+          $ref: "#/components/schemas/Nodes"
+        skip_tables:
+          type: string
+          description: Comma-separated list.
+        skip_file:
+          type: string
+          description: Path on the API server filesystem.
+        block_size:
+          type: integer
+          description: Defaults to table_diff.diff_block_size or 100000.
+        concurrency_factor:
+          type: integer
+          description: Defaults to table_diff.concurrency_factor or 1.
+        compare_unit_size:
+          type: integer
+          description: Defaults to table_diff.compare_unit_size or 10000.
+        output:
+          type: string
+          enum: [json, html]
+        override_block_size:
+          type: boolean
+        quiet:
+          type: boolean
+    MtreeClusterRequest:
+      type: object
+      properties:
+        cluster:
+          type: string
+        dbname:
+          type: string
+        nodes:
+          $ref: "#/components/schemas/Nodes"
+        quiet:
+          type: boolean
+    MtreeTableRequest:
+      type: object
+      required: [table]
+      properties:
+        cluster:
+          type: string
+        table:
+          type: string
+          description: Fully-qualified table name (schema.table).
+        dbname:
+          type: string
+        nodes:
+          $ref: "#/components/schemas/Nodes"
+        quiet:
+          type: boolean
+    MtreeBuildRequest:
+      type: object
+      required: [table]
+      properties:
+        cluster:
+          type: string
+        table:
+          type: string
+          description: Fully-qualified table name (schema.table).
+        dbname:
+          type: string
+        nodes:
+          $ref: "#/components/schemas/Nodes"
+        block_size:
+          type: integer
+          description: Defaults to 10000.
+        max_cpu_ratio:
+          type: number
+          description: Defaults to 0.5.
+        override_block_size:
+          type: boolean
+        analyse:
+          type: boolean
+        recreate_objects:
+          type: boolean
+        write_ranges:
+          type: boolean
+        ranges_file:
+          type: string
+          description: Path on the API server filesystem.
+        quiet:
+          type: boolean
+    MtreeUpdateRequest:
+      type: object
+      required: [table]
+      properties:
+        cluster:
+          type: string
+        table:
+          type: string
+          description: Fully-qualified table name (schema.table).
+        dbname:
+          type: string
+        nodes:
+          $ref: "#/components/schemas/Nodes"
+        max_cpu_ratio:
+          type: number
+          description: Defaults to 0.5.
+        rebalance:
+          type: boolean
+        quiet:
+          type: boolean
+    MtreeDiffRequest:
+      type: object
+      required: [table]
+      properties:
+        cluster:
+          type: string
+        table:
+          type: string
+          description: Fully-qualified table name (schema.table).
+        dbname:
+          type: string
+        nodes:
+          $ref: "#/components/schemas/Nodes"
+        max_cpu_ratio:
+          type: number
+          description: Defaults to 0.5.
+        output:
+          type: string
+          enum: [json, html]
+        skip_update:
+          type: boolean
+        quiet:
+          type: boolean
