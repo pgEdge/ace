@@ -80,6 +80,9 @@ nav:
       - mtree-update: commands/mtree/mtree-update.md
   - Scheduling ACE Runs: scheduling.md
   - The ACE API: api.md
+  - ACE HTTP API: http-api.md
+  - API Certificates and mTLS: certs.md
+  - OpenAPI Spec (YAML): openapi.yaml
   - Improving ACE Performance: performance.md
   - Using ACE for Failure Recovery: docs/using-ace-for-cnf-recovery.md
   - Architecture and Design: 
