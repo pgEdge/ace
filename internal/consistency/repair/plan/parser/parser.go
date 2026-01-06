@@ -2,7 +2,7 @@
 //
 // # ACE - Active Consistency Engine
 //
-// Copyright (C) 2023 - 2025, pgEdge (https://www.pgedge.com/)
+// Copyright (C) 2023 - 2026, pgEdge (https://www.pgedge.com/)
 //
 // This software is released under the PostgreSQL License:
 // https://opensource.org/license/postgresql
