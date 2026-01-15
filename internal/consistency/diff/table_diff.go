@@ -604,6 +604,17 @@ func (t *TableDiffTask) fetchRows(nodeName string, r Range) ([]types.OrderedMap,
 					} else {
 						processedVal = nil
 					}
+				case pgtype.UUID:
+					if v.Status == pgtype.Present {
+						processedVal = fmt.Sprintf("%x-%x-%x-%x-%x",
+							v.Bytes[0:4], v.Bytes[4:6], v.Bytes[6:8], v.Bytes[8:10], v.Bytes[10:16])
+					} else {
+						processedVal = nil
+					}
+				case [16]byte: // pgx/v5 returns UUIDs as [16]byte
+					// nil caught above
+					processedVal = fmt.Sprintf("%x-%x-%x-%x-%x",
+						v[0:4], v[4:6], v[6:8], v[8:10], v[10:16])
 				case time.Time:
 					processedVal = v
 				case string:
