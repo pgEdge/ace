@@ -2,6 +2,14 @@
 
 All notable changes to ACE will be captured in this document. The project follows semantic versioning; the latest changes appear first.
 
+## [v1.5.3] - 2026-01-15
+
+### Changed
+- Update copyrights to 2026
+
+### Fixed
+- UUID data type handling for table diff and repair fixed.
+
 ## [v1.5.2] - 2025-12-30
 
 ### Added
