@@ -1,0 +1,165 @@
+Third-Party Software Notices
+=============================
+
+This software includes the following third-party dependencies:
+
+- github.com/VividCortex/ewma
+  License: MIT
+  URL: https://github.com/VividCortex/ewma/blob/v1.2.0/LICENSE
+
+- github.com/acarl005/stripansi
+  License: MIT
+  URL: https://github.com/acarl005/stripansi/blob/5a71ef0e047d/LICENSE
+
+- github.com/aymanbagabas/go-osc52/v2
+  License: MIT
+  URL: https://github.com/aymanbagabas/go-osc52/blob/v2.0.1/LICENSE
+
+- github.com/charmbracelet/colorprofile
+  License: MIT
+  URL: https://github.com/charmbracelet/colorprofile/blob/f60798e515dc/LICENSE
+
+- github.com/charmbracelet/lipgloss
+  License: MIT
+  URL: https://github.com/charmbracelet/lipgloss/blob/v1.1.0/LICENSE
+
+- github.com/charmbracelet/log
+  License: MIT
+  URL: https://github.com/charmbracelet/log/blob/v0.4.2/LICENSE
+
+- github.com/charmbracelet/x/ansi
+  License: MIT
+  URL: https://github.com/charmbracelet/x/blob/ansi/v0.8.0/ansi/LICENSE
+
+- github.com/charmbracelet/x/cellbuf
+  License: MIT
+  URL: https://github.com/charmbracelet/x/blob/2c3ea96c31dd/cellbuf/LICENSE
+
+- github.com/charmbracelet/x/term
+  License: MIT
+  URL: https://github.com/charmbracelet/x/blob/term/v0.2.1/term/LICENSE
+
+- github.com/cpuguy83/go-md2man/v2/md2man
+  License: MIT
+  URL: https://github.com/cpuguy83/go-md2man/blob/v2.0.6/LICENSE.md
+
+- github.com/go-co-op/gocron/v2
+  License: MIT
+  URL: https://github.com/go-co-op/gocron/blob/v2.17.0/LICENSE
+
+- github.com/go-logfmt/logfmt
+  License: MIT
+  URL: https://github.com/go-logfmt/logfmt/blob/v0.6.0/LICENSE
+
+- github.com/golang/mock/gomock
+  License: Apache-2.0
+  URL: https://github.com/golang/mock/blob/v1.6.0/LICENSE
+
+- github.com/google/uuid
+  License: BSD-3-Clause
+  URL: https://github.com/google/uuid/blob/v1.6.0/LICENSE
+
+- github.com/jackc/pgio
+  License: MIT
+  URL: https://github.com/jackc/pgio/blob/v1.0.0/LICENSE
+
+- github.com/jackc/pglogrepl
+  License: MIT
+  URL: https://github.com/jackc/pglogrepl/blob/a9884f6bd75a/LICENSE
+
+- github.com/jackc/pgpassfile
+  License: MIT
+  URL: https://github.com/jackc/pgpassfile/blob/v1.0.0/LICENSE
+
+- github.com/jackc/pgservicefile
+  License: MIT
+  URL: https://github.com/jackc/pgservicefile/blob/5a60cdf6a761/LICENSE
+
+- github.com/jackc/pgtype
+  License: MIT
+  URL: https://github.com/jackc/pgtype/blob/v1.14.4/LICENSE
+
+- github.com/jackc/pgx/v5
+  License: MIT
+  URL: https://github.com/jackc/pgx/blob/v5.7.5/LICENSE
+
+- github.com/jackc/puddle/v2
+  License: MIT
+  URL: https://github.com/jackc/puddle/blob/v2.2.2/LICENSE
+
+- github.com/jonboulle/clockwork
+  License: Apache-2.0
+  URL: https://github.com/jonboulle/clockwork/blob/v0.5.0/LICENSE
+
+- github.com/lucasb-eyer/go-colorful
+  License: MIT
+  URL: https://github.com/lucasb-eyer/go-colorful/blob/v1.2.0/LICENSE
+
+- github.com/mattn/go-isatty
+  License: MIT
+  URL: https://github.com/mattn/go-isatty/blob/v0.0.20/LICENSE
+
+- github.com/mattn/go-runewidth
+  License: MIT
+  URL: https://github.com/mattn/go-runewidth/blob/v0.0.16/LICENSE
+
+- github.com/mattn/go-sqlite3
+  License: MIT
+  URL: https://github.com/mattn/go-sqlite3/blob/v1.14.22/LICENSE
+
+- github.com/muesli/termenv
+  License: MIT
+  URL: https://github.com/muesli/termenv/blob/v0.16.0/LICENSE
+
+- github.com/pgedge/ace
+  License: PostgreSQL
+  URL: https://github.com/pgedge/ace/blob/HEAD/LICENSE
+
+- github.com/rivo/uniseg
+  License: MIT
+  URL: https://github.com/rivo/uniseg/blob/v0.4.7/LICENSE.txt
+
+- github.com/robfig/cron/v3
+  License: MIT
+  URL: https://github.com/robfig/cron/blob/v3.0.1/LICENSE
+
+- github.com/russross/blackfriday/v2
+  License: BSD-2-Clause
+  URL: https://github.com/russross/blackfriday/blob/v2.1.0/LICENSE.txt
+
+- github.com/urfave/cli/v2
+  License: MIT
+  URL: https://github.com/urfave/cli/blob/v2.27.6/LICENSE
+
+- github.com/vbauerster/mpb/v8
+  License: Unlicense
+  URL: https://github.com/vbauerster/mpb/blob/v8.10.0/UNLICENSE
+
+- github.com/xo/terminfo
+  License: MIT
+  URL: https://github.com/xo/terminfo/blob/abceb7e1c41e/LICENSE
+
+- github.com/xrash/smetrics
+  License: MIT
+  URL: https://github.com/xrash/smetrics/blob/686a1a2994c1/LICENSE
+
+- golang.org/x/crypto/pbkdf2
+  License: BSD-3-Clause
+  URL: https://cs.opensource.google/go/x/crypto/+/v0.37.0:LICENSE
+
+- golang.org/x/sync/semaphore
+  License: BSD-3-Clause
+  URL: https://cs.opensource.google/go/x/sync/+/v0.13.0:LICENSE
+
+- golang.org/x/sys/unix
+  License: BSD-3-Clause
+  URL: https://cs.opensource.google/go/x/sys/+/v0.32.0:LICENSE
+
+- golang.org/x/text
+  License: BSD-3-Clause
+  URL: https://cs.opensource.google/go/x/text/+/v0.24.0:LICENSE
+
+- gopkg.in/yaml.v3
+  License: MIT
+  URL: https://github.com/go-yaml/yaml/blob/v3.0.1/LICENSE
+
