@@ -1,6 +1,6 @@
 # Changelog
 
-All notable changes to ACE will be captured in this document. The project follows semantic versioning; the latest changes appear first.
+All notable changes to ACE will be captured in this document. This project follows semantic versioning; the latest changes appear first.
 
 ## [v1.5.1] - 2025-12-22
 
