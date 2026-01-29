@@ -84,7 +84,7 @@ nav:
   - API Certificates and mTLS: certs.md
   - OpenAPI Spec (YAML): openapi.yaml
   - Improving ACE Performance: performance.md
-  - Using ACE for Failure Recovery: docs/using-ace-for-cnf-recovery.md
+  - Using ACE for Failure Recovery: using-ace-for-cnf-recovery.md
   - Architecture and Design: 
     - ACE table-diff Architecture: design/table_diff.md
     - Merkle Tree Architecture: design/merkle.md
