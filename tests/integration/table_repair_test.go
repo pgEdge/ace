@@ -976,3 +976,187 @@ func TestTableRepair_FixNulls_DryRun(t *testing.T) {
 		})
 	}
 }
+
+// TestTableRepair_FixNulls_BidirectionalUpdate tests that when both nodes have NULLs
+// in different columns for the same row, fix-nulls performs bidirectional updates.
+// This verifies the behavior discussed in code review: each node updates the other
+// with its non-NULL values.
+//
+// Example scenario:
+//
+//	Node1: {id: 1, col_a: NULL, col_b: "value_b", col_c: NULL}
+//	Node2: {id: 1, col_a: "value_a", col_b: NULL, col_c: "value_c"}
+//
+// Expected result after fix-nulls:
+//
+//	Node1: {id: 1, col_a: "value_a", col_b: "value_b", col_c: "value_c"}
+//	Node2: {id: 1, col_a: "value_a", col_b: "value_b", col_c: "value_c"}
+func TestTableRepair_FixNulls_BidirectionalUpdate(t *testing.T) {
+	tableName := "customers"
+	qualifiedTableName := fmt.Sprintf("%s.%s", testSchema, tableName)
+	ctx := context.Background()
+
+	testCases := []struct {
+		name      string
+		composite bool
+		setup     func()
+		teardown  func()
+	}{
+		{name: "simple_primary_key", composite: false, setup: func() {}, teardown: func() {}},
+		{
+			name:      "composite_primary_key",
+			composite: true,
+			setup: func() {
+				for _, pool := range []*pgxpool.Pool{pgCluster.Node1Pool, pgCluster.Node2Pool} {
+					_err := alterTableToCompositeKey(ctx, pool, testSchema, tableName)
+					require.NoError(t, _err)
+				}
+			},
+			teardown: func() {
+				for _, pool := range []*pgxpool.Pool{pgCluster.Node1Pool, pgCluster.Node2Pool} {
+					_err := revertTableToSimpleKey(ctx, pool, testSchema, tableName)
+					require.NoError(t, _err)
+				}
+			},
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			tc.setup()
+			t.Cleanup(tc.teardown)
+
+			log.Println("Setting up bidirectional NULL divergence for", qualifiedTableName)
+
+			// Clean table on both nodes
+			for i, pool := range []*pgxpool.Pool{pgCluster.Node1Pool, pgCluster.Node2Pool} {
+				nodeName := pgCluster.ClusterNodes[i]["Name"].(string)
+				_, err := pool.Exec(ctx, "SELECT spock.repair_mode(true)")
+				require.NoError(t, err, "Failed to enable repair mode on %s", nodeName)
+				_, err = pool.Exec(ctx, fmt.Sprintf("TRUNCATE TABLE %s CASCADE", qualifiedTableName))
+				require.NoError(t, err, "Failed to truncate table on node %s", nodeName)
+				_, err = pool.Exec(ctx, "SELECT spock.repair_mode(false)")
+				require.NoError(t, err, "Failed to disable repair mode on %s", nodeName)
+			}
+
+			// Insert row with complementary NULLs on each node
+			// Row 1: Node1 has NULL in first_name and city, Node2 has NULL in last_name and email
+			// Row 2: Node1 has NULL in last_name and email, Node2 has NULL in first_name and city
+			insertSQL := fmt.Sprintf(
+				"INSERT INTO %s (index, customer_id, first_name, last_name, city, email) VALUES ($1, $2, $3, $4, $5, $6)",
+				qualifiedTableName,
+			)
+
+			// Node1 data
+			_, err := pgCluster.Node1Pool.Exec(ctx, "SELECT spock.repair_mode(true)")
+			require.NoError(t, err)
+			// Row 1 on Node1: NULL first_name and city
+			_, err = pgCluster.Node1Pool.Exec(ctx, insertSQL, 100, "CUST-100", nil, "LastName100", nil, "email100@example.com")
+			require.NoError(t, err)
+			// Row 2 on Node1: NULL last_name and email
+			_, err = pgCluster.Node1Pool.Exec(ctx, insertSQL, 200, "CUST-200", "FirstName200", nil, "City200", nil)
+			require.NoError(t, err)
+			_, err = pgCluster.Node1Pool.Exec(ctx, "SELECT spock.repair_mode(false)")
+			require.NoError(t, err)
+
+			// Node2 data
+			_, err = pgCluster.Node2Pool.Exec(ctx, "SELECT spock.repair_mode(true)")
+			require.NoError(t, err)
+			// Row 1 on Node2: NULL last_name and email
+			_, err = pgCluster.Node2Pool.Exec(ctx, insertSQL, 100, "CUST-100", "FirstName100", nil, "City100", nil)
+			require.NoError(t, err)
+			// Row 2 on Node2: NULL first_name and city
+			_, err = pgCluster.Node2Pool.Exec(ctx, insertSQL, 200, "CUST-200", nil, "LastName200", nil, "email200@example.com")
+			require.NoError(t, err)
+			_, err = pgCluster.Node2Pool.Exec(ctx, "SELECT spock.repair_mode(false)")
+			require.NoError(t, err)
+
+			// Run table-diff to detect the NULL differences
+			diffFile := runTableDiff(t, qualifiedTableName, []string{serviceN1, serviceN2})
+
+			// Run fix-nulls repair
+			repairTask := newTestTableRepairTask("", qualifiedTableName, diffFile)
+			repairTask.SourceOfTruth = ""
+			repairTask.FixNulls = true
+
+			err = repairTask.Run(false)
+			require.NoError(t, err, "Table repair (fix-nulls bidirectional) failed")
+
+			// Verify bidirectional updates happened
+			// Helper to fetch all columns for a row
+			type fullRow struct {
+				firstName *string
+				lastName  *string
+				city      *string
+				email     *string
+			}
+			getFullRow := func(pool *pgxpool.Pool, index int, customerID string) fullRow {
+				var fr fullRow
+				err := pool.QueryRow(
+					ctx,
+					fmt.Sprintf("SELECT first_name, last_name, city, email FROM %s WHERE index = $1 AND customer_id = $2", qualifiedTableName),
+					index, customerID,
+				).Scan(&fr.firstName, &fr.lastName, &fr.city, &fr.email)
+				require.NoError(t, err, "Failed to fetch row %d/%s", index, customerID)
+				return fr
+			}
+
+			// Check Row 1 (id=100) on both nodes
+			row1N1 := getFullRow(pgCluster.Node1Pool, 100, "CUST-100")
+			row1N2 := getFullRow(pgCluster.Node2Pool, 100, "CUST-100")
+
+			// Node1's NULLs (first_name, city) should be filled from Node2
+			require.NotNil(t, row1N1.firstName, "Node1 row 100 first_name should be filled from Node2")
+			require.NotNil(t, row1N1.city, "Node1 row 100 city should be filled from Node2")
+			assert.Equal(t, "FirstName100", *row1N1.firstName, "Node1 row 100 first_name should match Node2's value")
+			assert.Equal(t, "City100", *row1N1.city, "Node1 row 100 city should match Node2's value")
+
+			// Node2's NULLs (last_name, email) should be filled from Node1
+			require.NotNil(t, row1N2.lastName, "Node2 row 100 last_name should be filled from Node1")
+			require.NotNil(t, row1N2.email, "Node2 row 100 email should be filled from Node1")
+			assert.Equal(t, "LastName100", *row1N2.lastName, "Node2 row 100 last_name should match Node1's value")
+			assert.Equal(t, "email100@example.com", *row1N2.email, "Node2 row 100 email should match Node1's value")
+
+			// Both nodes should now have complete row 1
+			assert.Equal(t, "FirstName100", *row1N1.firstName)
+			assert.Equal(t, "FirstName100", *row1N2.firstName)
+			assert.Equal(t, "LastName100", *row1N1.lastName)
+			assert.Equal(t, "LastName100", *row1N2.lastName)
+			assert.Equal(t, "City100", *row1N1.city)
+			assert.Equal(t, "City100", *row1N2.city)
+			assert.Equal(t, "email100@example.com", *row1N1.email)
+			assert.Equal(t, "email100@example.com", *row1N2.email)
+
+			// Check Row 2 (id=200) on both nodes
+			row2N1 := getFullRow(pgCluster.Node1Pool, 200, "CUST-200")
+			row2N2 := getFullRow(pgCluster.Node2Pool, 200, "CUST-200")
+
+			// Node1's NULLs (last_name, email) should be filled from Node2
+			require.NotNil(t, row2N1.lastName, "Node1 row 200 last_name should be filled from Node2")
+			require.NotNil(t, row2N1.email, "Node1 row 200 email should be filled from Node2")
+			assert.Equal(t, "LastName200", *row2N1.lastName, "Node1 row 200 last_name should match Node2's value")
+			assert.Equal(t, "email200@example.com", *row2N1.email, "Node1 row 200 email should match Node2's value")
+
+			// Node2's NULLs (first_name, city) should be filled from Node1
+			require.NotNil(t, row2N2.firstName, "Node2 row 200 first_name should be filled from Node1")
+			require.NotNil(t, row2N2.city, "Node2 row 200 city should be filled from Node1")
+			assert.Equal(t, "FirstName200", *row2N2.firstName, "Node2 row 200 first_name should match Node1's value")
+			assert.Equal(t, "City200", *row2N2.city, "Node2 row 200 city should match Node1's value")
+
+			// Both nodes should now have complete row 2
+			assert.Equal(t, "FirstName200", *row2N1.firstName)
+			assert.Equal(t, "FirstName200", *row2N2.firstName)
+			assert.Equal(t, "LastName200", *row2N1.lastName)
+			assert.Equal(t, "LastName200", *row2N2.lastName)
+			assert.Equal(t, "City200", *row2N1.city)
+			assert.Equal(t, "City200", *row2N2.city)
+			assert.Equal(t, "email200@example.com", *row2N1.email)
+			assert.Equal(t, "email200@example.com", *row2N2.email)
+
+			// Verify no diffs remain
+			assertNoTableDiff(t, qualifiedTableName)
+
+			log.Println("Bidirectional fix-nulls test completed successfully")
+		})
+	}
+}

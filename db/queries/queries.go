@@ -2995,7 +2995,8 @@ func SetupReplicationOriginXact(ctx context.Context, db DBQuerier, originLSN str
 
 	var timestampParam any
 	if originTimestamp != nil {
-		timestampParam = originTimestamp.Format(time.RFC3339)
+		// Use RFC3339Nano to preserve microsecond precision
+		timestampParam = originTimestamp.Format(time.RFC3339Nano)
 	} else {
 		timestampParam = nil
 	}

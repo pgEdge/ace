@@ -169,6 +169,7 @@ func TestTableDiffAgainstOriginWithUntil(t *testing.T) {
 	repairTask.RecoveryMode = true
 	repairTask.SourceOfTruth = serviceN1 // explicit SoT to avoid relying on LSN availability in test container setup
 	repairTask.Ctx = context.Background()
+	repairTask.PreserveOrigin = false // Disable preserve-origin as origin LSN is not available when origin node (n3) is crashed
 
 	require.NoError(t, repairTask.ValidateAndPrepare())
 	require.NoError(t, repairTask.Run(true))
