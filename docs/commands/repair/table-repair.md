@@ -30,7 +30,7 @@ Performs repairs on tables of divergent nodes based on the diff report generated
 | `--bidirectional` | `-Z` | Perform insert-only repairs in both directions | `false` |
 | `--fire-triggers` | `-t` | Execute triggers (otherwise runs with `session_replication_role='replica'`) | `false` |
 | `--recovery-mode` |  | Enable recovery-mode repair when the diff was generated with `--against-origin`; can auto-select a source of truth using Spock LSNs | `false` |
-| `--preserve-origin` |  | Preserve replication origin node ID and LSN for repaired rows. When enabled, repaired rows will have commits with the original node's origin ID instead of the local node ID. Requires LSN to be available from a survivor node. | `true` |
+| `--preserve-origin` |  | Preserve replication origin node ID and LSN with per-row timestamp accuracy for repaired rows. When enabled, repaired rows will have commits with the original node's origin ID and exact commit timestamp (microsecond precision) instead of the local node ID. Requires LSN to be available from a survivor node. | `true` |
 | `--quiet` | `-q` | Suppress non-essential logging | `false` |
 | `--debug` | `-v` | Enable verbose logging | `false` |
 
@@ -73,11 +73,12 @@ Replication hiccups can leave some columns NULL on one node while populated on a
 
 ## Preserving replication origin (`--preserve-origin`)
 
-By default, `--preserve-origin` is enabled. When repairing rows, this ensures that the repaired rows maintain the correct replication origin node ID and LSN from the original transaction, rather than using the local node's ID. This is particularly important in recovery scenarios where:
+By default, `--preserve-origin` is enabled. When repairing rows, this ensures that the repaired rows maintain the correct replication origin node ID and LSN from the original transaction, along with precise per-row timestamp preservation. This is particularly important in recovery scenarios where:
 
 - A node fails and rows are repaired from a survivor
 - The failed node may come back online
 - Without origin tracking, the repaired rows would have the local node's origin ID, which could cause conflicts when the original node resumes replication
+- Temporal ordering and conflict resolution depend on accurate commit timestamps
 
 ### How it works
 
@@ -92,7 +93,16 @@ By default, `--preserve-origin` is enabled. When repairing rows, this ensures th
    - Executes the repairs
    - Resets the session
 
-4. **Grouping**: Rows are automatically grouped by origin node to minimize session setup overhead.
+4. **Transaction management**: Each unique commit timestamp gets its own transaction to ensure precise timestamp preservation:
+   - Rows are grouped by (origin node, LSN, timestamp) tuples rather than just origin node
+   - Each timestamp group is committed in a separate transaction
+   - This ensures rows maintain their exact original commit timestamps with microsecond precision
+   - Critical for temporal ordering and conflict resolution in distributed recovery scenarios
+
+5. **Timestamp precision**: Timestamps are stored in RFC3339Nano format (e.g., `2026-01-15T14:23:45.123456Z`) to preserve microsecond-level accuracy. This precision is essential when:
+   - Multiple transactions occurred within the same second on the origin node
+   - Conflict resolution depends on precise temporal ordering
+   - Recovery scenarios require exact timestamp matching for conflict-free reintegration
 
 ### Requirements and limitations
 

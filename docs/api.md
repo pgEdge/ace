@@ -78,6 +78,7 @@ Repairs table inconsistencies using a diff file.
 | `--fix-nulls`       | `-X`  | Fill NULL columns on each node using non-NULL values from its peers  | false   |
 | `--bidirectional`   | `-Z`  | Perform insert-only repairs in both directions                       | false   |
 | `--fire-triggers`   | `-t`  | Fire triggers during repairs                                         | false   |
+| `--preserve-origin` |       | Preserve replication origin with per-row timestamp accuracy          | true    |
 | `--quiet`           | `-q`  | Suppress output                                                      | false   |
 | `--debug`           | `-v`  | Enable debug logging                                                 | false   |
 
