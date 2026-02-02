@@ -225,8 +225,8 @@ func SetupCLI() *cli.App {
 		},
 		&cli.BoolFlag{
 			Name:    "preserve-origin",
-			Usage:   "Preserve replication origin node ID and LSN for repaired rows (default: true)",
-			Value:   true,
+			Usage:   "Preserve replication origin node ID and LSN for repaired rows",
+			Value:   false,
 		},
 		&cli.BoolFlag{
 			Name:    "fix-nulls",

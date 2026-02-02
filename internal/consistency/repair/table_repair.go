@@ -115,7 +115,7 @@ func NewTableRepairTask() *TableRepairTask {
 			TaskStatus: taskstore.StatusPending,
 		},
 		InvokeMethod:   "cli",
-		PreserveOrigin: true,
+		PreserveOrigin: false,
 		Pools:          make(map[string]*pgxpool.Pool),
 		DerivedFields: types.DerivedFields{
 			HostMap: make(map[string]string),

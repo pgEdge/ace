@@ -435,7 +435,7 @@ func (s *APIServer) handleTableRepair(w http.ResponseWriter, r *http.Request) {
 	task.GenerateReport = req.GenerateReport
 	task.FixNulls = req.FixNulls
 	task.Bidirectional = req.Bidirectional
-	// PreserveOrigin defaults to true if not explicitly set
+	// Set PreserveOrigin from request if provided
 	if req.PreserveOrigin != nil {
 		task.PreserveOrigin = *req.PreserveOrigin
 	}
