@@ -1336,12 +1336,14 @@ func TestTableRepair_PreserveOrigin(t *testing.T) {
 	repairTaskWith.PreserveOrigin = true // Enable feature
 
 	err = repairTaskWith.Run(false)
+	// Note: Run() may return nil even when repair fails - it logs errors but doesn't always return them
+	// Check both the error AND the task status
+	require.NoError(t, err, "Table repair Run() returned unexpected error")
 
-	// Check if repair succeeded or failed due to missing LSN
-	if err != nil {
-		// If the error is about missing origin LSN, this is expected when LSN tracking
-		// is not available (e.g., in test environments or when origin node state is not tracked)
-		if strings.Contains(err.Error(), "origin LSN not available") {
+	// Check if repair actually succeeded by examining the task status
+	if repairTaskWith.TaskStatus == "FAILED" {
+		// Repair failed - check if it's due to missing LSN (expected in test environment)
+		if strings.Contains(repairTaskWith.TaskContext, "origin LSN not available") {
 			log.Println("⚠ Repair with preserve-origin failed: Origin LSN not available")
 			log.Println("  This is expected when LSN tracking is not configured or origin node state is unavailable.")
 			log.Println("  In production crash recovery scenarios, LSN would typically be available from WAL tracking.")
@@ -1361,8 +1363,8 @@ func TestTableRepair_PreserveOrigin(t *testing.T) {
 			log.Printf("  - Verified data integrity: %d rows present\n", len(sampleIDs))
 			return
 		}
-		// For other errors, fail the test
-		require.NoError(t, err, "Table repair with preserve-origin failed with unexpected error")
+		// For other failures, fail the test
+		t.Fatalf("Table repair failed with unexpected error: %s", repairTaskWith.TaskContext)
 	}
 
 	log.Println("Repair completed (with preserve-origin)")
