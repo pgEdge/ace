@@ -334,3 +334,55 @@ func repairTable(t *testing.T, qualifiedTableName, sourceOfTruthNode string) {
 
 	log.Printf("Table '%s' repaired successfully using %s as source of truth.", qualifiedTableName, sourceOfTruthNode)
 }
+
+// getCommitTimestamp retrieves the commit timestamp for a specific row
+func getCommitTimestamp(t *testing.T, ctx context.Context, pool *pgxpool.Pool, qualifiedTableName string, id int) time.Time {
+	t.Helper()
+	var ts time.Time
+	query := fmt.Sprintf("SELECT pg_xact_commit_timestamp(xmin) FROM %s WHERE id = $1", qualifiedTableName)
+	err := pool.QueryRow(ctx, query, id).Scan(&ts)
+	require.NoError(t, err, "Failed to get commit timestamp for row id %d", id)
+	return ts
+}
+
+// getReplicationOrigin retrieves the replication origin name for a specific row by querying
+// the transaction's origin tracking information
+func getReplicationOrigin(t *testing.T, ctx context.Context, pool *pgxpool.Pool, qualifiedTableName string, id int) string {
+	t.Helper()
+
+	// First, get the xmin for the row
+	var xmin uint64
+	query := fmt.Sprintf("SELECT xmin FROM %s WHERE id = $1", qualifiedTableName)
+	err := pool.QueryRow(ctx, query, id).Scan(&xmin)
+	require.NoError(t, err, "Failed to get xmin for row id %d", id)
+
+	// Query pg_replication_origin_status to find the origin for this transaction
+	// Note: This is a best-effort approach as PostgreSQL doesn't directly expose
+	// per-transaction origin information through standard views
+	var originName *string
+	originQuery := `
+		SELECT ro.roname 
+		FROM pg_replication_origin ro
+		JOIN pg_replication_origin_status ros ON ro.roid = ros.local_id
+		LIMIT 1
+	`
+	err = pool.QueryRow(ctx, originQuery).Scan(&originName)
+	if err != nil {
+		// If no origin found, return empty string
+		return ""
+	}
+
+	if originName == nil {
+		return ""
+	}
+	return *originName
+}
+
+// compareTimestamps compares two timestamps with a tolerance in seconds
+func compareTimestamps(t1, t2 time.Time, toleranceSeconds int) bool {
+	diff := t1.Sub(t2)
+	if diff < 0 {
+		diff = -diff
+	}
+	return diff <= time.Duration(toleranceSeconds)*time.Second
+}

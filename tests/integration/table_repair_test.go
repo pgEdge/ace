@@ -1164,3 +1164,233 @@ func TestTableRepair_FixNulls_BidirectionalUpdate(t *testing.T) {
 		})
 	}
 }
+
+// TestTableRepair_PreserveOrigin tests that the preserve-origin flag correctly preserves
+// both replication origin metadata and commit timestamps during table repair recovery operations.
+// This test verifies the fix for maintaining original transaction metadata to prevent
+// replication conflicts when the origin node returns to the cluster.
+func TestTableRepair_PreserveOrigin(t *testing.T) {
+	ctx := context.Background()
+	tableName := "preserve_origin_test"
+	qualifiedTableName := fmt.Sprintf("%s.%s", testSchema, tableName)
+
+	// Create table on all 3 nodes and add to repset
+	for i, pool := range []*pgxpool.Pool{pgCluster.Node1Pool, pgCluster.Node2Pool, pgCluster.Node3Pool} {
+		nodeName := pgCluster.ClusterNodes[i]["Name"].(string)
+		createSQL := fmt.Sprintf(`CREATE TABLE IF NOT EXISTS %s (id INT PRIMARY KEY, data TEXT, created_at TIMESTAMP DEFAULT NOW());`, qualifiedTableName)
+		_, err := pool.Exec(ctx, createSQL)
+		require.NoError(t, err, "Failed to create table on %s", nodeName)
+
+		addToRepSetSQL := fmt.Sprintf(`SELECT spock.repset_add_table('default', '%s');`, qualifiedTableName)
+		_, err = pool.Exec(ctx, addToRepSetSQL)
+		require.NoError(t, err, "Failed to add table to repset on %s", nodeName)
+	}
+
+	t.Cleanup(func() {
+		for _, pool := range []*pgxpool.Pool{pgCluster.Node1Pool, pgCluster.Node2Pool, pgCluster.Node3Pool} {
+			pool.Exec(ctx, fmt.Sprintf("DROP TABLE IF EXISTS %s CASCADE;", qualifiedTableName))
+		}
+	})
+
+	// Insert test data on n1
+	insertedIDs := []int{101, 102, 103, 104, 105, 106, 107, 108, 109, 110}
+	log.Printf("Inserting %d test rows on n1", len(insertedIDs))
+	for _, id := range insertedIDs {
+		_, err := pgCluster.Node1Pool.Exec(ctx, fmt.Sprintf("INSERT INTO %s (id, data) VALUES ($1, $2)", qualifiedTableName), id, fmt.Sprintf("test_data_%d", id))
+		require.NoError(t, err, "Failed to insert row %d on n1", id)
+	}
+
+	// Wait for replication to n2 and n3
+	log.Println("Waiting for replication to n2...")
+	assertEventually(t, 30*time.Second, func() error {
+		var count int
+		if err := pgCluster.Node2Pool.QueryRow(ctx, fmt.Sprintf("SELECT count(*) FROM %s WHERE id = ANY($1)", qualifiedTableName), insertedIDs).Scan(&count); err != nil {
+			return err
+		}
+		if count < len(insertedIDs) {
+			return fmt.Errorf("expected %d rows on n2, got %d", len(insertedIDs), count)
+		}
+		return nil
+	})
+
+	log.Println("Waiting for replication to n3...")
+	assertEventually(t, 30*time.Second, func() error {
+		var count int
+		if err := pgCluster.Node3Pool.QueryRow(ctx, fmt.Sprintf("SELECT count(*) FROM %s WHERE id = ANY($1)", qualifiedTableName), insertedIDs).Scan(&count); err != nil {
+			return err
+		}
+		if count < len(insertedIDs) {
+			return fmt.Errorf("expected %d rows on n3, got %d", len(insertedIDs), count)
+		}
+		return nil
+	})
+
+	// Capture original timestamps from n3 (before simulating data loss)
+	originalTimestamps := make(map[int]time.Time)
+	sampleIDs := []int{101, 102, 103, 104, 105}
+	log.Printf("Capturing original timestamps from n3 for sample rows: %v", sampleIDs)
+	for _, id := range sampleIDs {
+		ts := getCommitTimestamp(t, ctx, pgCluster.Node3Pool, qualifiedTableName, id)
+		originalTimestamps[id] = ts
+		log.Printf("Row %d original timestamp on n3: %s", id, ts.Format(time.RFC3339))
+	}
+
+	// Simulate data loss on n2 by deleting rows (using repair_mode to prevent replication)
+	log.Println("Simulating data loss on n2...")
+	tx, err := pgCluster.Node2Pool.Begin(ctx)
+	require.NoError(t, err, "Failed to begin transaction on n2")
+	_, err = tx.Exec(ctx, "SELECT spock.repair_mode(true)")
+	require.NoError(t, err, "Failed to enable repair_mode on n2")
+
+	for _, id := range sampleIDs {
+		_, err = tx.Exec(ctx, fmt.Sprintf("DELETE FROM %s WHERE id = $1", qualifiedTableName), id)
+		require.NoError(t, err, "Failed to delete row %d on n2", id)
+	}
+
+	_, err = tx.Exec(ctx, "SELECT spock.repair_mode(false)")
+	require.NoError(t, err, "Failed to disable repair_mode on n2")
+	require.NoError(t, tx.Commit(ctx), "Failed to commit transaction on n2")
+	log.Printf("Deleted %d rows from n2 to simulate data loss", len(sampleIDs))
+
+	// Run table-diff to identify the differences
+	log.Println("Running table-diff to identify missing rows...")
+	tdTask := newTestTableDiffTask(t, qualifiedTableName, []string{serviceN2, serviceN3})
+	err = tdTask.RunChecks(false)
+	require.NoError(t, err, "table-diff validation failed")
+	err = tdTask.ExecuteTask()
+	require.NoError(t, err, "table-diff execution failed")
+
+	latestDiffFile := getLatestDiffFile(t)
+	require.NotEmpty(t, latestDiffFile, "No diff file was generated")
+	log.Printf("Generated diff file: %s", latestDiffFile)
+
+	// Test 1: Repair WITHOUT preserve-origin (control test)
+	log.Println("\n=== Test 1: Repair WITHOUT preserve-origin ===")
+	repairTaskWithout := newTestTableRepairTask(serviceN3, qualifiedTableName, latestDiffFile)
+	repairTaskWithout.RecoveryMode = true
+	repairTaskWithout.PreserveOrigin = false // Explicitly disable
+
+	err = repairTaskWithout.Run(false)
+	require.NoError(t, err, "Table repair without preserve-origin failed")
+	log.Println("Repair completed (without preserve-origin)")
+
+	// Verify timestamps are CURRENT (repair time) for control test
+	time.Sleep(1 * time.Second) // Brief pause to ensure timestamp difference
+	repairTime := time.Now()
+	log.Println("Verifying timestamps without preserve-origin...")
+
+	timestampsWithout := make(map[int]time.Time)
+	for _, id := range sampleIDs {
+		ts := getCommitTimestamp(t, ctx, pgCluster.Node2Pool, qualifiedTableName, id)
+		timestampsWithout[id] = ts
+		log.Printf("Row %d timestamp on n2 (without preserve-origin): %s", id, ts.Format(time.RFC3339))
+
+		// Verify timestamp is RECENT (within last few seconds = repair time)
+		timeSinceRepair := repairTime.Sub(ts)
+		if timeSinceRepair < 0 {
+			timeSinceRepair = -timeSinceRepair
+		}
+		// Timestamps should be very recent (within 10 seconds of repair)
+		require.True(t, timeSinceRepair < 10*time.Second,
+			"Row %d timestamp should be recent (repair time), but is %v old", id, timeSinceRepair)
+
+		// Verify timestamp is DIFFERENT from original (not preserved)
+		require.False(t, compareTimestamps(ts, originalTimestamps[id], 1),
+			"Row %d timestamp should NOT match original (preserve-origin is disabled)", id)
+	}
+	log.Println("✓ Verified: Timestamps are CURRENT (not preserved) without preserve-origin")
+
+	// Delete rows again to prepare for Test 2
+	log.Println("\nResetting: Deleting rows from n2 again for preserve-origin test...")
+	tx2, err := pgCluster.Node2Pool.Begin(ctx)
+	require.NoError(t, err)
+	_, err = tx2.Exec(ctx, "SELECT spock.repair_mode(true)")
+	require.NoError(t, err)
+	for _, id := range sampleIDs {
+		_, err = tx2.Exec(ctx, fmt.Sprintf("DELETE FROM %s WHERE id = $1", qualifiedTableName), id)
+		require.NoError(t, err)
+	}
+	_, err = tx2.Exec(ctx, "SELECT spock.repair_mode(false)")
+	require.NoError(t, err)
+	require.NoError(t, tx2.Commit(ctx))
+
+	// Run table-diff again
+	log.Println("Running table-diff again...")
+	tdTask2 := newTestTableDiffTask(t, qualifiedTableName, []string{serviceN2, serviceN3})
+	err = tdTask2.RunChecks(false)
+	require.NoError(t, err)
+	err = tdTask2.ExecuteTask()
+	require.NoError(t, err)
+	latestDiffFile2 := getLatestDiffFile(t)
+	require.NotEmpty(t, latestDiffFile2)
+
+	// Test 2: Repair WITH preserve-origin (feature test)
+	log.Println("\n=== Test 2: Repair WITH preserve-origin ===")
+	repairTaskWith := newTestTableRepairTask(serviceN3, qualifiedTableName, latestDiffFile2)
+	repairTaskWith.RecoveryMode = true
+	repairTaskWith.PreserveOrigin = true // Enable feature
+
+	// Pre-flight check: Verify origin info exists on source of truth (n3)
+	var originCount int
+	err = pgCluster.Node3Pool.QueryRow(ctx, 
+		"SELECT COUNT(*) FROM pg_replication_origin WHERE roname LIKE 'node_%'").Scan(&originCount)
+	require.NoError(t, err, "Failed to check replication origins on n3")
+	log.Printf("Replication origins on n3 (source of truth): %d", originCount)
+	require.Greater(t, originCount, 0, "Source of truth should have replication origin info")
+
+	err = repairTaskWith.Run(false)
+	require.NoError(t, err, "Table repair with preserve-origin failed")
+	log.Println("Repair completed (with preserve-origin)")
+
+	// Verify timestamps are PRESERVED (match original from n3)
+	log.Println("Verifying per-row timestamp preservation with preserve-origin...")
+	timestampsWith := make(map[int]time.Time)
+	preservedCount := 0
+	failedRows := []int{}
+	
+	for _, id := range sampleIDs {
+		ts := getCommitTimestamp(t, ctx, pgCluster.Node2Pool, qualifiedTableName, id)
+		timestampsWith[id] = ts
+		originalTs := originalTimestamps[id]
+		timeDiff := ts.Sub(originalTs)
+		if timeDiff < 0 {
+			timeDiff = -timeDiff
+		}
+		
+		log.Printf("Row %d - Repaired: %s, Original: %s, Diff: %v", 
+			id, ts.Format(time.RFC3339Nano), originalTs.Format(time.RFC3339Nano), timeDiff)
+		
+		// Verify timestamp MATCHES original (is preserved)
+		// Use 5 second tolerance to account for timestamp precision differences
+		if compareTimestamps(ts, originalTs, 5) {
+			preservedCount++
+			log.Printf("  ✓ Row %d timestamp PRESERVED", id)
+		} else {
+			failedRows = append(failedRows, id)
+			log.Printf("  ✗ Row %d timestamp NOT preserved (diff: %v)", id, timeDiff)
+		}
+	}
+	
+	// Report results
+	log.Printf("\nTimestamp Preservation Results: %d/%d rows preserved", preservedCount, len(sampleIDs))
+	if len(failedRows) > 0 {
+		t.Errorf("Failed to preserve timestamps for rows: %v", failedRows)
+	}
+	
+	// Require that ALL timestamps were preserved
+	require.Equal(t, len(sampleIDs), preservedCount, 
+		"Expected all %d timestamps to be preserved with preserve-origin=true, but only %d were preserved", 
+		len(sampleIDs), preservedCount)
+	log.Println("✓ Verified: ALL per-row timestamps are PRESERVED (match original) with preserve-origin")
+
+	// Final verification: Ensure all rows are present
+	var finalCount int
+	err = pgCluster.Node2Pool.QueryRow(ctx, fmt.Sprintf("SELECT count(*) FROM %s WHERE id = ANY($1)", qualifiedTableName), insertedIDs).Scan(&finalCount)
+	require.NoError(t, err)
+	require.Equal(t, len(insertedIDs), finalCount, "All rows should be present after repair")
+
+	log.Println("\n✓ TestTableRepair_PreserveOrigin PASSED")
+	log.Println("  - WITHOUT preserve-origin: Timestamps are current (repair time) ✓")
+	log.Println("  - WITH preserve-origin: Per-row timestamps are preserved (original time) ✓")
+	log.Printf("  - Verified %d rows with timestamp preservation\n", len(sampleIDs))
+}
