@@ -1225,14 +1225,14 @@ func TestTableRepair_PreserveOrigin(t *testing.T) {
 		return nil
 	})
 
-	// Capture original timestamps from n3 (before simulating data loss)
+	// Capture original timestamps from n1 (source - before simulating data loss)
 	originalTimestamps := make(map[int]time.Time)
 	sampleIDs := []int{101, 102, 103, 104, 105}
-	log.Printf("Capturing original timestamps from n3 for sample rows: %v", sampleIDs)
+	log.Printf("Capturing original timestamps from n1 for sample rows: %v", sampleIDs)
 	for _, id := range sampleIDs {
-		ts := getCommitTimestamp(t, ctx, pgCluster.Node3Pool, qualifiedTableName, id)
+		ts := getCommitTimestamp(t, ctx, pgCluster.Node1Pool, qualifiedTableName, id)
 		originalTimestamps[id] = ts
-		log.Printf("Row %d original timestamp on n3: %s", id, ts.Format(time.RFC3339))
+		log.Printf("Row %d original timestamp on n1: %s", id, ts.Format(time.RFC3339))
 	}
 
 	// Simulate data loss on n2 by deleting rows (using repair_mode to prevent replication)
@@ -1254,7 +1254,7 @@ func TestTableRepair_PreserveOrigin(t *testing.T) {
 
 	// Run table-diff to identify the differences
 	log.Println("Running table-diff to identify missing rows...")
-	tdTask := newTestTableDiffTask(t, qualifiedTableName, []string{serviceN2, serviceN3})
+	tdTask := newTestTableDiffTask(t, qualifiedTableName, []string{serviceN1, serviceN2})
 	err = tdTask.RunChecks(false)
 	require.NoError(t, err, "table-diff validation failed")
 	err = tdTask.ExecuteTask()
@@ -1266,7 +1266,7 @@ func TestTableRepair_PreserveOrigin(t *testing.T) {
 
 	// Test 1: Repair WITHOUT preserve-origin (control test)
 	log.Println("\n=== Test 1: Repair WITHOUT preserve-origin ===")
-	repairTaskWithout := newTestTableRepairTask(serviceN3, qualifiedTableName, latestDiffFile)
+	repairTaskWithout := newTestTableRepairTask(serviceN1, qualifiedTableName, latestDiffFile)
 	repairTaskWithout.RecoveryMode = true
 	repairTaskWithout.PreserveOrigin = false // Explicitly disable
 
@@ -1316,7 +1316,7 @@ func TestTableRepair_PreserveOrigin(t *testing.T) {
 
 	// Run table-diff again
 	log.Println("Running table-diff again...")
-	tdTask2 := newTestTableDiffTask(t, qualifiedTableName, []string{serviceN2, serviceN3})
+	tdTask2 := newTestTableDiffTask(t, qualifiedTableName, []string{serviceN1, serviceN2})
 	err = tdTask2.RunChecks(false)
 	require.NoError(t, err)
 	err = tdTask2.ExecuteTask()
@@ -1326,16 +1326,16 @@ func TestTableRepair_PreserveOrigin(t *testing.T) {
 
 	// Test 2: Repair WITH preserve-origin (feature test)
 	log.Println("\n=== Test 2: Repair WITH preserve-origin ===")
-	repairTaskWith := newTestTableRepairTask(serviceN3, qualifiedTableName, latestDiffFile2)
+	repairTaskWith := newTestTableRepairTask(serviceN1, qualifiedTableName, latestDiffFile2)
 	repairTaskWith.RecoveryMode = true
 	repairTaskWith.PreserveOrigin = true // Enable feature
 
-	// Pre-flight check: Verify origin info exists on source of truth (n3)
+	// Pre-flight check: Verify origin info exists on source of truth (n1)
 	var originCount int
-	err = pgCluster.Node3Pool.QueryRow(ctx, 
+	err = pgCluster.Node1Pool.QueryRow(ctx,
 		"SELECT COUNT(*) FROM pg_replication_origin WHERE roname LIKE 'node_%'").Scan(&originCount)
-	require.NoError(t, err, "Failed to check replication origins on n3")
-	log.Printf("Replication origins on n3 (source of truth): %d", originCount)
+	require.NoError(t, err, "Failed to check replication origins on n1")
+	log.Printf("Replication origins on n1 (source of truth): %d", originCount)
 	require.Greater(t, originCount, 0, "Source of truth should have replication origin info")
 
 	err = repairTaskWith.Run(false)
