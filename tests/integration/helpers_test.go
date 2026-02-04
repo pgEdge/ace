@@ -346,7 +346,7 @@ func getCommitTimestamp(t *testing.T, ctx context.Context, pool *pgxpool.Pool, q
 }
 
 // getReplicationOrigin retrieves the replication origin name for a specific row by querying
-// the transaction's origin tracking information
+// the transaction's origin tracking information using pg_xact_commit_timestamp_origin()
 func getReplicationOrigin(t *testing.T, ctx context.Context, pool *pgxpool.Pool, qualifiedTableName string, id int) string {
 	t.Helper()
 
@@ -356,26 +356,33 @@ func getReplicationOrigin(t *testing.T, ctx context.Context, pool *pgxpool.Pool,
 	err := pool.QueryRow(ctx, query, id).Scan(&xmin)
 	require.NoError(t, err, "Failed to get xmin for row id %d", id)
 
-	// Query pg_replication_origin_status to find the origin for this transaction
-	// Note: This is a best-effort approach as PostgreSQL doesn't directly expose
-	// per-transaction origin information through standard views
-	var originName *string
+	// Use pg_xact_commit_timestamp_origin() to get the origin OID for this specific transaction
+	// This requires track_commit_timestamp = on
+	var originOid *uint32
 	originQuery := `
-		SELECT ro.roname 
-		FROM pg_replication_origin ro
-		JOIN pg_replication_origin_status ros ON ro.roid = ros.local_id
-		LIMIT 1
+		SELECT origin 
+		FROM pg_xact_commit_timestamp_origin($1::xid)
 	`
-	err = pool.QueryRow(ctx, originQuery).Scan(&originName)
-	if err != nil {
-		// If no origin found, return empty string
+	err = pool.QueryRow(ctx, originQuery, xmin).Scan(&originOid)
+	if err != nil || originOid == nil || *originOid == 0 {
+		// If no origin found or origin is 0 (local), return empty string
 		return ""
 	}
 
-	if originName == nil {
+	// Now get the origin name from pg_replication_origin using the OID
+	var originName string
+	nameQuery := `
+		SELECT roname 
+		FROM pg_replication_origin 
+		WHERE roid = $1
+	`
+	err = pool.QueryRow(ctx, nameQuery, *originOid).Scan(&originName)
+	if err != nil {
+		// If origin name not found, return empty string
 		return ""
 	}
-	return *originName
+
+	return originName
 }
 
 // compareTimestamps compares two timestamps with a tolerance in seconds

@@ -30,7 +30,7 @@ Performs repairs on tables of divergent nodes based on the diff report generated
 | `--bidirectional` | `-Z` | Perform insert-only repairs in both directions | `false` |
 | `--fire-triggers` | `-t` | Execute triggers (otherwise runs with `session_replication_role='replica'`) | `false` |
 | `--recovery-mode` |  | Enable recovery-mode repair when the diff was generated with `--against-origin`; can auto-select a source of truth using Spock LSNs | `false` |
-| `--preserve-origin` |  | Preserve replication origin node ID and LSN with per-row timestamp accuracy for repaired rows. When enabled, repaired rows will have commits with the original node's origin ID and exact commit timestamp (microsecond precision) instead of the local node ID. Requires LSN to be available from a survivor node. | `true` |
+| `--preserve-origin` |  | Preserve replication origin node ID and LSN with per-row timestamp accuracy for repaired rows. When enabled, repaired rows will have commits with the original node's origin ID and exact commit timestamp (microsecond precision) instead of the local node ID. Requires LSN to be available from a survivor node. | `false` |
 | `--quiet` | `-q` | Suppress non-essential logging | `false` |
 | `--debug` | `-v` | Enable verbose logging | `false` |
 
@@ -73,7 +73,7 @@ Replication hiccups can leave some columns NULL on one node while populated on a
 
 ## Preserving replication origin (`--preserve-origin`)
 
-By default, `--preserve-origin` is enabled. When repairing rows, this ensures that the repaired rows maintain the correct replication origin node ID and LSN from the original transaction, along with precise per-row timestamp preservation. This is particularly important in recovery scenarios where:
+When `--preserve-origin` is enabled, repaired rows maintain the correct replication origin node ID and LSN from the original transaction, along with precise per-row timestamp preservation. This is particularly important in recovery scenarios where:
 
 - A node fails and rows are repaired from a survivor
 - The failed node may come back online
@@ -111,9 +111,13 @@ By default, `--preserve-origin` is enabled. When repairing rows, this ensures th
 - **Privileges**: Replication origin functions require superuser or replication privileges on the target database.
 - **Missing metadata**: If origin metadata is missing from the diff file for some rows, those rows will be repaired without origin tracking (a warning will be logged).
 
-### When to disable
+### When to use
 
-You may want to disable `--preserve-origin` with `--no-preserve-origin` if:
+Enable `--preserve-origin` in recovery scenarios where:
+- You want to prevent replication conflicts when the origin node returns
+- You need to maintain the original transaction timestamps and origin metadata
+
+You can disable it with `--preserve-origin=false` if:
 - You're certain the origin node will not come back online
 - You've permanently removed the origin node from the cluster
 - You want repaired rows to be treated as local writes
