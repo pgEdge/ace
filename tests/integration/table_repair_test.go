@@ -1192,15 +1192,28 @@ func TestTableRepair_PreserveOrigin(t *testing.T) {
 		}
 	})
 
-	// Insert test data on n1
+	// Insert test data on n3 (so replication origin metadata is available)
+	// When data originates from n3 and replicates to n1/n2, those nodes will have node_origin='node_n3'
 	insertedIDs := []int{101, 102, 103, 104, 105, 106, 107, 108, 109, 110}
-	log.Printf("Inserting %d test rows on n1", len(insertedIDs))
+	log.Printf("Inserting %d test rows on n3", len(insertedIDs))
 	for _, id := range insertedIDs {
-		_, err := pgCluster.Node1Pool.Exec(ctx, fmt.Sprintf("INSERT INTO %s (id, data) VALUES ($1, $2)", qualifiedTableName), id, fmt.Sprintf("test_data_%d", id))
-		require.NoError(t, err, "Failed to insert row %d on n1", id)
+		_, err := pgCluster.Node3Pool.Exec(ctx, fmt.Sprintf("INSERT INTO %s (id, data) VALUES ($1, $2)", qualifiedTableName), id, fmt.Sprintf("test_data_%d", id))
+		require.NoError(t, err, "Failed to insert row %d on n3", id)
 	}
 
-	// Wait for replication to n2 and n3
+	// Wait for replication to n1 and n2
+	log.Println("Waiting for replication to n1...")
+	assertEventually(t, 30*time.Second, func() error {
+		var count int
+		if err := pgCluster.Node1Pool.QueryRow(ctx, fmt.Sprintf("SELECT count(*) FROM %s WHERE id = ANY($1)", qualifiedTableName), insertedIDs).Scan(&count); err != nil {
+			return err
+		}
+		if count < len(insertedIDs) {
+			return fmt.Errorf("expected %d rows on n1, got %d", len(insertedIDs), count)
+		}
+		return nil
+	})
+
 	log.Println("Waiting for replication to n2...")
 	assertEventually(t, 30*time.Second, func() error {
 		var count int
@@ -1213,19 +1226,7 @@ func TestTableRepair_PreserveOrigin(t *testing.T) {
 		return nil
 	})
 
-	log.Println("Waiting for replication to n3...")
-	assertEventually(t, 30*time.Second, func() error {
-		var count int
-		if err := pgCluster.Node3Pool.QueryRow(ctx, fmt.Sprintf("SELECT count(*) FROM %s WHERE id = ANY($1)", qualifiedTableName), insertedIDs).Scan(&count); err != nil {
-			return err
-		}
-		if count < len(insertedIDs) {
-			return fmt.Errorf("expected %d rows on n3, got %d", len(insertedIDs), count)
-		}
-		return nil
-	})
-
-	// Capture original timestamps from n1 (source - before simulating data loss)
+	// Capture original timestamps from n1 (which received data from n3 with origin metadata)
 	originalTimestamps := make(map[int]time.Time)
 	sampleIDs := []int{101, 102, 103, 104, 105}
 	log.Printf("Capturing original timestamps from n1 for sample rows: %v", sampleIDs)
@@ -1331,23 +1332,24 @@ func TestTableRepair_PreserveOrigin(t *testing.T) {
 	repairTaskWith.PreserveOrigin = true // Enable feature
 
 	// Pre-flight check: Verify origin info exists on source of truth (n1)
+	// n1 should have replication origin for n3, since data originated from n3
 	var originCount int
 	err = pgCluster.Node1Pool.QueryRow(ctx,
 		"SELECT COUNT(*) FROM pg_replication_origin WHERE roname LIKE 'node_%'").Scan(&originCount)
 	require.NoError(t, err, "Failed to check replication origins on n1")
 	log.Printf("Replication origins on n1 (source of truth): %d", originCount)
-	require.Greater(t, originCount, 0, "Source of truth should have replication origin info")
+	require.Greater(t, originCount, 0, "Source of truth should have replication origin info for node_n3")
 
 	err = repairTaskWith.Run(false)
 	require.NoError(t, err, "Table repair with preserve-origin failed")
 	log.Println("Repair completed (with preserve-origin)")
 
-	// Verify timestamps are PRESERVED (match original from n3)
+	// Verify timestamps are PRESERVED (match original from n1)
 	log.Println("Verifying per-row timestamp preservation with preserve-origin...")
 	timestampsWith := make(map[int]time.Time)
 	preservedCount := 0
 	failedRows := []int{}
-	
+
 	for _, id := range sampleIDs {
 		ts := getCommitTimestamp(t, ctx, pgCluster.Node2Pool, qualifiedTableName, id)
 		timestampsWith[id] = ts
@@ -1356,10 +1358,10 @@ func TestTableRepair_PreserveOrigin(t *testing.T) {
 		if timeDiff < 0 {
 			timeDiff = -timeDiff
 		}
-		
-		log.Printf("Row %d - Repaired: %s, Original: %s, Diff: %v", 
+
+		log.Printf("Row %d - Repaired: %s, Original: %s, Diff: %v",
 			id, ts.Format(time.RFC3339Nano), originalTs.Format(time.RFC3339Nano), timeDiff)
-		
+
 		// Verify timestamp MATCHES original (is preserved)
 		// Use 5 second tolerance to account for timestamp precision differences
 		if compareTimestamps(ts, originalTs, 5) {
@@ -1370,16 +1372,16 @@ func TestTableRepair_PreserveOrigin(t *testing.T) {
 			log.Printf("  ✗ Row %d timestamp NOT preserved (diff: %v)", id, timeDiff)
 		}
 	}
-	
+
 	// Report results
 	log.Printf("\nTimestamp Preservation Results: %d/%d rows preserved", preservedCount, len(sampleIDs))
 	if len(failedRows) > 0 {
 		t.Errorf("Failed to preserve timestamps for rows: %v", failedRows)
 	}
-	
+
 	// Require that ALL timestamps were preserved
-	require.Equal(t, len(sampleIDs), preservedCount, 
-		"Expected all %d timestamps to be preserved with preserve-origin=true, but only %d were preserved", 
+	require.Equal(t, len(sampleIDs), preservedCount,
+		"Expected all %d timestamps to be preserved with preserve-origin=true, but only %d were preserved",
 		len(sampleIDs), preservedCount)
 	log.Println("✓ Verified: ALL per-row timestamps are PRESERVED (match original) with preserve-origin")
 
