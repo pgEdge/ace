@@ -1335,39 +1335,26 @@ func TestTableRepair_PreserveOrigin(t *testing.T) {
 	repairTaskWith.RecoveryMode = true
 	repairTaskWith.PreserveOrigin = true // Enable feature
 
-	err = repairTaskWith.Run(false)
+	repairOutput := captureOutput(t, func() {
+		err = repairTaskWith.Run(false)
+	})
 	// Note: Run() may return nil even when repair fails - it logs errors but doesn't always return them
 	// Check both the error AND the task status
 	require.NoError(t, err, "Table repair Run() returned unexpected error")
 
 	// Check if repair actually succeeded by examining the task status
 	if repairTaskWith.TaskStatus == "FAILED" {
-		// Repair failed - check if it's due to missing LSN (expected in test environment)
-		if strings.Contains(repairTaskWith.TaskContext, "origin LSN not available") {
-			log.Println("⚠ Repair with preserve-origin failed: Origin LSN not available")
-			log.Println("  This is expected when LSN tracking is not configured or origin node state is unavailable.")
-			log.Println("  In production crash recovery scenarios, LSN would typically be available from WAL tracking.")
-			log.Println("  Skipping timestamp preservation verification (repair did not complete).")
-
-			// This is an acceptable outcome - preserve-origin requires LSN, which may not be available
-			// Verify that data is still intact from the first repair (without preserve-origin)
-			var finalCount int
-			err = pgCluster.Node2Pool.QueryRow(ctx, fmt.Sprintf("SELECT count(*) FROM %s WHERE id = ANY($1)", qualifiedTableName), sampleIDs).Scan(&finalCount)
-			require.NoError(t, err)
-			require.Equal(t, len(sampleIDs), finalCount, "Rows should still be present from first repair")
-
-			log.Println("\n✓ TestTableRepair_PreserveOrigin COMPLETED")
-			log.Println("  - WITHOUT preserve-origin: Timestamps are current (repair time) ✓")
-			log.Println("  - WITH preserve-origin: Skipped (LSN not available in test environment)")
-			log.Println("  - Feature validates gracefully: returns error when LSN unavailable ✓")
-			log.Printf("  - Verified data integrity: %d rows present\n", len(sampleIDs))
-			return
-		}
-		// For other failures, fail the test
 		t.Fatalf("Table repair failed with unexpected error: %s", repairTaskWith.TaskContext)
 	}
 
 	log.Println("Repair completed (with preserve-origin)")
+	repairVerifyTime := time.Now()
+
+	// Ensure the deleted sample rows were actually restored by the preserve-origin repair attempt.
+	var repairedSampleCount int
+	err = pgCluster.Node2Pool.QueryRow(ctx, fmt.Sprintf("SELECT count(*) FROM %s WHERE id = ANY($1)", qualifiedTableName), sampleIDs).Scan(&repairedSampleCount)
+	require.NoError(t, err)
+	require.Equal(t, len(sampleIDs), repairedSampleCount, "Sample rows should be present after preserve-origin repair")
 
 	// Verify timestamps are PRESERVED (match original from n1)
 	log.Println("Verifying per-row timestamp preservation with preserve-origin...")
@@ -1408,6 +1395,18 @@ func TestTableRepair_PreserveOrigin(t *testing.T) {
 		log.Println("⚠ Warning: No timestamps were preserved. Origin metadata likely unavailable.")
 		log.Println("  This can happen when data originates locally on a node without replication origin tracking.")
 		log.Println("  The feature falls back to regular INSERTs in this case, which is expected behavior.")
+
+		// If we fell back, verify timestamps are recent (repair-time) and output indicates fallback.
+		assert.Contains(t, repairOutput, "falling back to regular upsert")
+		for _, id := range sampleIDs {
+			ts := timestampsWith[id]
+			timeSinceRepair := repairVerifyTime.Sub(ts)
+			if timeSinceRepair < 0 {
+				timeSinceRepair = -timeSinceRepair
+			}
+			require.True(t, timeSinceRepair < 10*time.Second,
+				"Row %d timestamp should be recent (repair time) when falling back, but is %v away", id, timeSinceRepair)
+		}
 	} else if preservedCount < len(sampleIDs) {
 		log.Printf("⚠ Warning: Partial preservation: %d/%d timestamps preserved", preservedCount, len(sampleIDs))
 		if len(failedRows) > 0 {
