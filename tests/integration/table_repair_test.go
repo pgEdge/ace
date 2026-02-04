@@ -1226,6 +1226,10 @@ func TestTableRepair_PreserveOrigin(t *testing.T) {
 		return nil
 	})
 
+	// Wait a bit to ensure original timestamps are in the past before we repair
+	log.Println("Waiting 3 seconds to ensure original timestamps are clearly in the past...")
+	time.Sleep(3 * time.Second)
+
 	// Capture original timestamps from n1 (which received data from n3 with origin metadata)
 	originalTimestamps := make(map[int]time.Time)
 	sampleIDs := []int{101, 102, 103, 104, 105}
