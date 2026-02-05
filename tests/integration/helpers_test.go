@@ -351,7 +351,7 @@ func getReplicationOrigin(t *testing.T, ctx context.Context, pool *pgxpool.Pool,
 	t.Helper()
 
 	// First, get the xmin for the row
-	var xmin uint64
+	var xmin uint32
 	query := fmt.Sprintf("SELECT xmin FROM %s WHERE id = $1", qualifiedTableName)
 	err := pool.QueryRow(ctx, query, id).Scan(&xmin)
 	require.NoError(t, err, "Failed to get xmin for row id %d", id)

@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	pkgLogger "github.com/pgedge/ace/pkg/logger"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -166,12 +167,19 @@ func captureOutput(t *testing.T, task func()) string {
 	os.Stdout = w
 	os.Stderr = w
 
+	// Redirect package logger to capture WARN logs
+	pkgLogger.SetOutput(w)
+
 	task()
 
 	err = w.Close()
 	require.NoError(t, err)
 	os.Stdout = oldStdout
 	os.Stderr = oldStderr
+
+	// Restore package logger
+	pkgLogger.SetOutput(oldStderr)
+
 	var buf bytes.Buffer
 	_, err = io.Copy(&buf, r)
 	require.NoError(t, err)
@@ -1375,10 +1383,21 @@ func TestTableRepair_PreserveOrigin(t *testing.T) {
 			id, ts.Format(time.RFC3339Nano), originalTs.Format(time.RFC3339Nano), timeDiff)
 
 		// Verify timestamp MATCHES original (is preserved)
-		// Use 5 second tolerance to account for timestamp precision differences
-		if compareTimestamps(ts, originalTs, 5) {
+		// Use 1 second tolerance to account for timestamp precision differences
+		if compareTimestamps(ts, originalTs, 1) {
 			preservedCount++
 			log.Printf("  ✓ Row %d timestamp PRESERVED", id)
+
+			// Verify origin node is also preserved
+			expectedOrigin := "node_n3" // Data originated from n3
+			actualOrigin := getReplicationOrigin(t, ctx, pgCluster.Node2Pool, qualifiedTableName, id)
+			if actualOrigin != "" {
+				log.Printf("  Origin: %s", actualOrigin)
+				require.Equal(t, expectedOrigin, actualOrigin,
+					"Row %d origin should be preserved as %s", id, expectedOrigin)
+			} else {
+				log.Printf("  ⚠ No origin metadata found for row %d", id)
+			}
 		} else {
 			failedRows = append(failedRows, id)
 			log.Printf("  ✗ Row %d timestamp NOT preserved (diff: %v)", id, timeDiff)
@@ -1406,6 +1425,11 @@ func TestTableRepair_PreserveOrigin(t *testing.T) {
 			}
 			require.True(t, timeSinceRepair < 10*time.Second,
 				"Row %d timestamp should be recent (repair time) when falling back, but is %v away", id, timeSinceRepair)
+
+			// When falling back, origin should not be preserved
+			actualOrigin := getReplicationOrigin(t, ctx, pgCluster.Node2Pool, qualifiedTableName, id)
+			require.Empty(t, actualOrigin,
+				"Row %d should have no origin when falling back to regular repair", id)
 		}
 	} else if preservedCount < len(sampleIDs) {
 		log.Printf("⚠ Warning: Partial preservation: %d/%d timestamps preserved", preservedCount, len(sampleIDs))
