@@ -70,6 +70,7 @@ type TableRepairTask struct {
 	FixNulls       bool // TBD
 	Bidirectional  bool
 	RecoveryMode   bool
+	PreserveOrigin bool
 
 	InvokeMethod string // TBD
 	ClientRole   string // TBD
@@ -113,8 +114,9 @@ func NewTableRepairTask() *TableRepairTask {
 			TaskType:   taskstore.TaskTypeTableRepair,
 			TaskStatus: taskstore.StatusPending,
 		},
-		InvokeMethod: "cli",
-		Pools:        make(map[string]*pgxpool.Pool),
+		InvokeMethod:   "cli",
+		PreserveOrigin: false,
+		Pools:          make(map[string]*pgxpool.Pool),
 		DerivedFields: types.DerivedFields{
 			HostMap: make(map[string]string),
 		},
@@ -711,9 +713,10 @@ type rowData struct {
 }
 
 type nullUpdate struct {
-	pkValues []any
-	pkMap    map[string]any
-	columns  map[string]any
+	pkValues  []any
+	pkMap     map[string]any
+	columns   map[string]any
+	sourceRow types.OrderedMap // Source row providing the non-null value (for origin tracking)
 }
 
 func (t *TableRepairTask) runFixNulls(startTime time.Time) error {
@@ -851,7 +854,27 @@ func (t *TableRepairTask) runFixNulls(startTime time.Time) error {
 				continue
 			}
 
-			updatedCount, err := t.applyFixNullsUpdates(tx, col, colType, rowsForCol, colTypes)
+			// Extract origin information for fix-nulls updates if preserve-origin is enabled
+			var originInfoMap map[string]*rowOriginInfo
+			if t.PreserveOrigin {
+				originInfoMap = make(map[string]*rowOriginInfo)
+				for _, nu := range rowsForCol {
+					if nu.sourceRow != nil {
+						pkeyStr, err := utils.StringifyKey(nu.pkMap, t.Key)
+						if err != nil {
+							// Try alternative method
+							pkeyStr, err = utils.StringifyOrderedMapKey(nu.sourceRow, t.Key)
+						}
+						if err == nil {
+							if originInfo := extractOriginInfoFromRow(nu.sourceRow); originInfo != nil {
+								originInfoMap[pkeyStr] = originInfo
+							}
+						}
+					}
+				}
+			}
+
+			updatedCount, err := t.applyFixNullsUpdates(tx, col, colType, rowsForCol, colTypes, originInfoMap, nodeName)
 			if err != nil {
 				nodeFailed = true
 				tx.Rollback(t.Ctx)
@@ -977,9 +1000,27 @@ func (t *TableRepairTask) buildNullUpdates() (map[string]map[string]*nullUpdate,
 				val2 := row2.data[col]
 
 				if val1 == nil && val2 != nil {
-					addNullUpdate(updatesByNode, node1Name, row1, col, val2)
+					// Update node1 with value from node2 - find the source row from node2
+					var sourceRow types.OrderedMap
+					for _, r := range node2Rows {
+						pkeyStr, err := utils.StringifyOrderedMapKey(r, t.Key)
+						if err == nil && pkeyStr == pkKey {
+							sourceRow = r
+							break
+						}
+					}
+					addNullUpdate(updatesByNode, node1Name, row1, col, val2, sourceRow)
 				} else if val2 == nil && val1 != nil {
-					addNullUpdate(updatesByNode, node2Name, row2, col, val1)
+					// Update node2 with value from node1 - find the source row from node1
+					var sourceRow types.OrderedMap
+					for _, r := range node1Rows {
+						pkeyStr, err := utils.StringifyOrderedMapKey(r, t.Key)
+						if err == nil && pkeyStr == pkKey {
+							sourceRow = r
+							break
+						}
+					}
+					addNullUpdate(updatesByNode, node2Name, row2, col, val1, sourceRow)
 				}
 			}
 		}
@@ -1019,7 +1060,7 @@ func buildRowIndex(rows []types.OrderedMap, keyCols []string) (map[string]rowDat
 	return index, nil
 }
 
-func addNullUpdate(updates map[string]map[string]*nullUpdate, nodeName string, row rowData, col string, value any) {
+func addNullUpdate(updates map[string]map[string]*nullUpdate, nodeName string, row rowData, col string, value any, sourceRow types.OrderedMap) {
 	if value == nil {
 		return
 	}
@@ -1032,15 +1073,21 @@ func addNullUpdate(updates map[string]map[string]*nullUpdate, nodeName string, r
 	nu, ok := nodeUpdates[row.pkKey]
 	if !ok {
 		nu = &nullUpdate{
-			pkValues: row.pkValues,
-			pkMap:    row.pkMap,
-			columns:  make(map[string]any),
+			pkValues:  row.pkValues,
+			pkMap:     row.pkMap,
+			columns:   make(map[string]any),
+			sourceRow: sourceRow,
 		}
 		nodeUpdates[row.pkKey] = nu
 	}
 
 	if _, exists := nu.columns[col]; !exists {
 		nu.columns[col] = value
+	}
+
+	// Update source row if not set (retain first source)
+	if nu.sourceRow == nil {
+		nu.sourceRow = sourceRow
 	}
 }
 
@@ -1122,30 +1169,165 @@ func (t *TableRepairTask) populateFixNullsReport(nodeName string, nodeUpdates ma
 	t.report.Changes[nodeName].(map[string]any)[field] = rows
 }
 
-func (t *TableRepairTask) applyFixNullsUpdates(tx pgx.Tx, column string, columnType string, updates []*nullUpdate, colTypes map[string]string) (int, error) {
+func (t *TableRepairTask) applyFixNullsUpdates(tx pgx.Tx, column string, columnType string, updates []*nullUpdate, colTypes map[string]string, originInfoMap map[string]*rowOriginInfo, nodeName string) (int, error) {
 	if len(updates) == 0 {
 		return 0, nil
 	}
 
+	// Group updates by (origin, LSN, timestamp) if preserve-origin is enabled
+	var originGroups map[originBatchKey][]*nullUpdate
+	if t.PreserveOrigin && originInfoMap != nil && len(originInfoMap) > 0 {
+		originGroups = make(map[originBatchKey][]*nullUpdate)
+		for _, nu := range updates {
+			pkeyStr, err := utils.StringifyKey(nu.pkMap, t.Key)
+			if err != nil {
+				// Try alternative method if available
+				if nu.sourceRow != nil {
+					pkeyStr, err = utils.StringifyOrderedMapKey(nu.sourceRow, t.Key)
+				}
+			}
+			if err != nil {
+				continue
+			}
+			originInfo, hasOrigin := originInfoMap[pkeyStr]
+			var batchKey originBatchKey
+			if hasOrigin && originInfo != nil {
+				batchKey = makeOriginBatchKey(originInfo)
+			}
+			originGroups[batchKey] = append(originGroups[batchKey], nu)
+		}
+	} else {
+		// No origin tracking - process all updates together
+		originGroups = map[originBatchKey][]*nullUpdate{
+			{}: updates,
+		}
+	}
+
 	totalUpdated := 0
-	batchSize := 500
-	for i := 0; i < len(updates); i += batchSize {
-		end := i + batchSize
-		if end > len(updates) {
-			end = len(updates)
-		}
-		batch := updates[i:end]
 
-		updateSQL, args, err := t.buildFixNullsBatchSQL(column, columnType, batch, colTypes)
-		if err != nil {
-			return totalUpdated, err
+	// Track which origin sessions are already set up in this transaction
+	setupSessions := make(map[string]bool)
+
+	// Process each origin group separately
+	for batchKey, originUpdates := range originGroups {
+		if len(originUpdates) == 0 {
+			continue
 		}
 
-		tag, err := tx.Exec(t.Ctx, updateSQL, args...)
-		if err != nil {
-			return totalUpdated, fmt.Errorf("error executing fix-nulls batch for column %s: %w", column, err)
+		// Set up replication origin session and xact if we have origin info and preserve-origin is enabled.
+		// If we cannot obtain an origin LSN, we gracefully fall back to regular repair for this group.
+		preserveThisGroup := t.PreserveOrigin && batchKey.nodeOrigin != ""
+		if preserveThisGroup {
+			// Parse timestamp from batch key
+			var commitTS *time.Time
+			if batchKey.timestamp != "" {
+				ts, err := time.Parse(time.RFC3339Nano, batchKey.timestamp)
+				if err != nil {
+					return totalUpdated, fmt.Errorf("failed to parse timestamp from batch key: %w", err)
+				}
+				commitTS = &ts
+			}
+
+			// Get or generate LSN for this batch
+			// If LSN is in the batch key (from metadata), use it
+			// Otherwise, fetch LSN from survivor node and add timestamp-based offset for uniqueness
+			var lsn *uint64
+			if batchKey.lsn != 0 {
+				// LSN from metadata - use directly
+				lsnCopy := batchKey.lsn
+				lsn = &lsnCopy
+			} else {
+				// No LSN in metadata - need to fetch from survivor node and generate unique LSN per timestamp
+				var survivorNode string
+				for poolNode := range t.Pools {
+					if poolNode != batchKey.nodeOrigin && poolNode != nodeName {
+						survivorNode = poolNode
+						break
+					}
+				}
+				if survivorNode == "" && t.SourceOfTruth != "" && t.SourceOfTruth != batchKey.nodeOrigin {
+					survivorNode = t.SourceOfTruth
+				}
+
+				if survivorNode == "" {
+					return totalUpdated, fmt.Errorf("no survivor node available to fetch LSN for origin node %s", batchKey.nodeOrigin)
+				}
+
+				fetchedLSN, err := t.getOriginLSNForNode(batchKey.nodeOrigin, survivorNode)
+				if err != nil {
+					return totalUpdated, fmt.Errorf("failed to get origin LSN for node %s: %w", batchKey.nodeOrigin, err)
+				}
+				if fetchedLSN == nil {
+					// Graceful fallback: skip origin-preserving setup for this group.
+					preserveThisGroup = false
+					logger.Warn("preserve-origin: falling back to regular fix-nulls for node %s (origin=%s, timestamp=%s)", nodeName, batchKey.nodeOrigin, batchKey.timestamp)
+				}
+
+				if preserveThisGroup {
+					baseLSN := *fetchedLSN
+
+					// Use base LSN + timestamp-based offset to ensure uniqueness per timestamp
+					// This allows different timestamps to have different LSNs for proper tracking
+					// The offset is derived from the timestamp to maintain ordering
+					offset := uint64(0)
+					if commitTS != nil {
+						// Use microseconds since epoch as offset (modulo to keep reasonable)
+						offset = uint64(commitTS.UnixMicro() % 1000000)
+					}
+					uniqueLSN := baseLSN + offset
+					lsn = &uniqueLSN
+				}
+			}
+
+			if preserveThisGroup {
+				// Step 1: Setup session (once per origin node per transaction)
+				if !setupSessions[batchKey.nodeOrigin] {
+					_, err := t.setupReplicationOriginSession(tx, batchKey.nodeOrigin)
+					if err != nil {
+						return totalUpdated, fmt.Errorf("failed to setup replication origin session for node %s: %w", batchKey.nodeOrigin, err)
+					}
+					setupSessions[batchKey.nodeOrigin] = true
+				}
+
+				// Step 2: Setup xact with this batch's specific LSN and timestamp (BEFORE DML)
+				if err := t.setupReplicationOriginXact(tx, lsn, commitTS); err != nil {
+					t.resetReplicationOriginSession(tx) // Cleanup on error
+					return totalUpdated, fmt.Errorf("failed to setup replication origin xact for node %s (LSN=%v, TS=%v): %w", batchKey.nodeOrigin, lsn, commitTS, err)
+				}
+			}
 		}
-		totalUpdated += int(tag.RowsAffected())
+
+		// Process batches for this origin group
+		batchSize := 500
+		for i := 0; i < len(originUpdates); i += batchSize {
+			end := i + batchSize
+			if end > len(originUpdates) {
+				end = len(originUpdates)
+			}
+			batch := originUpdates[i:end]
+
+			updateSQL, args, err := t.buildFixNullsBatchSQL(column, columnType, batch, colTypes)
+			if err != nil {
+				if preserveThisGroup {
+					t.resetReplicationOriginXact(tx)
+					t.resetReplicationOriginSession(tx)
+				}
+				return totalUpdated, err
+			}
+
+			tag, err := tx.Exec(t.Ctx, updateSQL, args...)
+			if err != nil {
+				if preserveThisGroup {
+					t.resetReplicationOriginXact(tx)
+					t.resetReplicationOriginSession(tx)
+				}
+				return totalUpdated, fmt.Errorf("error executing fix-nulls batch for column %s: %w", column, err)
+			}
+			totalUpdated += int(tag.RowsAffected())
+		}
+
+		// Note: Xact reset happens AFTER commit in the calling function
+		// Session reset also happens AFTER commit in the calling function
 	}
 
 	return totalUpdated, nil
@@ -1387,9 +1569,77 @@ func (t *TableRepairTask) runUnidirectionalRepair(startTime time.Time) error {
 				continue
 			}
 
-			upsertedCount, err := executeUpserts(tx, t, nodeName, nodeUpserts, targetNodeColTypes)
+			// Extract origin information from source rows if preserve-origin is enabled
+			var originInfoMap map[string]*rowOriginInfo
+			if t.PreserveOrigin {
+				originInfoMap = make(map[string]*rowOriginInfo)
+				// Extract origin info from all source rows in the diff
+				// For repair plans, we'll extract from both nodes and use the appropriate one
+				// For source-of-truth repairs, we extract from the source of truth
+				for nodePair, diffs := range t.RawDiffs.NodeDiffs {
+					nodes := strings.Split(nodePair, "/")
+					if len(nodes) != 2 {
+						continue
+					}
+					node1Name, node2Name := nodes[0], nodes[1]
+
+					// Extract from both nodes - we'll use the one that matches the source
+					for _, sourceNode := range []string{node1Name, node2Name} {
+						sourceRows := diffs.Rows[sourceNode]
+						for _, row := range sourceRows {
+							pkeyStr, err := utils.StringifyOrderedMapKey(row, t.Key)
+							if err != nil {
+								continue
+							}
+							// Only add if this row is being upserted to the target node
+							if _, isBeingUpserted := nodeUpserts[pkeyStr]; isBeingUpserted {
+								if originInfo := extractOriginInfoFromRow(row); originInfo != nil {
+									// For repair plans, prefer the source node that's providing the data
+									// For source-of-truth, prefer the source of truth
+									if t.RepairPlan == nil {
+										// Source-of-truth: only use if it's the source of truth
+										if sourceNode == t.SourceOfTruth {
+											originInfoMap[pkeyStr] = originInfo
+										}
+									} else {
+										// Repair plan: use the first one we find (will be overridden if needed)
+										if _, exists := originInfoMap[pkeyStr]; !exists {
+											originInfoMap[pkeyStr] = originInfo
+										}
+									}
+								}
+							}
+						}
+					}
+				}
+			}
+
+			// Close the current transaction before executing upserts with per-timestamp transactions
+			// Reset spock.repair_mode temporarily
+			if spockRepairModeActive {
+				_, err = tx.Exec(t.Ctx, "SELECT spock.repair_mode(false)")
+				if err != nil {
+					tx.Rollback(t.Ctx)
+					logger.Error("disabling spock.repair_mode(false) on %s before upserts: %v", nodeName, err)
+					repairErrors = append(repairErrors, fmt.Sprintf("spock.repair_mode(false) failed for %s: %v", nodeName, err))
+					continue
+				}
+			}
+
+			// Commit the current transaction (which handled deletes if any)
+			logger.Debug("Committing transaction on %s before calling executeUpsertsWithTimestamps", nodeName)
+			err = tx.Commit(t.Ctx)
 			if err != nil {
-				tx.Rollback(t.Ctx)
+				// Note: If Commit fails, transaction is automatically rolled back by PostgreSQL
+				logger.Error("committing transaction on %s before upserts: %v", nodeName, err)
+				repairErrors = append(repairErrors, fmt.Sprintf("commit failed for %s: %v", nodeName, err))
+				continue
+			}
+			logger.Debug("Successfully committed transaction, now calling executeUpsertsWithTimestamps")
+
+			// Execute upserts with per-timestamp transactions
+			upsertedCount, err := executeUpsertsWithTimestamps(divergentPool, t, nodeName, nodeUpserts, targetNodeColTypes, originInfoMap)
+			if err != nil {
 				logger.Error("executing upserts on node %s: %v", nodeName, err)
 				repairErrors = append(repairErrors, fmt.Sprintf("upsert ops failed for %s: %v", nodeName, err))
 				continue
@@ -1410,7 +1660,12 @@ func (t *TableRepairTask) runUnidirectionalRepair(startTime time.Time) error {
 					t.report.Changes[nodeName].(map[string]any)["rule_matches"] = t.planRuleMatches[nodeName]
 				}
 			}
+
+			// All transactions for this node are now complete, continue to next node
+			continue
 		}
+
+		// If we reach here, there were no upserts, so commit the delete transaction
 
 		if spockRepairModeActive {
 			// TODO: Need to elevate privileges here, but might be difficult
@@ -1690,7 +1945,42 @@ func (t *TableRepairTask) performBirectionalInserts(nodeName string, inserts map
 	// Bidirectional is always insert only
 	originalInsertOnly := t.InsertOnly
 	t.InsertOnly = true
-	insertedCount, err := executeUpserts(tx, t, nodeName, inserts, targetNodeColTypes)
+	// Extract origin information from source rows for bidirectional repair
+	var originInfoMap map[string]*rowOriginInfo
+	if t.PreserveOrigin {
+		originInfoMap = make(map[string]*rowOriginInfo)
+		// For bidirectional, origin is the node providing the data
+		// We need to find which node pair this insert came from
+		for nodePairKey, diffs := range t.RawDiffs.NodeDiffs {
+			nodes := strings.Split(nodePairKey, "/")
+			if len(nodes) != 2 {
+				continue
+			}
+			var sourceNode string
+			if nodes[0] == nodeName {
+				sourceNode = nodes[1] // Data coming from the other node
+			} else if nodes[1] == nodeName {
+				sourceNode = nodes[0] // Data coming from the other node
+			} else {
+				continue
+			}
+
+			sourceRows := diffs.Rows[sourceNode]
+			for _, row := range sourceRows {
+				pkeyStr, err := utils.StringifyOrderedMapKey(row, t.Key)
+				if err != nil {
+					continue
+				}
+				if _, exists := inserts[pkeyStr]; exists {
+					if originInfo := extractOriginInfoFromRow(row); originInfo != nil {
+						originInfoMap[pkeyStr] = originInfo
+					}
+				}
+			}
+		}
+	}
+
+	insertedCount, err := executeUpserts(tx, t, nodeName, inserts, targetNodeColTypes, originInfoMap)
 	t.InsertOnly = originalInsertOnly
 
 	if err != nil {
@@ -1818,120 +2108,656 @@ func executeDeletes(ctx context.Context, tx pgx.Tx, task *TableRepairTask, nodeN
 	return totalDeletedCount, nil
 }
 
+// rowOriginInfo holds origin metadata for a row
+type rowOriginInfo struct {
+	nodeOrigin string
+	commitTS   *time.Time
+	lsn        *uint64
+}
+
+// originBatchKey is used to group rows by their origin node, LSN, and timestamp
+// for per-row accurate preserve-origin tracking. Rows with identical keys are
+// batched together and processed with a single xact setup.
+type originBatchKey struct {
+	nodeOrigin string
+	lsn        uint64 // 0 if nil
+	timestamp  string // empty if nil, RFC3339Nano format for comparison
+}
+
+// makeOriginBatchKey creates a batch key from origin info for grouping rows.
+// Returns zero-value key for rows without origin information.
+func makeOriginBatchKey(originInfo *rowOriginInfo) originBatchKey {
+	if originInfo == nil || originInfo.nodeOrigin == "" {
+		return originBatchKey{} // zero value
+	}
+
+	key := originBatchKey{nodeOrigin: originInfo.nodeOrigin}
+
+	if originInfo.lsn != nil {
+		key.lsn = *originInfo.lsn
+	}
+
+	if originInfo.commitTS != nil {
+		key.timestamp = originInfo.commitTS.Format(time.RFC3339Nano)
+	}
+
+	return key
+}
+
+// extractOriginInfoFromRow extracts origin information from a row's metadata.
+// Returns nil if no origin information is available.
+func extractOriginInfoFromRow(row types.OrderedMap) *rowOriginInfo {
+	rowMap := utils.OrderedMapToMap(row)
+
+	// Check for metadata in _spock_metadata_ field
+	var meta map[string]any
+	if rawMeta, ok := rowMap["_spock_metadata_"].(map[string]any); ok {
+		meta = rawMeta
+	} else {
+		meta = make(map[string]any)
+	}
+
+	// Also check for direct fields (for backward compatibility)
+	if val, ok := rowMap["node_origin"]; ok {
+		meta["node_origin"] = val
+	}
+	if val, ok := rowMap["commit_ts"]; ok {
+		meta["commit_ts"] = val
+	}
+
+	var nodeOrigin string
+	var commitTS *time.Time
+
+	if originVal, ok := meta["node_origin"]; ok && originVal != nil {
+		originStr := strings.TrimSpace(fmt.Sprintf("%v", originVal))
+		if originStr != "" && originStr != "0" && originStr != "local" {
+			nodeOrigin = originStr
+		}
+	}
+
+	if tsVal, ok := meta["commit_ts"]; ok && tsVal != nil {
+		var ts time.Time
+		var err error
+		switch v := tsVal.(type) {
+		case time.Time:
+			ts = v
+		case string:
+			ts, err = time.Parse(time.RFC3339, v)
+			if err != nil {
+				// Try other formats
+				ts, err = time.Parse("2006-01-02 15:04:05.999999-07", v)
+			}
+		}
+		if err == nil {
+			commitTS = &ts
+		}
+	}
+
+	if nodeOrigin == "" {
+		return nil
+	}
+
+	return &rowOriginInfo{
+		nodeOrigin: nodeOrigin,
+		commitTS:   commitTS,
+	}
+}
+
 // executeUpserts handles upserting rows in batches.
-func executeUpserts(tx pgx.Tx, task *TableRepairTask, nodeName string, upserts map[string]map[string]any, colTypes map[string]string) (int, error) {
+// originInfoMap maps primary key strings to their origin information.
+// If originInfoMap is nil or empty, origin tracking is skipped.
+func executeUpserts(tx pgx.Tx, task *TableRepairTask, nodeName string, upserts map[string]map[string]any, colTypes map[string]string, originInfoMap map[string]*rowOriginInfo) (int, error) {
 	if err := task.filterStaleRepairs(task.Ctx, tx, nodeName, upserts, colTypes, "upsert"); err != nil {
 		return 0, err
 	}
 
-	rowsToUpsert := make([][]any, 0, len(upserts))
-	orderedCols := task.Cols
-
-	for _, rowMap := range upserts {
-		typedRow := make([]any, len(orderedCols))
-		for i, colName := range orderedCols {
-			val, valExists := rowMap[colName]
-			pgType, typeExists := colTypes[colName]
-
-			if !valExists {
-				typedRow[i] = nil
-				continue
+	// Group rows by (origin, LSN, timestamp) if preserve-origin is enabled and we have origin info
+	var originGroups map[originBatchKey]map[string]map[string]any // batchKey -> pkey -> row
+	rowsWithoutOrigin := 0
+	if task.PreserveOrigin && originInfoMap != nil && len(originInfoMap) > 0 {
+		originGroups = make(map[originBatchKey]map[string]map[string]any)
+		for pkey, row := range upserts {
+			originInfo, hasOrigin := originInfoMap[pkey]
+			var batchKey originBatchKey
+			if hasOrigin && originInfo != nil {
+				batchKey = makeOriginBatchKey(originInfo)
+				if batchKey.nodeOrigin == "" {
+					rowsWithoutOrigin++
+				}
+			} else {
+				rowsWithoutOrigin++
 			}
-			if !typeExists {
-				return 0, fmt.Errorf("type for column %s not found in target node's colTypes", colName)
+			if originGroups[batchKey] == nil {
+				originGroups[batchKey] = make(map[string]map[string]any)
 			}
-
-			convertedVal, err := utils.ConvertToPgxType(val, pgType)
-			if err != nil {
-				return 0, fmt.Errorf("error converting value for column %s (value: %v, type: %s): %w", colName, val, pgType, err)
-			}
-			typedRow[i] = convertedVal
+			originGroups[batchKey][pkey] = row
 		}
-		rowsToUpsert = append(rowsToUpsert, typedRow)
-	}
-
-	if len(rowsToUpsert) == 0 {
-		return 0, nil
+		if rowsWithoutOrigin > 0 {
+			logger.Warn("preserve-origin enabled but %d rows missing origin metadata - these will be repaired without origin tracking", rowsWithoutOrigin)
+		}
+	} else {
+		// No origin tracking - process all rows together
+		originGroups = map[originBatchKey]map[string]map[string]any{
+			{}: upserts,
+		}
 	}
 
 	totalUpsertedCount := 0
-	// TODO: Make this configurable
-	batchSize := 1000
+	orderedCols := task.Cols
 
-	// For the max placeholders issue
-	if len(orderedCols) > 0 && batchSize*len(orderedCols) > 65500 {
-		batchSize = 65500 / len(orderedCols)
-		if batchSize == 0 {
-			batchSize = 1
+	// Track which origin sessions are already set up in this transaction
+	setupSessions := make(map[string]bool)
+
+	// Process each origin group separately
+	for batchKey, originUpserts := range originGroups {
+		if len(originUpserts) == 0 {
+			continue
+		}
+
+		// Set up replication origin session and xact if we have origin info and preserve-origin is enabled.
+		// If we cannot obtain an origin LSN, we gracefully fall back to regular repair for this group.
+		preserveThisGroup := task.PreserveOrigin && batchKey.nodeOrigin != ""
+		if preserveThisGroup {
+			// Parse timestamp from batch key
+			var commitTS *time.Time
+			if batchKey.timestamp != "" {
+				ts, err := time.Parse(time.RFC3339Nano, batchKey.timestamp)
+				if err != nil {
+					return totalUpsertedCount, fmt.Errorf("failed to parse timestamp from batch key: %w", err)
+				}
+				commitTS = &ts
+			}
+
+			// Get or generate LSN for this batch
+			// If LSN is in the batch key (from metadata), use it
+			// Otherwise, fetch LSN from survivor node and add timestamp-based offset for uniqueness
+			var lsn *uint64
+			if batchKey.lsn != 0 {
+				// LSN from metadata - use directly
+				lsnCopy := batchKey.lsn
+				lsn = &lsnCopy
+			} else {
+				// No LSN in metadata - need to fetch from survivor node and generate unique LSN per timestamp
+				var survivorNode string
+				for poolNode := range task.Pools {
+					if poolNode != batchKey.nodeOrigin && poolNode != nodeName {
+						survivorNode = poolNode
+						break
+					}
+				}
+				if survivorNode == "" && task.SourceOfTruth != "" && task.SourceOfTruth != batchKey.nodeOrigin {
+					survivorNode = task.SourceOfTruth
+				}
+
+				if survivorNode == "" {
+					return totalUpsertedCount, fmt.Errorf("no survivor node available to fetch LSN for origin node %s", batchKey.nodeOrigin)
+				}
+
+				fetchedLSN, err := task.getOriginLSNForNode(batchKey.nodeOrigin, survivorNode)
+				if err != nil {
+					return totalUpsertedCount, fmt.Errorf("failed to get origin LSN for node %s: %w", batchKey.nodeOrigin, err)
+				}
+				if fetchedLSN == nil {
+					// Graceful fallback: skip origin-preserving setup for this group.
+					preserveThisGroup = false
+					logger.Warn("preserve-origin: falling back to regular upsert for node %s (origin=%s, timestamp=%s)", nodeName, batchKey.nodeOrigin, batchKey.timestamp)
+				}
+
+				if preserveThisGroup {
+					baseLSN := *fetchedLSN
+
+					// Use base LSN + timestamp-based offset to ensure uniqueness per timestamp
+					// This allows different timestamps to have different LSNs for proper tracking
+					// The offset is derived from the timestamp to maintain ordering
+					offset := uint64(0)
+					if commitTS != nil {
+						// Use microseconds since epoch as offset (modulo to keep reasonable)
+						offset = uint64(commitTS.UnixMicro() % 1000000)
+					}
+					uniqueLSN := baseLSN + offset
+					lsn = &uniqueLSN
+				}
+			}
+
+			if preserveThisGroup {
+				// Step 1: Setup session (once per origin node per transaction)
+				if !setupSessions[batchKey.nodeOrigin] {
+					_, err := task.setupReplicationOriginSession(tx, batchKey.nodeOrigin)
+					if err != nil {
+						return totalUpsertedCount, fmt.Errorf("failed to setup replication origin session for node %s: %w", batchKey.nodeOrigin, err)
+					}
+					setupSessions[batchKey.nodeOrigin] = true
+				}
+
+				// Step 2: Setup xact with this batch's specific LSN and timestamp (BEFORE DML)
+				if err := task.setupReplicationOriginXact(tx, lsn, commitTS); err != nil {
+					task.resetReplicationOriginSession(tx) // Cleanup on error
+					return totalUpsertedCount, fmt.Errorf("failed to setup replication origin xact for node %s (LSN=%v, TS=%v): %w", batchKey.nodeOrigin, lsn, commitTS, err)
+				}
+			}
+		}
+
+		// Convert rows to typed format
+		rowsToUpsert := make([][]any, 0, len(originUpserts))
+		for _, rowMap := range originUpserts {
+			typedRow := make([]any, len(orderedCols))
+			for i, colName := range orderedCols {
+				val, valExists := rowMap[colName]
+				pgType, typeExists := colTypes[colName]
+
+				if !valExists {
+					typedRow[i] = nil
+					continue
+				}
+				if !typeExists {
+					return totalUpsertedCount, fmt.Errorf("type for column %s not found in target node's colTypes", colName)
+				}
+
+				convertedVal, err := utils.ConvertToPgxType(val, pgType)
+				if err != nil {
+					return totalUpsertedCount, fmt.Errorf("error converting value for column %s (value: %v, type: %s): %w", colName, val, pgType, err)
+				}
+				typedRow[i] = convertedVal
+			}
+			rowsToUpsert = append(rowsToUpsert, typedRow)
+		}
+
+		if len(rowsToUpsert) == 0 {
+			// Reset xact if we set it up
+			if preserveThisGroup {
+				task.resetReplicationOriginXact(tx)
+			}
+			continue
+		}
+
+		// Process batches for this origin group
+		// TODO: Make this configurable
+		batchSize := 1000
+
+		// For the max placeholders issue
+		if len(orderedCols) > 0 && batchSize*len(orderedCols) > 65500 {
+			batchSize = 65500 / len(orderedCols)
+			if batchSize == 0 {
+				batchSize = 1
+			}
+		}
+
+		tableIdent := pgx.Identifier{task.Schema, task.Table}.Sanitize()
+		colIdents := make([]string, len(orderedCols))
+		for i, col := range orderedCols {
+			colIdents[i] = pgx.Identifier{col}.Sanitize()
+		}
+		colsSQL := strings.Join(colIdents, ", ")
+
+		pkColIdents := make([]string, len(task.Key))
+		for i, pkCol := range task.Key {
+			pkColIdents[i] = pgx.Identifier{pkCol}.Sanitize()
+		}
+		pkSQL := strings.Join(pkColIdents, ", ")
+
+		for i := 0; i < len(rowsToUpsert); i += batchSize {
+			end := i + batchSize
+			if end > len(rowsToUpsert) {
+				end = len(rowsToUpsert)
+			}
+			batchRows := rowsToUpsert[i:end]
+
+			var upsertSQL strings.Builder
+			args := []any{}
+			paramIdx := 1
+
+			upsertSQL.WriteString(fmt.Sprintf("INSERT INTO %s (%s) VALUES ", tableIdent, colsSQL))
+			for j, row := range batchRows {
+				if j > 0 {
+					upsertSQL.WriteString(", ")
+				}
+				upsertSQL.WriteString("(")
+				for k, val := range row {
+					if k > 0 {
+						upsertSQL.WriteString(", ")
+					}
+					upsertSQL.WriteString(fmt.Sprintf("$%d", paramIdx))
+					args = append(args, val)
+					paramIdx++
+				}
+				upsertSQL.WriteString(")")
+			}
+
+			upsertSQL.WriteString(fmt.Sprintf(" ON CONFLICT (%s) ", pkSQL))
+			if task.InsertOnly {
+				upsertSQL.WriteString("DO NOTHING")
+			} else {
+				upsertSQL.WriteString("DO UPDATE SET ")
+				setClauses := make([]string, 0, len(orderedCols))
+				for _, col := range orderedCols {
+					isPkCol := false
+					for _, pk := range task.Key {
+						if col == pk {
+							isPkCol = true
+							break
+						}
+					}
+					if !isPkCol {
+						sanitisedCol := pgx.Identifier{col}.Sanitize()
+						setClauses = append(setClauses, fmt.Sprintf("%s = EXCLUDED.%s", sanitisedCol, sanitisedCol))
+					}
+				}
+				upsertSQL.WriteString(strings.Join(setClauses, ", "))
+			}
+
+			cmdTag, err := tx.Exec(task.Ctx, upsertSQL.String(), args...)
+			if err != nil {
+				// Reset xact and session before returning error
+				if preserveThisGroup {
+					task.resetReplicationOriginXact(tx)
+					task.resetReplicationOriginSession(tx)
+				}
+				return totalUpsertedCount, fmt.Errorf("error executing upsert batch: %w (SQL: %s, Args: %v)", err, upsertSQL.String(), args)
+			}
+			totalUpsertedCount += int(cmdTag.RowsAffected())
+		}
+
+		// Note: Xact reset happens AFTER commit in the calling function
+		// Session reset also happens AFTER commit in the calling function
+	}
+
+	return totalUpsertedCount, nil
+}
+
+// executeUpsertsWithTimestamps handles upserting rows with per-timestamp transaction management.
+// This allows each unique timestamp group to be committed separately, preserving per-row timestamp accuracy.
+func executeUpsertsWithTimestamps(pool *pgxpool.Pool, task *TableRepairTask, nodeName string, upserts map[string]map[string]any, colTypes map[string]string, originInfoMap map[string]*rowOriginInfo) (int, error) {
+	// Group rows by (origin, LSN, timestamp) if preserve-origin is enabled and we have origin info
+	var originGroups map[originBatchKey]map[string]map[string]any // batchKey -> pkey -> row
+	rowsWithoutOrigin := 0
+	if task.PreserveOrigin && originInfoMap != nil && len(originInfoMap) > 0 {
+		originGroups = make(map[originBatchKey]map[string]map[string]any)
+		for pkey, row := range upserts {
+			originInfo, hasOrigin := originInfoMap[pkey]
+			var batchKey originBatchKey
+			if hasOrigin && originInfo != nil {
+				batchKey = makeOriginBatchKey(originInfo)
+				if batchKey.nodeOrigin == "" {
+					rowsWithoutOrigin++
+				}
+			} else {
+				rowsWithoutOrigin++
+			}
+			if originGroups[batchKey] == nil {
+				originGroups[batchKey] = make(map[string]map[string]any)
+			}
+			originGroups[batchKey][pkey] = row
+		}
+		if rowsWithoutOrigin > 0 {
+			logger.Warn("preserve-origin enabled but %d rows missing origin metadata - these will be repaired without origin tracking", rowsWithoutOrigin)
+		}
+	} else {
+		// No origin tracking - process all rows together in one transaction
+		originGroups = map[originBatchKey]map[string]map[string]any{
+			{}: upserts,
 		}
 	}
 
+	totalUpsertedCount := 0
+
+	// Process each timestamp group in its own transaction
+	for batchKey, originUpserts := range originGroups {
+		if len(originUpserts) == 0 {
+			continue
+		}
+
+		logger.Info("Processing timestamp group: origin='%s', lsn=%d, timestamp='%s', rows=%d",
+			batchKey.nodeOrigin, batchKey.lsn, batchKey.timestamp, len(originUpserts))
+
+		// Start a new transaction for this timestamp group
+		tx, err := pool.Begin(task.Ctx)
+		if err != nil {
+			return totalUpsertedCount, fmt.Errorf("starting transaction for timestamp group on node %s: %w", nodeName, err)
+		}
+
+		// Enable spock repair mode
+		_, err = tx.Exec(task.Ctx, "SELECT spock.repair_mode(true)")
+		if err != nil {
+			tx.Rollback(task.Ctx)
+			return totalUpsertedCount, fmt.Errorf("enabling spock.repair_mode(true) on %s: %w", nodeName, err)
+		}
+
+		// Set session replication role
+		if task.FireTriggers {
+			_, err = tx.Exec(task.Ctx, "SET session_replication_role = 'local'")
+		} else {
+			_, err = tx.Exec(task.Ctx, "SET session_replication_role = 'replica'")
+		}
+		if err != nil {
+			tx.Rollback(task.Ctx)
+			return totalUpsertedCount, fmt.Errorf("setting session_replication_role on %s: %w", nodeName, err)
+		}
+
+		// Set role if needed
+		if err := task.setRole(tx, nodeName); err != nil {
+			tx.Rollback(task.Ctx)
+			return totalUpsertedCount, err
+		}
+
+		// Setup replication origin for this timestamp group.
+		// If we cannot obtain an origin LSN, we gracefully fall back to regular repair for this group.
+		preserveThisGroup := task.PreserveOrigin && batchKey.nodeOrigin != ""
+		if preserveThisGroup {
+			logger.Info("Setting up replication origin for %s with timestamp %s", batchKey.nodeOrigin, batchKey.timestamp)
+
+			// Parse timestamp from batch key
+			var commitTS *time.Time
+			if batchKey.timestamp != "" {
+				ts, err := time.Parse(time.RFC3339Nano, batchKey.timestamp)
+				if err != nil {
+					tx.Rollback(task.Ctx)
+					return totalUpsertedCount, fmt.Errorf("failed to parse timestamp from batch key: %w", err)
+				}
+				commitTS = &ts
+				logger.Info("Parsed commit timestamp: %v", commitTS)
+			}
+
+			// Get or generate LSN for this batch
+			var lsn *uint64
+			if batchKey.lsn != 0 {
+				lsnCopy := batchKey.lsn
+				lsn = &lsnCopy
+			} else {
+				// Fetch base LSN from survivor node
+				var survivorNode string
+				for poolNode := range task.Pools {
+					if poolNode != batchKey.nodeOrigin && poolNode != nodeName {
+						survivorNode = poolNode
+						break
+					}
+				}
+				if survivorNode == "" && task.SourceOfTruth != "" && task.SourceOfTruth != batchKey.nodeOrigin {
+					survivorNode = task.SourceOfTruth
+				}
+
+				if survivorNode != "" {
+					fetchedLSN, err := task.getOriginLSNForNode(batchKey.nodeOrigin, survivorNode)
+					if err != nil {
+						tx.Rollback(task.Ctx)
+						return totalUpsertedCount, fmt.Errorf("failed to get origin LSN for node %s: %w", batchKey.nodeOrigin, err)
+					}
+					if fetchedLSN == nil {
+						preserveThisGroup = false
+						logger.Warn("preserve-origin: falling back to regular upsert for node %s (origin=%s, timestamp=%s)", nodeName, batchKey.nodeOrigin, batchKey.timestamp)
+					} else {
+						baseLSN := *fetchedLSN
+						// Use base LSN + timestamp-based offset for uniqueness
+						offset := uint64(0)
+						if commitTS != nil {
+							offset = uint64(commitTS.UnixMicro() % 1000000)
+						}
+						uniqueLSN := baseLSN + offset
+						lsn = &uniqueLSN
+					}
+				} else {
+					tx.Rollback(task.Ctx)
+					return totalUpsertedCount, fmt.Errorf("no survivor node available to fetch LSN for origin node %s", batchKey.nodeOrigin)
+				}
+			}
+
+			if preserveThisGroup {
+				// Setup session (once per transaction)
+				_, err := task.setupReplicationOriginSession(tx, batchKey.nodeOrigin)
+				if err != nil {
+					tx.Rollback(task.Ctx)
+					return totalUpsertedCount, fmt.Errorf("failed to setup replication origin session for node %s: %w", batchKey.nodeOrigin, err)
+				}
+				logger.Info("Set up replication origin session for %s", batchKey.nodeOrigin)
+
+				// Setup xact with this specific timestamp
+				if err := task.setupReplicationOriginXact(tx, lsn, commitTS); err != nil {
+					task.resetReplicationOriginSession(tx)
+					tx.Rollback(task.Ctx)
+					return totalUpsertedCount, fmt.Errorf("failed to setup replication origin xact for node %s (LSN=%v, TS=%v): %w", batchKey.nodeOrigin, lsn, commitTS, err)
+				}
+				logger.Info("Set up replication origin xact with LSN=%v, timestamp=%v", lsn, commitTS)
+			}
+		}
+
+		// Execute the upserts for this timestamp group
+		count, err := executeUpsertsInTransaction(tx, task, nodeName, originUpserts, colTypes)
+		if err != nil {
+			// Reset origin tracking
+			if preserveThisGroup {
+				task.resetReplicationOriginXact(tx)
+				task.resetReplicationOriginSession(tx)
+			}
+			tx.Rollback(task.Ctx)
+			return totalUpsertedCount, fmt.Errorf("executing upserts for timestamp group: %w", err)
+		}
+		totalUpsertedCount += count
+
+		// Reset origin tracking BEFORE commit to clean up the connection
+		// This ensures the connection is returned to the pool in a clean state
+		if preserveThisGroup {
+			if err := task.resetReplicationOriginXact(tx); err != nil {
+				logger.Warn("failed to reset replication origin xact before commit: %v", err)
+				// Continue - this is a cleanup operation
+			}
+			if err := task.resetReplicationOriginSession(tx); err != nil {
+				logger.Warn("failed to reset replication origin session before commit: %v", err)
+				// Continue - this is a cleanup operation
+			}
+		}
+
+		// Commit this timestamp group's transaction
+		err = tx.Commit(task.Ctx)
+		if err != nil {
+			// On error, try to disable repair mode before rollback
+			tx.Exec(task.Ctx, "SELECT spock.repair_mode(false)")
+			tx.Rollback(task.Ctx)
+			return totalUpsertedCount, fmt.Errorf("committing timestamp group transaction on %s: %w", nodeName, err)
+		}
+
+		// Disable spock repair mode AFTER commit (on the connection)
+		if _, err := pool.Exec(task.Ctx, "SELECT spock.repair_mode(false)"); err != nil {
+			logger.Warn("failed to disable spock.repair_mode after commit: %v", err)
+		}
+
+		logger.Debug("Committed transaction for timestamp group: %d rows with origin=%s, timestamp=%s",
+			count, batchKey.nodeOrigin, batchKey.timestamp)
+	}
+
+	return totalUpsertedCount, nil
+}
+
+// executeUpsertsInTransaction performs the actual upsert operations within an existing transaction.
+// This is called by executeUpsertsWithTimestamps for each timestamp group.
+func executeUpsertsInTransaction(tx pgx.Tx, task *TableRepairTask, nodeName string, upserts map[string]map[string]any, colTypes map[string]string) (int, error) {
+	if err := task.filterStaleRepairs(task.Ctx, tx, nodeName, upserts, colTypes, "upsert"); err != nil {
+		return 0, err
+	}
+
+	orderedCols := task.Cols
+	totalUpsertedCount := 0
+	batchSize := 500
+
+	// Build table identifier using Schema and Table for consistency with other functions
 	tableIdent := pgx.Identifier{task.Schema, task.Table}.Sanitize()
-	colIdents := make([]string, len(orderedCols))
-	for i, col := range orderedCols {
-		colIdents[i] = pgx.Identifier{col}.Sanitize()
-	}
-	colsSQL := strings.Join(colIdents, ", ")
 
-	pkColIdents := make([]string, len(task.Key))
-	for i, pkCol := range task.Key {
-		pkColIdents[i] = pgx.Identifier{pkCol}.Sanitize()
+	// Convert map to slice for batching
+	upsertRows := make([]map[string]any, 0, len(upserts))
+	for _, row := range upserts {
+		upsertRows = append(upsertRows, row)
 	}
-	pkSQL := strings.Join(pkColIdents, ", ")
 
-	for i := 0; i < len(rowsToUpsert); i += batchSize {
+	// Process in batches
+	for i := 0; i < len(upsertRows); i += batchSize {
 		end := i + batchSize
-		if end > len(rowsToUpsert) {
-			end = len(rowsToUpsert)
+		if end > len(upsertRows) {
+			end = len(upsertRows)
 		}
-		batchRows := rowsToUpsert[i:end]
+		batch := upsertRows[i:end]
 
 		var upsertSQL strings.Builder
-		args := []any{}
-		paramIdx := 1
+		args := make([]any, 0, len(batch)*len(orderedCols))
 
-		upsertSQL.WriteString(fmt.Sprintf("INSERT INTO %s (%s) VALUES ", tableIdent, colsSQL))
-		for j, row := range batchRows {
-			if j > 0 {
+		upsertSQL.WriteString("INSERT INTO ")
+		upsertSQL.WriteString(tableIdent)
+		upsertSQL.WriteString(" (")
+		for i, col := range orderedCols {
+			if i > 0 {
+				upsertSQL.WriteString(", ")
+			}
+			upsertSQL.WriteString(pgx.Identifier{col}.Sanitize())
+		}
+		upsertSQL.WriteString(") VALUES ")
+
+		for rowIdx, row := range batch {
+			if rowIdx > 0 {
 				upsertSQL.WriteString(", ")
 			}
 			upsertSQL.WriteString("(")
-			for k, val := range row {
-				if k > 0 {
+			for colIdx, col := range orderedCols {
+				if colIdx > 0 {
 					upsertSQL.WriteString(", ")
 				}
-				upsertSQL.WriteString(fmt.Sprintf("$%d", paramIdx))
+				val := row[col]
 				args = append(args, val)
-				paramIdx++
+				upsertSQL.WriteString(fmt.Sprintf("$%d", len(args)))
 			}
 			upsertSQL.WriteString(")")
 		}
 
-		upsertSQL.WriteString(fmt.Sprintf(" ON CONFLICT (%s) ", pkSQL))
-		if task.InsertOnly {
-			upsertSQL.WriteString("DO NOTHING")
-		} else {
-			upsertSQL.WriteString("DO UPDATE SET ")
-			setClauses := make([]string, 0, len(orderedCols))
-			for _, col := range orderedCols {
-				isPkCol := false
-				for _, pk := range task.Key {
-					if col == pk {
-						isPkCol = true
-						break
-					}
-				}
-				if !isPkCol {
-					sanitisedCol := pgx.Identifier{col}.Sanitize()
-					setClauses = append(setClauses, fmt.Sprintf("%s = EXCLUDED.%s", sanitisedCol, sanitisedCol))
+		upsertSQL.WriteString(" ON CONFLICT (")
+		for i, pkCol := range task.Key {
+			if i > 0 {
+				upsertSQL.WriteString(", ")
+			}
+			upsertSQL.WriteString(pgx.Identifier{pkCol}.Sanitize())
+		}
+		upsertSQL.WriteString(") DO UPDATE SET ")
+
+		setClauses := []string{}
+		for _, col := range orderedCols {
+			isPkCol := false
+			for _, pkCol := range task.Key {
+				if col == pkCol {
+					isPkCol = true
+					break
 				}
 			}
+			if !isPkCol {
+				sanitisedCol := pgx.Identifier{col}.Sanitize()
+				setClauses = append(setClauses, fmt.Sprintf("%s = EXCLUDED.%s", sanitisedCol, sanitisedCol))
+			}
+		}
+
+		// If there are no non-PK columns, we can't update anything, so just use DO NOTHING
+		if len(setClauses) == 0 {
+			upsertSQL.WriteString("DO NOTHING")
+		} else {
 			upsertSQL.WriteString(strings.Join(setClauses, ", "))
 		}
 
 		cmdTag, err := tx.Exec(task.Ctx, upsertSQL.String(), args...)
 		if err != nil {
-			return totalUpsertedCount, fmt.Errorf("error executing upsert batch: %w (SQL: %s, Args: %v)", err, upsertSQL.String(), args)
+			return totalUpsertedCount, fmt.Errorf("error executing upsert batch: %w", err)
 		}
 		totalUpsertedCount += int(cmdTag.RowsAffected())
 	}
@@ -2291,4 +3117,99 @@ func (t *TableRepairTask) autoSelectSourceOfTruth(failedNode string, involved ma
 	}
 
 	return best.node, lsnDetails, nil
+}
+
+// getOriginLSNForNode fetches the origin LSN for a given origin node from a survivor node.
+// If LSN is not available, returns (nil, nil) so callers can gracefully fall back
+// to non-origin-preserving repair.
+func (t *TableRepairTask) getOriginLSNForNode(originNodeName, survivorNodeName string) (*uint64, error) {
+	survivorPool, ok := t.Pools[survivorNodeName]
+	if !ok || survivorPool == nil {
+		return nil, fmt.Errorf("no connection pool for survivor node %s", survivorNodeName)
+	}
+
+	originLSN, _, err := t.fetchLSNsForNode(survivorPool, originNodeName, survivorNodeName)
+	if err != nil {
+		logger.Warn("preserve-origin: failed to fetch origin LSN for node %s from survivor %s; falling back to regular repair: %v", originNodeName, survivorNodeName, err)
+		return nil, nil
+	}
+
+	if originLSN == nil {
+		logger.Warn("preserve-origin: origin LSN not available for node %s on survivor %s; falling back to regular repair (timestamps will be current)", originNodeName, survivorNodeName)
+		return nil, nil
+	}
+
+	return originLSN, nil
+}
+
+// setupReplicationOriginSession sets up the replication origin for the session.
+// This should be called before starting the transaction or at the very start.
+// Returns the origin ID for use in xact setup.
+func (t *TableRepairTask) setupReplicationOriginSession(tx pgx.Tx, originNodeName string) (uint32, error) {
+	// Normalize origin node name - use "node_X" format for replication origin
+	originName := fmt.Sprintf("node_%s", originNodeName)
+
+	// Get or create replication origin
+	originID, err := queries.GetReplicationOriginByName(t.Ctx, tx, originName)
+	if err != nil {
+		return 0, fmt.Errorf("failed to get replication origin by name '%s': %w", originName, err)
+	}
+
+	if originID == nil {
+		// Create the replication origin if it doesn't exist
+		createdID, createErr := queries.CreateReplicationOrigin(t.Ctx, tx, originName)
+		if createErr != nil {
+			return 0, fmt.Errorf("failed to create replication origin '%s': %w", originName, createErr)
+		}
+		originID = &createdID
+		logger.Debug("Created replication origin '%s' with ID %d", originName, *originID)
+	} else {
+		logger.Debug("Found existing replication origin '%s' with ID %d", originName, *originID)
+	}
+
+	// Set up the replication origin session
+	if err := queries.SetupReplicationOriginSession(t.Ctx, tx, originName); err != nil {
+		return 0, fmt.Errorf("failed to setup replication origin session for '%s': %w", originName, err)
+	}
+
+	return *originID, nil
+}
+
+// setupReplicationOriginXact sets up the transaction-level LSN and timestamp.
+// This must be called within the transaction, before any DML operations.
+func (t *TableRepairTask) setupReplicationOriginXact(tx pgx.Tx, originLSN *uint64, originTimestamp *time.Time) error {
+	if originLSN == nil {
+		return fmt.Errorf("origin LSN is required for xact setup")
+	}
+
+	lsnStr := pglogrepl.LSN(*originLSN).String()
+
+	if err := queries.SetupReplicationOriginXact(t.Ctx, tx, lsnStr, originTimestamp); err != nil {
+		return fmt.Errorf("failed to setup replication origin xact with LSN %s: %w", lsnStr, err)
+	}
+
+	logger.Debug("Set replication origin xact LSN to %s", lsnStr)
+	if originTimestamp != nil {
+		logger.Debug("Set replication origin xact timestamp to %s", originTimestamp.Format(time.RFC3339))
+	}
+
+	return nil
+}
+
+// resetReplicationOriginXact resets the transaction-level replication origin state (for error cleanup within transaction).
+func (t *TableRepairTask) resetReplicationOriginXact(tx pgx.Tx) error {
+	if err := queries.ResetReplicationOriginXact(t.Ctx, tx); err != nil {
+		return fmt.Errorf("failed to reset replication origin xact: %w", err)
+	}
+	logger.Debug("Reset replication origin xact")
+	return nil
+}
+
+// resetReplicationOriginSession resets the session-level replication origin state (for error cleanup within transaction).
+func (t *TableRepairTask) resetReplicationOriginSession(tx pgx.Tx) error {
+	if err := queries.ResetReplicationOriginSession(t.Ctx, tx); err != nil {
+		return fmt.Errorf("failed to reset replication origin session: %w", err)
+	}
+	logger.Debug("Reset replication origin session")
+	return nil
 }

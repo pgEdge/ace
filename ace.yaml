@@ -9,7 +9,7 @@
 #
 #############################################################################
 
-default_cluster: ""
+default_cluster: "test-cluster"
 
 postgres:
   statement_timeout: 0       # milliseconds

@@ -153,11 +153,13 @@ Request body:
 | `generate_report` | bool | no | Write a JSON report. |
 | `fix_nulls` | bool | no | Fill NULLs using peer values. |
 | `bidirectional` | bool | no | Insert-only in both directions. |
+| `preserve_origin` | bool | no | Preserve replication origin node ID and LSN with per-row timestamp accuracy. Default: `true` |
 
 Notes:
 
 - Recovery-mode is not exposed via HTTP; origin-only diff files will be rejected.
 - The client certificate CN must map to a DB role that can run `SET ROLE` and perform required DML.
+- Preserve-origin maintains microsecond-precision timestamps for each repaired row, ensuring accurate temporal ordering in recovery scenarios.
 
 ### POST /api/v1/spock-diff
 
