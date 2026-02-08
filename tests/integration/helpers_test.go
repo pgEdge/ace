@@ -393,3 +393,12 @@ func compareTimestamps(t1, t2 time.Time, toleranceSeconds int) bool {
 	}
 	return diff <= time.Duration(toleranceSeconds)*time.Second
 }
+
+// compareTimestampsExact compares two timestamps with precise duration-based tolerance
+func compareTimestampsExact(t1, t2 time.Time, tolerance time.Duration) bool {
+	diff := t1.Sub(t2)
+	if diff < 0 {
+		diff = -diff
+	}
+	return diff <= tolerance
+}
