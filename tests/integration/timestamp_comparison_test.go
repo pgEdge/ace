@@ -95,6 +95,31 @@ func TestCompareTimestampsExact(t *testing.T) {
 	}
 }
 
+// TestPostgreSQLMicrosecondPrecision demonstrates the correct way to compare timestamps
+// when dealing with PostgreSQL's microsecond precision
+func TestPostgreSQLMicrosecondPrecision(t *testing.T) {
+	// PostgreSQL stores timestamps with microsecond precision
+	// Go time.Time has nanosecond precision
+	// When comparing, we should truncate to microseconds first
+	
+	ts1 := time.Date(2024, 1, 1, 12, 0, 0, 123456789, time.UTC) // has nanoseconds
+	ts2 := time.Date(2024, 1, 1, 12, 0, 0, 123456000, time.UTC) // microsecond boundary
+	
+	// Direct comparison would show they're different
+	assert.NotEqual(t, ts1, ts2, "Timestamps with different nanoseconds are not equal")
+	
+	// After truncating to PostgreSQL precision, they should be equal
+	ts1Trunc := ts1.Truncate(time.Microsecond)
+	ts2Trunc := ts2.Truncate(time.Microsecond)
+	assert.Equal(t, ts1Trunc, ts2Trunc, "After truncating to microseconds, timestamps should be equal")
+	
+	t.Logf("✓ Original ts1: %v", ts1.Format(time.RFC3339Nano))
+	t.Logf("✓ Original ts2: %v", ts2.Format(time.RFC3339Nano))
+	t.Logf("✓ Truncated ts1: %v", ts1Trunc.Format(time.RFC3339Nano))
+	t.Logf("✓ Truncated ts2: %v", ts2Trunc.Format(time.RFC3339Nano))
+	t.Logf("✓ PostgreSQL precision: microseconds (6 decimal places)")
+}
+
 // TestOldVsNewComparison demonstrates the difference between old and new comparison functions
 func TestOldVsNewComparison(t *testing.T) {
 	// Timestamps that differ by 500 milliseconds

@@ -200,6 +200,16 @@ func TestOriginBatchKeyTimestampPrecision(t *testing.T) {
 	parsedTS2, err := time.Parse(time.RFC3339Nano, key2.timestamp)
 	assert.NoError(t, err)
 	assert.Equal(t, ts2, parsedTS2, "Timestamp precision should be preserved")
+
+	// Test PostgreSQL microsecond precision - timestamps differing only in nanoseconds
+	// below microsecond precision should be considered equal after truncation
+	ts3 := time.Date(2024, 1, 1, 12, 0, 0, 123456000, time.UTC) // microsecond boundary
+	ts4 := time.Date(2024, 1, 1, 12, 0, 0, 123456999, time.UTC) // 999 nanoseconds added
+	
+	// When truncated to microsecond precision (PostgreSQL's precision), these should be equal
+	ts3Trunc := ts3.Truncate(time.Microsecond)
+	ts4Trunc := ts4.Truncate(time.Microsecond)
+	assert.Equal(t, ts3Trunc, ts4Trunc, "Timestamps should be equal after truncating to microsecond precision")
 }
 
 // Helper functions for creating pointers

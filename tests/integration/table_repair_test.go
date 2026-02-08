@@ -1383,9 +1383,11 @@ func TestTableRepair_PreserveOrigin(t *testing.T) {
 			id, ts.Format(time.RFC3339Nano), originalTs.Format(time.RFC3339Nano), timeDiff)
 
 		// Verify timestamp MATCHES original (is preserved)
-		// PostgreSQL timestamp precision is microseconds, so we allow up to 1 microsecond tolerance
-		// to account for potential rounding during storage/retrieval
-		if compareTimestampsExact(ts, originalTs, time.Microsecond) {
+		// PostgreSQL timestamp precision is microseconds, so we truncate both timestamps
+		// to microsecond precision and check for exact equality
+		tsTrunc := ts.Truncate(time.Microsecond)
+		originalTsTrunc := originalTs.Truncate(time.Microsecond)
+		if tsTrunc.Equal(originalTsTrunc) {
 			preservedCount++
 			log.Printf("  ✓ Row %d timestamp PRESERVED", id)
 
