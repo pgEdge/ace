@@ -2731,28 +2731,32 @@ func executeUpsertsInTransaction(tx pgx.Tx, task *TableRepairTask, nodeName stri
 			}
 			upsertSQL.WriteString(pgx.Identifier{pkCol}.Sanitize())
 		}
-		upsertSQL.WriteString(") DO UPDATE SET ")
-
-		setClauses := []string{}
-		for _, col := range orderedCols {
-			isPkCol := false
-			for _, pkCol := range task.Key {
-				if col == pkCol {
-					isPkCol = true
-					break
-				}
-			}
-			if !isPkCol {
-				sanitisedCol := pgx.Identifier{col}.Sanitize()
-				setClauses = append(setClauses, fmt.Sprintf("%s = EXCLUDED.%s", sanitisedCol, sanitisedCol))
-			}
-		}
-
-		// If there are no non-PK columns, we can't update anything, so just use DO NOTHING
-		if len(setClauses) == 0 {
+		upsertSQL.WriteString(") ")
+		if task.InsertOnly {
 			upsertSQL.WriteString("DO NOTHING")
 		} else {
-			upsertSQL.WriteString(strings.Join(setClauses, ", "))
+			upsertSQL.WriteString("DO UPDATE SET ")
+			setClauses := []string{}
+			for _, col := range orderedCols {
+				isPkCol := false
+				for _, pkCol := range task.Key {
+					if col == pkCol {
+						isPkCol = true
+						break
+					}
+				}
+				if !isPkCol {
+					sanitisedCol := pgx.Identifier{col}.Sanitize()
+					setClauses = append(setClauses, fmt.Sprintf("%s = EXCLUDED.%s", sanitisedCol, sanitisedCol))
+				}
+			}
+
+			// If there are no non-PK columns, we can't update anything, so just use DO NOTHING
+			if len(setClauses) == 0 {
+				upsertSQL.WriteString("DO NOTHING")
+			} else {
+				upsertSQL.WriteString(strings.Join(setClauses, ", "))
+			}
 		}
 
 		cmdTag, err := tx.Exec(task.Ctx, upsertSQL.String(), args...)

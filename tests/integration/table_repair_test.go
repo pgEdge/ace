@@ -374,13 +374,15 @@ func TestTableRepair_InsertOnly(t *testing.T) {
 			if strings.Compare(serviceN1, serviceN2) > 0 {
 				pairKey = serviceN2 + "/" + serviceN1
 			}
-			// After insert-only repair with n1 as source:
-			// - All rows from n1 are now on n2 (4 upserted), so n1 has 0 unique rows
-			// - n2 still has its 2 unique rows (2001, 2002) that weren't deleted
-			// - Total diff count is 2 (only the rows unique to n2)
-			assert.Equal(t, 0, len(tdTask.DiffResult.NodeDiffs[pairKey].Rows[serviceN1]))
-			assert.Equal(t, 2, len(tdTask.DiffResult.NodeDiffs[pairKey].Rows[serviceN2]))
-			assert.Equal(t, 2, tdTask.DiffResult.Summary.DiffRowsCount[pairKey])
+			// After insert-only repair with n1 as source (DO NOTHING on conflict):
+			// - Rows 1001, 1002 (n1-only) are inserted into n2
+			// - Rows 1, 2 (conflicting) are NOT overwritten on n2 (DO NOTHING), so they still differ
+			// - n1 has 2 differing rows (its versions of rows 1, 2)
+			// - n2 has 4 differing rows (its versions of rows 1, 2 + unique rows 2001, 2002)
+			// - Total diff count is 4
+			assert.Equal(t, 2, len(tdTask.DiffResult.NodeDiffs[pairKey].Rows[serviceN1]))
+			assert.Equal(t, 4, len(tdTask.DiffResult.NodeDiffs[pairKey].Rows[serviceN2]))
+			assert.Equal(t, 4, tdTask.DiffResult.Summary.DiffRowsCount[pairKey])
 		})
 	}
 }
