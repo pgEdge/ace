@@ -1483,32 +1483,10 @@ func (t *TableRepairTask) runUnidirectionalRepair(startTime time.Time) error {
 				}
 			}
 
-			// Close the current transaction before executing upserts with per-timestamp transactions
-			// Reset spock.repair_mode temporarily
-			if spockRepairModeActive {
-				_, err = tx.Exec(t.Ctx, "SELECT spock.repair_mode(false)")
-				if err != nil {
-					tx.Rollback(t.Ctx)
-					logger.Error("disabling spock.repair_mode(false) on %s before upserts: %v", nodeName, err)
-					repairErrors = append(repairErrors, fmt.Sprintf("spock.repair_mode(false) failed for %s: %v", nodeName, err))
-					continue
-				}
-			}
-
-			// Commit the current transaction (which handled deletes if any)
-			logger.Debug("Committing transaction on %s before calling executeUpsertsWithTimestamps", nodeName)
-			err = tx.Commit(t.Ctx)
+			// Execute upserts on the same transaction as deletes
+			upsertedCount, err := executeUpserts(tx, t, nodeName, nodeUpserts, targetNodeColTypes, originInfoMap)
 			if err != nil {
-				// Note: If Commit fails, transaction is automatically rolled back by PostgreSQL
-				logger.Error("committing transaction on %s before upserts: %v", nodeName, err)
-				repairErrors = append(repairErrors, fmt.Sprintf("commit failed for %s: %v", nodeName, err))
-				continue
-			}
-			logger.Debug("Successfully committed transaction, now calling executeUpsertsWithTimestamps")
-
-			// Execute upserts with per-timestamp transactions
-			upsertedCount, err := executeUpsertsWithTimestamps(divergentPool, t, nodeName, nodeUpserts, targetNodeColTypes, originInfoMap)
-			if err != nil {
+				tx.Rollback(t.Ctx)
 				logger.Error("executing upserts on node %s: %v", nodeName, err)
 				repairErrors = append(repairErrors, fmt.Sprintf("upsert ops failed for %s: %v", nodeName, err))
 				continue
@@ -1529,12 +1507,9 @@ func (t *TableRepairTask) runUnidirectionalRepair(startTime time.Time) error {
 					t.report.Changes[nodeName].(map[string]any)["rule_matches"] = t.planRuleMatches[nodeName]
 				}
 			}
-
-			// All transactions for this node are now complete, continue to next node
-			continue
 		}
 
-		// If we reach here, there were no upserts, so commit the delete transaction
+		// Commit the transaction (deletes and/or upserts)
 
 		if spockRepairModeActive {
 			// TODO: Need to elevate privileges here, but might be difficult
@@ -2286,79 +2261,6 @@ func executeUpserts(tx pgx.Tx, task *TableRepairTask, nodeName string, upserts m
 			return totalUpsertedCount, err
 		}
 		totalUpsertedCount += count
-	}
-
-	return totalUpsertedCount, nil
-}
-
-// executeUpsertsWithTimestamps handles upserting rows with per-timestamp transaction management.
-// This allows each unique timestamp group to be committed separately, preserving per-row timestamp accuracy.
-func executeUpsertsWithTimestamps(pool *pgxpool.Pool, task *TableRepairTask, nodeName string, upserts map[string]map[string]any, colTypes map[string]string, originInfoMap map[string]*rowOriginInfo) (int, error) {
-	originGroups := groupUpsertsByOrigin(upserts, originInfoMap, task.PreserveOrigin)
-
-	totalUpsertedCount := 0
-
-	for batchKey, originUpserts := range originGroups {
-		if len(originUpserts) == 0 {
-			continue
-		}
-
-		logger.Info("Processing timestamp group: origin='%s', lsn=%d, timestamp='%s', rows=%d",
-			batchKey.nodeOrigin, batchKey.lsn, batchKey.timestamp, len(originUpserts))
-
-		tx, err := pool.Begin(task.Ctx)
-		if err != nil {
-			return totalUpsertedCount, fmt.Errorf("starting transaction for timestamp group on node %s: %w", nodeName, err)
-		}
-
-		if err := task.setupTransactionMode(tx, nodeName); err != nil {
-			tx.Rollback(task.Ctx)
-			return totalUpsertedCount, err
-		}
-
-		preserveThisGroup, err := task.setupOriginForBatchKey(tx, batchKey, nodeName, nil)
-		if err != nil {
-			tx.Rollback(task.Ctx)
-			return totalUpsertedCount, err
-		}
-
-		if err := task.filterStaleRepairs(task.Ctx, tx, nodeName, originUpserts, colTypes, "upsert"); err != nil {
-			tx.Rollback(task.Ctx)
-			return totalUpsertedCount, err
-		}
-
-		count, err := executeUpsertBatch(tx, task, originUpserts, colTypes)
-		if err != nil {
-			if preserveThisGroup {
-				task.resetReplicationOriginXact(tx)
-				task.resetReplicationOriginSession(tx)
-			}
-			tx.Rollback(task.Ctx)
-			return totalUpsertedCount, fmt.Errorf("executing upserts for timestamp group: %w", err)
-		}
-		totalUpsertedCount += count
-
-		if preserveThisGroup {
-			if err := task.resetReplicationOriginXact(tx); err != nil {
-				logger.Warn("failed to reset replication origin xact before commit: %v", err)
-			}
-			if err := task.resetReplicationOriginSession(tx); err != nil {
-				logger.Warn("failed to reset replication origin session before commit: %v", err)
-			}
-		}
-
-		if _, err := tx.Exec(task.Ctx, "SELECT spock.repair_mode(false)"); err != nil {
-			tx.Rollback(task.Ctx)
-			return totalUpsertedCount, fmt.Errorf("disabling spock.repair_mode before commit on %s: %w", nodeName, err)
-		}
-
-		err = tx.Commit(task.Ctx)
-		if err != nil {
-			return totalUpsertedCount, fmt.Errorf("committing timestamp group transaction on %s: %w", nodeName, err)
-		}
-
-		logger.Debug("Committed transaction for timestamp group: %d rows with origin=%s, timestamp=%s",
-			count, batchKey.nodeOrigin, batchKey.timestamp)
 	}
 
 	return totalUpsertedCount, nil
