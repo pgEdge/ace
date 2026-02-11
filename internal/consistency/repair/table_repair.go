@@ -1218,6 +1218,10 @@ func (t *TableRepairTask) applyFixNullsUpdates(tx pgx.Tx, column string, columnT
 		}
 	}
 
+	if len(setupSessions) > 0 {
+		t.resetReplicationOriginSession(tx)
+	}
+
 	return totalUpdated, nil
 }
 
@@ -2265,6 +2269,10 @@ func executeUpserts(tx pgx.Tx, task *TableRepairTask, nodeName string, upserts m
 			return totalUpsertedCount, err
 		}
 		totalUpsertedCount += count
+	}
+
+	if len(setupSessions) > 0 {
+		task.resetReplicationOriginSession(tx)
 	}
 
 	return totalUpsertedCount, nil
