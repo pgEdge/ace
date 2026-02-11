@@ -2736,10 +2736,16 @@ func (t *TableRepairTask) setupOriginForBatchKey(tx pgx.Tx, batchKey originBatch
 		}
 	}
 
-	// Setup xact
-	if err := t.setupReplicationOriginXact(tx, lsn, commitTS); err != nil {
-		t.resetReplicationOriginSession(tx)
-		return false, fmt.Errorf("failed to setup replication origin xact for node %s (LSN=%v, TS=%v): %w", batchKey.nodeOrigin, lsn, commitTS, err)
+	// Setup xact (only when both LSN and timestamp are available).
+	// Without a timestamp, we still preserve the origin node ID via the
+	// session setup above — just without the original commit timestamp.
+	if lsn != nil && commitTS != nil {
+		if err := t.setupReplicationOriginXact(tx, lsn, commitTS); err != nil {
+			t.resetReplicationOriginSession(tx)
+			return false, fmt.Errorf("failed to setup replication origin xact for node %s (LSN=%v, TS=%v): %w", batchKey.nodeOrigin, lsn, commitTS, err)
+		}
+	} else if commitTS == nil {
+		logger.Warn("preserve-origin: no commit timestamp for origin %s on node %s, preserving origin ID only", batchKey.nodeOrigin, nodeName)
 	}
 
 	return true, nil
