@@ -2711,8 +2711,19 @@ func (t *TableRepairTask) setupOriginForBatchKey(tx pgx.Tx, batchKey originBatch
 		return false, nil
 	}
 
-	// Setup session (memoized when setupSessions is non-nil)
+	// Setup session (memoized when setupSessions is non-nil).
+	// PG only allows one replication origin per session, so reset the
+	// previous session before setting up a different origin node.
 	if setupSessions == nil || !setupSessions[batchKey.nodeOrigin] {
+		if setupSessions != nil {
+			for origin := range setupSessions {
+				if origin != batchKey.nodeOrigin {
+					t.resetReplicationOriginSession(tx)
+					delete(setupSessions, origin)
+					break
+				}
+			}
+		}
 		if _, err := t.setupReplicationOriginSession(tx, batchKey.nodeOrigin); err != nil {
 			return false, fmt.Errorf("failed to setup replication origin session for node %s: %w", batchKey.nodeOrigin, err)
 		}
