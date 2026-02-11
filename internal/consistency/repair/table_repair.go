@@ -987,6 +987,20 @@ func (t *TableRepairTask) buildNullUpdates() (map[string]map[string]*nullUpdate,
 			return nil, fmt.Errorf("failed to index rows for %s: %w", node2Name, err)
 		}
 
+		// Build pk -> OrderedMap lookups for source row retrieval (O(1) instead of O(n))
+		node1RawByPK := make(map[string]types.OrderedMap, len(node1Rows))
+		for _, r := range node1Rows {
+			if pk, err := utils.StringifyOrderedMapKey(r, t.Key); err == nil {
+				node1RawByPK[pk] = r
+			}
+		}
+		node2RawByPK := make(map[string]types.OrderedMap, len(node2Rows))
+		for _, r := range node2Rows {
+			if pk, err := utils.StringifyOrderedMapKey(r, t.Key); err == nil {
+				node2RawByPK[pk] = r
+			}
+		}
+
 		for pkKey, row1 := range node1Index {
 			row2, ok := node2Index[pkKey]
 			if !ok {
@@ -1003,27 +1017,9 @@ func (t *TableRepairTask) buildNullUpdates() (map[string]map[string]*nullUpdate,
 				val2 := row2.data[col]
 
 				if val1 == nil && val2 != nil {
-					// Update node1 with value from node2 - find the source row from node2
-					var sourceRow types.OrderedMap
-					for _, r := range node2Rows {
-						pkeyStr, err := utils.StringifyOrderedMapKey(r, t.Key)
-						if err == nil && pkeyStr == pkKey {
-							sourceRow = r
-							break
-						}
-					}
-					addNullUpdate(updatesByNode, node1Name, row1, col, val2, sourceRow)
+					addNullUpdate(updatesByNode, node1Name, row1, col, val2, node2RawByPK[pkKey])
 				} else if val2 == nil && val1 != nil {
-					// Update node2 with value from node1 - find the source row from node1
-					var sourceRow types.OrderedMap
-					for _, r := range node1Rows {
-						pkeyStr, err := utils.StringifyOrderedMapKey(r, t.Key)
-						if err == nil && pkeyStr == pkKey {
-							sourceRow = r
-							break
-						}
-					}
-					addNullUpdate(updatesByNode, node2Name, row2, col, val1, sourceRow)
+					addNullUpdate(updatesByNode, node2Name, row2, col, val1, node1RawByPK[pkKey])
 				}
 			}
 		}
