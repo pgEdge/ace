@@ -2988,20 +2988,16 @@ func ResetReplicationOriginSession(ctx context.Context, db DBQuerier) error {
 }
 
 func SetupReplicationOriginXact(ctx context.Context, db DBQuerier, originLSN string, originTimestamp *time.Time) error {
+	if originTimestamp == nil {
+		return fmt.Errorf("origin timestamp is required for pg_replication_origin_xact_setup (LSN %s)", originLSN)
+	}
+
 	sql, err := RenderSQL(SQLTemplates.SetupReplicationOriginXact, nil)
 	if err != nil {
 		return fmt.Errorf("failed to render SetupReplicationOriginXact SQL: %w", err)
 	}
 
-	var timestampParam any
-	if originTimestamp != nil {
-		// Use RFC3339Nano to preserve microsecond precision
-		timestampParam = originTimestamp.Format(time.RFC3339Nano)
-	} else {
-		timestampParam = nil
-	}
-
-	_, err = db.Exec(ctx, sql, originLSN, timestampParam)
+	_, err = db.Exec(ctx, sql, originLSN, *originTimestamp)
 	if err != nil {
 		return fmt.Errorf("query to setup replication origin xact with LSN %s failed: %w", originLSN, err)
 	}
