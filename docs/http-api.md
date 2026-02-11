@@ -153,7 +153,7 @@ Request body:
 | `generate_report` | bool | no | Write a JSON report. |
 | `fix_nulls` | bool | no | Fill NULLs using peer values. |
 | `bidirectional` | bool | no | Insert-only in both directions. |
-| `preserve_origin` | bool | no | Preserve replication origin node ID and LSN with per-row timestamp accuracy. Default: `true` |
+| `preserve_origin` | bool | no | Preserve replication origin node ID and LSN with per-row timestamp accuracy. Default: `false` |
 
 Notes:
 
