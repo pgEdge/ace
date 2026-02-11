@@ -84,7 +84,7 @@ When `--preserve-origin` is enabled, repaired rows maintain the correct replicat
 
 1. **Origin extraction**: ACE extracts the `node_origin` and `commit_ts` from the diff file metadata for each row being repaired.
 
-2. **LSN retrieval**: For each origin node, ACE queries a survivor node to obtain the origin LSN. This LSN must be available - if it's not, the repair will fail (as required for data consistency).
+2. **LSN retrieval**: For each origin node, ACE queries a survivor node to obtain the origin LSN. If the LSN is not available, the affected rows fall back to a regular repair without origin preservation (a warning will be logged).
 
 3. **Replication origin session**: Before executing repairs for each origin group, ACE:
    - Gets or creates a replication origin for the origin node
@@ -93,11 +93,10 @@ When `--preserve-origin` is enabled, repaired rows maintain the correct replicat
    - Executes the repairs
    - Resets the session
 
-4. **Transaction management**: Each unique commit timestamp gets its own transaction to ensure precise timestamp preservation:
-   - Rows are grouped by (origin node, LSN, timestamp) tuples rather than just origin node
-   - Each timestamp group is committed in a separate transaction
-   - This ensures rows maintain their exact original commit timestamps with microsecond precision
-   - Critical for temporal ordering and conflict resolution in distributed recovery scenarios
+4. **Transaction management**: Deletes and upserts run atomically in a single transaction:
+   - Rows are grouped by (origin node, LSN, timestamp) tuples
+   - Each group's replication origin xact is configured with its exact commit timestamp
+   - All operations commit together, ensuring the repair is all-or-nothing
 
 5. **Timestamp precision**: Timestamps are stored in RFC3339Nano format (e.g., `2026-01-15T14:23:45.123456Z`) to preserve microsecond-level accuracy. This precision is essential when:
    - Multiple transactions occurred within the same second on the origin node
@@ -106,7 +105,7 @@ When `--preserve-origin` is enabled, repaired rows maintain the correct replicat
 
 ### Requirements and limitations
 
-- **LSN availability**: The origin LSN must be available from at least one survivor node. If not available, the repair will fail with an error.
+- **LSN availability**: The origin LSN should be available from at least one survivor node. If not available, the affected rows fall back to a regular repair without origin preservation.
 - **Survivor nodes**: At least one survivor node must be accessible to fetch the origin LSN.
 - **Privileges**: Replication origin functions require superuser or replication privileges on the target database.
 - **Missing metadata**: If origin metadata is missing from the diff file for some rows, those rows will be repaired without origin tracking (a warning will be logged).
@@ -117,9 +116,7 @@ Enable `--preserve-origin` in recovery scenarios where:
 - You want to prevent replication conflicts when the origin node returns
 - You need to maintain the original transaction timestamps and origin metadata
 
-You can disable it with `--preserve-origin=false` if:
+Origin preservation is off by default. Consider leaving it disabled if:
 - You're certain the origin node will not come back online
 - You've permanently removed the origin node from the cluster
 - You want repaired rows to be treated as local writes
-
-**Note**: Disabling origin preservation should only be done when you're certain about the node's status, as it can cause replication conflicts if the origin node returns.
