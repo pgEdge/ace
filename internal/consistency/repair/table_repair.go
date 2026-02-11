@@ -1200,8 +1200,12 @@ func (t *TableRepairTask) applyFixNullsUpdates(tx pgx.Tx, column string, columnT
 			updateSQL, args, err := t.buildFixNullsBatchSQL(column, columnType, batch, colTypes)
 			if err != nil {
 				if preserveThisGroup {
-					t.resetReplicationOriginXact(tx)
-					t.resetReplicationOriginSession(tx)
+					if resetErr := t.resetReplicationOriginXact(tx); resetErr != nil {
+						logger.Warn("failed to reset replication origin xact during cleanup: %v", resetErr)
+					}
+					if resetErr := t.resetReplicationOriginSession(tx); resetErr != nil {
+						logger.Warn("failed to reset replication origin session during cleanup: %v", resetErr)
+					}
 				}
 				return totalUpdated, err
 			}
@@ -1209,8 +1213,12 @@ func (t *TableRepairTask) applyFixNullsUpdates(tx pgx.Tx, column string, columnT
 			tag, err := tx.Exec(t.Ctx, updateSQL, args...)
 			if err != nil {
 				if preserveThisGroup {
-					t.resetReplicationOriginXact(tx)
-					t.resetReplicationOriginSession(tx)
+					if resetErr := t.resetReplicationOriginXact(tx); resetErr != nil {
+						logger.Warn("failed to reset replication origin xact during cleanup: %v", resetErr)
+					}
+					if resetErr := t.resetReplicationOriginSession(tx); resetErr != nil {
+						logger.Warn("failed to reset replication origin session during cleanup: %v", resetErr)
+					}
 				}
 				return totalUpdated, fmt.Errorf("error executing fix-nulls batch for column %s: %w", column, err)
 			}
@@ -2263,8 +2271,12 @@ func executeUpserts(tx pgx.Tx, task *TableRepairTask, nodeName string, upserts m
 		count, err := executeUpsertBatch(tx, task, originUpserts, colTypes)
 		if err != nil {
 			if preserveThisGroup {
-				task.resetReplicationOriginXact(tx)
-				task.resetReplicationOriginSession(tx)
+				if resetErr := task.resetReplicationOriginXact(tx); resetErr != nil {
+					logger.Warn("failed to reset replication origin xact during cleanup: %v", resetErr)
+				}
+				if resetErr := task.resetReplicationOriginSession(tx); resetErr != nil {
+					logger.Warn("failed to reset replication origin session during cleanup: %v", resetErr)
+				}
 			}
 			return totalUpsertedCount, err
 		}
