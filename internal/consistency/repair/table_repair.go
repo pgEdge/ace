@@ -2107,6 +2107,7 @@ func groupNullUpdatesByOrigin(updates []*nullUpdate, originInfoMap map[string]*r
 				}
 			}
 			if err != nil {
+				logger.Warn("groupNullUpdatesByOrigin: failed to stringify primary key, skipping row: %v", err)
 				continue
 			}
 			originInfo, hasOrigin := originInfoMap[pkeyStr]
