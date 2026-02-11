@@ -2347,15 +2347,16 @@ func executeUpsertsWithTimestamps(pool *pgxpool.Pool, task *TableRepairTask, nod
 			}
 		}
 
+		if _, err := tx.Exec(task.Ctx, "SELECT spock.repair_mode(false)"); err != nil {
+			tx.Rollback(task.Ctx)
+			return totalUpsertedCount, fmt.Errorf("disabling spock.repair_mode before commit on %s: %w", nodeName, err)
+		}
+
 		err = tx.Commit(task.Ctx)
 		if err != nil {
 			tx.Exec(task.Ctx, "SELECT spock.repair_mode(false)")
 			tx.Rollback(task.Ctx)
 			return totalUpsertedCount, fmt.Errorf("committing timestamp group transaction on %s: %w", nodeName, err)
-		}
-
-		if _, err := pool.Exec(task.Ctx, "SELECT spock.repair_mode(false)"); err != nil {
-			logger.Warn("failed to disable spock.repair_mode after commit: %v", err)
 		}
 
 		logger.Debug("Committed transaction for timestamp group: %d rows with origin=%s, timestamp=%s",
