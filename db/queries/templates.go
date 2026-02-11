@@ -120,6 +120,12 @@ type Templates struct {
 	RemoveTableFromCDCMetadata       *template.Template
 	GetSpockOriginLSNForNode         *template.Template
 	GetSpockSlotLSNForNode           *template.Template
+	GetReplicationOriginByName       *template.Template
+	CreateReplicationOrigin          *template.Template
+	SetupReplicationOriginSession    *template.Template
+	ResetReplicationOriginSession    *template.Template
+	SetupReplicationOriginXact       *template.Template
+	ResetReplicationOriginXact       *template.Template
 }
 
 var SQLTemplates = Templates{
@@ -1542,5 +1548,23 @@ var SQLTemplates = Templates{
 			AND rs.confirmed_flush_lsn IS NOT NULL
 		ORDER BY rs.confirmed_flush_lsn DESC
 		LIMIT 1
+	`)),
+	GetReplicationOriginByName: template.Must(template.New("getReplicationOriginByName").Parse(`
+		SELECT roident FROM pg_replication_origin WHERE roname = $1
+	`)),
+	CreateReplicationOrigin: template.Must(template.New("createReplicationOrigin").Parse(`
+		SELECT pg_replication_origin_create($1)
+	`)),
+	SetupReplicationOriginSession: template.Must(template.New("setupReplicationOriginSession").Parse(`
+		SELECT pg_replication_origin_session_setup($1)
+	`)),
+	ResetReplicationOriginSession: template.Must(template.New("resetReplicationOriginSession").Parse(`
+		SELECT pg_replication_origin_session_reset()
+	`)),
+	SetupReplicationOriginXact: template.Must(template.New("setupReplicationOriginXact").Parse(`
+		SELECT pg_replication_origin_xact_setup($1, $2)
+	`)),
+	ResetReplicationOriginXact: template.Must(template.New("resetReplicationOriginXact").Parse(`
+		SELECT pg_replication_origin_xact_reset()
 	`)),
 }

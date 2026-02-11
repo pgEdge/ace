@@ -28,6 +28,10 @@ func SetLevel(level log.Level) {
 	Log.SetLevel(level)
 }
 
+func SetOutput(w *os.File) {
+	Log.SetOutput(w)
+}
+
 func Info(format string, args ...any) {
 	Log.Infof(format, args...)
 }
