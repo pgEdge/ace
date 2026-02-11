@@ -2028,10 +2028,18 @@ func extractOriginInfoFromRow(row types.OrderedMap) *rowOriginInfo {
 				// Try other formats
 				ts, err = time.Parse("2006-01-02 15:04:05.999999-07", v)
 			}
+		default:
+			logger.Warn("extractOriginInfoFromRow: unhandled commit_ts type %T, skipping origin preservation", tsVal)
+			return nil
 		}
-		if err == nil {
-			commitTS = &ts
+		if err != nil {
+			logger.Warn("extractOriginInfoFromRow: failed to parse commit_ts %q: %v, skipping origin preservation", tsVal, err)
+			return nil
 		}
+		if ts.IsZero() {
+			return nil
+		}
+		commitTS = &ts
 	}
 
 	if nodeOrigin == "" {
