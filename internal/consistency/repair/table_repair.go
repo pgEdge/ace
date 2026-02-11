@@ -2354,8 +2354,6 @@ func executeUpsertsWithTimestamps(pool *pgxpool.Pool, task *TableRepairTask, nod
 
 		err = tx.Commit(task.Ctx)
 		if err != nil {
-			tx.Exec(task.Ctx, "SELECT spock.repair_mode(false)")
-			tx.Rollback(task.Ctx)
 			return totalUpsertedCount, fmt.Errorf("committing timestamp group transaction on %s: %w", nodeName, err)
 		}
 
