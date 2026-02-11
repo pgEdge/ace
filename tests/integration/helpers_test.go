@@ -334,3 +334,71 @@ func repairTable(t *testing.T, qualifiedTableName, sourceOfTruthNode string) {
 
 	log.Printf("Table '%s' repaired successfully using %s as source of truth.", qualifiedTableName, sourceOfTruthNode)
 }
+
+// getCommitTimestamp retrieves the commit timestamp for a specific row
+func getCommitTimestamp(t *testing.T, ctx context.Context, pool *pgxpool.Pool, qualifiedTableName string, id int) time.Time {
+	t.Helper()
+	var ts time.Time
+	query := fmt.Sprintf("SELECT pg_xact_commit_timestamp(xmin) FROM %s WHERE id = $1", qualifiedTableName)
+	err := pool.QueryRow(ctx, query, id).Scan(&ts)
+	require.NoError(t, err, "Failed to get commit timestamp for row id %d", id)
+	return ts
+}
+
+// getReplicationOrigin retrieves the replication origin name for a specific row by querying
+// the transaction's origin tracking information using pg_xact_commit_timestamp_origin()
+func getReplicationOrigin(t *testing.T, ctx context.Context, pool *pgxpool.Pool, qualifiedTableName string, id int) string {
+	t.Helper()
+
+	// First, get the xmin for the row
+	var xmin uint32
+	query := fmt.Sprintf("SELECT xmin FROM %s WHERE id = $1", qualifiedTableName)
+	err := pool.QueryRow(ctx, query, id).Scan(&xmin)
+	require.NoError(t, err, "Failed to get xmin for row id %d", id)
+
+	// Use pg_xact_commit_timestamp_origin() to get the origin OID for this specific transaction
+	// This requires track_commit_timestamp = on
+	var originOid *uint32
+	originQuery := `
+		SELECT origin 
+		FROM pg_xact_commit_timestamp_origin($1::xid)
+	`
+	err = pool.QueryRow(ctx, originQuery, xmin).Scan(&originOid)
+	if err != nil || originOid == nil || *originOid == 0 {
+		// If no origin found or origin is 0 (local), return empty string
+		return ""
+	}
+
+	// Now get the origin name from pg_replication_origin using the OID
+	var originName string
+	nameQuery := `
+		SELECT roname 
+		FROM pg_replication_origin 
+		WHERE roid = $1
+	`
+	err = pool.QueryRow(ctx, nameQuery, *originOid).Scan(&originName)
+	if err != nil {
+		// If origin name not found, return empty string
+		return ""
+	}
+
+	return originName
+}
+
+// compareTimestamps compares two timestamps with a tolerance in seconds
+func compareTimestamps(t1, t2 time.Time, toleranceSeconds int) bool {
+	diff := t1.Sub(t2)
+	if diff < 0 {
+		diff = -diff
+	}
+	return diff <= time.Duration(toleranceSeconds)*time.Second
+}
+
+// compareTimestampsExact compares two timestamps with precise duration-based tolerance
+func compareTimestampsExact(t1, t2 time.Time, tolerance time.Duration) bool {
+	diff := t1.Sub(t2)
+	if diff < 0 {
+		diff = -diff
+	}
+	return diff <= tolerance
+}
