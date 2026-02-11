@@ -987,17 +987,20 @@ func (t *TableRepairTask) buildNullUpdates() (map[string]map[string]*nullUpdate,
 			return nil, fmt.Errorf("failed to index rows for %s: %w", node2Name, err)
 		}
 
-		// Build pk -> OrderedMap lookups for source row retrieval (O(1) instead of O(n))
-		node1RawByPK := make(map[string]types.OrderedMap, len(node1Rows))
-		for _, r := range node1Rows {
-			if pk, err := utils.StringifyOrderedMapKey(r, t.Key); err == nil {
-				node1RawByPK[pk] = r
+		// Build pk -> OrderedMap lookups for source row retrieval (only needed for preserve-origin)
+		var node1RawByPK, node2RawByPK map[string]types.OrderedMap
+		if t.PreserveOrigin {
+			node1RawByPK = make(map[string]types.OrderedMap, len(node1Rows))
+			for _, r := range node1Rows {
+				if pk, err := utils.StringifyOrderedMapKey(r, t.Key); err == nil {
+					node1RawByPK[pk] = r
+				}
 			}
-		}
-		node2RawByPK := make(map[string]types.OrderedMap, len(node2Rows))
-		for _, r := range node2Rows {
-			if pk, err := utils.StringifyOrderedMapKey(r, t.Key); err == nil {
-				node2RawByPK[pk] = r
+			node2RawByPK = make(map[string]types.OrderedMap, len(node2Rows))
+			for _, r := range node2Rows {
+				if pk, err := utils.StringifyOrderedMapKey(r, t.Key); err == nil {
+					node2RawByPK[pk] = r
+				}
 			}
 		}
 
