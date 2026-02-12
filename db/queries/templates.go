@@ -120,6 +120,8 @@ type Templates struct {
 	RemoveTableFromCDCMetadata       *template.Template
 	GetSpockOriginLSNForNode         *template.Template
 	GetSpockSlotLSNForNode           *template.Template
+	GetNativeOriginLSNForNode        *template.Template
+	GetNativeSlotLSNForNode          *template.Template
 	GetReplicationOriginByName       *template.Template
 	CreateReplicationOrigin          *template.Template
 	SetupReplicationOriginSession    *template.Template
@@ -1547,6 +1549,24 @@ var SQLTemplates = Templates{
 		JOIN spock.subscription s ON rs.slot_name = s.sub_slot_name
 		JOIN spock.node o ON o.node_id = s.sub_origin
 		WHERE o.node_name = $1
+			AND rs.confirmed_flush_lsn IS NOT NULL
+		ORDER BY rs.confirmed_flush_lsn DESC
+		LIMIT 1
+	`)),
+	GetNativeOriginLSNForNode: template.Must(template.New("getNativeOriginLSNForNode").Parse(`
+		SELECT ros.remote_lsn::text
+		FROM pg_catalog.pg_replication_origin_status ros
+		JOIN pg_catalog.pg_replication_origin ro ON ro.roident = ros.local_id
+		JOIN pg_catalog.pg_subscription s ON ro.roname LIKE 'pg_%' || s.oid::text
+		WHERE s.subname LIKE '%' || $1 || '%'
+			AND ros.remote_lsn IS NOT NULL
+		LIMIT 1
+	`)),
+	GetNativeSlotLSNForNode: template.Must(template.New("getNativeSlotLSNForNode").Parse(`
+		SELECT rs.confirmed_flush_lsn::text
+		FROM pg_catalog.pg_replication_slots rs
+		JOIN pg_catalog.pg_subscription s ON rs.slot_name = s.subslotname
+		WHERE s.subname LIKE '%' || $1 || '%'
 			AND rs.confirmed_flush_lsn IS NOT NULL
 		ORDER BY rs.confirmed_flush_lsn DESC
 		LIMIT 1

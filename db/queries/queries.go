@@ -866,6 +866,36 @@ func GetSpockSlotLSNForNode(ctx context.Context, db DBQuerier, failedNode string
 	return lsn, nil
 }
 
+func GetNativeOriginLSNForNode(ctx context.Context, db DBQuerier, originNodeName string) (*string, error) {
+	sql, err := RenderSQL(SQLTemplates.GetNativeOriginLSNForNode, nil)
+	if err != nil {
+		return nil, err
+	}
+	var lsn *string
+	if err := db.QueryRow(ctx, sql, originNodeName).Scan(&lsn); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("failed to fetch native origin lsn: %w", err)
+	}
+	return lsn, nil
+}
+
+func GetNativeSlotLSNForNode(ctx context.Context, db DBQuerier, failedNode string) (*string, error) {
+	sql, err := RenderSQL(SQLTemplates.GetNativeSlotLSNForNode, nil)
+	if err != nil {
+		return nil, err
+	}
+	var lsn *string
+	if err := db.QueryRow(ctx, sql, failedNode).Scan(&lsn); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("failed to fetch native slot lsn: %w", err)
+	}
+	return lsn, nil
+}
+
 func GetSpockRepSetInfo(ctx context.Context, db DBQuerier) ([]types.SpockRepSetInfo, error) {
 	sql, err := RenderSQL(SQLTemplates.SpockRepSetInfo, nil)
 	if err != nil {
