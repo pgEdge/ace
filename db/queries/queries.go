@@ -836,13 +836,13 @@ func GetSpockNodeNames(ctx context.Context, db DBQuerier) (map[string]string, er
 	return names, nil
 }
 
-func GetSpockOriginLSNForNode(ctx context.Context, db DBQuerier, failedNode, survivor string) (*string, error) {
+func GetSpockOriginLSNForNode(ctx context.Context, db DBQuerier, originNodeName string) (*string, error) {
 	sql, err := RenderSQL(SQLTemplates.GetSpockOriginLSNForNode, nil)
 	if err != nil {
 		return nil, err
 	}
 	var lsn *string
-	if err := db.QueryRow(ctx, sql, failedNode, survivor).Scan(&lsn); err != nil {
+	if err := db.QueryRow(ctx, sql, originNodeName).Scan(&lsn); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, nil
 		}

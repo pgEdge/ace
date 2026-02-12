@@ -1452,60 +1452,49 @@ func (t *TableRepairTask) runUnidirectionalRepair(startTime time.Time) error {
 			}
 
 			// Extract origin information from source rows if preserve-origin is enabled
-			var originInfoMap map[string]*rowOriginInfo
-			if t.PreserveOrigin {
-				originInfoMap = make(map[string]*rowOriginInfo)
-				// Extract origin info from all source rows in the diff
-				// For repair plans, we'll extract from both nodes and use the appropriate one
-				// For source-of-truth repairs, we extract from the source of truth
-				for nodePair, diffs := range t.RawDiffs.NodeDiffs {
-					nodes := strings.Split(nodePair, "/")
-					if len(nodes) != 2 {
+			originInfoMap := t.extractOriginInfoForNode(nodeName, nodeUpserts)
+
+			if t.PreserveOrigin && len(originInfoMap) > 0 {
+				// When preserve-origin is active, commit deletes first then use
+				// separate per-batch-key transactions so each batch gets its own
+				// pg_replication_origin_xact_setup (which is per-transaction).
+				if spockRepairModeActive {
+					_, err = tx.Exec(t.Ctx, "SELECT spock.repair_mode(false)")
+					if err != nil {
+						tx.Rollback(t.Ctx)
+						logger.Error("disabling spock.repair_mode(false) on %s: %v", nodeName, err)
+						repairErrors = append(repairErrors, fmt.Sprintf("spock.repair_mode(false) failed for %s: %v", nodeName, err))
 						continue
 					}
-					node1Name, node2Name := nodes[0], nodes[1]
-
-					// Extract from both nodes - we'll use the one that matches the source
-					for _, sourceNode := range []string{node1Name, node2Name} {
-						sourceRows := diffs.Rows[sourceNode]
-						for _, row := range sourceRows {
-							pkeyStr, err := utils.StringifyOrderedMapKey(row, t.Key)
-							if err != nil {
-								continue
-							}
-							// Only add if this row is being upserted to the target node
-							if _, isBeingUpserted := nodeUpserts[pkeyStr]; isBeingUpserted {
-								if originInfo := extractOriginInfoFromRow(row); originInfo != nil {
-									// For repair plans, prefer the source node that's providing the data
-									// For source-of-truth, prefer the source of truth
-									if t.RepairPlan == nil {
-										// Source-of-truth: only use if it's the source of truth
-										if sourceNode == t.SourceOfTruth {
-											originInfoMap[pkeyStr] = originInfo
-										}
-									} else {
-										// Repair plan: use the first one we find (will be overridden if needed)
-										if _, exists := originInfoMap[pkeyStr]; !exists {
-											originInfoMap[pkeyStr] = originInfo
-										}
-									}
-								}
-							}
-						}
-					}
 				}
-			}
+				err = tx.Commit(t.Ctx)
+				if err != nil {
+					logger.Error("committing delete transaction on node %s: %v", nodeName, err)
+					repairErrors = append(repairErrors, fmt.Sprintf("delete commit failed for %s: %v", nodeName, err))
+					continue
+				}
+				spockRepairModeActive = false
 
-			// Execute upserts on the same transaction as deletes
-			upsertedCount, err := executeUpserts(tx, t, nodeName, nodeUpserts, targetNodeColTypes, originInfoMap)
-			if err != nil {
-				tx.Rollback(t.Ctx)
-				logger.Error("executing upserts on node %s: %v", nodeName, err)
-				repairErrors = append(repairErrors, fmt.Sprintf("upsert ops failed for %s: %v", nodeName, err))
-				continue
+				// Execute upserts with per-batch-key transactions for origin preservation
+				upsertedCount, upsertErr := t.executePreserveOriginUpserts(divergentPool, nodeName, nodeUpserts, targetNodeColTypes, originInfoMap)
+				if upsertErr != nil {
+					logger.Error("executing preserve-origin upserts on node %s: %v", nodeName, upsertErr)
+					repairErrors = append(repairErrors, fmt.Sprintf("preserve-origin upsert ops failed for %s: %v", nodeName, upsertErr))
+				}
+				totalOps[nodeName]["upserted"] = upsertedCount
+				logger.Info("Executed %d upsert operations on %s (preserve-origin)", upsertedCount, nodeName)
+			} else {
+				// Standard path: execute upserts in the same transaction as deletes
+				upsertedCount, err := executeUpserts(tx, t, nodeName, nodeUpserts, targetNodeColTypes, nil)
+				if err != nil {
+					tx.Rollback(t.Ctx)
+					logger.Error("executing upserts on node %s: %v", nodeName, err)
+					repairErrors = append(repairErrors, fmt.Sprintf("upsert ops failed for %s: %v", nodeName, err))
+					continue
+				}
+				totalOps[nodeName]["upserted"] = upsertedCount
+				logger.Info("Executed %d upsert operations on %s", upsertedCount, nodeName)
 			}
-			totalOps[nodeName]["upserted"] = upsertedCount
-			logger.Info("Executed %d upsert operations on %s", upsertedCount, nodeName)
 
 			if t.report != nil {
 				if _, ok := t.report.Changes[nodeName]; !ok {
@@ -1522,8 +1511,8 @@ func (t *TableRepairTask) runUnidirectionalRepair(startTime time.Time) error {
 			}
 		}
 
-		// Commit the transaction (deletes and/or upserts)
-
+		// Commit the transaction (deletes and/or non-preserve-origin upserts)
+		// When preserve-origin was used, the tx was already committed above.
 		if spockRepairModeActive {
 			// TODO: Need to elevate privileges here, but might be difficult
 			// with pgx transactions and connection pooling.
@@ -1535,15 +1524,15 @@ func (t *TableRepairTask) runUnidirectionalRepair(startTime time.Time) error {
 				continue
 			}
 			logger.Debug("spock.repair_mode(false) set on %s", nodeName)
-		}
 
-		err = tx.Commit(t.Ctx)
-		if err != nil {
-			logger.Error("committing transaction on node %s: %v", nodeName, err)
-			repairErrors = append(repairErrors, fmt.Sprintf("commit failed for %s: %v", nodeName, err))
-			continue
+			err = tx.Commit(t.Ctx)
+			if err != nil {
+				logger.Error("committing transaction on node %s: %v", nodeName, err)
+				repairErrors = append(repairErrors, fmt.Sprintf("commit failed for %s: %v", nodeName, err))
+				continue
+			}
+			logger.Debug("Transaction committed successfully on %s", nodeName)
 		}
-		logger.Debug("Transaction committed successfully on %s", nodeName)
 	}
 
 	t.FinishedAt = time.Now()
@@ -2336,10 +2325,153 @@ func executeUpserts(tx pgx.Tx, task *TableRepairTask, nodeName string, upserts m
 		totalUpsertedCount += count
 	}
 
-	if len(setupSessions) > 0 {
-		if err := task.resetReplicationOriginSession(tx); err != nil {
-			return totalUpsertedCount, fmt.Errorf("failed to reset replication origin session after upserts: %w", err)
+	// NOTE: Do NOT reset the replication origin session here.
+	// The session must remain active until after tx.Commit() so the origin
+	// metadata is persisted in the WAL commit record. The caller is
+	// responsible for resetting after commit.
+
+	return totalUpsertedCount, nil
+}
+
+// extractOriginInfoForNode extracts origin metadata from diff rows for the
+// given node's upserts. Returns nil if preserve-origin is disabled.
+func (t *TableRepairTask) extractOriginInfoForNode(nodeName string, nodeUpserts map[string]map[string]any) map[string]*rowOriginInfo {
+	if !t.PreserveOrigin {
+		return nil
+	}
+	originInfoMap := make(map[string]*rowOriginInfo)
+	logger.Debug("preserve-origin: extracting origin info for %d upserts on %s (SoT=%s)", len(nodeUpserts), nodeName, t.SourceOfTruth)
+	for nodePair, diffs := range t.RawDiffs.NodeDiffs {
+		nodes := strings.Split(nodePair, "/")
+		if len(nodes) != 2 {
+			continue
 		}
+		node1Name, node2Name := nodes[0], nodes[1]
+		for _, sourceNode := range []string{node1Name, node2Name} {
+			sourceRows := diffs.Rows[sourceNode]
+			for _, row := range sourceRows {
+				pkeyStr, err := utils.StringifyOrderedMapKey(row, t.Key)
+				if err != nil {
+					continue
+				}
+				if _, isBeingUpserted := nodeUpserts[pkeyStr]; !isBeingUpserted {
+					continue
+				}
+				originInfo := extractOriginInfoFromRow(row)
+				if originInfo == nil {
+					continue
+				}
+				if t.RepairPlan == nil {
+					if sourceNode == t.SourceOfTruth {
+						originInfoMap[pkeyStr] = originInfo
+					}
+				} else {
+					if _, exists := originInfoMap[pkeyStr]; !exists {
+						originInfoMap[pkeyStr] = originInfo
+					}
+				}
+			}
+		}
+	}
+	logger.Debug("preserve-origin: origin info map has %d entries for %d upserts", len(originInfoMap), len(nodeUpserts))
+	return originInfoMap
+}
+
+// executePreserveOriginUpserts handles upserts with per-batch-key transactions.
+// Each unique (origin, timestamp) combination gets its own transaction so that
+// pg_replication_origin_xact_setup correctly preserves per-row timestamps.
+// A single connection is acquired from the pool to manage session-level origin
+// state across multiple transactions.
+func (t *TableRepairTask) executePreserveOriginUpserts(pool *pgxpool.Pool, nodeName string, upserts map[string]map[string]any, colTypes map[string]string, originInfoMap map[string]*rowOriginInfo) (int, error) {
+	originGroups := groupUpsertsByOrigin(upserts, originInfoMap, true)
+
+	// Acquire a dedicated connection so we can manage session-level origin state.
+	conn, err := pool.Acquire(t.Ctx)
+	if err != nil {
+		return 0, fmt.Errorf("failed to acquire connection for preserve-origin upserts: %w", err)
+	}
+	defer func() {
+		// Reset session origin before releasing connection back to pool.
+		queries.ResetReplicationOriginSession(t.Ctx, conn)
+		conn.Release()
+	}()
+
+	totalUpsertedCount := 0
+	currentSessionOrigin := ""
+
+	for batchKey, originUpserts := range originGroups {
+		if len(originUpserts) == 0 {
+			continue
+		}
+
+		// Manage session-level origin: only reset+setup when origin node changes.
+		if batchKey.nodeOrigin != "" && batchKey.nodeOrigin != currentSessionOrigin {
+			if currentSessionOrigin != "" {
+				queries.ResetReplicationOriginSession(t.Ctx, conn)
+			}
+			originName := fmt.Sprintf("node_%s", batchKey.nodeOrigin)
+			originID, err := queries.GetReplicationOriginByName(t.Ctx, conn, originName)
+			if err != nil {
+				return totalUpsertedCount, fmt.Errorf("failed to get replication origin '%s': %w", originName, err)
+			}
+			if originID == nil {
+				createdID, createErr := queries.CreateReplicationOrigin(t.Ctx, conn, originName)
+				if createErr != nil {
+					return totalUpsertedCount, fmt.Errorf("failed to create replication origin '%s': %w", originName, createErr)
+				}
+				originID = &createdID
+			}
+			if err := queries.SetupReplicationOriginSession(t.Ctx, conn, originName); err != nil {
+				return totalUpsertedCount, fmt.Errorf("failed to setup origin session for '%s': %w", originName, err)
+			}
+			currentSessionOrigin = batchKey.nodeOrigin
+		}
+
+		batchTx, err := conn.Begin(t.Ctx)
+		if err != nil {
+			return totalUpsertedCount, fmt.Errorf("failed to begin batch transaction for origin %s: %w", batchKey.nodeOrigin, err)
+		}
+
+		if err := t.setupTransactionMode(batchTx, nodeName); err != nil {
+			batchTx.Rollback(t.Ctx)
+			return totalUpsertedCount, fmt.Errorf("failed to setup transaction mode for origin batch: %w", err)
+		}
+
+		// Setup xact-level origin (LSN + timestamp) for this batch.
+		commitTS, err := parseBatchKeyTimestamp(batchKey)
+		if err != nil {
+			batchTx.Rollback(t.Ctx)
+			return totalUpsertedCount, fmt.Errorf("failed to parse batch key timestamp: %w", err)
+		}
+
+		lsn, ok, err := t.resolveOriginLSN(batchKey, nodeName, commitTS)
+		if err != nil {
+			batchTx.Rollback(t.Ctx)
+			return totalUpsertedCount, fmt.Errorf("failed to resolve origin LSN: %w", err)
+		}
+		if ok && lsn != nil && commitTS != nil {
+			if err := t.setupReplicationOriginXact(batchTx, lsn, commitTS); err != nil {
+				batchTx.Rollback(t.Ctx)
+				return totalUpsertedCount, fmt.Errorf("failed to setup origin xact: %w", err)
+			}
+		}
+
+		count, err := executeUpsertBatch(batchTx, t, originUpserts, colTypes)
+		if err != nil {
+			batchTx.Rollback(t.Ctx)
+			return totalUpsertedCount, fmt.Errorf("failed to execute upsert batch for origin %s: %w", batchKey.nodeOrigin, err)
+		}
+
+		// Disable repair mode before commit
+		if _, err := batchTx.Exec(t.Ctx, "SELECT spock.repair_mode(false)"); err != nil {
+			batchTx.Rollback(t.Ctx)
+			return totalUpsertedCount, fmt.Errorf("failed to disable repair mode for origin batch: %w", err)
+		}
+
+		if err := batchTx.Commit(t.Ctx); err != nil {
+			return totalUpsertedCount, fmt.Errorf("failed to commit batch transaction for origin %s: %w", batchKey.nodeOrigin, err)
+		}
+		totalUpsertedCount += count
 	}
 
 	return totalUpsertedCount, nil
@@ -2598,7 +2730,7 @@ func calculateRepairSetsWithSourceOfTruth(task *TableRepairTask) (map[string]map
 
 func (t *TableRepairTask) fetchLSNsForNode(pool *pgxpool.Pool, failedNode, survivor string) (originLSN *uint64, slotLSN *uint64, err error) {
 	var originStr *string
-	originStr, err = queries.GetSpockOriginLSNForNode(t.Ctx, pool, failedNode, survivor)
+	originStr, err = queries.GetSpockOriginLSNForNode(t.Ctx, pool, failedNode)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to fetch origin lsn on %s: %w", survivor, err)
 	}
@@ -2862,6 +2994,7 @@ func (t *TableRepairTask) setupReplicationOriginSession(tx pgx.Tx, originNodeNam
 	if err := queries.SetupReplicationOriginSession(t.Ctx, tx, originName); err != nil {
 		return 0, fmt.Errorf("failed to setup replication origin session for '%s': %w", originName, err)
 	}
+	logger.Debug("Replication origin session set up for '%s' (ID=%d)", originName, *originID)
 
 	return *originID, nil
 }
@@ -2881,7 +3014,7 @@ func (t *TableRepairTask) setupReplicationOriginXact(tx pgx.Tx, originLSN *uint6
 
 	logger.Debug("Set replication origin xact LSN to %s", lsnStr)
 	if originTimestamp != nil {
-		logger.Debug("Set replication origin xact timestamp to %s", originTimestamp.Format(time.RFC3339))
+		logger.Debug("Set replication origin xact timestamp to %s", originTimestamp.Format(time.RFC3339Nano))
 	}
 
 	return nil

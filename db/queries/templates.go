@@ -1535,7 +1535,9 @@ var SQLTemplates = Templates{
 		SELECT ros.remote_lsn::text
 		FROM pg_catalog.pg_replication_origin_status ros
 		JOIN pg_catalog.pg_replication_origin ro ON ro.roident = ros.local_id
-		WHERE ro.roname LIKE 'spk_%_' || $1 || '_sub_' || $1 || '_' || $2
+		JOIN spock.subscription s ON ro.roname LIKE '%' || s.sub_name
+		JOIN spock.node o ON o.node_id = s.sub_origin
+		WHERE o.node_name = $1
 			AND ros.remote_lsn IS NOT NULL
 		LIMIT 1
 	`)),
