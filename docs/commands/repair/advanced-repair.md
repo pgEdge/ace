@@ -24,7 +24,7 @@
 - `skip`: do nothing.  
 - `delete`: remove the row (from the side(s) where it exists).
 - Action option: `allow_stale_repairs` (default `true`) set to `false` to skip repairs when the current row on the target node has a newer commit timestamp than the diff snapshot. Skipped rows are logged to `reports/<YYYY-MM-DD>/stale_repair_skips_<HHMMSS.mmm>.json`.
-- Spock metadata in plans: you can reference `commit_ts` and `node_origin` in `when` predicates and `custom_row` templates (e.g., `{{n1.commit_ts}}`, `when: "n2.node_origin = 'n3'"`). These fields are injected during diff collection (via `pg_xact_commit_timestamp(xmin)` and `spock.xact_commit_timestamp_origin(xmin)`), not stored in your table.
+- Spock metadata in plans: you can reference `commit_ts` and `node_origin` in `when` predicates and `custom_row` templates (e.g., `{{n1.commit_ts}}`, `when: "n2.node_origin = 'n3'"`). These fields are injected during diff collection (via `pg_xact_commit_timestamp(xmin)` and `pg_xact_commit_timestamp_origin(xmin)`), not stored in your table.
 
 ### Compatibility checks (fail fast)
 - `keep_n1`/`apply_from n1` require a row on n1; `keep_n2`/`apply_from n2` require a row on n2.  

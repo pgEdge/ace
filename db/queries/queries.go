@@ -836,6 +836,46 @@ func GetSpockNodeNames(ctx context.Context, db DBQuerier) (map[string]string, er
 	return names, nil
 }
 
+func GetReplicationOriginNames(ctx context.Context, db DBQuerier) (map[string]string, error) {
+	sql, err := RenderSQL(SQLTemplates.GetReplicationOriginNames, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	rows, err := db.Query(ctx, sql)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	names := make(map[string]string)
+	for rows.Next() {
+		var id, name string
+		if err := rows.Scan(&id, &name); err != nil {
+			return nil, err
+		}
+		names[id] = name
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	return names, nil
+}
+
+func GetNodeOriginNames(ctx context.Context, db DBQuerier) (map[string]string, error) {
+	var spockAvailable bool
+	err := db.QueryRow(ctx, "SELECT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'spock')").Scan(&spockAvailable)
+	if err != nil {
+		return nil, fmt.Errorf("detecting spock extension: %w", err)
+	}
+	if spockAvailable {
+		return GetSpockNodeNames(ctx, db)
+	}
+	return GetReplicationOriginNames(ctx, db)
+}
+
 func GetSpockOriginLSNForNode(ctx context.Context, db DBQuerier, originNodeName string) (*string, error) {
 	sql, err := RenderSQL(SQLTemplates.GetSpockOriginLSNForNode, nil)
 	if err != nil {

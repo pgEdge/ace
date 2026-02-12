@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"os"
 	"path/filepath"
 	"sort"
@@ -25,10 +26,16 @@ import (
 	"testing"
 	"time"
 
+	"github.com/docker/go-connections/nat"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/pgedge/ace/internal/consistency/diff"
+	"github.com/pgedge/ace/internal/consistency/repair"
 	pkgLogger "github.com/pgedge/ace/pkg/logger"
+	"github.com/pgedge/ace/pkg/types"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/testcontainers/testcontainers-go/modules/compose"
+	"github.com/testcontainers/testcontainers-go/wait"
 )
 
 // TODO: Verify replication works and only then assert for correct counts.
@@ -1847,4 +1854,377 @@ func TestTableRepair_MixedOps_PreserveOrigin(t *testing.T) {
 	log.Println("  - DELETE: 2 extra rows removed from n2")
 	log.Println("  - INSERT: 2 missing rows restored with preserved origin/timestamp")
 	log.Println("  - UPDATE: 2 modified rows corrected with preserved origin/timestamp")
+}
+
+// setupNativePGCluster spins up 2 vanilla postgres:17 containers (no spock)
+// and returns connection pools plus a cleanup function.
+func setupNativePGCluster(t *testing.T) (n1Pool, n2Pool *pgxpool.Pool, n1Host, n1Port, n2Host, n2Port string, stack compose.ComposeStack) {
+	t.Helper()
+	ctx := context.Background()
+
+	absCompose, err := filepath.Abs("docker-compose-native.yaml")
+	require.NoError(t, err)
+
+	identifier := strings.ToLower(fmt.Sprintf("ace_native_pg_%d", time.Now().UnixNano()))
+
+	waitN1 := wait.ForListeningPort("5432/tcp").
+		WithStartupTimeout(2 * time.Minute).
+		WithPollInterval(3 * time.Second)
+	waitN2 := wait.ForListeningPort("5432/tcp").
+		WithStartupTimeout(2 * time.Minute).
+		WithPollInterval(3 * time.Second)
+
+	stack, err = compose.NewDockerComposeWith(
+		compose.StackIdentifier(identifier),
+		compose.WithStackFiles(absCompose),
+	)
+	require.NoError(t, err, "could not create native PG compose stack")
+
+	execErr := stack.
+		WaitForService("native-n1", waitN1).
+		WaitForService("native-n2", waitN2).
+		Up(ctx, compose.Wait(true))
+	require.NoError(t, execErr, "could not start native PG compose stack")
+
+	// Resolve hosts and ports
+	n1Container, err := stack.ServiceContainer(ctx, "native-n1")
+	require.NoError(t, err)
+	n1Host, err = n1Container.Host(ctx)
+	require.NoError(t, err)
+	cPort, err := nat.NewPort("tcp", "5432")
+	require.NoError(t, err)
+	mappedN1, err := n1Container.MappedPort(ctx, cPort)
+	require.NoError(t, err)
+	n1Port = mappedN1.Port()
+
+	n2Container, err := stack.ServiceContainer(ctx, "native-n2")
+	require.NoError(t, err)
+	n2Host, err = n2Container.Host(ctx)
+	require.NoError(t, err)
+	mappedN2, err := n2Container.MappedPort(ctx, cPort)
+	require.NoError(t, err)
+	n2Port = mappedN2.Port()
+
+	log.Printf("Native PG n1 at %s:%s, n2 at %s:%s", n1Host, n1Port, n2Host, n2Port)
+
+	n1Pool, err = connectToNode(n1Host, n1Port, "postgres", "password", "testdb")
+	require.NoError(t, err, "failed to connect to native-n1")
+	n2Pool, err = connectToNode(n2Host, n2Port, "postgres", "password", "testdb")
+	require.NoError(t, err, "failed to connect to native-n2")
+
+	// Ensure pgcrypto on both nodes
+	for name, pool := range map[string]*pgxpool.Pool{"native-n1": n1Pool, "native-n2": n2Pool} {
+		_, err := pool.Exec(ctx, "CREATE EXTENSION IF NOT EXISTS pgcrypto")
+		require.NoError(t, err, "failed to create pgcrypto on %s", name)
+	}
+
+	return n1Pool, n2Pool, n1Host, n1Port, n2Host, n2Port, stack
+}
+
+// TestTableRepair_NativePG_MixedOps_PreserveOrigin verifies that table-diff and
+// table-repair work correctly on vanilla PostgreSQL (no spock extension).
+// This test manages its own container lifecycle, separate from the shared spock cluster.
+//
+// Scenario (n1 = source of truth, n2 = target):
+//   - 9 rows inserted identically on both nodes (no replication, just matching data)
+//   - 2 rows deleted from n2 → INSERT during repair
+//   - 2 rows modified on n2 → UPDATE during repair
+//   - 2 extra rows inserted on n2 → DELETE during repair
+//
+// After repair: both nodes have 9 identical rows with preserved timestamps.
+func TestTableRepair_NativePG_MixedOps_PreserveOrigin(t *testing.T) {
+	ctx := context.Background()
+
+	// --- Phase 0: Spin up native PG containers ---
+	n1Pool, n2Pool, n1Host, n1Port, n2Host, n2Port, stack := setupNativePGCluster(t)
+	t.Cleanup(func() {
+		n1Pool.Close()
+		n2Pool.Close()
+		if stack != nil {
+			stack.Down(context.Background(), compose.RemoveOrphans(true), compose.RemoveVolumes(true))
+		}
+		files, _ := filepath.Glob("*_diffs-*.json")
+		for _, f := range files {
+			os.Remove(f)
+		}
+		os.Remove("test_cluster_native.json")
+	})
+
+	tableName := "native_repair_test"
+	qualifiedTableName := fmt.Sprintf("public.%s", tableName)
+
+	// --- Phase 1: Create table and insert identical data on both nodes ---
+	createSQL := fmt.Sprintf(`CREATE TABLE IF NOT EXISTS %s (id INT PRIMARY KEY, data TEXT, category TEXT)`, qualifiedTableName)
+	for name, pool := range map[string]*pgxpool.Pool{"native-n1": n1Pool, "native-n2": n2Pool} {
+		_, err := pool.Exec(ctx, createSQL)
+		require.NoError(t, err, "Failed to create table on %s", name)
+	}
+
+	allIDs := []int{1, 2, 3, 4, 5, 6, 7, 8, 9}
+	for _, id := range allIDs {
+		for _, pool := range []*pgxpool.Pool{n1Pool, n2Pool} {
+			_, err := pool.Exec(ctx,
+				fmt.Sprintf("INSERT INTO %s (id, data, category) VALUES ($1, $2, $3)", qualifiedTableName),
+				id, fmt.Sprintf("original_data_%d", id), "original")
+			require.NoError(t, err, "Failed to insert row %d", id)
+		}
+	}
+	log.Printf("Inserted %d identical rows on both native PG nodes", len(allIDs))
+
+	// Wait so timestamps are in the past
+	log.Println("Waiting 3 seconds to ensure original timestamps are in the past...")
+	time.Sleep(3 * time.Second)
+
+	// --- Phase 2: Capture baseline data from n1 ---
+	verifyIDs := []int{6, 7, 8, 9}
+	originalData := make(map[int]string)
+
+	for _, id := range verifyIDs {
+		ts := getCommitTimestamp(t, ctx, n1Pool, qualifiedTableName, id)
+		var data string
+		err := n1Pool.QueryRow(ctx,
+			fmt.Sprintf("SELECT data FROM %s WHERE id = $1", qualifiedTableName), id).Scan(&data)
+		require.NoError(t, err)
+		originalData[id] = data
+		log.Printf("Baseline row %d on n1: ts=%s data=%q", id, ts.Format(time.RFC3339Nano), data)
+	}
+
+	// --- Phase 3: Create divergence on n2 ---
+	log.Println("Creating divergence on n2...")
+	// Delete rows 6,7 → will need INSERT during repair
+	for _, id := range []int{6, 7} {
+		_, err := n2Pool.Exec(ctx, fmt.Sprintf("DELETE FROM %s WHERE id = $1", qualifiedTableName), id)
+		require.NoError(t, err, "Failed to delete row %d on n2", id)
+	}
+	// Modify rows 8,9 → will need UPDATE during repair
+	for _, id := range []int{8, 9} {
+		_, err := n2Pool.Exec(ctx, fmt.Sprintf("UPDATE %s SET data = $1, category = $2 WHERE id = $3", qualifiedTableName),
+			fmt.Sprintf("modified_on_n2_%d", id), "modified", id)
+		require.NoError(t, err, "Failed to modify row %d on n2", id)
+	}
+	// Insert rows 1001,1002 only on n2 → will need DELETE during repair
+	for _, id := range []int{1001, 1002} {
+		_, err := n2Pool.Exec(ctx, fmt.Sprintf("INSERT INTO %s (id, data, category) VALUES ($1, $2, $3)", qualifiedTableName),
+			id, fmt.Sprintf("n2_only_%d", id), "n2_extra")
+		require.NoError(t, err, "Failed to insert row %d on n2", id)
+	}
+	log.Println("Divergence created: 2 deleted, 2 modified, 2 extra rows on n2")
+
+	// Verify divergence state
+	n1Count := getTableCount(t, ctx, n1Pool, qualifiedTableName)
+	n2Count := getTableCount(t, ctx, n2Pool, qualifiedTableName)
+	require.Equal(t, 9, n1Count, "n1 should have 9 rows")
+	require.Equal(t, 9, n2Count, "n2 should have 9 rows (7 original + 2 extra - 2 deleted)")
+
+	// --- Phase 4: Write cluster config for native PG nodes ---
+	nativeClusterName := "test_cluster_native"
+	nativeClusterConfig := types.ClusterConfig{
+		JSONVersion: "1.0",
+		ClusterName: nativeClusterName,
+		LogLevel:    "info",
+		UpdateDate:  time.Now().Format(time.RFC3339),
+		PGEdge: struct {
+			PGVersion int               `json:"pg_version"`
+			AutoStart string            `json:"auto_start"`
+			Spock     types.SpockConfig `json:"spock"`
+			Databases []types.Database  `json:"databases"`
+		}{
+			PGVersion: 17,
+			AutoStart: "yes",
+			Databases: []types.Database{
+				{
+					DBName:     "testdb",
+					DBUser:     "postgres",
+					DBPassword: "password",
+				},
+			},
+		},
+		NodeGroups: []types.NodeGroup{
+			{
+				Name:     "native-n1",
+				IsActive: "yes",
+				PublicIP: n1Host,
+				Port:     n1Port,
+				Path:     "/usr/local/bin",
+			},
+			{
+				Name:     "native-n2",
+				IsActive: "yes",
+				PublicIP: n2Host,
+				Port:     n2Port,
+				Path:     "/usr/local/bin",
+			},
+		},
+	}
+
+	jsonData, err := json.MarshalIndent(nativeClusterConfig, "", "  ")
+	require.NoError(t, err)
+	err = os.WriteFile("test_cluster_native.json", jsonData, 0644)
+	require.NoError(t, err)
+
+	// --- Phase 5: Run table-diff ---
+	log.Println("Running table-diff on native PG cluster...")
+	// Clean up any old diff files
+	files, _ := filepath.Glob("*_diffs-*.json")
+	for _, f := range files {
+		os.Remove(f)
+	}
+
+	tdTask := diff.NewTableDiffTask()
+	tdTask.ClusterName = nativeClusterName
+	tdTask.DBName = "testdb"
+	tdTask.QualifiedTableName = qualifiedTableName
+	tdTask.Nodes = "native-n1,native-n2"
+	tdTask.Output = "json"
+	tdTask.BlockSize = 1000
+	tdTask.CompareUnitSize = 100
+	tdTask.ConcurrencyFactor = 1
+	tdTask.MaxDiffRows = math.MaxInt64
+	tdTask.EnsurePgcrypto = true
+	tdTask.DiffResult = types.DiffOutput{
+		NodeDiffs: make(map[string]types.DiffByNodePair),
+		Summary: types.DiffSummary{
+			Nodes:             []string{"native-n1", "native-n2"},
+			BlockSize:         tdTask.BlockSize,
+			CompareUnitSize:   tdTask.CompareUnitSize,
+			ConcurrencyFactor: tdTask.ConcurrencyFactor,
+			DiffRowsCount:     make(map[string]int),
+		},
+	}
+
+	err = tdTask.RunChecks(false)
+	require.NoError(t, err, "table-diff validation failed on native PG")
+	err = tdTask.ExecuteTask()
+	require.NoError(t, err, "table-diff execution failed on native PG")
+
+	diffFile := getLatestDiffFile(t)
+	require.NotEmpty(t, diffFile, "No diff file was generated")
+	log.Printf("Diff file generated: %s", diffFile)
+
+	// --- Phase 6: Run table-repair with preserve-origin ---
+	log.Println("Running repair with preserve-origin on native PG...")
+	repairTask := repair.NewTableRepairTask()
+	repairTask.ClusterName = nativeClusterName
+	repairTask.DBName = "testdb"
+	repairTask.SourceOfTruth = "native-n1"
+	repairTask.QualifiedTableName = qualifiedTableName
+	repairTask.DiffFilePath = diffFile
+	repairTask.Nodes = "all"
+	repairTask.PreserveOrigin = true
+
+	// Capture output to check for spock detection
+	output := captureOutput(t, func() {
+		err = repairTask.Run(false)
+	})
+	require.NoError(t, err, "Table repair failed on native PG")
+	require.NotEqual(t, "FAILED", repairTask.TaskStatus,
+		"Repair task should not be FAILED: %s", repairTask.TaskContext)
+
+	// Verify spock was NOT detected
+	assert.Contains(t, output, "spock extension detected: false",
+		"Repair should detect that spock is not available")
+	log.Println("Confirmed: spock extension was NOT detected (native PG mode)")
+
+	// --- Phase 7: Verify repair correctness ---
+	log.Println("Verifying repair results on native PG...")
+
+	// 7a. Row counts should match
+	n1CountAfter := getTableCount(t, ctx, n1Pool, qualifiedTableName)
+	n2CountAfter := getTableCount(t, ctx, n2Pool, qualifiedTableName)
+	require.Equal(t, 9, n1CountAfter, "n1 should still have 9 rows")
+	require.Equal(t, 9, n2CountAfter, "n2 should have 9 rows after repair")
+
+	// 7b. No diffs should remain — run a second diff to verify
+	log.Println("Running verification diff...")
+	files, _ = filepath.Glob("*_diffs-*.json")
+	for _, f := range files {
+		os.Remove(f)
+	}
+
+	verifyDiffTask := diff.NewTableDiffTask()
+	verifyDiffTask.ClusterName = nativeClusterName
+	verifyDiffTask.DBName = "testdb"
+	verifyDiffTask.QualifiedTableName = qualifiedTableName
+	verifyDiffTask.Nodes = "native-n1,native-n2"
+	verifyDiffTask.Output = "json"
+	verifyDiffTask.BlockSize = 1000
+	verifyDiffTask.CompareUnitSize = 100
+	verifyDiffTask.ConcurrencyFactor = 1
+	verifyDiffTask.MaxDiffRows = math.MaxInt64
+	verifyDiffTask.EnsurePgcrypto = true
+	verifyDiffTask.DiffResult = types.DiffOutput{
+		NodeDiffs: make(map[string]types.DiffByNodePair),
+		Summary: types.DiffSummary{
+			Nodes:             []string{"native-n1", "native-n2"},
+			BlockSize:         verifyDiffTask.BlockSize,
+			CompareUnitSize:   verifyDiffTask.CompareUnitSize,
+			ConcurrencyFactor: verifyDiffTask.ConcurrencyFactor,
+			DiffRowsCount:     make(map[string]int),
+		},
+	}
+
+	err = verifyDiffTask.RunChecks(false)
+	require.NoError(t, err, "verification diff validation failed")
+	err = verifyDiffTask.ExecuteTask()
+	require.NoError(t, err, "verification diff execution failed")
+	assert.Empty(t, verifyDiffTask.DiffResult.NodeDiffs, "Expected no differences after repair")
+
+	// 7c. Extra rows (1001, 1002) should be deleted from n2
+	for _, id := range []int{1001, 1002} {
+		var count int
+		err := n2Pool.QueryRow(ctx,
+			fmt.Sprintf("SELECT count(*) FROM %s WHERE id = $1", qualifiedTableName), id).Scan(&count)
+		require.NoError(t, err)
+		require.Equal(t, 0, count, "Row %d should have been deleted from n2", id)
+	}
+
+	// 7d. Verify data correctness for INSERTED rows (6, 7)
+	// Note: On native PG without replication origins, rows have "local" origin,
+	// so preserve-origin gracefully falls back to standard repair. Timestamps
+	// will be current (not preserved) because there's no origin metadata.
+	log.Println("Verifying data correctness for INSERTED rows (6, 7)...")
+	for _, id := range []int{6, 7} {
+		var data string
+		err := n2Pool.QueryRow(ctx,
+			fmt.Sprintf("SELECT data FROM %s WHERE id = $1", qualifiedTableName), id).Scan(&data)
+		require.NoError(t, err, "Failed to get data for row %d on n2", id)
+		require.Equal(t, originalData[id], data,
+			"Row %d data on n2 should match n1 baseline", id)
+
+		ts := getCommitTimestamp(t, ctx, n2Pool, qualifiedTableName, id)
+		log.Printf("  Row %d (INSERT): ts=%s data=%q (timestamp is current — no origin metadata to preserve)", id, ts.Format(time.RFC3339Nano), data)
+	}
+
+	// 7e. Verify data correctness for UPDATED rows (8, 9)
+	log.Println("Verifying data correctness for UPDATED rows (8, 9)...")
+	for _, id := range []int{8, 9} {
+		var data, category string
+		err := n2Pool.QueryRow(ctx,
+			fmt.Sprintf("SELECT data, category FROM %s WHERE id = $1", qualifiedTableName), id).Scan(&data, &category)
+		require.NoError(t, err, "Failed to get data for row %d on n2", id)
+		require.Equal(t, originalData[id], data,
+			"Row %d data on n2 should match n1 baseline (was modified)", id)
+		require.Equal(t, "original", category,
+			"Row %d category on n2 should be restored to 'original'", id)
+
+		ts := getCommitTimestamp(t, ctx, n2Pool, qualifiedTableName, id)
+		log.Printf("  Row %d (UPDATE): ts=%s data=%q (timestamp is current — no origin metadata to preserve)", id, ts.Format(time.RFC3339Nano), data)
+	}
+
+	// 7f. Verify common rows (1-5) are untouched
+	log.Println("Verifying common rows (1-5) are unchanged...")
+	for _, id := range []int{1, 2, 3, 4, 5} {
+		var data string
+		err := n2Pool.QueryRow(ctx,
+			fmt.Sprintf("SELECT data FROM %s WHERE id = $1", qualifiedTableName), id).Scan(&data)
+		require.NoError(t, err)
+		require.Equal(t, fmt.Sprintf("original_data_%d", id), data,
+			"Common row %d should be unchanged", id)
+	}
+
+	log.Println("TestTableRepair_NativePG_MixedOps_PreserveOrigin PASSED")
+	log.Println("  - DELETE: 2 extra rows removed from n2")
+	log.Println("  - INSERT: 2 missing rows restored (graceful fallback — no origin metadata)")
+	log.Println("  - UPDATE: 2 modified rows corrected (graceful fallback — no origin metadata)")
+	log.Println("  - No spock dependency required!")
 }

@@ -1483,6 +1483,7 @@ func (t *TableRepairTask) runUnidirectionalRepair(startTime time.Time) error {
 
 		// And now for the upserts
 		nodeUpserts := fullUpserts[nodeName]
+		txAlreadyCommitted := false
 		if len(nodeUpserts) > 0 {
 			targetNodeColTypes, _, err := t.getColTypesForNode(nodeName)
 			if err != nil {
@@ -1514,6 +1515,7 @@ func (t *TableRepairTask) runUnidirectionalRepair(startTime time.Time) error {
 					repairErrors = append(repairErrors, fmt.Sprintf("delete commit failed for %s: %v", nodeName, err))
 					continue
 				}
+				txAlreadyCommitted = true
 				spockRepairModeActive = false
 
 				// Execute upserts with per-batch-key transactions for origin preservation
@@ -1552,16 +1554,18 @@ func (t *TableRepairTask) runUnidirectionalRepair(startTime time.Time) error {
 			}
 		}
 
-		// Commit the transaction (deletes and/or non-preserve-origin upserts)
+		// Commit the transaction (deletes and/or non-preserve-origin upserts).
 		// When preserve-origin was used, the tx was already committed above.
-		if spockRepairModeActive {
-			// TODO: Need to elevate privileges here, but might be difficult
-			// with pgx transactions and connection pooling.
-			if err := t.disableSpockRepairMode(tx, nodeName); err != nil {
-				tx.Rollback(t.Ctx)
-				logger.Error("%v", err)
-				repairErrors = append(repairErrors, err.Error())
-				continue
+		if !txAlreadyCommitted {
+			if spockRepairModeActive {
+				// TODO: Need to elevate privileges here, but might be difficult
+				// with pgx transactions and connection pooling.
+				if err := t.disableSpockRepairMode(tx, nodeName); err != nil {
+					tx.Rollback(t.Ctx)
+					logger.Error("%v", err)
+					repairErrors = append(repairErrors, err.Error())
+					continue
+				}
 			}
 
 			err = tx.Commit(t.Ctx)

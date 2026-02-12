@@ -128,6 +128,7 @@ type Templates struct {
 	ResetReplicationOriginSession    *template.Template
 	SetupReplicationOriginXact       *template.Template
 	ResetReplicationOriginXact       *template.Template
+	GetReplicationOriginNames        *template.Template
 }
 
 var SQLTemplates = Templates{
@@ -1588,5 +1589,8 @@ var SQLTemplates = Templates{
 	`)),
 	ResetReplicationOriginXact: template.Must(template.New("resetReplicationOriginXact").Parse(`
 		SELECT pg_replication_origin_xact_reset()
+	`)),
+	GetReplicationOriginNames: template.Must(template.New("getReplicationOriginNames").Parse(`
+		SELECT roident::text, roname FROM pg_replication_origin;
 	`)),
 }

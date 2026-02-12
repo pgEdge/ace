@@ -193,7 +193,7 @@ func (t *TableDiffTask) loadSpockNodeNames() error {
 		return fmt.Errorf("no connection pool available to load spock node names")
 	}
 
-	names, err := queries.GetSpockNodeNames(t.Ctx, firstPool)
+	names, err := queries.GetNodeOriginNames(t.Ctx, firstPool)
 	if err != nil {
 		t.SpockNodeNames = make(map[string]string)
 		return err
@@ -246,7 +246,7 @@ func (t *TableDiffTask) buildEffectiveFilter() (string, error) {
 
 	if t.resolvedAgainstOrigin != "" {
 		escaped := strings.ReplaceAll(t.resolvedAgainstOrigin, "'", "''")
-		parts = append(parts, fmt.Sprintf("(to_json(spock.xact_commit_timestamp_origin(xmin))->>'roident' = '%s')", escaped))
+		parts = append(parts, fmt.Sprintf("(to_json(pg_xact_commit_timestamp_origin(xmin))->>'roident' = '%s')", escaped))
 	}
 
 	if t.untilTime != nil {
@@ -434,7 +434,7 @@ func (t *TableDiffTask) fetchRows(nodeName string, r Range) ([]types.OrderedMap,
 	}
 
 	selectCols := make([]string, 0, len(t.Cols)+2)
-	selectCols = append(selectCols, "pg_xact_commit_timestamp(xmin) as commit_ts", "to_json(spock.xact_commit_timestamp_origin(xmin))->>'roident' as node_origin")
+	selectCols = append(selectCols, "pg_xact_commit_timestamp(xmin) as commit_ts", "to_json(pg_xact_commit_timestamp_origin(xmin))->>'roident' as node_origin")
 
 	for _, colName := range t.Cols {
 		colType := colTypes[colName]

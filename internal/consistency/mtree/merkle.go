@@ -502,7 +502,7 @@ func (m *MerkleTreeTask) loadSpockNodeNames() error {
 			lastErr = err
 			continue
 		}
-		names, err := queries.GetSpockNodeNames(m.Ctx, pool)
+		names, err := queries.GetNodeOriginNames(m.Ctx, pool)
 		pool.Close()
 		if err != nil {
 			lastErr = err
@@ -698,7 +698,7 @@ func buildFetchRowsSQLSimple(tableName, pk string, orderBy string, keys []any) (
 		args[i] = keys[i]
 	}
 	where := fmt.Sprintf("%s IN (%s)", pgx.Identifier{pk}.Sanitize(), strings.Join(placeholders, ","))
-	selectCols := "pg_xact_commit_timestamp(xmin) as commit_ts, to_json(spock.xact_commit_timestamp_origin(xmin))->>'roident' as node_origin, *"
+	selectCols := "pg_xact_commit_timestamp(xmin) as commit_ts, to_json(pg_xact_commit_timestamp_origin(xmin))->>'roident' as node_origin, *"
 	q := fmt.Sprintf("SELECT %s FROM %s WHERE %s ORDER BY %s", selectCols, tableName, where, orderBy)
 	return q, args
 }
@@ -721,7 +721,7 @@ func buildFetchRowsSQLComposite(tableName string, pk []string, orderBy string, k
 		tuples = append(tuples, fmt.Sprintf("(%s)", strings.Join(ph, ",")))
 	}
 	where := fmt.Sprintf("( %s ) IN ( %s )", strings.Join(tupleCols, ","), strings.Join(tuples, ","))
-	selectCols := "pg_xact_commit_timestamp(xmin) as commit_ts, to_json(spock.xact_commit_timestamp_origin(xmin))->>'roident' as node_origin, *"
+	selectCols := "pg_xact_commit_timestamp(xmin) as commit_ts, to_json(pg_xact_commit_timestamp_origin(xmin))->>'roident' as node_origin, *"
 	q := fmt.Sprintf("SELECT %s FROM %s WHERE %s ORDER BY %s", selectCols, tableName, where, orderBy)
 	return q, args
 }

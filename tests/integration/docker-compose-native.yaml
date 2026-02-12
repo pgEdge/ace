@@ -1,0 +1,45 @@
+#############################################################################
+#
+# ACE - Active Consistency Engine
+#
+# Copyright (C) 2023 - 2026, pgEdge (https://www.pgedge.com/)
+#
+# This software is released under the PostgreSQL License:
+# https://opensource.org/license/postgresql
+#
+#############################################################################
+
+# Minimal docker-compose with vanilla PostgreSQL images (no spock extension).
+# Used by TestTableRepair_NativePG_MixedOps_PreserveOrigin to verify that
+# table-diff and table-repair work with native PG replication origin tracking.
+services:
+  native-n1:
+    image: postgres:17
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: testdb
+    command:
+      - "postgres"
+      - "-c"
+      - "track_commit_timestamp=on"
+      - "-c"
+      - "wal_level=logical"
+    ports:
+      - target: 5432
+        published: 7432
+  native-n2:
+    image: postgres:17
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: testdb
+    command:
+      - "postgres"
+      - "-c"
+      - "track_commit_timestamp=on"
+      - "-c"
+      - "wal_level=logical"
+    ports:
+      - target: 5432
+        published: 7433
