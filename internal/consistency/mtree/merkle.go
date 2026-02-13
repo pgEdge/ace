@@ -1507,6 +1507,12 @@ func (m *MerkleTreeTask) UpdateMtree(skipAllChecks bool) (err error) {
 			return fmt.Errorf("error getting connection pool for node %s: %w", nodeInfo["Name"], err)
 		}
 
+		// Ensure hash_version column exists (schema migration for upgrades).
+		if err := queries.EnsureHashVersionColumn(m.Ctx, pool); err != nil {
+			pool.Close()
+			return fmt.Errorf("error migrating metadata schema on node %s: %w", nodeInfo["Name"], err)
+		}
+
 		blockSize, err = queries.GetBlockSizeFromMetadata(m.Ctx, pool, m.Schema, m.Table)
 		if err != nil {
 			pool.Close()
@@ -1556,12 +1562,34 @@ func (m *MerkleTreeTask) UpdateMtree(skipAllChecks bool) (err error) {
 		mtreeTableIdentifier := pgx.Identifier{aceSchema(), fmt.Sprintf("ace_mtree_%s_%s", m.Schema, m.Table)}
 		mtreeTableName := mtreeTableIdentifier.Sanitize()
 
+		// Check if stored hashes use an older algorithm and need full recomputation.
+		hashVersion, err := queries.GetHashVersion(m.Ctx, tx, m.Schema, m.Table)
+		if err != nil {
+			return fmt.Errorf("error getting hash version on node %s: %w", nodeInfo["Name"], err)
+		}
+		hashVersionUpgraded := false
+		if hashVersion < queries.CurrentHashVersion {
+			marked, err := queries.MarkAllLeavesDirty(m.Ctx, tx, mtreeTableName)
+			if err != nil {
+				return fmt.Errorf("error marking all leaves dirty for hash upgrade on node %s: %w", nodeInfo["Name"], err)
+			}
+			fmt.Printf("Hash algorithm upgraded (v%d -> v%d): marked %d blocks for recomputation on %s\n",
+				hashVersion, queries.CurrentHashVersion, marked, nodeInfo["Name"])
+			hashVersionUpgraded = true
+		}
+
 		blocksToUpdate, err := queries.GetDirtyAndNewBlocks(m.Ctx, tx, mtreeTableName, m.SimplePrimaryKey, m.Key)
 		if err != nil {
 			return fmt.Errorf("error getting dirty blocks on node %s: %w", nodeInfo["Name"], err)
 		}
 
 		if len(blocksToUpdate) == 0 {
+			if hashVersionUpgraded {
+				// No blocks exist yet, but still update the version marker.
+				if err := queries.UpdateHashVersion(m.Ctx, tx, m.Schema, m.Table, queries.CurrentHashVersion); err != nil {
+					return fmt.Errorf("error updating hash version on node %s: %w", nodeInfo["Name"], err)
+				}
+			}
 			fmt.Printf("No updates needed for %s\n", nodeInfo["Name"])
 			tx.Commit(m.Ctx)
 			continue
@@ -1639,6 +1667,12 @@ func (m *MerkleTreeTask) UpdateMtree(skipAllChecks bool) (err error) {
 			err = queries.ClearDirtyFlags(m.Ctx, tx, mtreeTableName, affectedPositions)
 			if err != nil {
 				return err
+			}
+		}
+
+		if hashVersionUpgraded {
+			if err := queries.UpdateHashVersion(m.Ctx, tx, m.Schema, m.Table, queries.CurrentHashVersion); err != nil {
+				return fmt.Errorf("error updating hash version on node %s: %w", nodeInfo["Name"], err)
 			}
 		}
 
@@ -2440,7 +2474,7 @@ func (m *MerkleTreeTask) createMtreeObjects(tx pgx.Tx, totalRows int64, numBlock
 		return fmt.Errorf("failed to create metadata table: %w", err)
 	}
 
-	err = queries.UpdateMetadata(m.Ctx, tx, m.Schema, m.Table, totalRows, m.BlockSize, numBlocks, !m.SimplePrimaryKey)
+	err = queries.UpdateMetadata(m.Ctx, tx, m.Schema, m.Table, totalRows, m.BlockSize, numBlocks, !m.SimplePrimaryKey, queries.CurrentHashVersion)
 	if err != nil {
 		return fmt.Errorf("failed to update metadata: %w", err)
 	}
