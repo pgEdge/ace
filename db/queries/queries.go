@@ -2925,3 +2925,96 @@ func RemoveTableFromCDCMetadata(ctx context.Context, db DBQuerier, tableName, pu
 
 	return nil
 }
+
+func GetReplicationOriginByName(ctx context.Context, db DBQuerier, originName string) (*uint32, error) {
+	sql, err := RenderSQL(SQLTemplates.GetReplicationOriginByName, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to render GetReplicationOriginByName SQL: %w", err)
+	}
+
+	var originID uint32
+	err = db.QueryRow(ctx, sql, originName).Scan(&originID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("query to get replication origin by name '%s' failed: %w", originName, err)
+	}
+
+	return &originID, nil
+}
+
+func CreateReplicationOrigin(ctx context.Context, db DBQuerier, originName string) (uint32, error) {
+	sql, err := RenderSQL(SQLTemplates.CreateReplicationOrigin, nil)
+	if err != nil {
+		return 0, fmt.Errorf("failed to render CreateReplicationOrigin SQL: %w", err)
+	}
+
+	var originID uint32
+	err = db.QueryRow(ctx, sql, originName).Scan(&originID)
+	if err != nil {
+		return 0, fmt.Errorf("query to create replication origin '%s' failed: %w", originName, err)
+	}
+
+	return originID, nil
+}
+
+func SetupReplicationOriginSession(ctx context.Context, db DBQuerier, originName string) error {
+	sql, err := RenderSQL(SQLTemplates.SetupReplicationOriginSession, nil)
+	if err != nil {
+		return fmt.Errorf("failed to render SetupReplicationOriginSession SQL: %w", err)
+	}
+
+	_, err = db.Exec(ctx, sql, originName)
+	if err != nil {
+		return fmt.Errorf("query to setup replication origin session for origin '%s' failed: %w", originName, err)
+	}
+
+	return nil
+}
+
+func ResetReplicationOriginSession(ctx context.Context, db DBQuerier) error {
+	sql, err := RenderSQL(SQLTemplates.ResetReplicationOriginSession, nil)
+	if err != nil {
+		return fmt.Errorf("failed to render ResetReplicationOriginSession SQL: %w", err)
+	}
+
+	_, err = db.Exec(ctx, sql)
+	if err != nil {
+		return fmt.Errorf("query to reset replication origin session failed: %w", err)
+	}
+
+	return nil
+}
+
+func SetupReplicationOriginXact(ctx context.Context, db DBQuerier, originLSN string, originTimestamp *time.Time) error {
+	if originTimestamp == nil {
+		return fmt.Errorf("origin timestamp is required for pg_replication_origin_xact_setup (LSN %s)", originLSN)
+	}
+
+	sql, err := RenderSQL(SQLTemplates.SetupReplicationOriginXact, nil)
+	if err != nil {
+		return fmt.Errorf("failed to render SetupReplicationOriginXact SQL: %w", err)
+	}
+
+	_, err = db.Exec(ctx, sql, originLSN, *originTimestamp)
+	if err != nil {
+		return fmt.Errorf("query to setup replication origin xact with LSN %s failed: %w", originLSN, err)
+	}
+
+	return nil
+}
+
+func ResetReplicationOriginXact(ctx context.Context, db DBQuerier) error {
+	sql, err := RenderSQL(SQLTemplates.ResetReplicationOriginXact, nil)
+	if err != nil {
+		return fmt.Errorf("failed to render ResetReplicationOriginXact SQL: %w", err)
+	}
+
+	_, err = db.Exec(ctx, sql)
+	if err != nil {
+		return fmt.Errorf("query to reset replication origin xact failed: %w", err)
+	}
+
+	return nil
+}
