@@ -116,7 +116,7 @@ func writeHTMLDiffReport(diffResult types.DiffOutput, jsonFilePath string) (stri
 		{Label: "Mismatched Ranges", Value: formatInt64WithCommas(int64(summary.MismatchedRangesCount))},
 		{Label: "Block Size", Value: formatInt64WithCommas(int64(summary.BlockSize))},
 		{Label: "Compare Unit Size", Value: formatInt64WithCommas(int64(summary.CompareUnitSize))},
-		{Label: "Concurrency Factor", Value: strconv.Itoa(summary.ConcurrencyFactor)},
+		{Label: "Concurrency Factor", Value: strconv.FormatFloat(summary.ConcurrencyFactor, 'f', -1, 64)},
 		{Label: "Time Taken", Value: formatDurationHuman(summary.TimeTaken)},
 		{Label: "Start Time", Value: formatTimestampHuman(summary.StartTime)},
 		{Label: "End Time", Value: formatTimestampHuman(summary.EndTime)},

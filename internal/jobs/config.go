@@ -100,7 +100,7 @@ func buildTableDiffJob(cfg *config.Config, def config.JobDef, spec scheduleSpec)
 	if v := intArg(def.Args, "block_size", 0); v > 0 {
 		base.BlockSize = v
 	}
-	if v := intArg(def.Args, "concurrency_factor", 0); v > 0 {
+	if v := float64Arg(def.Args, "concurrency_factor", 0); v > 0 {
 		base.ConcurrencyFactor = v
 	}
 	if v := intArg(def.Args, "compare_unit_size", 0); v > 0 {
@@ -120,11 +120,11 @@ func buildTableDiffJob(cfg *config.Config, def config.JobDef, spec scheduleSpec)
 		base.TaskStorePath = path
 	}
 
-	if base.ConcurrencyFactor == 0 {
+	if base.ConcurrencyFactor == 0.0 {
 		if cfg.TableDiff.ConcurrencyFactor > 0 {
 			base.ConcurrencyFactor = cfg.TableDiff.ConcurrencyFactor
 		} else {
-			base.ConcurrencyFactor = 1
+			base.ConcurrencyFactor = 0.5
 		}
 	}
 	if base.BlockSize == 0 && cfg.TableDiff.DiffBlockSize > 0 {
@@ -175,7 +175,7 @@ func buildSchemaDiffJob(cfg *config.Config, def config.JobDef, spec scheduleSpec
 	if v := intArg(def.Args, "block_size", 0); v > 0 {
 		base.BlockSize = v
 	}
-	if v := intArg(def.Args, "concurrency_factor", 0); v > 0 {
+	if v := float64Arg(def.Args, "concurrency_factor", 0); v > 0 {
 		base.ConcurrencyFactor = v
 	}
 	if v := intArg(def.Args, "compare_unit_size", 0); v > 0 {
@@ -191,11 +191,11 @@ func buildSchemaDiffJob(cfg *config.Config, def config.JobDef, spec scheduleSpec
 		base.TaskStorePath = path
 	}
 
-	if base.ConcurrencyFactor == 0 {
+	if base.ConcurrencyFactor == 0.0 {
 		if cfg.TableDiff.ConcurrencyFactor > 0 {
 			base.ConcurrencyFactor = cfg.TableDiff.ConcurrencyFactor
 		} else {
-			base.ConcurrencyFactor = 1
+			base.ConcurrencyFactor = 0.5
 		}
 	}
 	if base.BlockSize == 0 && cfg.TableDiff.DiffBlockSize > 0 {
@@ -243,7 +243,7 @@ func buildRepsetDiffJob(cfg *config.Config, def config.JobDef, spec scheduleSpec
 	if v := intArg(def.Args, "block_size", 0); v > 0 {
 		base.BlockSize = v
 	}
-	if v := intArg(def.Args, "concurrency_factor", 0); v > 0 {
+	if v := float64Arg(def.Args, "concurrency_factor", 0); v > 0 {
 		base.ConcurrencyFactor = v
 	}
 	if v := intArg(def.Args, "compare_unit_size", 0); v > 0 {
@@ -259,11 +259,11 @@ func buildRepsetDiffJob(cfg *config.Config, def config.JobDef, spec scheduleSpec
 		base.TaskStorePath = path
 	}
 
-	if base.ConcurrencyFactor == 0 {
+	if base.ConcurrencyFactor == 0.0 {
 		if cfg.TableDiff.ConcurrencyFactor > 0 {
 			base.ConcurrencyFactor = cfg.TableDiff.ConcurrencyFactor
 		} else {
-			base.ConcurrencyFactor = 1
+			base.ConcurrencyFactor = 0.5
 		}
 	}
 	if base.BlockSize == 0 && cfg.TableDiff.DiffBlockSize > 0 {
@@ -347,6 +347,27 @@ func boolArg(args map[string]any, key string, defaultVal bool) bool {
 			return v != 0
 		case int64:
 			return v != 0
+		}
+	}
+	return defaultVal
+}
+
+func float64Arg(args map[string]any, key string, defaultVal float64) float64 {
+	if args == nil {
+		return defaultVal
+	}
+	if val, ok := args[key]; ok {
+		switch v := val.(type) {
+		case float64:
+			return v
+		case int:
+			return float64(v)
+		case int64:
+			return float64(v)
+		case string:
+			if parsed, err := strconv.ParseFloat(v, 64); err == nil {
+				return parsed
+			}
 		}
 	}
 	return defaultVal

@@ -23,7 +23,7 @@ type tableDiffRequest struct {
 	DBName            string   `json:"dbname"`
 	Nodes             []string `json:"nodes"`
 	BlockSize         int      `json:"block_size"`
-	Concurrency       int      `json:"concurrency_factor"`
+	Concurrency       float64  `json:"concurrency_factor"`
 	CompareUnitSize   int      `json:"compare_unit_size"`
 	MaxDiffRows       int64    `json:"max_diff_rows"`
 	TableFilter       string   `json:"table_filter"`
@@ -73,7 +73,7 @@ type schemaDiffRequest struct {
 	SkipFile          string   `json:"skip_file"`
 	DDLOnly           bool     `json:"ddl_only"`
 	BlockSize         int      `json:"block_size"`
-	Concurrency       int      `json:"concurrency_factor"`
+	Concurrency       float64  `json:"concurrency_factor"`
 	CompareUnitSize   int      `json:"compare_unit_size"`
 	Output            string   `json:"output"`
 	OverrideBlockSize bool     `json:"override_block_size"`
@@ -88,7 +88,7 @@ type repsetDiffRequest struct {
 	SkipTables        string   `json:"skip_tables"`
 	SkipFile          string   `json:"skip_file"`
 	BlockSize         int      `json:"block_size"`
-	Concurrency       int      `json:"concurrency_factor"`
+	Concurrency       float64  `json:"concurrency_factor"`
 	CompareUnitSize   int      `json:"compare_unit_size"`
 	Output            string   `json:"output"`
 	OverrideBlockSize bool     `json:"override_block_size"`
@@ -258,14 +258,14 @@ func (s *APIServer) resolveBlockSize(requested int) int {
 	return 100000
 }
 
-func (s *APIServer) resolveConcurrency(requested int) int {
+func (s *APIServer) resolveConcurrency(requested float64) float64 {
 	if requested > 0 {
 		return requested
 	}
 	if cfg := s.cfg; cfg != nil && cfg.TableDiff.ConcurrencyFactor > 0 {
 		return cfg.TableDiff.ConcurrencyFactor
 	}
-	return 1
+	return 0.5
 }
 
 func (s *APIServer) resolveCompareUnitSize(requested int) int {

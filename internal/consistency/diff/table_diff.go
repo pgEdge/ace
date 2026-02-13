@@ -68,7 +68,7 @@ type TableDiffTask struct {
 	FilteredViewCreated bool
 
 	BlockSize         int
-	ConcurrencyFactor int
+	ConcurrencyFactor float64
 	Output            string
 	TableFilter       string
 	QuietMode         bool
@@ -713,8 +713,8 @@ func (t *TableDiffTask) Validate() error {
 		t.MaxDiffRows = config.Cfg.TableDiff.MaxDiffRows
 	}
 
-	if t.ConcurrencyFactor > 10 || t.ConcurrencyFactor < 1 {
-		return fmt.Errorf("invalid value range for concurrency_factor, must be between 1 and 10")
+	if t.ConcurrencyFactor > 4.0 || t.ConcurrencyFactor <= 0 {
+		return fmt.Errorf("invalid value range for concurrency_factor, must be > 0 and <= 4.0")
 	}
 
 	if t.Output != "json" && t.Output != "html" {
@@ -1202,7 +1202,10 @@ func (t *TableDiffTask) ExecuteTask() (err error) {
 		ctx = context.Background()
 	}
 
-	maxConcurrent := runtime.NumCPU() * t.ConcurrencyFactor
+	maxConcurrent := int(math.Round(float64(runtime.NumCPU()) * t.ConcurrencyFactor))
+	if maxConcurrent < 1 {
+		maxConcurrent = 1
+	}
 	logger.Info("Using %d CPUs, max concurrent workers = %d", runtime.NumCPU(), maxConcurrent)
 	sem := make(chan struct{}, maxConcurrent)
 

@@ -78,11 +78,11 @@ func SetupCLI() *cli.App {
 			Usage:   "Number of rows per block",
 			Value:   "100000",
 		},
-		&cli.IntFlag{
+		&cli.Float64Flag{
 			Name:    "concurrency-factor",
 			Aliases: []string{"c"},
-			Usage:   "Concurrency factor",
-			Value:   1,
+			Usage:   "CPU ratio for concurrency (0.0–4.0, e.g. 0.5 uses half of available CPUs)",
+			Value:   0.5,
 		},
 		&cli.IntFlag{
 			Name:    "compare-unit-size",
@@ -873,7 +873,7 @@ func TableDiffCLI(ctx *cli.Context) error {
 	task.QualifiedTableName = positional[0]
 	task.DBName = ctx.String("dbname")
 	task.BlockSize = int(blockSizeInt)
-	task.ConcurrencyFactor = ctx.Int("concurrency-factor")
+	task.ConcurrencyFactor = ctx.Float64("concurrency-factor")
 	task.CompareUnitSize = ctx.Int("compare-unit-size")
 	task.Output = strings.ToLower(ctx.String("output"))
 	task.Nodes = ctx.String("nodes")
@@ -1268,7 +1268,7 @@ func SchemaDiffCLI(ctx *cli.Context) error {
 	}
 
 	task.BlockSize = int(blockSizeInt)
-	task.ConcurrencyFactor = ctx.Int("concurrency-factor")
+	task.ConcurrencyFactor = ctx.Float64("concurrency-factor")
 	task.CompareUnitSize = ctx.Int("compare-unit-size")
 	task.Output = ctx.String("output")
 	task.OverrideBlockSize = ctx.Bool("override-block-size")
@@ -1343,7 +1343,7 @@ func RepsetDiffCLI(ctx *cli.Context) error {
 	task.Ctx = context.Background()
 
 	task.BlockSize = int(blockSizeInt)
-	task.ConcurrencyFactor = ctx.Int("concurrency-factor")
+	task.ConcurrencyFactor = ctx.Float64("concurrency-factor")
 	task.CompareUnitSize = ctx.Int("compare-unit-size")
 	task.Output = ctx.String("output")
 	task.OverrideBlockSize = ctx.Bool("override-block-size")
