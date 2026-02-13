@@ -44,7 +44,7 @@ type PostgresConfig struct {
 }
 
 type DiffConfig struct {
-	ConcurrencyFactor int     `yaml:"concurrency_factor"`
+	ConcurrencyFactor float64 `yaml:"concurrency_factor"`
 	MaxDiffRows       int64   `yaml:"max_diff_rows"`
 	MinBlockSize      int     `yaml:"min_diff_block_size"`
 	MaxBlockSize      int     `yaml:"max_diff_block_size"`

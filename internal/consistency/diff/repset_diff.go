@@ -47,7 +47,7 @@ type RepsetDiffCmd struct {
 	clusterNodes      []map[string]any
 	database          types.Database
 	ConnectionPool    *pgxpool.Pool
-	ConcurrencyFactor int
+	ConcurrencyFactor float64
 	BlockSize         int
 	CompareUnitSize   int
 	Output            string

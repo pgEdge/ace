@@ -17,7 +17,7 @@ This command compares the data in the specified table across nodes in a cluster 
 |---|---|---|
 | `--dbname <name>` | `-d` | Database name. Defaults to the first DB in the cluster config. |
 | `--block-size <int>` | `-b` | Rows processed per comparison block. Default `100000`. Honours `ace.yaml` limits unless `--override-block-size` is set. |
-| `--concurrency-factor <int>` | `-c` | Number of workers per node (1–10). Default `1`. |
+| `--concurrency-factor <float>` | `-c` | CPU ratio for concurrency (0.0–4.0, e.g. 0.5 uses half of available CPUs). Default `0.5`. |
 | `--compare-unit-size <int>` | `-u` | Recursive split size for mismatched blocks. Default `10000`. |
 | `--output <json\|html>` | `-o` | Report format. Default `json`. When `html`, both JSON and HTML files share the same timestamped prefix. |
 | `--nodes <list>` | `-n` | Comma-separated node list or `all`. Up to three-way diffs are supported. |

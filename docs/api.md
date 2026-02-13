@@ -28,7 +28,7 @@ Compares a table between nodes and generates a diff report.
 |------------------------|-------|---------------------------------------------------------------------|---------|
 | `--dbname`             | `-d`  | Name of the database                                                |         |
 | `--block-size`         | `-b`  | Number of rows per block                                            | 100000  |
-| `--concurrency-factor` | `-c`  | Concurrency factor                                                  | 1       |
+| `--concurrency-factor` | `-c`  | CPU ratio for concurrency (0.0–4.0)                                 | 0.5     |
 | `--compare-unit-size`  | `-u`  | Max size of the smallest block to use when diffs are present        | 10000   |
 | `--output`             | `-o`  | Output format (`json` or `html`)                                    | json    |
 | `--nodes`              | `-n`  | Nodes to include in the diff (comma-separated, or "all")            | all     |
@@ -141,7 +141,7 @@ Compares schemas across nodes in a pgEdge cluster. By default, `schema-diff` per
 |------------------------|-------|-------------------------------------------------------------------------|---------|
 | `--dbname`             | `-d`  | Name of the database                                                    |         |
 | `--block-size`         | `-b`  | Number of rows per block                                                | 100000  |
-| `--concurrency-factor` | `-c`  | Concurrency factor                                                      | 1       |
+| `--concurrency-factor` | `-c`  | CPU ratio for concurrency (0.0–4.0)                                     | 0.5     |
 | `--compare-unit-size`  | `-u`  | Max size of the smallest block to use when diffs are present            | 10000   |
 | `--output`             | `-o`  | Output format (`json` or `html`)                                        | json    |
 | `--nodes`              | `-n`  | Nodes to include in the diff (comma-separated, or "all")                | all     |
@@ -185,7 +185,7 @@ Performs a `table-diff` on every table in a replication set and reports differen
 | `--skip-tables`         | `-T`  | Tables to exclude from the diff (comma-separated)                           |         |
 | `--skip-file`           | `-s`  | File containing a list of tables to exclude                                 |         |
 | `--block-size`          | `-b`  | Rows per block when diffing tables                                          | 100000  |
-| `--concurrency-factor`  | `-c`  | Workers per node                                                             | 1       |
+| `--concurrency-factor`  | `-c`  | CPU ratio for concurrency (0.0–4.0)                                          | 0.5     |
 | `--compare-unit-size`   | `-u`  | Recursive split size for mismatched blocks                                  | 10000   |
 | `--output`              | `-o`  | Per-table diff output format (`json` or `html`)                             | json    |
 | `--override-block-size` | `-B`  | Allow block sizes outside `ace.yaml` guardrails                             | false   |

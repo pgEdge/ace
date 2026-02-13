@@ -22,7 +22,7 @@ Runs `table-diff` on every table in a replication set and reports differences.
 | `--skip-tables` | `-T` | Comma list of tables to exclude |  |
 | `--skip-file` | `-s` | File with list of tables to exclude |  |
 | `--block-size <int>` | `-b` | Rows per block when diffing each table. Default `100000`. |
-| `--concurrency-factor <int>` | `-c` | Workers per node (1–10). Default `1`. |
+| `--concurrency-factor <float>` | `-c` | CPU ratio for concurrency (0.0–4.0). Default `0.5`. |
 | `--compare-unit-size <int>` | `-u` | Recursive split size for mismatched blocks. Default `10000`. |
 | `--output <json\|html>` | `-o` | Per-table diff report format. Default `json`. |
 | `--override-block-size` | `-B` | Allow block sizes outside `ace.yaml` guardrails. |

@@ -28,7 +28,7 @@ The [`ace.yaml` file](https://github.com/pgEdge/ace/blob/main/ace.yaml) defines 
 | postgres --> tcp_keepalives_idle | TCP keepalive idle time (s). **Default: 30** |
 | postgres --> tcp_keepalives_interval | TCP keepalive interval (s). **Default: 10** |
 | postgres --> tcp_keepalives_count | Number of keepalive probes before drop. **Default: 5** |
-| table_diff --> concurrency_factor | Parallelism used for table diff operations. **Default: 1** |
+| table_diff --> concurrency_factor | CPU ratio for diff concurrency (0.0–4.0, e.g. 0.5 uses half of available CPUs). **Default: 0.5** |
 | table_diff --> min_diff_block_size | Minimum diff block (row chunk) size. **Default: 1** |
 | table_diff --> max_diff_block_size | Maximum diff block size. **Default: 1000000** |
 | table_diff --> compare_unit_size | Unit size for smallest comparison chunk. **Default: 10000** |

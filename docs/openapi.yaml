@@ -457,8 +457,8 @@ components:
           type: integer
           description: Defaults to table_diff.diff_block_size or 100000.
         concurrency_factor:
-          type: integer
-          description: Defaults to table_diff.concurrency_factor or 1.
+          type: number
+          description: CPU ratio for concurrency (0.0–4.0). Defaults to table_diff.concurrency_factor or 0.5.
         compare_unit_size:
           type: integer
           description: Defaults to table_diff.compare_unit_size or 10000.
@@ -562,8 +562,8 @@ components:
           type: integer
           description: Defaults to table_diff.diff_block_size or 100000.
         concurrency_factor:
-          type: integer
-          description: Defaults to table_diff.concurrency_factor or 1.
+          type: number
+          description: CPU ratio for concurrency (0.0–4.0). Defaults to table_diff.concurrency_factor or 0.5.
         compare_unit_size:
           type: integer
           description: Defaults to table_diff.compare_unit_size or 10000.
@@ -596,8 +596,8 @@ components:
           type: integer
           description: Defaults to table_diff.diff_block_size or 100000.
         concurrency_factor:
-          type: integer
-          description: Defaults to table_diff.concurrency_factor or 1.
+          type: number
+          description: CPU ratio for concurrency (0.0–4.0). Defaults to table_diff.concurrency_factor or 0.5.
         compare_unit_size:
           type: integer
           description: Defaults to table_diff.compare_unit_size or 10000.
