@@ -1056,6 +1056,119 @@ func testMerkleTreeTeardown(t *testing.T, tableName string) {
 	}
 }
 
+// TestMerkleTreeNumericScaleInvariance verifies that mathematically equal
+// numeric values with different PostgreSQL scales (e.g., 3000.00 vs 3000.0)
+// produce identical merkle tree hashes and are NOT reported as differences.
+func TestMerkleTreeNumericScaleInvariance(t *testing.T) {
+	ctx := context.Background()
+	numericTable := "ace_numeric_scale_test"
+	qualifiedTable := fmt.Sprintf("%s.%s", testSchema, numericTable)
+
+	// Create the table on both nodes
+	createSQL := fmt.Sprintf(`
+		CREATE TABLE IF NOT EXISTS %s (
+			id INT PRIMARY KEY,
+			amount NUMERIC(18,6),
+			label TEXT
+		)`, qualifiedTable)
+	for _, pool := range []*pgxpool.Pool{pgCluster.Node1Pool, pgCluster.Node2Pool} {
+		_, err := pool.Exec(ctx, createSQL)
+		require.NoError(t, err, "failed to create numeric test table")
+	}
+	t.Cleanup(func() {
+		for _, pool := range []*pgxpool.Pool{pgCluster.Node1Pool, pgCluster.Node2Pool} {
+			pool.Exec(ctx, fmt.Sprintf("DROP TABLE IF EXISTS %s", qualifiedTable))
+		}
+	})
+
+	// Insert rows with specific numeric scales using repair_mode on each node
+	// independently, so each node stores different scale representations.
+	// Node1: amount = 3000.00 (scale 2)
+	// Node2: amount = 3000.0  (scale 1)
+	// These are mathematically identical but produce different ::text output.
+
+	rows := []struct {
+		id    int
+		n1Amt string // literal SQL for node1
+		n2Amt string // literal SQL for node2
+		label string
+	}{
+		{1, "3000.00", "3000.0", "scale-diff-trailing-zeros"},
+		{2, "1234.5600", "1234.56", "scale-diff-extra-zeros"},
+		{3, "100.10", "100.1", "scale-diff-fractional"},
+		{4, "42", "42.000", "scale-diff-integer-vs-decimal"},
+		{5, "0.00", "0.0", "scale-diff-zero"},
+	}
+
+	for _, pool := range []*pgxpool.Pool{pgCluster.Node1Pool, pgCluster.Node2Pool} {
+		tx, err := pool.Begin(ctx)
+		require.NoError(t, err)
+		_, err = tx.Exec(ctx, "SELECT spock.repair_mode(true)")
+		require.NoError(t, err)
+		for _, r := range rows {
+			amt := r.n1Amt
+			if pool == pgCluster.Node2Pool {
+				amt = r.n2Amt
+			}
+			insertSQL := fmt.Sprintf("INSERT INTO %s (id, amount, label) VALUES ($1, %s, $2) ON CONFLICT (id) DO UPDATE SET amount = %s, label = $2", qualifiedTable, amt, amt)
+			_, err := tx.Exec(ctx, insertSQL, r.id, r.label)
+			require.NoError(t, err)
+		}
+		_, err = tx.Exec(ctx, "SELECT spock.repair_mode(false)")
+		require.NoError(t, err)
+		require.NoError(t, tx.Commit(ctx))
+	}
+
+	// Verify the scales really are different in storage by checking ::text
+	var n1Text, n2Text string
+	err := pgCluster.Node1Pool.QueryRow(ctx, fmt.Sprintf("SELECT amount::text FROM %s WHERE id = 1", qualifiedTable)).Scan(&n1Text)
+	require.NoError(t, err)
+	err = pgCluster.Node2Pool.QueryRow(ctx, fmt.Sprintf("SELECT amount::text FROM %s WHERE id = 1", qualifiedTable)).Scan(&n2Text)
+	require.NoError(t, err)
+	t.Logf("Node1 amount::text = %q, Node2 amount::text = %q", n1Text, n2Text)
+	// They should differ in scale representation
+	require.NotEqual(t, n1Text, n2Text, "precondition: numeric ::text should differ between nodes (different scales)")
+
+	// Now run merkle tree init + build + diff
+	nodes := []string{serviceN1, serviceN2}
+	mtreeTask := newTestMerkleTreeTask(t, qualifiedTable, nodes)
+	mtreeTask.BlockSize = 10 // small block size for this small table
+
+	err = mtreeTask.RunChecks(false)
+	require.NoError(t, err, "RunChecks should succeed")
+
+	err = mtreeTask.MtreeInit()
+	require.NoError(t, err, "MtreeInit should succeed")
+	t.Cleanup(func() {
+		mtreeTask.MtreeTeardown()
+	})
+
+	err = mtreeTask.BuildMtree()
+	require.NoError(t, err, "BuildMtree should succeed")
+
+	mtreeTask.NoCDC = true
+	err = mtreeTask.DiffMtree()
+	require.NoError(t, err, "DiffMtree should succeed")
+
+	// The key assertion: there should be ZERO differences because trim_scale
+	// normalizes numeric values before hashing.
+	pairKey := serviceN1 + "/" + serviceN2
+	if strings.Compare(serviceN1, serviceN2) > 0 {
+		pairKey = serviceN2 + "/" + serviceN1
+	}
+
+	if nodeDiffs, ok := mtreeTask.DiffResult.NodeDiffs[pairKey]; ok {
+		n1Rows := len(nodeDiffs.Rows[serviceN1])
+		n2Rows := len(nodeDiffs.Rows[serviceN2])
+		require.Equal(t, 0, n1Rows, "Expected 0 diff rows on %s, got %d (numeric scale should not cause diffs)", serviceN1, n1Rows)
+		require.Equal(t, 0, n2Rows, "Expected 0 diff rows on %s, got %d (numeric scale should not cause diffs)", serviceN2, n2Rows)
+	}
+	// If pairKey is not in NodeDiffs at all, that means zero diffs — which is correct.
+
+	diffCount := mtreeTask.DiffResult.Summary.DiffRowsCount[pairKey]
+	require.Equal(t, 0, diffCount, "Expected 0 total diff rows, got %d (numeric scale differences should be normalized)", diffCount)
+}
+
 func schemaExists(t *testing.T, ctx context.Context, pool *pgxpool.Pool, schemaName string) bool {
 	t.Helper()
 	var exists bool

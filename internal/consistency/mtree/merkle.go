@@ -365,7 +365,7 @@ func (m *MerkleTreeTask) processWorkItem(work CompareRangesWorkItem, pool1, pool
 		whereClause = "TRUE"
 	}
 
-	rowHashQuery, orderByStr := buildRowHashQuery(m.QualifiedTableName, m.Key, m.Cols, whereClause)
+	rowHashQuery, orderByStr := buildRowHashQuery(m.QualifiedTableName, m.Key, m.Cols, whereClause, m.ColTypes["_ref"])
 	logger.Debug("Row-hash Query: %s, Args: %v", rowHashQuery, args)
 
 	rowsH1, err := pool1.Query(m.Ctx, rowHashQuery, args...)
@@ -630,20 +630,26 @@ func (m *MerkleTreeTask) buildRowKey(row types.OrderedMap) (string, error) {
 	return strings.Join(values, "|"), nil
 }
 
-func buildRowHashQuery(tableName string, key []string, cols []string, whereClause string) (string, string) {
+func isNumericColType(colType string) bool {
+	lower := strings.ToLower(colType)
+	return strings.HasPrefix(lower, "numeric") || strings.HasPrefix(lower, "decimal")
+}
+
+func buildRowHashQuery(tableName string, key []string, cols []string, whereClause string, colTypes map[string]string) (string, string) {
 	pkQuoted := make([]string, len(key))
 	for i, k := range key {
 		pkQuoted[i] = pgx.Identifier{k}.Sanitize()
 	}
-	colQuoted := make([]string, len(cols))
+	colExprs := make([]string, len(cols))
 	for i, c := range cols {
-		colQuoted[i] = pgx.Identifier{c}.Sanitize()
+		quoted := pgx.Identifier{c}.Sanitize()
+		if colTypes != nil && isNumericColType(colTypes[c]) {
+			colExprs[i] = fmt.Sprintf("COALESCE(trim_scale(%s)::text, '')", quoted)
+		} else {
+			colExprs[i] = fmt.Sprintf("COALESCE(%s::text, '')", quoted)
+		}
 	}
-
-	for i := range colQuoted {
-		colQuoted[i] = fmt.Sprintf("COALESCE(%s::text, '')", colQuoted[i])
-	}
-	concatExpr := fmt.Sprintf("concat_ws('|', %s)", strings.Join(colQuoted, ", "))
+	concatExpr := fmt.Sprintf("concat_ws('|', %s)", strings.Join(colExprs, ", "))
 
 	orderBy := strings.Join(pkQuoted, ", ")
 	selectList := strings.Join(pkQuoted, ", ") + ", encode(digest(" + concatExpr + ",'sha256'),'hex') as row_hash"
@@ -1199,6 +1205,15 @@ func (m *MerkleTreeTask) RunChecks(skipValidation bool) error {
 				return fmt.Errorf("failed to get pkey column types on node %s: %w", nodeInfo["Name"], err)
 			}
 			m.PKeyTypes = pkeyTypes
+
+			colTypes, err := queries.GetColumnTypes(m.Ctx, tx, m.Schema, m.Table)
+			if err != nil {
+				return fmt.Errorf("failed to get column types on node %s: %w", nodeInfo["Name"], err)
+			}
+			if m.ColTypes == nil {
+				m.ColTypes = make(map[string]map[string]string)
+			}
+			m.ColTypes["_ref"] = colTypes
 		}
 
 		if strings.Join(currentColsSlice, ",") != strings.Join(localCols, ",") || strings.Join(currentKeySlice, ",") != strings.Join(localKey, ",") {
@@ -2377,8 +2392,11 @@ func (m *MerkleTreeTask) computeLeafHashes(pool *pgxpool.Pool, tx pgx.Tx, ranges
 func (m *MerkleTreeTask) leafHashWorker(wg *sync.WaitGroup, jobs <-chan types.BlockRange, results chan<- LeafHashResult, pool *pgxpool.Pool, bar *mpb.Bar) {
 	defer wg.Done()
 
+	// Use reference column types for hash computation (schemas are validated to match)
+	refColTypes := m.ColTypes["_ref"]
+
 	for block := range jobs {
-		leafHash, err := queries.ComputeLeafHashes(m.Ctx, pool, m.Schema, m.Table, m.SimplePrimaryKey, m.Key, block.RangeStart, block.RangeEnd)
+		leafHash, err := queries.ComputeLeafHashes(m.Ctx, pool, m.Schema, m.Table, m.SimplePrimaryKey, m.Key, block.RangeStart, block.RangeEnd, m.Cols, refColTypes)
 		if err != nil {
 			results <- LeafHashResult{BlockID: block.NodePosition, Err: fmt.Errorf("failed to compute hash for block %d: %w", block.NodePosition, err)}
 			bar.Increment()

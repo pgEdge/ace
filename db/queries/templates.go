@@ -890,12 +890,12 @@ var SQLTemplates = Templates{
         {{- end }}
     `)),
 	TDBlockHashSQL: template.Must(template.New("tdBlockHashSQL").Parse(`
-        SELECT encode(digest(COALESCE(string_agg({{.TableAlias}}::text, '|' ORDER BY {{.PkOrderByStr}}), 'EMPTY_BLOCK'), 'sha256'), 'hex')
+        SELECT encode(digest(COALESCE(string_agg({{.RowTextExpr}}, '|' ORDER BY {{.PkOrderByStr}}), 'EMPTY_BLOCK'), 'sha256'), 'hex')
         FROM {{.SchemaIdent}}.{{.TableIdent}} AS {{.TableAlias}}
         WHERE {{.WhereClause}}
     `)),
 	MtreeLeafHashSQL: template.Must(template.New("mtreeLeafHashSQL").Parse(`
-        SELECT digest(COALESCE(string_agg({{.TableAlias}}::text, '|' ORDER BY {{.PkOrderByStr}}), 'EMPTY_BLOCK'), 'sha256')
+        SELECT digest(COALESCE(string_agg({{.RowTextExpr}}, '|' ORDER BY {{.PkOrderByStr}}), 'EMPTY_BLOCK'), 'sha256')
         FROM {{.SchemaIdent}}.{{.TableIdent}} AS {{.TableAlias}}
         WHERE {{.WhereClause}}
     `)),

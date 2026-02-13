@@ -277,6 +277,8 @@ func TestBlockHashSQL(t *testing.T) {
 		schema            string
 		table             string
 		primaryKeyCols    []string
+		allCols           []string
+		colTypes          map[string]string
 		includeLower      bool
 		includeUpper      bool
 		filter            string
@@ -284,10 +286,12 @@ func TestBlockHashSQL(t *testing.T) {
 		wantErr           bool
 	}{
 		{
-			name:           "valid inputs - single primary key",
+			name:           "nil cols - fallback to table alias cast",
 			schema:         "public",
 			table:          "events",
 			primaryKeyCols: []string{"event_id"},
+			allCols:        nil,
+			colTypes:       nil,
 			includeLower:   true,
 			includeUpper:   true,
 			filter:         "",
@@ -300,10 +304,31 @@ func TestBlockHashSQL(t *testing.T) {
 			wantErr: false,
 		},
 		{
-			name:           "valid inputs - composite primary key",
+			name:           "with columns - per-column concat_ws",
+			schema:         "public",
+			table:          "events",
+			primaryKeyCols: []string{"event_id"},
+			allCols:        []string{"event_id", "name", "amount"},
+			colTypes:       map[string]string{"event_id": "integer", "name": "text", "amount": "numeric(10,2)"},
+			includeLower:   true,
+			includeUpper:   true,
+			filter:         "",
+			wantQueryContains: []string{
+				`FROM "public"."events" AS _tbl_`,
+				`encode(digest(COALESCE(string_agg(concat_ws('|',`,
+				`COALESCE(_tbl_."event_id"::text, '')`,
+				`COALESCE(_tbl_."name"::text, '')`,
+				`COALESCE(trim_scale(_tbl_."amount")::text, '')`,
+			},
+			wantErr: false,
+		},
+		{
+			name:           "composite primary key with columns",
 			schema:         "commerce",
 			table:          "line_items",
 			primaryKeyCols: []string{"order_id", "item_seq"},
+			allCols:        []string{"order_id", "item_seq", "price"},
+			colTypes:       map[string]string{"order_id": "integer", "item_seq": "integer", "price": "decimal"},
 			includeLower:   true,
 			includeUpper:   true,
 			filter:         "",
@@ -311,7 +336,8 @@ func TestBlockHashSQL(t *testing.T) {
 				`FROM "commerce"."line_items" AS _tbl_`,
 				`ORDER BY "order_id", "item_seq"`,
 				`WHERE ROW("order_id", "item_seq") >= ROW($1, $2) AND ROW("order_id", "item_seq") < ROW($3, $4)`,
-				`encode(digest(COALESCE(string_agg(_tbl_::text, '|' ORDER BY "order_id", "item_seq"), 'EMPTY_BLOCK'), 'sha256'), 'hex')`,
+				`encode(digest(COALESCE(string_agg(concat_ws('|',`,
+				`COALESCE(trim_scale(_tbl_."price")::text, '')`,
 			},
 			wantErr: false,
 		},
@@ -364,7 +390,7 @@ func TestBlockHashSQL(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			query, err := BlockHashSQL(tt.schema, tt.table, tt.primaryKeyCols, "TD_BLOCK_HASH" /* mode */, tt.includeLower, tt.includeUpper, tt.filter)
+			query, err := BlockHashSQL(tt.schema, tt.table, tt.primaryKeyCols, "TD_BLOCK_HASH" /* mode */, tt.includeLower, tt.includeUpper, tt.filter, tt.allCols, tt.colTypes)
 
 			if (err != nil) != tt.wantErr {
 				t.Errorf("BlockHashSQL() error = %v, wantErr %v", err, tt.wantErr)

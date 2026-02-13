@@ -427,10 +427,13 @@ func scanRow(pgRows pgx.Rows) (types.OrderedMap, error) {
 		var processedVal any
 		switch v := val.(type) {
 		case pgtype.Numeric:
-			var fValue float64
 			if v.Status == pgtype.Present {
-				v.AssignTo(&fValue)
-				processedVal = fValue
+				text, err := v.EncodeText(nil, nil)
+				if err == nil {
+					processedVal = utils.NormalizeNumericString(string(text))
+				} else {
+					processedVal = v
+				}
 			} else {
 				processedVal = nil
 			}

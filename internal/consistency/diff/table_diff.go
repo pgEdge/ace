@@ -368,7 +368,13 @@ func (t *TableDiffTask) getBlockHashSQL(hasLower, hasUpper bool) (string, error)
 		return sql, nil
 	}
 
-	query, err := queries.BlockHashSQL(t.Schema, t.Table, t.Key, "TD_BLOCK_HASH" /* mode */, hasLower, hasUpper, t.EffectiveFilter)
+	// Use any node's column types for hashing (schemas are validated to match)
+	var mergedColTypes map[string]string
+	for _, ct := range t.ColTypes {
+		mergedColTypes = ct
+		break
+	}
+	query, err := queries.BlockHashSQL(t.Schema, t.Table, t.Key, "TD_BLOCK_HASH" /* mode */, hasLower, hasUpper, t.EffectiveFilter, t.Cols, mergedColTypes)
 	if err != nil {
 		return "", err
 	}
@@ -563,10 +569,13 @@ func (t *TableDiffTask) fetchRows(nodeName string, r Range) ([]types.OrderedMap,
 			} else {
 				switch v := val.(type) {
 				case pgtype.Numeric:
-					var fValue float64
 					if v.Status == pgtype.Present {
-						v.AssignTo(&fValue)
-						processedVal = fValue
+						text, err := v.EncodeText(nil, nil)
+						if err == nil {
+							processedVal = utils.NormalizeNumericString(string(text))
+						} else {
+							processedVal = v
+						}
 					} else {
 						processedVal = nil
 					}
