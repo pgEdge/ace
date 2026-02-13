@@ -29,6 +29,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgtype"
+	pgxv5type "github.com/jackc/pgx/v5/pgtype"
 	"github.com/pgedge/ace/pkg/config"
 	"github.com/pgedge/ace/pkg/logger"
 	"github.com/pgedge/ace/pkg/types"
@@ -962,6 +963,50 @@ func rowsToMap(rows []types.OrderedMap, pkeyCols []string) (map[string]types.Ord
 	return rowMap, nil
 }
 
+// NormalizeNumericString strips trailing fractional zeros from a numeric string,
+// acting as the Go-side equivalent of PostgreSQL's trim_scale().
+// Examples: "3000.00" → "3000", "3000.10" → "3000.1", "3000" → "3000"
+func NormalizeNumericString(s string) string {
+	dotIdx := strings.IndexByte(s, '.')
+	if dotIdx < 0 {
+		return s
+	}
+	// Trim trailing zeros after the decimal point
+	trimmed := strings.TrimRight(s, "0")
+	// If all fractional digits were zeros, remove the decimal point too
+	trimmed = strings.TrimRight(trimmed, ".")
+	return trimmed
+}
+
+// stringifyValue converts a value to its string representation for comparison,
+// normalizing numeric types to strip trailing fractional zeros.
+func stringifyValue(val any) string {
+	switch v := val.(type) {
+	case pgtype.Numeric:
+		// pgtype v1 (standalone, used in table_diff/table_rerun paths)
+		if v.Status == pgtype.Present {
+			text, err := v.EncodeText(nil, nil)
+			if err == nil {
+				return NormalizeNumericString(string(text))
+			}
+		}
+		return fmt.Sprintf("%v", val)
+	case pgxv5type.Numeric:
+		// pgx v5 pgtype (used in merkle's processRows via rows.Values())
+		if v.Valid {
+			text, err := v.MarshalJSON()
+			if err == nil {
+				return NormalizeNumericString(string(text))
+			}
+		}
+		return fmt.Sprintf("%v", val)
+	case string:
+		return v
+	default:
+		return fmt.Sprintf("%v", val)
+	}
+}
+
 func areRowsModified(row1, row2 types.OrderedMap, dataCols []string) (bool, error) {
 	row1Map := OrderedMapToMap(row1)
 	row2Map := OrderedMapToMap(row2)
@@ -974,8 +1019,8 @@ func areRowsModified(row1, row2 types.OrderedMap, dataCols []string) (bool, erro
 			return false, fmt.Errorf("column %s not found in one of the rows", col)
 		}
 
-		sVal1 := fmt.Sprintf("%v", val1)
-		sVal2 := fmt.Sprintf("%v", val2)
+		sVal1 := stringifyValue(val1)
+		sVal2 := stringifyValue(val2)
 
 		if sVal1 != sVal2 {
 			return true, nil

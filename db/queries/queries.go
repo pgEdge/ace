@@ -540,7 +540,35 @@ func GetPkeyOffsets(ctx context.Context, db DBQuerier, schema, table string, key
 	return offsets, nil
 }
 
-func BlockHashSQL(schema, table string, primaryKeyCols []string, mode string, includeLower, includeUpper bool, filter string) (string, error) {
+// isNumericType returns true if a PostgreSQL type string represents a numeric/decimal type.
+func isNumericType(colType string) bool {
+	lower := strings.ToLower(colType)
+	return strings.HasPrefix(lower, "numeric") || strings.HasPrefix(lower, "decimal")
+}
+
+// buildRowTextExpr builds a SQL expression that converts a single row to text.
+// When allCols is provided, it returns concat_ws('|', col1_expr, col2_expr, ...)
+// with numeric/decimal columns wrapped in trim_scale() to normalize trailing zeros.
+// If allCols is nil/empty, falls back to the table-alias::text whole-row cast.
+func buildRowTextExpr(tableAlias string, allCols []string, colTypes map[string]string) string {
+	if len(allCols) == 0 {
+		return tableAlias + "::text"
+	}
+
+	exprs := make([]string, len(allCols))
+	for i, col := range allCols {
+		quoted := pgx.Identifier{col}.Sanitize()
+		qualifiedCol := tableAlias + "." + quoted
+		if colTypes != nil && isNumericType(colTypes[col]) {
+			exprs[i] = fmt.Sprintf("COALESCE(trim_scale(%s)::text, '')", qualifiedCol)
+		} else {
+			exprs[i] = fmt.Sprintf("COALESCE(%s::text, '')", qualifiedCol)
+		}
+	}
+	return fmt.Sprintf("concat_ws('|', %s)", strings.Join(exprs, ", "))
+}
+
+func BlockHashSQL(schema, table string, primaryKeyCols []string, mode string, includeLower, includeUpper bool, filter string, allCols []string, colTypes map[string]string) (string, error) {
 	if len(primaryKeyCols) == 0 {
 		return "", fmt.Errorf("primaryKeyCols cannot be empty")
 	}
@@ -632,12 +660,15 @@ func BlockHashSQL(schema, table string, primaryKeyCols []string, mode string, in
 		return "", fmt.Errorf("invalid mode: %s", mode)
 	}
 
+	rowTextExpr := buildRowTextExpr(tableAlias, allCols, colTypes)
+
 	data := map[string]any{
 		"SchemaIdent":  schemaIdent,
 		"TableIdent":   tableIdent,
 		"TableAlias":   tableAlias,
 		"PkOrderByStr": pkOrderByStr,
 		"WhereClause":  strings.Join(whereParts, " AND "),
+		"RowTextExpr":  rowTextExpr,
 	}
 	return RenderSQL(tmpl, data)
 }
@@ -1148,11 +1179,11 @@ func UpdateMetadata(ctx context.Context, db DBQuerier, schema, table string, tot
 	return nil
 }
 
-func ComputeLeafHashes(ctx context.Context, db DBQuerier, schema, table string, _ bool, key []string, start []any, end []any) ([]byte, error) {
+func ComputeLeafHashes(ctx context.Context, db DBQuerier, schema, table string, _ bool, key []string, start []any, end []any, allCols []string, colTypes map[string]string) ([]byte, error) {
 	hasLower := len(start) > 0 && !sliceAllNil(start)
 	hasUpper := len(end) > 0 && !sliceAllNil(end)
 
-	sql, err := BlockHashSQL(schema, table, key, "MTREE_LEAF_HASH", hasLower, hasUpper, "")
+	sql, err := BlockHashSQL(schema, table, key, "MTREE_LEAF_HASH", hasLower, hasUpper, "", allCols, colTypes)
 	if err != nil {
 		return nil, err
 	}
