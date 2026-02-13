@@ -5,7 +5,7 @@ All notable changes to ACE will be captured in this document. This project follo
 ## [v1.6.0-beta] 2026-02-14
 
 ### Changed
-- To accomodate value comparison fix below, changed row hash algorithm and added algorithm versioning
+- To accommodate value comparison fix below, changed row hash algorithm and added algorithm versioning
     - If using Merkle Trees, it will automatically update to the new format when detected.
       Alternatively, you can reinitialize the trees.
 
