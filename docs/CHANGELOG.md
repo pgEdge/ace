@@ -2,25 +2,15 @@
 
 All notable changes to ACE will be captured in this document. This project follows semantic versioning; the latest changes appear first.
 
-## [v1.5.1] - 2025-12-22
+## [v1.5.5] - 2026-02-12
 
 ### Changed
-- Advanced repair terminology updated from `--repair-file` to `--repair-plan` across CLI/docs and HTML diff report export text.
+- Change --concurrency-factor from int multiplier to float64 CPU ratio. The number of workers is based on the number of cores times this factor. The default is now 0.5.
 
-## [v1.5.0] - 2025-12-18
-
-### Added
-- Advanced repair plans (`--repair-file`) for `table-repair`, including rule-based actions, row overrides, and custom rows, plus new docs and examples.
-- Catastrophic node failure recovery workflow: `table-diff --against-origin` with optional `--until` fencing and `table-repair --recovery-mode` auto-selecting a source of truth using Spock origin/slot LSNs.
-- HTML diff reports can now build and export starter repair plans with bulk actions, custom helpers, and copy/download controls.
+## [v1.5.4] - 2026-01-28
 
 ### Changed
-- Table filters are applied inline (no filtered views), and diff summaries now record the effective filter that combines table filters with origin/until constraints.
-- Spock origin identifiers in diff metadata are resolved to node names when available.
-
-### Fixed
-- Dockerfile honors `TARGETARCH` for multi-arch builds.
-- Repair-plan row overrides now compare numeric primary keys reliably.
+- Add 3rd party license notice
 
 ## [v1.5.3] - 2026-01-15
 
