@@ -124,7 +124,7 @@ type Templates struct {
 	GetHashVersion                   *template.Template
 	MarkAllLeavesDirty               *template.Template
 	UpdateHashVersion                *template.Template
-  GetReplicationOriginByName       *template.Template
+	GetReplicationOriginByName       *template.Template
 	CreateReplicationOrigin          *template.Template
 	SetupReplicationOriginSession    *template.Template
 	ResetReplicationOriginSession    *template.Template
@@ -1578,8 +1578,9 @@ var SQLTemplates = Templates{
 	UpdateHashVersion: template.Must(template.New("updateHashVersion").Parse(`
 		UPDATE spock.ace_mtree_metadata
 		SET hash_version = $1, last_updated = current_timestamp
-		WHERE schema_name = $2 AND table_name = $3,
-    	GetReplicationOriginByName: template.Must(template.New("getReplicationOriginByName").Parse(`
+		WHERE schema_name = $2 AND table_name = $3
+	`)),
+	GetReplicationOriginByName: template.Must(template.New("getReplicationOriginByName").Parse(`
 		SELECT roident FROM pg_replication_origin WHERE roname = $1
 	`)),
 	CreateReplicationOrigin: template.Must(template.New("createReplicationOrigin").Parse(`
