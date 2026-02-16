@@ -108,7 +108,7 @@ type DiffSummary struct {
 	Nodes                 []string       `json:"nodes"`
 	BlockSize             int            `json:"block_size"`
 	CompareUnitSize       int            `json:"compare_unit_size"`
-	ConcurrencyFactor     int            `json:"concurrency_factor"`
+	ConcurrencyFactor     float64        `json:"concurrency_factor"`
 	MaxDiffRows           int64          `json:"max_diff_rows"`
 	StartTime             string         `json:"start_time"`
 	EndTime               string         `json:"end_time"`

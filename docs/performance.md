@@ -29,7 +29,7 @@ When invoking [ACE commands](commands/index.md), review the available command op
     Controls the number of rows hashed per block. Larger blocks reduce round-trips but can increase memory usage or hash time. Defaults to `100000`, and respects the guardrails defined in `ace.yaml` unless `--override-block-size`/`-B` is set.
 
 - **`--concurrency-factor`**
-    Increases the number of workers per node (1–10). Higher values improve throughput on machines with spare CPU, but can create contention on smaller hosts. Default is `1`.
+    CPU ratio that controls how many workers ACE spawns relative to available CPUs (0.0–4.0). For example, `0.5` on a 16-CPU machine creates 8 workers. Higher values improve throughput on machines with spare CPU, but can create contention on smaller or busier hosts. Default is `0.5`.
 
 - **`--compare-unit-size`**
     Sets the minimum block size used when ACE recursively drills into mismatched blocks. Smaller values provide more granular comparisons at the cost of additional round-trips. Default is `10000`.

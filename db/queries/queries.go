@@ -26,6 +26,11 @@ import (
 	"github.com/pgedge/ace/pkg/types"
 )
 
+// CurrentHashVersion is the version of the hash algorithm used by this build.
+// Increment when the SQL hash computation changes (e.g., switching from
+// whole-row ::text to per-column concat_ws with trim_scale).
+const CurrentHashVersion = 2
+
 type DBQuerier interface {
 	Exec(context.Context, string, ...interface{}) (pgconn.CommandTag, error)
 	Query(context.Context, string, ...interface{}) (pgx.Rows, error)
@@ -540,7 +545,35 @@ func GetPkeyOffsets(ctx context.Context, db DBQuerier, schema, table string, key
 	return offsets, nil
 }
 
-func BlockHashSQL(schema, table string, primaryKeyCols []string, mode string, includeLower, includeUpper bool, filter string) (string, error) {
+// isNumericType returns true if a PostgreSQL type string represents a numeric/decimal type.
+func isNumericType(colType string) bool {
+	lower := strings.ToLower(colType)
+	return strings.HasPrefix(lower, "numeric") || strings.HasPrefix(lower, "decimal")
+}
+
+// buildRowTextExpr builds a SQL expression that converts a single row to text.
+// When allCols is provided, it returns concat_ws('|', col1_expr, col2_expr, ...)
+// with numeric/decimal columns wrapped in trim_scale() to normalize trailing zeros.
+// If allCols is nil/empty, falls back to the table-alias::text whole-row cast.
+func buildRowTextExpr(tableAlias string, allCols []string, colTypes map[string]string) string {
+	if len(allCols) == 0 {
+		return tableAlias + "::text"
+	}
+
+	exprs := make([]string, len(allCols))
+	for i, col := range allCols {
+		quoted := pgx.Identifier{col}.Sanitize()
+		qualifiedCol := tableAlias + "." + quoted
+		if colTypes != nil && isNumericType(colTypes[col]) {
+			exprs[i] = fmt.Sprintf("COALESCE(trim_scale(%s)::text, '')", qualifiedCol)
+		} else {
+			exprs[i] = fmt.Sprintf("COALESCE(%s::text, '')", qualifiedCol)
+		}
+	}
+	return fmt.Sprintf("concat_ws('|', %s)", strings.Join(exprs, ", "))
+}
+
+func BlockHashSQL(schema, table string, primaryKeyCols []string, mode string, includeLower, includeUpper bool, filter string, allCols []string, colTypes map[string]string) (string, error) {
 	if len(primaryKeyCols) == 0 {
 		return "", fmt.Errorf("primaryKeyCols cannot be empty")
 	}
@@ -632,12 +665,15 @@ func BlockHashSQL(schema, table string, primaryKeyCols []string, mode string, in
 		return "", fmt.Errorf("invalid mode: %s", mode)
 	}
 
+	rowTextExpr := buildRowTextExpr(tableAlias, allCols, colTypes)
+
 	data := map[string]any{
 		"SchemaIdent":  schemaIdent,
 		"TableIdent":   tableIdent,
 		"TableAlias":   tableAlias,
 		"PkOrderByStr": pkOrderByStr,
 		"WhereClause":  strings.Join(whereParts, " AND "),
+		"RowTextExpr":  rowTextExpr,
 	}
 	return RenderSQL(tmpl, data)
 }
@@ -1134,13 +1170,13 @@ func GetPkeyType(ctx context.Context, db DBQuerier, schema, table, pkey string) 
 	return pkeyType, nil
 }
 
-func UpdateMetadata(ctx context.Context, db DBQuerier, schema, table string, totalRows int64, blockSize, numBlocks int, isComposite bool) error {
+func UpdateMetadata(ctx context.Context, db DBQuerier, schema, table string, totalRows int64, blockSize, numBlocks int, isComposite bool, hashVersion int) error {
 	sql, err := RenderSQL(SQLTemplates.UpdateMetadata, nil)
 	if err != nil {
 		return fmt.Errorf("failed to render UpdateMetadata SQL: %w", err)
 	}
 
-	_, err = db.Exec(ctx, sql, schema, table, totalRows, blockSize, numBlocks, isComposite)
+	_, err = db.Exec(ctx, sql, schema, table, totalRows, blockSize, numBlocks, isComposite, hashVersion)
 	if err != nil {
 		return fmt.Errorf("query to update metadata for '%s.%s' failed: %w", schema, table, err)
 	}
@@ -1148,11 +1184,11 @@ func UpdateMetadata(ctx context.Context, db DBQuerier, schema, table string, tot
 	return nil
 }
 
-func ComputeLeafHashes(ctx context.Context, db DBQuerier, schema, table string, _ bool, key []string, start []any, end []any) ([]byte, error) {
+func ComputeLeafHashes(ctx context.Context, db DBQuerier, schema, table string, _ bool, key []string, start []any, end []any, allCols []string, colTypes map[string]string) ([]byte, error) {
 	hasLower := len(start) > 0 && !sliceAllNil(start)
 	hasUpper := len(end) > 0 && !sliceAllNil(end)
 
-	sql, err := BlockHashSQL(schema, table, key, "MTREE_LEAF_HASH", hasLower, hasUpper, "")
+	sql, err := BlockHashSQL(schema, table, key, "MTREE_LEAF_HASH", hasLower, hasUpper, "", allCols, colTypes)
 	if err != nil {
 		return nil, err
 	}
@@ -2293,6 +2329,63 @@ func GetBlockSizeFromMetadata(ctx context.Context, db DBQuerier, schema, table s
 		return 0, fmt.Errorf("query to get block size from metadata for '%s.%s' failed: %w", schema, table, err)
 	}
 	return blockSize, nil
+}
+
+func EnsureHashVersionColumn(ctx context.Context, db DBQuerier) error {
+	sql, err := RenderSQL(SQLTemplates.EnsureHashVersionColumn, nil)
+	if err != nil {
+		return fmt.Errorf("failed to render EnsureHashVersionColumn SQL: %w", err)
+	}
+
+	_, err = db.Exec(ctx, sql)
+	if err != nil {
+		return fmt.Errorf("failed to add hash_version column to metadata table: %w", err)
+	}
+	return nil
+}
+
+func GetHashVersion(ctx context.Context, db DBQuerier, schema, table string) (int, error) {
+	sql, err := RenderSQL(SQLTemplates.GetHashVersion, nil)
+	if err != nil {
+		return 0, fmt.Errorf("failed to render GetHashVersion SQL: %w", err)
+	}
+
+	var version int
+	err = db.QueryRow(ctx, sql, schema, table).Scan(&version)
+	if err != nil {
+		return 0, fmt.Errorf("query to get hash version for '%s.%s' failed: %w", schema, table, err)
+	}
+	return version, nil
+}
+
+func MarkAllLeavesDirty(ctx context.Context, db DBQuerier, mtreeTable string) (int64, error) {
+	data := map[string]interface{}{
+		"MtreeTable": mtreeTable,
+	}
+
+	sql, err := RenderSQL(SQLTemplates.MarkAllLeavesDirty, data)
+	if err != nil {
+		return 0, fmt.Errorf("failed to render MarkAllLeavesDirty SQL: %w", err)
+	}
+
+	tag, err := db.Exec(ctx, sql)
+	if err != nil {
+		return 0, fmt.Errorf("query to mark all leaves dirty for '%s' failed: %w", mtreeTable, err)
+	}
+	return tag.RowsAffected(), nil
+}
+
+func UpdateHashVersion(ctx context.Context, db DBQuerier, schema, table string, version int) error {
+	sql, err := RenderSQL(SQLTemplates.UpdateHashVersion, nil)
+	if err != nil {
+		return fmt.Errorf("failed to render UpdateHashVersion SQL: %w", err)
+	}
+
+	_, err = db.Exec(ctx, sql, version, schema, table)
+	if err != nil {
+		return fmt.Errorf("query to update hash version for '%s.%s' failed: %w", schema, table, err)
+	}
+	return nil
 }
 
 func GetMaxNodeLevel(ctx context.Context, db DBQuerier, mtreeTable string) (int, error) {

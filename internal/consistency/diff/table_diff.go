@@ -68,7 +68,7 @@ type TableDiffTask struct {
 	FilteredViewCreated bool
 
 	BlockSize         int
-	ConcurrencyFactor int
+	ConcurrencyFactor float64
 	Output            string
 	TableFilter       string
 	QuietMode         bool
@@ -368,7 +368,13 @@ func (t *TableDiffTask) getBlockHashSQL(hasLower, hasUpper bool) (string, error)
 		return sql, nil
 	}
 
-	query, err := queries.BlockHashSQL(t.Schema, t.Table, t.Key, "TD_BLOCK_HASH" /* mode */, hasLower, hasUpper, t.EffectiveFilter)
+	// Use any node's column types for hashing (schemas are validated to match)
+	var mergedColTypes map[string]string
+	for _, ct := range t.ColTypes {
+		mergedColTypes = ct
+		break
+	}
+	query, err := queries.BlockHashSQL(t.Schema, t.Table, t.Key, "TD_BLOCK_HASH" /* mode */, hasLower, hasUpper, t.EffectiveFilter, t.Cols, mergedColTypes)
 	if err != nil {
 		return "", err
 	}
@@ -563,10 +569,13 @@ func (t *TableDiffTask) fetchRows(nodeName string, r Range) ([]types.OrderedMap,
 			} else {
 				switch v := val.(type) {
 				case pgtype.Numeric:
-					var fValue float64
 					if v.Status == pgtype.Present {
-						v.AssignTo(&fValue)
-						processedVal = fValue
+						text, err := v.EncodeText(nil, nil)
+						if err == nil {
+							processedVal = utils.NormalizeNumericString(string(text))
+						} else {
+							processedVal = v
+						}
 					} else {
 						processedVal = nil
 					}
@@ -604,6 +613,17 @@ func (t *TableDiffTask) fetchRows(nodeName string, r Range) ([]types.OrderedMap,
 					} else {
 						processedVal = nil
 					}
+				case pgtype.UUID:
+					if v.Status == pgtype.Present {
+						processedVal = fmt.Sprintf("%x-%x-%x-%x-%x",
+							v.Bytes[0:4], v.Bytes[4:6], v.Bytes[6:8], v.Bytes[8:10], v.Bytes[10:16])
+					} else {
+						processedVal = nil
+					}
+				case [16]byte: // pgx/v5 returns UUIDs as [16]byte
+					// nil caught above
+					processedVal = fmt.Sprintf("%x-%x-%x-%x-%x",
+						v[0:4], v[4:6], v[6:8], v[8:10], v[10:16])
 				case time.Time:
 					processedVal = v
 				case string:
@@ -702,8 +722,8 @@ func (t *TableDiffTask) Validate() error {
 		t.MaxDiffRows = config.Cfg.TableDiff.MaxDiffRows
 	}
 
-	if t.ConcurrencyFactor > 10 || t.ConcurrencyFactor < 1 {
-		return fmt.Errorf("invalid value range for concurrency_factor, must be between 1 and 10")
+	if t.ConcurrencyFactor > 4.0 || t.ConcurrencyFactor <= 0 {
+		return fmt.Errorf("invalid value range for concurrency_factor, must be > 0 and <= 4.0")
 	}
 
 	if t.Output != "json" && t.Output != "html" {
@@ -1191,7 +1211,10 @@ func (t *TableDiffTask) ExecuteTask() (err error) {
 		ctx = context.Background()
 	}
 
-	maxConcurrent := runtime.NumCPU() * t.ConcurrencyFactor
+	maxConcurrent := int(math.Round(float64(runtime.NumCPU()) * t.ConcurrencyFactor))
+	if maxConcurrent < 1 {
+		maxConcurrent = 1
+	}
 	logger.Info("Using %d CPUs, max concurrent workers = %d", runtime.NumCPU(), maxConcurrent)
 	sem := make(chan struct{}, maxConcurrent)
 

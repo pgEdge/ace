@@ -120,7 +120,11 @@ type Templates struct {
 	RemoveTableFromCDCMetadata       *template.Template
 	GetSpockOriginLSNForNode         *template.Template
 	GetSpockSlotLSNForNode           *template.Template
-	GetReplicationOriginByName       *template.Template
+	EnsureHashVersionColumn          *template.Template
+	GetHashVersion                   *template.Template
+	MarkAllLeavesDirty               *template.Template
+	UpdateHashVersion                *template.Template
+  GetReplicationOriginByName       *template.Template
 	CreateReplicationOrigin          *template.Template
 	SetupReplicationOriginSession    *template.Template
 	ResetReplicationOriginSession    *template.Template
@@ -138,6 +142,7 @@ var SQLTemplates = Templates{
 			block_size int,
 			num_blocks int,
 			is_composite boolean NOT NULL DEFAULT false,
+			hash_version int NOT NULL DEFAULT 2,
 			last_updated timestamptz,
 			PRIMARY KEY (schema_name, table_name)
 		)`),
@@ -845,6 +850,7 @@ var SQLTemplates = Templates{
 				block_size,
 				num_blocks,
 				is_composite,
+				hash_version,
 				last_updated
 			)
 		VALUES
@@ -855,6 +861,7 @@ var SQLTemplates = Templates{
 				$4,
 				$5,
 				$6,
+				$7,
 				current_timestamp
 			)
 		ON CONFLICT (schema_name, table_name) DO
@@ -864,6 +871,7 @@ var SQLTemplates = Templates{
 			block_size = EXCLUDED.block_size,
 			num_blocks = EXCLUDED.num_blocks,
 			is_composite = EXCLUDED.is_composite,
+			hash_version = EXCLUDED.hash_version,
 			last_updated = EXCLUDED.last_updated
 	`)),
 	DeleteMetadata: template.Must(template.New("deleteMetadata").Parse(`
@@ -896,12 +904,12 @@ var SQLTemplates = Templates{
         {{- end }}
     `)),
 	TDBlockHashSQL: template.Must(template.New("tdBlockHashSQL").Parse(`
-        SELECT encode(digest(COALESCE(string_agg({{.TableAlias}}::text, '|' ORDER BY {{.PkOrderByStr}}), 'EMPTY_BLOCK'), 'sha256'), 'hex')
+        SELECT encode(digest(COALESCE(string_agg({{.RowTextExpr}}, '|' ORDER BY {{.PkOrderByStr}}), 'EMPTY_BLOCK'), 'sha256'), 'hex')
         FROM {{.SchemaIdent}}.{{.TableIdent}} AS {{.TableAlias}}
         WHERE {{.WhereClause}}
     `)),
 	MtreeLeafHashSQL: template.Must(template.New("mtreeLeafHashSQL").Parse(`
-        SELECT digest(COALESCE(string_agg({{.TableAlias}}::text, '|' ORDER BY {{.PkOrderByStr}}), 'EMPTY_BLOCK'), 'sha256')
+        SELECT digest(COALESCE(string_agg({{.RowTextExpr}}, '|' ORDER BY {{.PkOrderByStr}}), 'EMPTY_BLOCK'), 'sha256')
         FROM {{.SchemaIdent}}.{{.TableIdent}} AS {{.TableAlias}}
         WHERE {{.WhereClause}}
     `)),
@@ -1551,7 +1559,27 @@ var SQLTemplates = Templates{
 		ORDER BY rs.confirmed_flush_lsn DESC
 		LIMIT 1
 	`)),
-	GetReplicationOriginByName: template.Must(template.New("getReplicationOriginByName").Parse(`
+	EnsureHashVersionColumn: template.Must(template.New("ensureHashVersionColumn").Parse(`
+		ALTER TABLE spock.ace_mtree_metadata
+		ADD COLUMN IF NOT EXISTS hash_version int NOT NULL DEFAULT 1
+	`)),
+	GetHashVersion: template.Must(template.New("getHashVersion").Parse(`
+		SELECT COALESCE(
+			(SELECT hash_version FROM spock.ace_mtree_metadata
+			 WHERE schema_name = $1 AND table_name = $2),
+			1
+		)
+	`)),
+	MarkAllLeavesDirty: template.Must(template.New("markAllLeavesDirty").Parse(`
+		UPDATE {{.MtreeTable}}
+		SET dirty = true
+		WHERE node_level = 0
+	`)),
+	UpdateHashVersion: template.Must(template.New("updateHashVersion").Parse(`
+		UPDATE spock.ace_mtree_metadata
+		SET hash_version = $1, last_updated = current_timestamp
+		WHERE schema_name = $2 AND table_name = $3,
+    	GetReplicationOriginByName: template.Must(template.New("getReplicationOriginByName").Parse(`
 		SELECT roident FROM pg_replication_origin WHERE roname = $1
 	`)),
 	CreateReplicationOrigin: template.Must(template.New("createReplicationOrigin").Parse(`

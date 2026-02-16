@@ -55,3 +55,28 @@ func TestConvertToPgxType_FallbackStringer(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "stringer:x", val)
 }
+
+func TestNormalizeNumericString(t *testing.T) {
+	tests := []struct {
+		input string
+		want  string
+	}{
+		{"3000.00", "3000"},
+		{"3000.10", "3000.1"},
+		{"3000", "3000"},
+		{"0.0", "0"},
+		{"0.00", "0"},
+		{"1.23456", "1.23456"},
+		{"100.0100", "100.01"},
+		{"-5.50", "-5.5"},
+		{"-5.00", "-5"},
+		{"0", "0"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.input, func(t *testing.T) {
+			got := NormalizeNumericString(tt.input)
+			require.Equal(t, tt.want, got)
+		})
+	}
+}

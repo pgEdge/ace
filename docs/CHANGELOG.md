@@ -1,6 +1,34 @@
 # Changelog
 
-All notable changes to ACE will be captured in this document. The project follows semantic versioning; the latest changes appear first.
+All notable changes to ACE will be captured in this document. This project follows semantic versioning; the latest changes appear first.
+
+## [v1.6.0-beta] 2026-02-14
+
+### Changed
+- To accommodate value comparison fix below, changed row hash algorithm and added algorithm versioning
+    - If using Merkle Trees, it will automatically update to the new format when detected.
+      Alternatively, you can reinitialize the trees.
+
+### Fixed
+- Fixed column comparisons with equal values but different scales (e.g., 3000.00 vs 3000.0).
+
+## [v1.5.5] - 2026-02-12
+
+### Changed
+- Change --concurrency-factor from int multiplier to float64 CPU ratio. The number of workers is based on the number of cores times this factor. The default is now 0.5.
+
+## [v1.5.4] - 2026-01-28
+
+### Changed
+- Add 3rd party license notice
+
+## [v1.5.3] - 2026-01-15
+
+### Changed
+- Update copyrights to 2026
+
+### Fixed
+- UUID data type handling for table diff and repair fixed.
 
 ## [v1.5.2] - 2025-12-30
 

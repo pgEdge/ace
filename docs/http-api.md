@@ -90,7 +90,7 @@ Request body:
 | `dbname` | string | no | Overrides DB name from config. |
 | `nodes` | array[string] | no | Defaults to `"all"`. |
 | `block_size` | int | no | Defaults to `table_diff.diff_block_size` or `100000`. |
-| `concurrency_factor` | int | no | Defaults to `table_diff.concurrency_factor` or `1`. |
+| `concurrency_factor` | float | no | CPU ratio (0.0–4.0). Defaults to `table_diff.concurrency_factor` or `0.5`. |
 | `compare_unit_size` | int | no | Defaults to `table_diff.compare_unit_size` or `10000`. |
 | `max_diff_rows` | int64 | no | Defaults to `table_diff.max_diff_rows` or `0` (no limit). |
 | `table_filter` | string | no | SQL `WHERE` predicate (without `WHERE`). |
@@ -190,7 +190,7 @@ Request body:
 | `skip_file` | string | no | File path (server-side). |
 | `ddl_only` | bool | no | Compare schema objects only. |
 | `block_size` | int | no | Defaults to `table_diff.diff_block_size` or `100000`. |
-| `concurrency_factor` | int | no | Defaults to `table_diff.concurrency_factor` or `1`. |
+| `concurrency_factor` | float | no | CPU ratio (0.0–4.0). Defaults to `table_diff.concurrency_factor` or `0.5`. |
 | `compare_unit_size` | int | no | Defaults to `table_diff.compare_unit_size` or `10000`. |
 | `output` | string | no | `json` (default) or `html`. |
 | `override_block_size` | bool | no | Bypass block-size guardrails. |
@@ -211,7 +211,7 @@ Request body:
 | `skip_tables` | string | no | Comma-separated list. |
 | `skip_file` | string | no | File path (server-side). |
 | `block_size` | int | no | Defaults to `table_diff.diff_block_size` or `100000`. |
-| `concurrency_factor` | int | no | Defaults to `table_diff.concurrency_factor` or `1`. |
+| `concurrency_factor` | float | no | CPU ratio (0.0–4.0). Defaults to `table_diff.concurrency_factor` or `0.5`. |
 | `compare_unit_size` | int | no | Defaults to `table_diff.compare_unit_size` or `10000`. |
 | `output` | string | no | `json` (default) or `html`. |
 | `override_block_size` | bool | no | Bypass block-size guardrails. |
