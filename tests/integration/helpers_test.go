@@ -345,44 +345,45 @@ func getCommitTimestamp(t *testing.T, ctx context.Context, pool *pgxpool.Pool, q
 	return ts
 }
 
-// getReplicationOrigin retrieves the replication origin name for a specific row by querying
-// the transaction's origin tracking information using pg_xact_commit_timestamp_origin()
+// getReplicationOrigin retrieves the replication origin name for a specific row.
+// It uses spock.xact_commit_timestamp_origin() to extract the roident from the
+// transaction's origin tracking, then resolves it to a human-readable name.
+//
+// For normally replicated rows, the roident is the spock node_id, resolved via
+// spock.node to a node_name (e.g., "n3"), returned as "node_n3".
+//
+// For rows repaired with preserve-origin, the roident is a pg_replication_origin
+// entry (e.g., "node_n3"), returned as-is.
 func getReplicationOrigin(t *testing.T, ctx context.Context, pool *pgxpool.Pool, qualifiedTableName string, id int) string {
 	t.Helper()
 
-	// First, get the xmin for the row
-	var xmin uint32
-	query := fmt.Sprintf("SELECT xmin FROM %s WHERE id = $1", qualifiedTableName)
-	err := pool.QueryRow(ctx, query, id).Scan(&xmin)
-	require.NoError(t, err, "Failed to get xmin for row id %d", id)
-
-	// Use pg_xact_commit_timestamp_origin() to get the origin OID for this specific transaction
-	// This requires track_commit_timestamp = on
-	var originOid *uint32
-	originQuery := `
-		SELECT origin 
-		FROM pg_xact_commit_timestamp_origin($1::xid)
-	`
-	err = pool.QueryRow(ctx, originQuery, xmin).Scan(&originOid)
-	if err != nil || originOid == nil || *originOid == 0 {
-		// If no origin found or origin is 0 (local), return empty string
+	// Extract the roident using spock's origin tracking function (same as table-diff code).
+	var roidentStr *string
+	query := fmt.Sprintf(
+		`SELECT to_json(spock.xact_commit_timestamp_origin(xmin))->>'roident'
+		 FROM %s WHERE id = $1`, qualifiedTableName)
+	err := pool.QueryRow(ctx, query, id).Scan(&roidentStr)
+	if err != nil || roidentStr == nil || *roidentStr == "" || *roidentStr == "0" {
 		return ""
 	}
 
-	// Now get the origin name from pg_replication_origin using the OID
+	// Try resolving as a spock node_id first (normal replication path).
+	var nodeName string
+	err = pool.QueryRow(ctx,
+		"SELECT node_name FROM spock.node WHERE node_id::text = $1", *roidentStr).Scan(&nodeName)
+	if err == nil && nodeName != "" {
+		return "node_" + nodeName
+	}
+
+	// Fall back to pg_replication_origin lookup (preserve-origin repair path).
 	var originName string
-	nameQuery := `
-		SELECT roname 
-		FROM pg_replication_origin 
-		WHERE roid = $1
-	`
-	err = pool.QueryRow(ctx, nameQuery, *originOid).Scan(&originName)
-	if err != nil {
-		// If origin name not found, return empty string
-		return ""
+	err = pool.QueryRow(ctx,
+		"SELECT roname FROM pg_replication_origin WHERE roident::text = $1", *roidentStr).Scan(&originName)
+	if err == nil && originName != "" {
+		return originName
 	}
 
-	return originName
+	return ""
 }
 
 // compareTimestamps compares two timestamps with a tolerance in seconds
