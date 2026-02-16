@@ -1599,3 +1599,252 @@ func TestTableRepair_Bidirectional_PreserveOrigin(t *testing.T) {
 	require.Equal(t, "node_n1", origin1OnN2, "row 1 on n2 should have origin node_n1")
 	require.Equal(t, "node_n2", origin2OnN2, "row 2 on n2 should have origin node_n2")
 }
+
+// TestTableRepair_MixedOps_PreserveOrigin verifies that a standard unidirectional repair
+// with PreserveOrigin=true correctly handles DELETE, INSERT, and UPDATE operations within
+// a single transaction. This is the most realistic real-world scenario: a source-of-truth
+// repair where some rows must be deleted from the target, some inserted, and some updated,
+// all while preserving the original replication origin and commit timestamp metadata.
+//
+// Scenario (n1 = source of truth, n2 = target, data originates on n3):
+//   - 5 common rows on both nodes (originated on n3) — no repair needed
+//   - 2 rows only on n1 (originated on n3) → INSERT into n2 with preserved origin/timestamp
+//   - 2 rows only on n2 (inserted locally) → DELETE from n2
+//   - 2 common rows modified on n2 → UPDATE on n2 with preserved origin/timestamp from n1
+//
+// After repair: both nodes have 7 identical rows, and the inserted/updated rows on n2
+// retain the original node_n3 origin and commit timestamps from n1.
+func TestTableRepair_MixedOps_PreserveOrigin(t *testing.T) {
+	ctx := context.Background()
+	tableName := "mixed_ops_preserve_origin_test"
+	qualifiedTableName := fmt.Sprintf("%s.%s", testSchema, tableName)
+
+	// Create table on all 3 nodes and add to repset
+	for i, pool := range []*pgxpool.Pool{pgCluster.Node1Pool, pgCluster.Node2Pool, pgCluster.Node3Pool} {
+		nodeName := pgCluster.ClusterNodes[i]["Name"].(string)
+		createSQL := fmt.Sprintf(`CREATE TABLE IF NOT EXISTS %s (id INT PRIMARY KEY, data TEXT, category TEXT);`, qualifiedTableName)
+		_, err := pool.Exec(ctx, createSQL)
+		require.NoError(t, err, "Failed to create table on %s", nodeName)
+		_, err = pool.Exec(ctx, fmt.Sprintf(`SELECT spock.repset_add_table('default', '%s');`, qualifiedTableName))
+		require.NoError(t, err, "Failed to add table to repset on %s", nodeName)
+	}
+
+	t.Cleanup(func() {
+		for _, pool := range []*pgxpool.Pool{pgCluster.Node1Pool, pgCluster.Node2Pool, pgCluster.Node3Pool} {
+			pool.Exec(ctx, fmt.Sprintf("DROP TABLE IF EXISTS %s CASCADE;", qualifiedTableName))
+		}
+		files, _ := filepath.Glob("*_diffs-*.json")
+		for _, f := range files {
+			os.Remove(f)
+		}
+	})
+
+	// --- Phase 1: Insert 9 rows on n3 so they replicate to n1 and n2 with origin=node_n3 ---
+	// IDs 1-5: common rows (will remain unchanged)
+	// IDs 6-7: will become "only on n1" after we delete them from n2
+	// IDs 8-9: will become "modified on n2" after we update them on n2
+	allIDs := []int{1, 2, 3, 4, 5, 6, 7, 8, 9}
+	log.Printf("Inserting %d rows on n3", len(allIDs))
+	for _, id := range allIDs {
+		_, err := pgCluster.Node3Pool.Exec(ctx,
+			fmt.Sprintf("INSERT INTO %s (id, data, category) VALUES ($1, $2, $3)", qualifiedTableName),
+			id, fmt.Sprintf("original_data_%d", id), "original")
+		require.NoError(t, err, "Failed to insert row %d on n3", id)
+	}
+
+	// Wait for replication to n1 and n2
+	for _, nodeInfo := range []struct {
+		name string
+		pool *pgxpool.Pool
+	}{
+		{"n1", pgCluster.Node1Pool},
+		{"n2", pgCluster.Node2Pool},
+	} {
+		log.Printf("Waiting for replication to %s...", nodeInfo.name)
+		assertEventually(t, 30*time.Second, func() error {
+			var count int
+			if err := nodeInfo.pool.QueryRow(ctx,
+				fmt.Sprintf("SELECT count(*) FROM %s WHERE id = ANY($1)", qualifiedTableName), allIDs).Scan(&count); err != nil {
+				return err
+			}
+			if count < len(allIDs) {
+				return fmt.Errorf("expected %d rows on %s, got %d", len(allIDs), nodeInfo.name, count)
+			}
+			return nil
+		})
+	}
+
+	// Wait to ensure original timestamps are clearly in the past
+	log.Println("Waiting 3 seconds to ensure original timestamps are in the past...")
+	time.Sleep(3 * time.Second)
+
+	// --- Phase 2: Capture baseline origin metadata from n1 (source of truth) ---
+	// We capture for rows that will be inserted (6,7) and updated (8,9) on n2
+	verifyIDs := []int{6, 7, 8, 9}
+	originalTimestamps := make(map[int]time.Time)
+	originalOrigins := make(map[int]string)
+	originalData := make(map[int]string)
+
+	log.Printf("Capturing baseline state from n1 for rows: %v", verifyIDs)
+	for _, id := range verifyIDs {
+		ts := getCommitTimestamp(t, ctx, pgCluster.Node1Pool, qualifiedTableName, id)
+		originalTimestamps[id] = ts
+		origin := getReplicationOrigin(t, ctx, pgCluster.Node1Pool, qualifiedTableName, id)
+		originalOrigins[id] = origin
+		var data string
+		err := pgCluster.Node1Pool.QueryRow(ctx,
+			fmt.Sprintf("SELECT data FROM %s WHERE id = $1", qualifiedTableName), id).Scan(&data)
+		require.NoError(t, err)
+		originalData[id] = data
+		log.Printf("Baseline row %d on n1: ts=%s origin=%s data=%q", id, ts.Format(time.RFC3339Nano), origin, data)
+	}
+	// Verify baseline: all rows should have origin node_n3
+	for _, id := range verifyIDs {
+		require.Equal(t, "node_n3", originalOrigins[id],
+			"Baseline: row %d on n1 must have origin node_n3", id)
+	}
+
+	// --- Phase 3: Create divergence on n2 using repair_mode (no replication) ---
+	log.Println("Creating divergence on n2...")
+	tx, err := pgCluster.Node2Pool.Begin(ctx)
+	require.NoError(t, err)
+	_, err = tx.Exec(ctx, "SELECT spock.repair_mode(true)")
+	require.NoError(t, err)
+
+	// Delete rows 6,7 from n2 → these will need to be INSERTED back during repair
+	for _, id := range []int{6, 7} {
+		_, err = tx.Exec(ctx, fmt.Sprintf("DELETE FROM %s WHERE id = $1", qualifiedTableName), id)
+		require.NoError(t, err, "Failed to delete row %d on n2", id)
+	}
+
+	// Modify rows 8,9 on n2 → these will need to be UPDATED during repair
+	for _, id := range []int{8, 9} {
+		_, err = tx.Exec(ctx, fmt.Sprintf("UPDATE %s SET data = $1, category = $2 WHERE id = $3", qualifiedTableName),
+			fmt.Sprintf("modified_on_n2_%d", id), "modified", id)
+		require.NoError(t, err, "Failed to modify row %d on n2", id)
+	}
+
+	// Insert rows 1001,1002 only on n2 → these will need to be DELETED during repair
+	for _, id := range []int{1001, 1002} {
+		_, err = tx.Exec(ctx, fmt.Sprintf("INSERT INTO %s (id, data, category) VALUES ($1, $2, $3)", qualifiedTableName),
+			id, fmt.Sprintf("n2_only_%d", id), "n2_extra")
+		require.NoError(t, err, "Failed to insert row %d on n2", id)
+	}
+
+	_, err = tx.Exec(ctx, "SELECT spock.repair_mode(false)")
+	require.NoError(t, err)
+	require.NoError(t, tx.Commit(ctx))
+	log.Println("Divergence created: 2 deleted, 2 modified, 2 extra rows on n2")
+
+	// Verify divergence state
+	n1Count := getTableCount(t, ctx, pgCluster.Node1Pool, qualifiedTableName)
+	n2Count := getTableCount(t, ctx, pgCluster.Node2Pool, qualifiedTableName)
+	require.Equal(t, 9, n1Count, "n1 should have 9 rows")
+	require.Equal(t, 9, n2Count, "n2 should have 9 rows (7 original + 2 extra - 2 deleted)")
+
+	// --- Phase 4: Run table-diff and repair with preserve-origin ---
+	log.Println("Running table-diff...")
+	diffFile := runTableDiff(t, qualifiedTableName, []string{serviceN1, serviceN2})
+
+	log.Println("Running repair with preserve-origin...")
+	repairTask := newTestTableRepairTask(serviceN1, qualifiedTableName, diffFile)
+	repairTask.PreserveOrigin = true
+
+	err = repairTask.Run(false)
+	require.NoError(t, err, "Table repair failed")
+	require.NotEqual(t, "FAILED", repairTask.TaskStatus,
+		"Repair task should not be FAILED: %s", repairTask.TaskContext)
+
+	// --- Phase 5: Verify repair correctness ---
+	log.Println("Verifying repair results...")
+
+	// 5a. Row counts should match (9 rows each, extra rows deleted from n2)
+	n1CountAfter := getTableCount(t, ctx, pgCluster.Node1Pool, qualifiedTableName)
+	n2CountAfter := getTableCount(t, ctx, pgCluster.Node2Pool, qualifiedTableName)
+	require.Equal(t, 9, n1CountAfter, "n1 should still have 9 rows")
+	require.Equal(t, 9, n2CountAfter, "n2 should have 9 rows after repair")
+
+	// 5b. No diffs should remain
+	assertNoTableDiff(t, qualifiedTableName)
+
+	// 5c. Extra rows (1001, 1002) should be deleted from n2
+	for _, id := range []int{1001, 1002} {
+		var count int
+		err := pgCluster.Node2Pool.QueryRow(ctx,
+			fmt.Sprintf("SELECT count(*) FROM %s WHERE id = $1", qualifiedTableName), id).Scan(&count)
+		require.NoError(t, err)
+		require.Equal(t, 0, count, "Row %d should have been deleted from n2", id)
+	}
+
+	// 5d. Verify origin and timestamp preservation for INSERTED rows (6, 7)
+	log.Println("Verifying origin/timestamp preservation for INSERTED rows (6, 7)...")
+	for _, id := range []int{6, 7} {
+		// Verify data was restored correctly
+		var data string
+		err := pgCluster.Node2Pool.QueryRow(ctx,
+			fmt.Sprintf("SELECT data FROM %s WHERE id = $1", qualifiedTableName), id).Scan(&data)
+		require.NoError(t, err, "Failed to get data for row %d on n2", id)
+		require.Equal(t, originalData[id], data,
+			"Row %d data on n2 should match n1 baseline", id)
+
+		// Verify origin preserved
+		origin := getReplicationOrigin(t, ctx, pgCluster.Node2Pool, qualifiedTableName, id)
+		require.Equal(t, "node_n3", origin,
+			"Inserted row %d on n2 should have origin node_n3 preserved (got %q)", id, origin)
+
+		// Verify timestamp preserved (microsecond precision)
+		ts := getCommitTimestamp(t, ctx, pgCluster.Node2Pool, qualifiedTableName, id)
+		tsTrunc := ts.Truncate(time.Microsecond)
+		originalTsTrunc := originalTimestamps[id].Truncate(time.Microsecond)
+		require.True(t, tsTrunc.Equal(originalTsTrunc),
+			"Inserted row %d timestamp should be preserved: got %s, expected %s",
+			id, ts.Format(time.RFC3339Nano), originalTimestamps[id].Format(time.RFC3339Nano))
+
+		log.Printf("  Row %d (INSERT): origin=%s ts=%s data=%q", id, origin, ts.Format(time.RFC3339Nano), data)
+	}
+
+	// 5e. Verify origin and timestamp preservation for UPDATED rows (8, 9)
+	log.Println("Verifying origin/timestamp preservation for UPDATED rows (8, 9)...")
+	for _, id := range []int{8, 9} {
+		// Verify data was restored to original
+		var data, category string
+		err := pgCluster.Node2Pool.QueryRow(ctx,
+			fmt.Sprintf("SELECT data, category FROM %s WHERE id = $1", qualifiedTableName), id).Scan(&data, &category)
+		require.NoError(t, err, "Failed to get data for row %d on n2", id)
+		require.Equal(t, originalData[id], data,
+			"Row %d data on n2 should match n1 baseline (was modified)", id)
+		require.Equal(t, "original", category,
+			"Row %d category on n2 should be restored to 'original'", id)
+
+		// Verify origin preserved
+		origin := getReplicationOrigin(t, ctx, pgCluster.Node2Pool, qualifiedTableName, id)
+		require.Equal(t, "node_n3", origin,
+			"Updated row %d on n2 should have origin node_n3 preserved (got %q)", id, origin)
+
+		// Verify timestamp preserved (microsecond precision)
+		ts := getCommitTimestamp(t, ctx, pgCluster.Node2Pool, qualifiedTableName, id)
+		tsTrunc := ts.Truncate(time.Microsecond)
+		originalTsTrunc := originalTimestamps[id].Truncate(time.Microsecond)
+		require.True(t, tsTrunc.Equal(originalTsTrunc),
+			"Updated row %d timestamp should be preserved: got %s, expected %s",
+			id, ts.Format(time.RFC3339Nano), originalTimestamps[id].Format(time.RFC3339Nano))
+
+		log.Printf("  Row %d (UPDATE): origin=%s ts=%s data=%q", id, origin, ts.Format(time.RFC3339Nano), data)
+	}
+
+	// 5f. Verify common rows (1-5) are untouched
+	log.Println("Verifying common rows (1-5) are unchanged...")
+	for _, id := range []int{1, 2, 3, 4, 5} {
+		var data string
+		err := pgCluster.Node2Pool.QueryRow(ctx,
+			fmt.Sprintf("SELECT data FROM %s WHERE id = $1", qualifiedTableName), id).Scan(&data)
+		require.NoError(t, err)
+		require.Equal(t, fmt.Sprintf("original_data_%d", id), data,
+			"Common row %d should be unchanged", id)
+	}
+
+	log.Println("TestTableRepair_MixedOps_PreserveOrigin PASSED")
+	log.Println("  - DELETE: 2 extra rows removed from n2")
+	log.Println("  - INSERT: 2 missing rows restored with preserved origin/timestamp")
+	log.Println("  - UPDATE: 2 modified rows corrected with preserved origin/timestamp")
+}
