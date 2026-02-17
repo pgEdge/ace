@@ -1473,27 +1473,41 @@ func TestTableRepair_FixNulls_PreserveOrigin(t *testing.T) {
 		"Fix-nulls would need to use DELETE+INSERT or a different mechanism to preserve origin during UPDATE.")
 }
 
-// TestTableRepair_Bidirectional_PreserveOrigin verifies that bidirectional repair with
-// PreserveOrigin=true completes and preserves per-row replication origins.
-// Bidirectional scenario: row 1 originated on n1, row 2 on n2 (different origins per row).
-// After repair, both nodes have both rows with correct per-row origins preserved.
-// Tests origin preservation in both directions: n1→n2 (preserves node_n1) and n2→n1 (preserves node_n2).
-// Validates per-row origin tracking, not just single-direction or homogeneous-origin scenarios.
+// TestTableRepair_Bidirectional_PreserveOrigin verifies that bidirectional
+// repair with PreserveOrigin=true preserves replication origins.
+//
+// Scenario: two rows originate on n3 and replicate to n1 and n2 with
+// origin=node_n3.  Then, in repair_mode, row 1 is deleted from n2 and
+// row 2 is deleted from n1 — creating symmetric divergence.
+// Bidirectional repair must copy row 2 → n1 and row 1 → n2, preserving
+// the original node_n3 origin on both sides.
 func TestTableRepair_Bidirectional_PreserveOrigin(t *testing.T) {
 	tableName := "bi_preserve_origin_test"
 	qualifiedTableName := fmt.Sprintf("%s.%s", testSchema, tableName)
 	ctx := context.Background()
 
-	for i, pool := range []*pgxpool.Pool{pgCluster.Node1Pool, pgCluster.Node2Pool} {
+	// Create table on all 3 nodes and add to repset
+	for i, pool := range []*pgxpool.Pool{
+		pgCluster.Node1Pool, pgCluster.Node2Pool, pgCluster.Node3Pool,
+	} {
 		nodeName := pgCluster.ClusterNodes[i]["Name"].(string)
-		_, err := pool.Exec(ctx, fmt.Sprintf(`CREATE TABLE IF NOT EXISTS %s (id INT PRIMARY KEY, label TEXT);`, qualifiedTableName))
+		_, err := pool.Exec(ctx, fmt.Sprintf(
+			`CREATE TABLE IF NOT EXISTS %s
+			 (id INT PRIMARY KEY, label TEXT);`,
+			qualifiedTableName))
 		require.NoError(t, err, "create table on %s", nodeName)
-		_, err = pool.Exec(ctx, fmt.Sprintf(`SELECT spock.repset_add_table('default', '%s');`, qualifiedTableName))
+		_, err = pool.Exec(ctx, fmt.Sprintf(
+			`SELECT spock.repset_add_table('default', '%s');`,
+			qualifiedTableName))
 		require.NoError(t, err, "add to repset on %s", nodeName)
 	}
 	t.Cleanup(func() {
-		for _, pool := range []*pgxpool.Pool{pgCluster.Node1Pool, pgCluster.Node2Pool} {
-			pool.Exec(ctx, fmt.Sprintf("DROP TABLE IF EXISTS %s CASCADE;", qualifiedTableName))
+		for _, pool := range []*pgxpool.Pool{
+			pgCluster.Node1Pool, pgCluster.Node2Pool, pgCluster.Node3Pool,
+		} {
+			pool.Exec(ctx, fmt.Sprintf(
+				"DROP TABLE IF EXISTS %s CASCADE;",
+				qualifiedTableName))
 		}
 		files, _ := filepath.Glob("*_diffs-*.json")
 		for _, f := range files {
@@ -1501,13 +1515,46 @@ func TestTableRepair_Bidirectional_PreserveOrigin(t *testing.T) {
 		}
 	})
 
-	// Insert different rows on each node in repair_mode (no replication)
-	// n1: row 1 only, n2: row 2 only
+	// Insert 2 rows on n3 so they replicate with origin=node_n3
+	_, err := pgCluster.Node3Pool.Exec(ctx, fmt.Sprintf(
+		"INSERT INTO %s (id, label) VALUES (1, 'row_one')",
+		qualifiedTableName))
+	require.NoError(t, err)
+	_, err = pgCluster.Node3Pool.Exec(ctx, fmt.Sprintf(
+		"INSERT INTO %s (id, label) VALUES (2, 'row_two')",
+		qualifiedTableName))
+	require.NoError(t, err)
+
+	// Wait for replication to both nodes
+	for _, info := range []struct {
+		name string
+		pool *pgxpool.Pool
+	}{
+		{"n1", pgCluster.Node1Pool},
+		{"n2", pgCluster.Node2Pool},
+	} {
+		assertEventually(t, 30*time.Second, func() error {
+			var c int
+			if err := info.pool.QueryRow(ctx, fmt.Sprintf(
+				"SELECT count(*) FROM %s", qualifiedTableName),
+			).Scan(&c); err != nil {
+				return err
+			}
+			if c < 2 {
+				return fmt.Errorf(
+					"expected 2 rows on %s, got %d", info.name, c)
+			}
+			return nil
+		})
+	}
+
+	// Delete row 2 from n1, row 1 from n2 (symmetric divergence)
 	tx1, err := pgCluster.Node1Pool.Begin(ctx)
 	require.NoError(t, err)
 	_, err = tx1.Exec(ctx, "SELECT spock.repair_mode(true)")
 	require.NoError(t, err)
-	_, err = tx1.Exec(ctx, fmt.Sprintf("INSERT INTO %s (id, label) VALUES (1, 'from_n1')", qualifiedTableName))
+	_, err = tx1.Exec(ctx, fmt.Sprintf(
+		"DELETE FROM %s WHERE id = 2", qualifiedTableName))
 	require.NoError(t, err)
 	_, err = tx1.Exec(ctx, "SELECT spock.repair_mode(false)")
 	require.NoError(t, err)
@@ -1517,46 +1564,62 @@ func TestTableRepair_Bidirectional_PreserveOrigin(t *testing.T) {
 	require.NoError(t, err)
 	_, err = tx2.Exec(ctx, "SELECT spock.repair_mode(true)")
 	require.NoError(t, err)
-	_, err = tx2.Exec(ctx, fmt.Sprintf("INSERT INTO %s (id, label) VALUES (2, 'from_n2')", qualifiedTableName))
+	_, err = tx2.Exec(ctx, fmt.Sprintf(
+		"DELETE FROM %s WHERE id = 1", qualifiedTableName))
 	require.NoError(t, err)
 	_, err = tx2.Exec(ctx, "SELECT spock.repair_mode(false)")
 	require.NoError(t, err)
 	require.NoError(t, tx2.Commit(ctx))
 
-	// Verify divergence exists
+	// Verify divergence: each node has exactly 1 row
 	var count1, count2 int
-	err = pgCluster.Node1Pool.QueryRow(ctx, fmt.Sprintf("SELECT count(*) FROM %s", qualifiedTableName)).Scan(&count1)
+	err = pgCluster.Node1Pool.QueryRow(ctx, fmt.Sprintf(
+		"SELECT count(*) FROM %s", qualifiedTableName)).Scan(&count1)
 	require.NoError(t, err)
-	err = pgCluster.Node2Pool.QueryRow(ctx, fmt.Sprintf("SELECT count(*) FROM %s", qualifiedTableName)).Scan(&count2)
+	err = pgCluster.Node2Pool.QueryRow(ctx, fmt.Sprintf(
+		"SELECT count(*) FROM %s", qualifiedTableName)).Scan(&count2)
 	require.NoError(t, err)
 	require.Equal(t, 1, count1, "n1 should have 1 row before repair")
 	require.Equal(t, 1, count2, "n2 should have 1 row before repair")
 
-	diffFile := runTableDiff(t, qualifiedTableName, []string{serviceN1, serviceN2})
-	repairTask := newTestTableRepairTask(serviceN1, qualifiedTableName, diffFile)
+	// Run bidirectional repair with preserve-origin
+	diffFile := runTableDiff(t, qualifiedTableName,
+		[]string{serviceN1, serviceN2})
+	repairTask := newTestTableRepairTask(
+		serviceN1, qualifiedTableName, diffFile)
 	repairTask.Bidirectional = true
 	repairTask.PreserveOrigin = true
 
 	err = repairTask.Run(false)
-	require.NoError(t, err, "bidirectional repair with preserve-origin failed")
-	require.NotEqual(t, "FAILED", repairTask.TaskStatus, "repair task should not be FAILED")
+	require.NoError(t, err,
+		"bidirectional repair with preserve-origin failed")
+	require.NotEqual(t, "FAILED", repairTask.TaskStatus,
+		"repair task should not be FAILED")
 
+	// Verify tables match and both have 2 rows
 	assertNoTableDiff(t, qualifiedTableName)
 	count1 = getTableCount(t, ctx, pgCluster.Node1Pool, qualifiedTableName)
 	count2 = getTableCount(t, ctx, pgCluster.Node2Pool, qualifiedTableName)
 	require.Equal(t, 2, count1, "node1 should have 2 rows")
 	require.Equal(t, 2, count2, "node2 should have 2 rows")
 
-	// Row 1 originated on n1, row 2 on n2. After bidirectional repair, each node has both rows
-	// with origins preserved: on n1 row 1 = node_n1, row 2 = node_n2; on n2 same.
-	origin1OnN1 := getReplicationOrigin(t, ctx, pgCluster.Node1Pool, qualifiedTableName, 1)
-	origin2OnN1 := getReplicationOrigin(t, ctx, pgCluster.Node1Pool, qualifiedTableName, 2)
-	origin1OnN2 := getReplicationOrigin(t, ctx, pgCluster.Node2Pool, qualifiedTableName, 1)
-	origin2OnN2 := getReplicationOrigin(t, ctx, pgCluster.Node2Pool, qualifiedTableName, 2)
-	require.Equal(t, "node_n1", origin1OnN1, "row 1 on n1 should have origin node_n1")
-	require.Equal(t, "node_n2", origin2OnN1, "row 2 on n1 should have origin node_n2")
-	require.Equal(t, "node_n1", origin1OnN2, "row 1 on n2 should have origin node_n1")
-	require.Equal(t, "node_n2", origin2OnN2, "row 2 on n2 should have origin node_n2")
+	// Both rows originated on n3. After bidirectional repair with
+	// preserve-origin, both nodes should show origin=node_n3.
+	for _, nodeInfo := range []struct {
+		name string
+		pool *pgxpool.Pool
+	}{
+		{"n1", pgCluster.Node1Pool},
+		{"n2", pgCluster.Node2Pool},
+	} {
+		for _, id := range []int{1, 2} {
+			origin := getReplicationOrigin(
+				t, ctx, nodeInfo.pool, qualifiedTableName, id)
+			require.Equal(t, "node_n3", origin,
+				"row %d on %s should have origin node_n3",
+				id, nodeInfo.name)
+		}
+	}
 }
 
 // TestTableRepair_MixedOps_PreserveOrigin verifies that a standard unidirectional repair
