@@ -12,6 +12,7 @@
 package queries
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -408,4 +409,61 @@ func TestBlockHashSQL(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestConcatWSBatched(t *testing.T) {
+	t.Run("under limit is single concat_ws", func(t *testing.T) {
+		exprs := make([]string, 50)
+		for i := range exprs {
+			exprs[i] = fmt.Sprintf("col%d", i)
+		}
+		result := concatWSBatched(exprs)
+		// Should be a single concat_ws with all 50 expressions
+		if strings.Count(result, "concat_ws(") != 1 {
+			t.Errorf("expected 1 concat_ws call, got: %s", result)
+		}
+	})
+
+	t.Run("at limit of 99 is single concat_ws", func(t *testing.T) {
+		exprs := make([]string, 99)
+		for i := range exprs {
+			exprs[i] = fmt.Sprintf("col%d", i)
+		}
+		result := concatWSBatched(exprs)
+		if strings.Count(result, "concat_ws(") != 1 {
+			t.Errorf("expected 1 concat_ws call for exactly 99 exprs, got: %s", result)
+		}
+	})
+
+	t.Run("100 expressions nests into batches", func(t *testing.T) {
+		exprs := make([]string, 100)
+		for i := range exprs {
+			exprs[i] = fmt.Sprintf("col%d", i)
+		}
+		result := concatWSBatched(exprs)
+		// Should have 3 concat_ws calls: 1 outer + 2 inner (99 + 1)
+		if strings.Count(result, "concat_ws(") != 3 {
+			t.Errorf("expected 3 concat_ws calls for 100 exprs, got %d in: %s",
+				strings.Count(result, "concat_ws("), result)
+		}
+		// Every expression should be present
+		for _, e := range exprs {
+			if !strings.Contains(result, e) {
+				t.Errorf("missing expression %s in result", e)
+			}
+		}
+	})
+
+	t.Run("200 expressions nests into 3 inner batches", func(t *testing.T) {
+		exprs := make([]string, 200)
+		for i := range exprs {
+			exprs[i] = fmt.Sprintf("col%d", i)
+		}
+		result := concatWSBatched(exprs)
+		// 99 + 99 + 2 = 3 inner batches + 1 outer = 4 concat_ws calls
+		if strings.Count(result, "concat_ws(") != 4 {
+			t.Errorf("expected 4 concat_ws calls for 200 exprs, got %d in: %s",
+				strings.Count(result, "concat_ws("), result)
+		}
+	})
 }
