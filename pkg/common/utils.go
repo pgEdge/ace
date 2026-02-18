@@ -750,19 +750,31 @@ func parseTimeToMicroseconds(s string) (int64, error) {
 	if err != nil {
 		return 0, fmt.Errorf("invalid time hours: %s", s)
 	}
+	if hours < 0 || hours > 23 {
+		return 0, fmt.Errorf("time hours out of range (0-23): %s", s)
+	}
 	minutes, err := strconv.ParseInt(core[3:5], 10, 64)
 	if err != nil {
 		return 0, fmt.Errorf("invalid time minutes: %s", s)
 	}
+	if minutes < 0 || minutes > 59 {
+		return 0, fmt.Errorf("time minutes out of range (0-59): %s", s)
+	}
 	seconds, err := strconv.ParseInt(core[6:8], 10, 64)
 	if err != nil {
 		return 0, fmt.Errorf("invalid time seconds: %s", s)
+	}
+	if seconds < 0 || seconds > 59 {
+		return 0, fmt.Errorf("time seconds out of range (0-59): %s", s)
 	}
 
 	usec := hours*3_600_000_000 + minutes*60_000_000 + seconds*1_000_000
 
 	if len(core) > 9 && core[8] == '.' {
 		frac := core[9:]
+		if len(frac) > 6 {
+			frac = frac[:6] // truncate to microsecond precision
+		}
 		n, err := strconv.ParseInt(frac, 10, 64)
 		if err != nil {
 			return 0, fmt.Errorf("invalid time fractional seconds: %s", s)

@@ -216,6 +216,42 @@ func TestConvertToPgxType_TimeFormats(t *testing.T) {
 	}
 }
 
+func TestConvertToPgxType_TimeOutOfRange(t *testing.T) {
+	// Out-of-range values should be rejected.
+	badInputs := []struct {
+		name  string
+		input string
+	}{
+		{"hours 24", "24:00:00"},
+		{"hours 99", "99:00:00"},
+		{"minutes 60", "10:60:00"},
+		{"seconds 60", "10:30:60"},
+	}
+
+	for _, tt := range badInputs {
+		t.Run(tt.name, func(t *testing.T) {
+			// Should fall back to string passthrough (not crash or produce wrong microseconds)
+			val, err := ConvertToPgxType(tt.input, "time without time zone")
+			require.NoError(t, err)
+			_, ok := val.(string)
+			require.True(t, ok, "expected string fallback for invalid input %q, got %T", tt.input, val)
+		})
+	}
+}
+
+func TestConvertToPgxType_TimeFractionalTruncation(t *testing.T) {
+	// Fractional parts longer than 6 digits should be truncated to microseconds.
+	val, err := ConvertToPgxType("10:30:00.123456789", "time without time zone")
+	require.NoError(t, err)
+
+	tv, ok := val.(pgxv5type.Time)
+	require.True(t, ok, "expected pgxv5type.Time, got %T", val)
+	require.True(t, tv.Valid)
+
+	expectedUsec := int64(10*3_600_000_000 + 30*60_000_000 + 123456)
+	require.Equal(t, expectedUsec, tv.Microseconds, "should truncate to 6 fractional digits")
+}
+
 func TestConvertToPgxType_TimeWithPrecision(t *testing.T) {
 	// format_type() returns "time(3) without time zone" for TIME(3) columns.
 	// The normalizedType strips the precision, yielding "time", which must
