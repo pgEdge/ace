@@ -25,6 +25,7 @@ import (
 	"reflect"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -627,19 +628,26 @@ func ConvertToPgxType(val any, pgType string) (any, error) {
 
 		return nil, fmt.Errorf("expected date string (YYYY-MM-DD) for %s, got %v (%T)", pgType, val, val)
 
-	case "timestamp", "timestamptz", "timestamp without time zone", "timestamp with time zone":
+	case "timestamp", "timestamp without time zone":
 		if s, ok := val.(string); ok {
-			t, err := time.Parse(time.RFC3339Nano, s)
+			t, err := parseTimestampString(s)
 			if err == nil {
-				return t, nil
+				// Return pgxv5type.Timestamp so pgx sends the value as "timestamp"
+				// instead of "timestamptz". This avoids PostgreSQL
+				// applying a session-timezone conversion when inserting into
+				// a "timestamp without time zone" column.
+				return pgxv5type.Timestamp{Time: t, Valid: true}, nil
 			}
 
-			t, err = time.Parse("2006-01-02 15:04:05.999999-07", s)
-			if err == nil {
-				return t, nil
-			}
+			// Fallback: let Postgres cast from the raw string
+			return s, nil
+		}
 
-			t, err = time.Parse("2006-01-02 15:04:05.999999", s)
+		return nil, fmt.Errorf("expected timestamp string (RFC3339Nano like) for %s, got %v (%T)", pgType, val, val)
+
+	case "timestamptz", "timestamp with time zone":
+		if s, ok := val.(string); ok {
+			t, err := parseTimestampString(s)
 			if err == nil {
 				return t, nil
 			}
@@ -649,6 +657,25 @@ func ConvertToPgxType(val any, pgType string) (any, error) {
 		}
 
 		return nil, fmt.Errorf("expected timestamp string (RFC3339Nano like) for %s, got %v (%T)", pgType, val, val)
+
+	case "time", "time without time zone":
+		if s, ok := val.(string); ok {
+			usec, err := parseTimeToMicroseconds(s)
+			if err == nil {
+				return pgxv5type.Time{Microseconds: usec, Valid: true}, nil
+			}
+			// Fallback: let Postgres cast from the raw string
+			return s, nil
+		}
+		return nil, fmt.Errorf("expected time string (HH:MM:SS) for %s, got %v (%T)", pgType, val, val)
+
+	case "timetz", "time with time zone":
+		// timetz is not registered in pgx v5's default type map, so the
+		// safest approach is to pass the string through and let Postgres parse it.
+		if s, ok := val.(string); ok {
+			return s, nil
+		}
+		return nil, fmt.Errorf("expected time string for %s, got %v (%T)", pgType, val, val)
 
 	case "interval":
 		if s, ok := val.(string); ok {
@@ -700,6 +727,78 @@ func ConvertToPgxType(val any, pgType string) (any, error) {
 		log.Printf("Warning: Converting value of type %T to string for pgType '%s'", val, pgType)
 		return fmt.Sprint(val), nil
 	}
+}
+
+// parseTimeToMicroseconds parses a PostgreSQL time string (HH:MM:SS[.ffffff])
+// into microseconds since midnight. It stops at any timezone offset suffix so
+// the same helper works for both "time" and "timetz" text representations.
+func parseTimeToMicroseconds(s string) (int64, error) {
+	// Strip timezone offset if present (e.g., "10:30:00-07" or "10:30:00+05:30")
+	core := s
+	for i := 8; i < len(core); i++ {
+		if core[i] == '+' || core[i] == '-' {
+			core = core[:i]
+			break
+		}
+	}
+
+	if len(core) < 8 || core[2] != ':' || core[5] != ':' {
+		return 0, fmt.Errorf("invalid time format: %s", s)
+	}
+
+	hours, err := strconv.ParseInt(core[0:2], 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("invalid time hours: %s", s)
+	}
+	if hours < 0 || hours > 23 {
+		return 0, fmt.Errorf("time hours out of range (0-23): %s", s)
+	}
+	minutes, err := strconv.ParseInt(core[3:5], 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("invalid time minutes: %s", s)
+	}
+	if minutes < 0 || minutes > 59 {
+		return 0, fmt.Errorf("time minutes out of range (0-59): %s", s)
+	}
+	seconds, err := strconv.ParseInt(core[6:8], 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("invalid time seconds: %s", s)
+	}
+	if seconds < 0 || seconds > 59 {
+		return 0, fmt.Errorf("time seconds out of range (0-59): %s", s)
+	}
+
+	usec := hours*3_600_000_000 + minutes*60_000_000 + seconds*1_000_000
+
+	if len(core) > 9 && core[8] == '.' {
+		frac := core[9:]
+		if len(frac) > 6 {
+			frac = frac[:6] // truncate to microsecond precision
+		}
+		n, err := strconv.ParseInt(frac, 10, 64)
+		if err != nil {
+			return 0, fmt.Errorf("invalid time fractional seconds: %s", s)
+		}
+		for i := len(frac); i < 6; i++ {
+			n *= 10
+		}
+		usec += n
+	}
+
+	return usec, nil
+}
+
+func parseTimestampString(s string) (time.Time, error) {
+	if t, err := time.Parse(time.RFC3339Nano, s); err == nil {
+		return t, nil
+	}
+	if t, err := time.Parse("2006-01-02 15:04:05.999999-07", s); err == nil {
+		return t, nil
+	}
+	if t, err := time.Parse("2006-01-02 15:04:05.999999", s); err == nil {
+		return t, nil
+	}
+	return time.Time{}, fmt.Errorf("unable to parse timestamp string: %s", s)
 }
 
 func buildPgArrayLiteral(val any) (string, error) {
@@ -799,6 +898,13 @@ func SafeCut(s string, n int) string {
 }
 
 func IsKnownScalarType(colType string) bool {
+	// "time with time zone" (timetz) is NOT registered in the pgx v5
+	// default type map, so it cannot be scanned into *interface{}. Exclude it
+	// so the diff layer casts it to ::TEXT.
+	if strings.HasPrefix(colType, "time with time zone") {
+		return false
+	}
+
 	knownPrefixes := []string{
 		"character", "text",
 		"integer", "bigint", "smallint",

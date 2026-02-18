@@ -33,6 +33,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgtype"
 	"github.com/jackc/pgx/v5"
+	pgxv5type "github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/pgedge/ace/db/queries"
 	auth "github.com/pgedge/ace/internal/infra/db"
@@ -624,6 +625,19 @@ func (t *TableDiffTask) fetchRows(nodeName string, r Range) ([]types.OrderedMap,
 					// nil caught above
 					processedVal = fmt.Sprintf("%x-%x-%x-%x-%x",
 						v[0:4], v[4:6], v[6:8], v[8:10], v[10:16])
+				case pgxv5type.Time: // pgx/v5 returns "time without time zone" as pgtype.Time
+					if v.Valid {
+						usec := v.Microseconds
+						hours := usec / 3_600_000_000
+						usec -= hours * 3_600_000_000
+						minutes := usec / 60_000_000
+						usec -= minutes * 60_000_000
+						seconds := usec / 1_000_000
+						usec -= seconds * 1_000_000
+						processedVal = fmt.Sprintf("%02d:%02d:%02d.%06d", hours, minutes, seconds, usec)
+					} else {
+						processedVal = nil
+					}
 				case time.Time:
 					processedVal = v
 				case string:
