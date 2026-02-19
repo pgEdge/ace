@@ -334,3 +334,72 @@ func repairTable(t *testing.T, qualifiedTableName, sourceOfTruthNode string) {
 
 	log.Printf("Table '%s' repaired successfully using %s as source of truth.", qualifiedTableName, sourceOfTruthNode)
 }
+
+// getCommitTimestamp retrieves the commit timestamp for a specific row
+func getCommitTimestamp(t *testing.T, ctx context.Context, pool *pgxpool.Pool, qualifiedTableName string, id int) time.Time {
+	t.Helper()
+	var ts time.Time
+	query := fmt.Sprintf("SELECT pg_xact_commit_timestamp(xmin) FROM %s WHERE id = $1", qualifiedTableName)
+	err := pool.QueryRow(ctx, query, id).Scan(&ts)
+	require.NoError(t, err, "Failed to get commit timestamp for row id %d", id)
+	return ts
+}
+
+// getReplicationOrigin retrieves the replication origin name for a specific row.
+// It uses spock.xact_commit_timestamp_origin() to extract the roident from the
+// transaction's origin tracking, then resolves it to a human-readable name.
+//
+// For normally replicated rows, the roident is the spock node_id, resolved via
+// spock.node to a node_name (e.g., "n3"), returned as "node_n3".
+//
+// For rows repaired with preserve-origin, the roident is a pg_replication_origin
+// entry (e.g., "node_n3"), returned as-is.
+func getReplicationOrigin(t *testing.T, ctx context.Context, pool *pgxpool.Pool, qualifiedTableName string, id int) string {
+	t.Helper()
+
+	// Extract the roident using spock's origin tracking function (same as table-diff code).
+	var roidentStr *string
+	query := fmt.Sprintf(
+		`SELECT to_json(spock.xact_commit_timestamp_origin(xmin))->>'roident'
+		 FROM %s WHERE id = $1`, qualifiedTableName)
+	err := pool.QueryRow(ctx, query, id).Scan(&roidentStr)
+	if err != nil || roidentStr == nil || *roidentStr == "" || *roidentStr == "0" {
+		return ""
+	}
+
+	// Try resolving as a spock node_id first (normal replication path).
+	var nodeName string
+	err = pool.QueryRow(ctx,
+		"SELECT node_name FROM spock.node WHERE node_id::text = $1", *roidentStr).Scan(&nodeName)
+	if err == nil && nodeName != "" {
+		return "node_" + nodeName
+	}
+
+	// Fall back to pg_replication_origin lookup (preserve-origin repair path).
+	var originName string
+	err = pool.QueryRow(ctx,
+		"SELECT roname FROM pg_replication_origin WHERE roident::text = $1", *roidentStr).Scan(&originName)
+	if err == nil && originName != "" {
+		return originName
+	}
+
+	return ""
+}
+
+// compareTimestamps compares two timestamps with a tolerance in seconds
+func compareTimestamps(t1, t2 time.Time, toleranceSeconds int) bool {
+	diff := t1.Sub(t2)
+	if diff < 0 {
+		diff = -diff
+	}
+	return diff <= time.Duration(toleranceSeconds)*time.Second
+}
+
+// compareTimestampsExact compares two timestamps with precise duration-based tolerance
+func compareTimestampsExact(t1, t2 time.Time, tolerance time.Duration) bool {
+	diff := t1.Sub(t2)
+	if diff < 0 {
+		diff = -diff
+	}
+	return diff <= tolerance
+}

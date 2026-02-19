@@ -55,6 +55,7 @@ type tableRepairRequest struct {
 	GenerateReport bool     `json:"generate_report"`
 	FixNulls       bool     `json:"fix_nulls"`
 	Bidirectional  bool     `json:"bidirectional"`
+	PreserveOrigin bool     `json:"preserve_origin"`
 }
 
 type spockDiffRequest struct {
@@ -434,6 +435,7 @@ func (s *APIServer) handleTableRepair(w http.ResponseWriter, r *http.Request) {
 	task.GenerateReport = req.GenerateReport
 	task.FixNulls = req.FixNulls
 	task.Bidirectional = req.Bidirectional
+	task.PreserveOrigin = req.PreserveOrigin
 	task.Ctx = r.Context()
 	task.ClientRole = clientInfo.role
 	task.InvokeMethod = "api"

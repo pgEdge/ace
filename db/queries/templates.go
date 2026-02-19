@@ -124,6 +124,12 @@ type Templates struct {
 	GetHashVersion                   *template.Template
 	MarkAllLeavesDirty               *template.Template
 	UpdateHashVersion                *template.Template
+	GetReplicationOriginByName       *template.Template
+	CreateReplicationOrigin          *template.Template
+	SetupReplicationOriginSession    *template.Template
+	ResetReplicationOriginSession    *template.Template
+	SetupReplicationOriginXact       *template.Template
+	ResetReplicationOriginXact       *template.Template
 }
 
 var SQLTemplates = Templates{
@@ -1537,7 +1543,9 @@ var SQLTemplates = Templates{
 		SELECT ros.remote_lsn::text
 		FROM pg_catalog.pg_replication_origin_status ros
 		JOIN pg_catalog.pg_replication_origin ro ON ro.roident = ros.local_id
-		WHERE ro.roname LIKE 'spk_%_' || $1 || '_sub_' || $1 || '_' || $2
+		JOIN spock.subscription s ON ro.roname LIKE '%' || s.sub_name
+		JOIN spock.node o ON o.node_id = s.sub_origin
+		WHERE o.node_name = $1
 			AND ros.remote_lsn IS NOT NULL
 		LIMIT 1
 	`)),
@@ -1571,5 +1579,23 @@ var SQLTemplates = Templates{
 		UPDATE spock.ace_mtree_metadata
 		SET hash_version = $1, last_updated = current_timestamp
 		WHERE schema_name = $2 AND table_name = $3
+	`)),
+	GetReplicationOriginByName: template.Must(template.New("getReplicationOriginByName").Parse(`
+		SELECT roident FROM pg_replication_origin WHERE roname = $1
+	`)),
+	CreateReplicationOrigin: template.Must(template.New("createReplicationOrigin").Parse(`
+		SELECT pg_replication_origin_create($1)
+	`)),
+	SetupReplicationOriginSession: template.Must(template.New("setupReplicationOriginSession").Parse(`
+		SELECT pg_replication_origin_session_setup($1)
+	`)),
+	ResetReplicationOriginSession: template.Must(template.New("resetReplicationOriginSession").Parse(`
+		SELECT pg_replication_origin_session_reset()
+	`)),
+	SetupReplicationOriginXact: template.Must(template.New("setupReplicationOriginXact").Parse(`
+		SELECT pg_replication_origin_xact_setup($1, $2)
+	`)),
+	ResetReplicationOriginXact: template.Must(template.New("resetReplicationOriginXact").Parse(`
+		SELECT pg_replication_origin_xact_reset()
 	`)),
 }
