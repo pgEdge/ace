@@ -1870,3 +1870,163 @@ func TestTableRepair_MixedOps_PreserveOrigin(t *testing.T) {
 	log.Println("  - INSERT: 2 missing rows restored with preserved origin/timestamp")
 	log.Println("  - UPDATE: 2 modified rows corrected with preserved origin/timestamp")
 }
+
+// TestTableRepair_TimestampAndTimeTypes verifies that the full diff→repair
+// pipeline works correctly for timestamp, timestamptz, time, and timetz columns.
+// This guards against pgx sending the wrong OID for timestamp-without-tz
+// (which would cause PostgreSQL to apply a session-timezone shift) and ensures
+// that pgtype.Time values round-trip through diff JSON and back correctly.
+func TestTableRepair_TimestampAndTimeTypes(t *testing.T) {
+	ctx := context.Background()
+	tableName := "temporal_type_repair"
+	qualifiedTableName := fmt.Sprintf("%s.%s", testSchema, tableName)
+
+	createSQL := fmt.Sprintf(`
+CREATE SCHEMA IF NOT EXISTS "%s";
+CREATE TABLE IF NOT EXISTS %s.%s (
+    id          INT PRIMARY KEY,
+    col_ts      TIMESTAMP WITHOUT TIME ZONE,
+    col_tstz    TIMESTAMP WITH TIME ZONE,
+    col_time    TIME WITHOUT TIME ZONE,
+    col_timetz  TIME WITH TIME ZONE
+);`, testSchema, testSchema, tableName)
+
+	for i, pool := range []*pgxpool.Pool{pgCluster.Node1Pool, pgCluster.Node2Pool} {
+		nodeName := pgCluster.ClusterNodes[i]["Name"].(string)
+		_, err := pool.Exec(ctx, createSQL)
+		require.NoErrorf(t, err, "Failed to create temporal table on %s", nodeName)
+		_, err = pool.Exec(ctx, fmt.Sprintf("TRUNCATE TABLE %s CASCADE", qualifiedTableName))
+		require.NoErrorf(t, err, "Failed to truncate temporal table on %s", nodeName)
+		_, err = pool.Exec(ctx, fmt.Sprintf(`SELECT spock.repset_add_table('default', '%s');`, qualifiedTableName))
+		require.NoErrorf(t, err, "Failed to add temporal table to repset on %s", nodeName)
+	}
+
+	t.Cleanup(func() {
+		_, _ = pgCluster.Node1Pool.Exec(ctx, fmt.Sprintf(`SELECT spock.repset_remove_table('default', '%s');`, qualifiedTableName))
+		for _, pool := range []*pgxpool.Pool{pgCluster.Node1Pool, pgCluster.Node2Pool} {
+			_, _ = pool.Exec(ctx, fmt.Sprintf("DROP TABLE IF EXISTS %s CASCADE", qualifiedTableName))
+		}
+		files, _ := filepath.Glob("*_diffs-*.json")
+		for _, f := range files {
+			_ = os.Remove(f)
+		}
+	})
+
+	insertRow := func(pool *pgxpool.Pool, id int, ts, tstz time.Time, timeStr, timetzStr string) {
+		tx, err := pool.Begin(ctx)
+		require.NoError(t, err)
+		defer tx.Rollback(ctx)
+
+		_, err = tx.Exec(ctx, "SELECT spock.repair_mode(true)")
+		require.NoError(t, err)
+
+		_, err = tx.Exec(ctx, fmt.Sprintf(
+			`INSERT INTO %s (id, col_ts, col_tstz, col_time, col_timetz) VALUES ($1, $2, $3, $4::time, $5::timetz)`,
+			qualifiedTableName),
+			id, ts, tstz, timeStr, timetzStr,
+		)
+		require.NoError(t, err)
+
+		_, err = tx.Exec(ctx, "SELECT spock.repair_mode(false)")
+		require.NoError(t, err)
+		require.NoError(t, tx.Commit(ctx))
+	}
+
+	refTS := time.Date(2024, 6, 15, 10, 30, 0, 0, time.UTC)
+	refTSTZ := time.Date(2024, 6, 15, 18, 45, 30, 0, time.UTC)
+
+	// Row 1: identical on both nodes (baseline)
+	insertRow(pgCluster.Node1Pool, 1, refTS, refTSTZ, "08:15:30.123456", "14:30:00-05")
+	insertRow(pgCluster.Node2Pool, 1, refTS, refTSTZ, "08:15:30.123456", "14:30:00-05")
+
+	// Row 2: only on node1 (missing on node2)
+	insertRow(pgCluster.Node1Pool, 2,
+		refTS.Add(1*time.Hour),
+		refTSTZ.Add(1*time.Hour),
+		"12:00:00",
+		"09:00:00+03",
+	)
+
+	// Row 3: only on node2 (should be deleted when n1 is source of truth)
+	insertRow(pgCluster.Node2Pool, 3,
+		refTS.Add(2*time.Hour),
+		refTSTZ.Add(2*time.Hour),
+		"23:59:59.999999",
+		"00:00:00+00",
+	)
+
+	// Row 4: different values on each node (row mismatch)
+	insertRow(pgCluster.Node1Pool, 4,
+		refTS.Add(3*time.Hour),
+		refTSTZ.Add(3*time.Hour),
+		"06:30:00",
+		"16:45:00-07",
+	)
+	insertRow(pgCluster.Node2Pool, 4,
+		refTS.Add(99*time.Hour), // deliberately different
+		refTSTZ.Add(99*time.Hour),
+		"22:00:00.500000",
+		"01:15:00+05:30",
+	)
+
+	// ----- Diff -----
+	diffFile := runTableDiff(t, qualifiedTableName, []string{serviceN1, serviceN2})
+
+	// ----- Repair (node1 = source of truth) -----
+	repairTask := newTestTableRepairTask(serviceN1, qualifiedTableName, diffFile)
+	err := repairTask.Run(false)
+	require.NoError(t, err, "Repair for temporal types failed")
+
+	// ----- Verify: no diffs remain -----
+	assertNoTableDiff(t, qualifiedTableName)
+
+	// ----- Verify: row counts match -----
+	countN1 := getTableCount(t, ctx, pgCluster.Node1Pool, qualifiedTableName)
+	countN2 := getTableCount(t, ctx, pgCluster.Node2Pool, qualifiedTableName)
+	assert.Equal(t, countN1, countN2, "Row counts should match after repair")
+
+	// ----- Verify: row 3 was deleted from node2 -----
+	var row3Count int
+	err = pgCluster.Node2Pool.QueryRow(ctx, fmt.Sprintf("SELECT count(*) FROM %s WHERE id = 3", qualifiedTableName)).Scan(&row3Count)
+	require.NoError(t, err)
+	assert.Equal(t, 0, row3Count, "Row 3 (only on node2) should be deleted")
+
+	// ----- Verify: row 2 was inserted on node2 with correct values -----
+	type temporalRow struct {
+		ts     time.Time
+		tstz   time.Time
+		timeV  string
+		timetz string
+	}
+	readRow := func(pool *pgxpool.Pool, id int) temporalRow {
+		var r temporalRow
+		err := pool.QueryRow(ctx, fmt.Sprintf(
+			`SELECT col_ts, col_tstz, col_time::text, col_timetz::text FROM %s WHERE id = $1`, qualifiedTableName), id).
+			Scan(&r.ts, &r.tstz, &r.timeV, &r.timetz)
+		require.NoError(t, err, "Failed to read row %d", id)
+		return r
+	}
+
+	r2n1 := readRow(pgCluster.Node1Pool, 2)
+	r2n2 := readRow(pgCluster.Node2Pool, 2)
+	assert.True(t, r2n1.ts.Equal(r2n2.ts), "row 2 col_ts: n1=%v n2=%v", r2n1.ts, r2n2.ts)
+	assert.True(t, r2n1.tstz.Equal(r2n2.tstz), "row 2 col_tstz: n1=%v n2=%v", r2n1.tstz, r2n2.tstz)
+	assert.Equal(t, r2n1.timeV, r2n2.timeV, "row 2 col_time mismatch")
+	assert.Equal(t, r2n1.timetz, r2n2.timetz, "row 2 col_timetz mismatch")
+
+	// ----- Verify: row 4 was repaired to match node1 -----
+	r4n1 := readRow(pgCluster.Node1Pool, 4)
+	r4n2 := readRow(pgCluster.Node2Pool, 4)
+	assert.True(t, r4n1.ts.Equal(r4n2.ts), "row 4 col_ts: n1=%v n2=%v", r4n1.ts, r4n2.ts)
+	assert.True(t, r4n1.tstz.Equal(r4n2.tstz), "row 4 col_tstz: n1=%v n2=%v", r4n1.tstz, r4n2.tstz)
+	assert.Equal(t, r4n1.timeV, r4n2.timeV, "row 4 col_time mismatch")
+	assert.Equal(t, r4n1.timetz, r4n2.timetz, "row 4 col_timetz mismatch")
+
+	// ----- Verify: row 1 (baseline) is still identical -----
+	r1n1 := readRow(pgCluster.Node1Pool, 1)
+	r1n2 := readRow(pgCluster.Node2Pool, 1)
+	assert.True(t, r1n1.ts.Equal(r1n2.ts), "row 1 col_ts: n1=%v n2=%v", r1n1.ts, r1n2.ts)
+	assert.True(t, r1n1.tstz.Equal(r1n2.tstz), "row 1 col_tstz: n1=%v n2=%v", r1n1.tstz, r1n2.tstz)
+	assert.Equal(t, r1n1.timeV, r1n2.timeV, "row 1 col_time mismatch")
+	assert.Equal(t, r1n1.timetz, r1n2.timetz, "row 1 col_timetz mismatch")
+}

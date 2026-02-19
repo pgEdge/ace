@@ -555,6 +555,10 @@ func isNumericType(colType string) bool {
 // When allCols is provided, it returns concat_ws('|', col1_expr, col2_expr, ...)
 // with numeric/decimal columns wrapped in trim_scale() to normalize trailing zeros.
 // If allCols is nil/empty, falls back to the table-alias::text whole-row cast.
+//
+// PostgreSQL limits functions to 100 arguments. Since concat_ws uses 1 argument
+// for the separator, at most 99 column expressions fit per call. For wider
+// tables, the expressions are batched into nested concat_ws calls.
 func buildRowTextExpr(tableAlias string, allCols []string, colTypes map[string]string) string {
 	if len(allCols) == 0 {
 		return tableAlias + "::text"
@@ -570,7 +574,29 @@ func buildRowTextExpr(tableAlias string, allCols []string, colTypes map[string]s
 			exprs[i] = fmt.Sprintf("COALESCE(%s::text, '')", qualifiedCol)
 		}
 	}
-	return fmt.Sprintf("concat_ws('|', %s)", strings.Join(exprs, ", "))
+	return concatWSBatched(exprs)
+}
+
+// concatWSBatched produces a concat_ws('|', ...) expression. When len(exprs)
+// exceeds 99 (the max value-arguments per concat_ws call, since the separator
+// takes one slot), it splits the expressions into batches and nests the calls.
+func concatWSBatched(exprs []string) string {
+	const maxArgs = 99 // 100 total - 1 for the separator
+
+	if len(exprs) <= maxArgs {
+		return fmt.Sprintf("concat_ws('|', %s)", strings.Join(exprs, ", "))
+	}
+
+	// Split into batches, wrap each in its own concat_ws, then combine.
+	var batches []string
+	for i := 0; i < len(exprs); i += maxArgs {
+		end := i + maxArgs
+		if end > len(exprs) {
+			end = len(exprs)
+		}
+		batches = append(batches, fmt.Sprintf("concat_ws('|', %s)", strings.Join(exprs[i:end], ", ")))
+	}
+	return fmt.Sprintf("concat_ws('|', %s)", strings.Join(batches, ", "))
 }
 
 func BlockHashSQL(schema, table string, primaryKeyCols []string, mode string, includeLower, includeUpper bool, filter string, allCols []string, colTypes map[string]string) (string, error) {

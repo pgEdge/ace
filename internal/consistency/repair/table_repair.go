@@ -27,6 +27,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pglogrepl"
 	"github.com/jackc/pgx/v5"
+	pgxv5type "github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/pgedge/ace/db/queries"
 	planner "github.com/pgedge/ace/internal/consistency/repair/plan"
@@ -1314,6 +1315,13 @@ func convertValueForType(val any, colType string) (any, error) {
 	}
 
 	if tVal, ok := val.(time.Time); ok {
+		// For "timestamp without time zone" columns, wrap in pgxv5type.Timestamp
+		// so pgx sends the value as "timestamp" instead of "timestamptz". This prevents
+		// PostgreSQL from applying a session-timezone conversion.
+		lower := strings.ToLower(colType)
+		if lower == "timestamp without time zone" || (strings.HasPrefix(lower, "timestamp") && !strings.Contains(lower, "with time zone")) {
+			return pgxv5type.Timestamp{Time: tVal, Valid: true}, nil
+		}
 		return tVal, nil
 	}
 
