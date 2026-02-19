@@ -1467,10 +1467,138 @@ func TestTableRepair_PreserveOrigin(t *testing.T) {
 // Source row (n1) has origin metadata (node_n3); target row (n2) has a NULL column.
 // Preserve-origin must extract origin/timestamp from source and apply during UPDATE.
 // Validates origin preservation for UPDATE operations, not just INSERT operations.
+// TestTableRepair_FixNulls_PreserveOrigin verifies that fix-nulls with
+// PreserveOrigin=true preserves the original replication origin after
+// updating NULL columns.
+//
+// Scenario: rows originate on n3 (origin=node_n3) and replicate to n1/n2.
+// Then specific columns are set to NULL on n2 via repair_mode, creating
+// NULL divergence. Fix-nulls fills in the NULLs from n1, and the repaired
+// rows on n2 must still show origin=node_n3.
 func TestTableRepair_FixNulls_PreserveOrigin(t *testing.T) {
-	t.Skip("KNOWN LIMITATION: fix-nulls uses UPDATE statements which don't preserve origin. " +
-		"Preserve-origin only works for INSERT operations (via pg_replication_origin_xact_setup). " +
-		"Fix-nulls would need to use DELETE+INSERT or a different mechanism to preserve origin during UPDATE.")
+	ctx := context.Background()
+	tableName := "fixnulls_preserve_origin_test"
+	qualifiedTableName := fmt.Sprintf("%s.%s", testSchema, tableName)
+
+	for i, pool := range []*pgxpool.Pool{
+		pgCluster.Node1Pool, pgCluster.Node2Pool, pgCluster.Node3Pool,
+	} {
+		nodeName := pgCluster.ClusterNodes[i]["Name"].(string)
+		_, err := pool.Exec(ctx, fmt.Sprintf(
+			`CREATE TABLE IF NOT EXISTS %s (
+				id INT PRIMARY KEY,
+				first_name TEXT,
+				last_name TEXT,
+				city TEXT
+			);`, qualifiedTableName))
+		require.NoError(t, err, "create table on %s", nodeName)
+		_, err = pool.Exec(ctx, fmt.Sprintf(
+			`SELECT spock.repset_add_table('default', '%s');`,
+			qualifiedTableName))
+		require.NoError(t, err, "add to repset on %s", nodeName)
+	}
+	t.Cleanup(func() {
+		for _, pool := range []*pgxpool.Pool{
+			pgCluster.Node1Pool, pgCluster.Node2Pool, pgCluster.Node3Pool,
+		} {
+			pool.Exec(ctx, fmt.Sprintf(
+				"DROP TABLE IF EXISTS %s CASCADE;", qualifiedTableName))
+		}
+		files, _ := filepath.Glob("*_diffs-*.json")
+		for _, f := range files {
+			os.Remove(f)
+		}
+	})
+
+	// Insert rows on n3 so they replicate with origin=node_n3
+	_, err := pgCluster.Node3Pool.Exec(ctx, fmt.Sprintf(
+		"INSERT INTO %s (id, first_name, last_name, city) VALUES "+
+			"(1, 'Michael', 'Schumacher', 'Kerpen'), "+
+			"(2, 'Fernando', 'Alonso', 'Oviedo')",
+		qualifiedTableName))
+	require.NoError(t, err)
+
+	// Wait for replication
+	for _, info := range []struct {
+		name string
+		pool *pgxpool.Pool
+	}{
+		{"n1", pgCluster.Node1Pool},
+		{"n2", pgCluster.Node2Pool},
+	} {
+		assertEventually(t, 30*time.Second, func() error {
+			var c int
+			if err := info.pool.QueryRow(ctx, fmt.Sprintf(
+				"SELECT count(*) FROM %s", qualifiedTableName),
+			).Scan(&c); err != nil {
+				return err
+			}
+			if c < 2 {
+				return fmt.Errorf(
+					"expected 2 rows on %s, got %d", info.name, c)
+			}
+			return nil
+		})
+	}
+
+	// Set some columns to NULL on n2 in repair_mode (creating divergence)
+	tx, err := pgCluster.Node2Pool.Begin(ctx)
+	require.NoError(t, err)
+	_, err = tx.Exec(ctx, "SELECT spock.repair_mode(true)")
+	require.NoError(t, err)
+	_, err = tx.Exec(ctx, fmt.Sprintf(
+		"UPDATE %s SET city = NULL WHERE id = 1", qualifiedTableName))
+	require.NoError(t, err)
+	_, err = tx.Exec(ctx, fmt.Sprintf(
+		"UPDATE %s SET first_name = NULL WHERE id = 2", qualifiedTableName))
+	require.NoError(t, err)
+	_, err = tx.Exec(ctx, "SELECT spock.repair_mode(false)")
+	require.NoError(t, err)
+	require.NoError(t, tx.Commit(ctx))
+
+	// Verify divergence: n2 has NULLs that n1 doesn't
+	var city *string
+	err = pgCluster.Node2Pool.QueryRow(ctx, fmt.Sprintf(
+		"SELECT city FROM %s WHERE id = 1", qualifiedTableName)).Scan(&city)
+	require.NoError(t, err)
+	require.Nil(t, city, "n2 row 1 city should be NULL before fix-nulls")
+
+	// Run diff then fix-nulls with preserve-origin
+	diffFile := runTableDiff(t, qualifiedTableName,
+		[]string{serviceN1, serviceN2})
+	repairTask := newTestTableRepairTask("", qualifiedTableName, diffFile)
+	repairTask.SourceOfTruth = ""
+	repairTask.FixNulls = true
+	repairTask.PreserveOrigin = true
+
+	err = repairTask.Run(false)
+	require.NoError(t, err, "fix-nulls with preserve-origin failed")
+
+	// Verify NULLs are fixed
+	assertNoTableDiff(t, qualifiedTableName)
+
+	var fixedCity, fixedFirstName string
+	err = pgCluster.Node2Pool.QueryRow(ctx, fmt.Sprintf(
+		"SELECT city FROM %s WHERE id = 1", qualifiedTableName),
+	).Scan(&fixedCity)
+	require.NoError(t, err)
+	require.Equal(t, "Kerpen", fixedCity, "row 1 city should be fixed")
+
+	err = pgCluster.Node2Pool.QueryRow(ctx, fmt.Sprintf(
+		"SELECT first_name FROM %s WHERE id = 2", qualifiedTableName),
+	).Scan(&fixedFirstName)
+	require.NoError(t, err)
+	require.Equal(t, "Fernando", fixedFirstName,
+		"row 2 first_name should be fixed")
+
+	// Verify origin is preserved as node_n3
+	for _, id := range []int{1, 2} {
+		origin := getReplicationOrigin(
+			t, ctx, pgCluster.Node2Pool, qualifiedTableName, id)
+		require.Equal(t, "node_n3", origin,
+			"row %d on n2 should still have origin node_n3 after fix-nulls",
+			id)
+	}
 }
 
 // TestTableRepair_Bidirectional_PreserveOrigin verifies that bidirectional

@@ -834,83 +834,119 @@ func (t *TableRepairTask) runFixNulls(startTime time.Time) error {
 		}
 		sort.Strings(columns)
 
-		nodeCellsUpdated := 0
-		nodeFailed := false
-
+		// Build per-column update lists
+		columnsByRow := make(map[string][]*nullUpdate)
 		for _, col := range columns {
-			colType, ok := colTypes[col]
-			if !ok {
-				nodeFailed = true
-				tx.Rollback(t.Ctx)
-				errStr := fmt.Sprintf("column type for %s not found on node %s", col, nodeName)
-				logger.Error("%s", errStr)
-				repairErrors = append(repairErrors, errStr)
-				break
-			}
-
-			var rowsForCol []*nullUpdate
 			for _, nu := range updates {
 				if _, ok := nu.columns[col]; ok {
-					rowsForCol = append(rowsForCol, nu)
+					columnsByRow[col] = append(columnsByRow[col], nu)
 				}
 			}
-			if len(rowsForCol) == 0 {
-				continue
-			}
+		}
 
-			// Extract origin information for fix-nulls updates if preserve-origin is enabled
-			var originInfoMap map[string]*rowOriginInfo
-			if t.PreserveOrigin {
-				originInfoMap = make(map[string]*rowOriginInfo)
-				for _, nu := range rowsForCol {
-					if nu.sourceRow != nil {
-						pkeyStr, err := utils.StringifyKey(nu.pkMap, t.Key)
-						if err != nil {
-							// Try alternative method
-							pkeyStr, err = utils.StringifyOrderedMapKey(nu.sourceRow, t.Key)
-						}
-						if err == nil {
-							if originInfo := extractOriginInfoFromRow(nu.sourceRow); originInfo != nil {
-								originInfoMap[pkeyStr] = originInfo
-							}
+		// Extract origin info once for all columns
+		var originInfoMap map[string]*rowOriginInfo
+		if t.PreserveOrigin {
+			originInfoMap = make(map[string]*rowOriginInfo)
+			for _, nu := range updates {
+				if nu.sourceRow != nil {
+					pkeyStr, err := utils.StringifyKey(nu.pkMap, t.Key)
+					if err != nil {
+						pkeyStr, err = utils.StringifyOrderedMapKey(nu.sourceRow, t.Key)
+					}
+					if err == nil {
+						if originInfo := extractOriginInfoFromRow(nu.sourceRow); originInfo != nil {
+							originInfoMap[pkeyStr] = originInfo
 						}
 					}
 				}
 			}
+		}
 
-			updatedCount, err := t.applyFixNullsUpdates(tx, col, colType, rowsForCol, colTypes, originInfoMap, nodeName)
-			if err != nil {
-				nodeFailed = true
-				tx.Rollback(t.Ctx)
-				logger.Error("executing fix-nulls updates for column %s on node %s: %v", col, nodeName, err)
-				repairErrors = append(repairErrors, fmt.Sprintf("fix-nulls updates failed for %s on %s: %v", col, nodeName, err))
-				break
+		nodeCellsUpdated := 0
+		nodeFailed := false
+
+		if t.PreserveOrigin && len(originInfoMap) > 0 {
+			// Commit the initial tx (repair_mode setup) first, then use
+			// per-batch-key transactions for origin preservation.
+			if spockRepairModeActive {
+				_, err = tx.Exec(t.Ctx, "SELECT spock.repair_mode(false)")
+				if err != nil {
+					tx.Rollback(t.Ctx)
+					logger.Error("disabling spock.repair_mode(false) on %s: %v", nodeName, err)
+					repairErrors = append(repairErrors, fmt.Sprintf("spock.repair_mode(false) failed for %s: %v", nodeName, err))
+					continue
+				}
 			}
-			nodeCellsUpdated += updatedCount
-			logger.Info("Updated %d column values for column %s on %s", updatedCount, col, nodeName)
+			if err := tx.Commit(t.Ctx); err != nil {
+				logger.Error("committing pre-fixnulls transaction on %s: %v", nodeName, err)
+				repairErrors = append(repairErrors, fmt.Sprintf("commit failed for %s: %v", nodeName, err))
+				continue
+			}
+			spockRepairModeActive = false
+
+			updatedCount, err := t.executePreserveOriginFixNulls(pool, nodeName, columns, columnsByRow, colTypes, originInfoMap)
+			if err != nil {
+				logger.Error("executing preserve-origin fix-nulls on node %s: %v", nodeName, err)
+				repairErrors = append(repairErrors, fmt.Sprintf("preserve-origin fix-nulls failed for %s: %v", nodeName, err))
+				nodeFailed = true
+			}
+			nodeCellsUpdated = updatedCount
+			logger.Info("Updated %d column values on %s (preserve-origin)", updatedCount, nodeName)
+		} else {
+			// Standard path: all updates in the shared transaction
+			for _, col := range columns {
+				colType, ok := colTypes[col]
+				if !ok {
+					nodeFailed = true
+					tx.Rollback(t.Ctx)
+					errStr := fmt.Sprintf("column type for %s not found on node %s", col, nodeName)
+					logger.Error("%s", errStr)
+					repairErrors = append(repairErrors, errStr)
+					break
+				}
+
+				rowsForCol := columnsByRow[col]
+				if len(rowsForCol) == 0 {
+					continue
+				}
+
+				updatedCount, err := t.applyFixNullsUpdates(tx, col, colType, rowsForCol, colTypes, nodeName)
+				if err != nil {
+					nodeFailed = true
+					tx.Rollback(t.Ctx)
+					logger.Error("executing fix-nulls updates for column %s on node %s: %v", col, nodeName, err)
+					repairErrors = append(repairErrors, fmt.Sprintf("fix-nulls updates failed for %s on %s: %v", col, nodeName, err))
+					break
+				}
+				nodeCellsUpdated += updatedCount
+				logger.Info("Updated %d column values for column %s on %s", updatedCount, col, nodeName)
+			}
+
+			if !nodeFailed {
+				if spockRepairModeActive {
+					_, err = tx.Exec(t.Ctx, "SELECT spock.repair_mode(false)")
+					if err != nil {
+						tx.Rollback(t.Ctx)
+						logger.Error("disabling spock.repair_mode(false) on %s: %v", nodeName, err)
+						repairErrors = append(repairErrors, fmt.Sprintf("spock.repair_mode(false) failed for %s: %v", nodeName, err))
+						nodeFailed = true
+					}
+				}
+				if !nodeFailed {
+					if err := tx.Commit(t.Ctx); err != nil {
+						logger.Error("committing transaction on %s: %v", nodeName, err)
+						repairErrors = append(repairErrors, fmt.Sprintf("commit failed for %s: %v", nodeName, err))
+						nodeFailed = true
+					}
+				}
+			}
 		}
 
 		if nodeFailed {
 			continue
 		}
-
-		if spockRepairModeActive {
-			_, err = tx.Exec(t.Ctx, "SELECT spock.repair_mode(false)")
-			if err != nil {
-				tx.Rollback(t.Ctx)
-				logger.Error("disabling spock.repair_mode(false) on %s: %v", nodeName, err)
-				repairErrors = append(repairErrors, fmt.Sprintf("spock.repair_mode(false) failed for %s: %v", nodeName, err))
-				continue
-			}
-			logger.Debug("spock.repair_mode(false) set on %s", nodeName)
-		}
-
-		if err := tx.Commit(t.Ctx); err != nil {
-			logger.Error("committing transaction on %s: %v", nodeName, err)
-			repairErrors = append(repairErrors, fmt.Sprintf("commit failed for %s: %v", nodeName, err))
-			continue
-		}
-		logger.Debug("Transaction committed successfully on %s", nodeName)
+		logger.Debug("Fix-nulls completed on %s", nodeName)
 
 		totalCellsUpdated[nodeName] = nodeCellsUpdated
 
@@ -1172,67 +1208,180 @@ func (t *TableRepairTask) populateFixNullsReport(nodeName string, nodeUpdates ma
 	t.report.Changes[nodeName].(map[string]any)[field] = rows
 }
 
-func (t *TableRepairTask) applyFixNullsUpdates(tx pgx.Tx, column string, columnType string, updates []*nullUpdate, colTypes map[string]string, originInfoMap map[string]*rowOriginInfo, nodeName string) (int, error) {
+// applyFixNullsUpdates executes fix-nulls UPDATE statements in a shared tx.
+// This is the standard (non-preserve-origin) path.
+func (t *TableRepairTask) applyFixNullsUpdates(tx pgx.Tx, column string, columnType string, updates []*nullUpdate, colTypes map[string]string, nodeName string) (int, error) {
 	if len(updates) == 0 {
 		return 0, nil
 	}
 
-	originGroups := groupNullUpdatesByOrigin(updates, originInfoMap, t.PreserveOrigin, t.Key)
-
 	totalUpdated := 0
-	setupSessions := make(map[string]bool)
-
-	for batchKey, originUpdates := range originGroups {
-		if len(originUpdates) == 0 {
-			continue
+	batchSize := 500
+	for i := 0; i < len(updates); i += batchSize {
+		end := i + batchSize
+		if end > len(updates) {
+			end = len(updates)
 		}
+		batch := updates[i:end]
 
-		preserveThisGroup, err := t.setupOriginForBatchKey(tx, batchKey, nodeName, setupSessions)
+		updateSQL, args, err := t.buildFixNullsBatchSQL(column, columnType, batch, colTypes)
 		if err != nil {
 			return totalUpdated, err
 		}
 
-		// Process batches for this origin group
-		batchSize := 500
-		for i := 0; i < len(originUpdates); i += batchSize {
-			end := i + batchSize
-			if end > len(originUpdates) {
-				end = len(originUpdates)
-			}
-			batch := originUpdates[i:end]
+		tag, err := tx.Exec(t.Ctx, updateSQL, args...)
+		if err != nil {
+			return totalUpdated, fmt.Errorf("error executing fix-nulls batch for column %s: %w", column, err)
+		}
+		totalUpdated += int(tag.RowsAffected())
+	}
 
-			updateSQL, args, err := t.buildFixNullsBatchSQL(column, columnType, batch, colTypes)
-			if err != nil {
-				if preserveThisGroup {
-					if resetErr := t.resetReplicationOriginXact(tx); resetErr != nil {
-						logger.Warn("failed to reset replication origin xact during cleanup: %v", resetErr)
-					}
-					if resetErr := t.resetReplicationOriginSession(tx); resetErr != nil {
-						logger.Warn("failed to reset replication origin session during cleanup: %v", resetErr)
-					}
-				}
-				return totalUpdated, err
-			}
+	return totalUpdated, nil
+}
 
-			tag, err := tx.Exec(t.Ctx, updateSQL, args...)
+// executePreserveOriginFixNulls handles fix-nulls updates with per-batch-key
+// transactions so that pg_replication_origin_xact_setup correctly preserves
+// per-row origin metadata. Each unique (origin, timestamp) combination gets
+// its own transaction.
+func (t *TableRepairTask) executePreserveOriginFixNulls(pool *pgxpool.Pool, nodeName string, columns []string, columnsByRow map[string][]*nullUpdate, colTypes map[string]string, originInfoMap map[string]*rowOriginInfo) (int, error) {
+	// Group all updates by origin batch key.
+	type colUpdate struct {
+		column     string
+		columnType string
+		updates    []*nullUpdate
+	}
+	batchGroups := make(map[originBatchKey][]colUpdate)
+
+	for _, col := range columns {
+		colType := colTypes[col]
+		var rowsForCol []*nullUpdate
+		for _, nu := range columnsByRow[col] {
+			rowsForCol = append(rowsForCol, nu)
+		}
+		if len(rowsForCol) == 0 {
+			continue
+		}
+
+		// Sub-group this column's updates by origin
+		perOrigin := make(map[originBatchKey][]*nullUpdate)
+		for _, nu := range rowsForCol {
+			pkeyStr, err := utils.StringifyKey(nu.pkMap, t.Key)
 			if err != nil {
-				if preserveThisGroup {
-					if resetErr := t.resetReplicationOriginXact(tx); resetErr != nil {
-						logger.Warn("failed to reset replication origin xact during cleanup: %v", resetErr)
-					}
-					if resetErr := t.resetReplicationOriginSession(tx); resetErr != nil {
-						logger.Warn("failed to reset replication origin session during cleanup: %v", resetErr)
-					}
+				if nu.sourceRow != nil {
+					pkeyStr, err = utils.StringifyOrderedMapKey(nu.sourceRow, t.Key)
 				}
-				return totalUpdated, fmt.Errorf("error executing fix-nulls batch for column %s: %w", column, err)
 			}
-			totalUpdated += int(tag.RowsAffected())
+			var bk originBatchKey
+			if err == nil {
+				if oi, ok := originInfoMap[pkeyStr]; ok && oi != nil {
+					bk = makeOriginBatchKey(oi)
+				}
+			}
+			perOrigin[bk] = append(perOrigin[bk], nu)
+		}
+		for bk, updates := range perOrigin {
+			batchGroups[bk] = append(batchGroups[bk], colUpdate{
+				column: col, columnType: colType, updates: updates,
+			})
 		}
 	}
 
-	if len(setupSessions) > 0 {
-		if err := t.resetReplicationOriginSession(tx); err != nil {
-			return totalUpdated, fmt.Errorf("failed to reset replication origin session after fix-nulls: %w", err)
+	conn, err := pool.Acquire(t.Ctx)
+	if err != nil {
+		return 0, fmt.Errorf("failed to acquire connection for preserve-origin fix-nulls: %w", err)
+	}
+	defer func() {
+		queries.ResetReplicationOriginSession(t.Ctx, conn)
+		conn.Release()
+	}()
+
+	totalUpdated := 0
+	currentSessionOrigin := ""
+
+	for batchKey, colUpdates := range batchGroups {
+		if len(colUpdates) == 0 {
+			continue
+		}
+
+		// Manage session-level origin
+		if batchKey.nodeOrigin != "" && batchKey.nodeOrigin != currentSessionOrigin {
+			if currentSessionOrigin != "" {
+				queries.ResetReplicationOriginSession(t.Ctx, conn)
+			}
+			originName := fmt.Sprintf("node_%s", batchKey.nodeOrigin)
+			originID, err := queries.GetReplicationOriginByName(t.Ctx, conn, originName)
+			if err != nil {
+				return totalUpdated, fmt.Errorf("failed to get replication origin '%s': %w", originName, err)
+			}
+			if originID == nil {
+				createdID, createErr := queries.CreateReplicationOrigin(t.Ctx, conn, originName)
+				if createErr != nil {
+					return totalUpdated, fmt.Errorf("failed to create replication origin '%s': %w", originName, createErr)
+				}
+				originID = &createdID
+			}
+			if err := queries.SetupReplicationOriginSession(t.Ctx, conn, originName); err != nil {
+				return totalUpdated, fmt.Errorf("failed to setup origin session for '%s': %w", originName, err)
+			}
+			currentSessionOrigin = batchKey.nodeOrigin
+		}
+
+		batchTx, err := conn.Begin(t.Ctx)
+		if err != nil {
+			return totalUpdated, fmt.Errorf("failed to begin batch transaction for origin %s: %w", batchKey.nodeOrigin, err)
+		}
+
+		if err := t.setupTransactionMode(batchTx, nodeName); err != nil {
+			batchTx.Rollback(t.Ctx)
+			return totalUpdated, fmt.Errorf("failed to setup transaction mode for origin batch: %w", err)
+		}
+
+		commitTS, err := parseBatchKeyTimestamp(batchKey)
+		if err != nil {
+			batchTx.Rollback(t.Ctx)
+			return totalUpdated, fmt.Errorf("failed to parse batch key timestamp: %w", err)
+		}
+
+		lsn, ok, err := t.resolveOriginLSN(batchKey, nodeName, commitTS)
+		if err != nil {
+			batchTx.Rollback(t.Ctx)
+			return totalUpdated, fmt.Errorf("failed to resolve origin LSN: %w", err)
+		}
+		if ok && lsn != nil && commitTS != nil {
+			if err := t.setupReplicationOriginXact(batchTx, lsn, commitTS); err != nil {
+				batchTx.Rollback(t.Ctx)
+				return totalUpdated, fmt.Errorf("failed to setup origin xact: %w", err)
+			}
+		}
+
+		for _, cu := range colUpdates {
+			batchSize := 500
+			for i := 0; i < len(cu.updates); i += batchSize {
+				end := i + batchSize
+				if end > len(cu.updates) {
+					end = len(cu.updates)
+				}
+				updateSQL, args, err := t.buildFixNullsBatchSQL(cu.column, cu.columnType, cu.updates[i:end], colTypes)
+				if err != nil {
+					batchTx.Rollback(t.Ctx)
+					return totalUpdated, err
+				}
+				tag, err := batchTx.Exec(t.Ctx, updateSQL, args...)
+				if err != nil {
+					batchTx.Rollback(t.Ctx)
+					return totalUpdated, fmt.Errorf("error executing fix-nulls batch for column %s: %w", cu.column, err)
+				}
+				totalUpdated += int(tag.RowsAffected())
+			}
+		}
+
+		if _, err := batchTx.Exec(t.Ctx, "SELECT spock.repair_mode(false)"); err != nil {
+			batchTx.Rollback(t.Ctx)
+			return totalUpdated, fmt.Errorf("failed to disable repair mode for origin batch: %w", err)
+		}
+
+		if err := batchTx.Commit(t.Ctx); err != nil {
+			return totalUpdated, fmt.Errorf("failed to commit batch transaction for origin %s: %w", batchKey.nodeOrigin, err)
 		}
 	}
 
@@ -1755,16 +1904,6 @@ func (t *TableRepairTask) performBirectionalInserts(nodeName string, inserts map
 		return 0, fmt.Errorf("no connection pool for node %s", nodeName)
 	}
 
-	tx, err := pool.Begin(t.Ctx)
-	if err != nil {
-		return 0, fmt.Errorf("failed to begin transaction on %s: %w", nodeName, err)
-	}
-	defer tx.Rollback(t.Ctx)
-
-	if err := t.setupTransactionMode(tx, nodeName); err != nil {
-		return 0, err
-	}
-
 	targetNodeHostPortKey := ""
 	for hostPort, mappedName := range t.HostMap {
 		if mappedName == nodeName {
@@ -1783,12 +1922,12 @@ func (t *TableRepairTask) performBirectionalInserts(nodeName string, inserts map
 	// Bidirectional is always insert only
 	originalInsertOnly := t.InsertOnly
 	t.InsertOnly = true
+	defer func() { t.InsertOnly = originalInsertOnly }()
+
 	// Extract origin information from source rows for bidirectional repair
 	var originInfoMap map[string]*rowOriginInfo
 	if t.PreserveOrigin {
 		originInfoMap = make(map[string]*rowOriginInfo)
-		// For bidirectional, origin is the node providing the data
-		// We need to find which node pair this insert came from
 		for nodePairKey, diffs := range t.RawDiffs.NodeDiffs {
 			nodes := strings.Split(nodePairKey, "/")
 			if len(nodes) != 2 {
@@ -1796,9 +1935,9 @@ func (t *TableRepairTask) performBirectionalInserts(nodeName string, inserts map
 			}
 			var sourceNode string
 			if nodes[0] == nodeName {
-				sourceNode = nodes[1] // Data coming from the other node
+				sourceNode = nodes[1]
 			} else if nodes[1] == nodeName {
-				sourceNode = nodes[0] // Data coming from the other node
+				sourceNode = nodes[0]
 			} else {
 				continue
 			}
@@ -1818,9 +1957,30 @@ func (t *TableRepairTask) performBirectionalInserts(nodeName string, inserts map
 		}
 	}
 
-	insertedCount, err := executeUpserts(tx, t, nodeName, inserts, targetNodeColTypes, originInfoMap)
-	t.InsertOnly = originalInsertOnly
+	if t.PreserveOrigin && len(originInfoMap) > 0 {
+		// pg_replication_origin_xact_setup is transaction-scoped: each call
+		// overwrites the previous. Use separate per-batch-key transactions
+		// so each (origin, timestamp) group gets its own commit record.
+		insertedCount, err := t.executePreserveOriginUpserts(pool, nodeName, inserts, targetNodeColTypes, originInfoMap)
+		if err != nil {
+			return 0, fmt.Errorf("failed to execute preserve-origin inserts on %s: %w", nodeName, err)
+		}
+		logger.Info("Executed %d insert operations on %s (preserve-origin)", insertedCount, nodeName)
+		return insertedCount, nil
+	}
 
+	// Standard path: single transaction for all inserts
+	tx, err := pool.Begin(t.Ctx)
+	if err != nil {
+		return 0, fmt.Errorf("failed to begin transaction on %s: %w", nodeName, err)
+	}
+	defer tx.Rollback(t.Ctx)
+
+	if err := t.setupTransactionMode(tx, nodeName); err != nil {
+		return 0, err
+	}
+
+	insertedCount, err := executeUpserts(tx, t, nodeName, inserts, targetNodeColTypes, nil)
 	if err != nil {
 		return 0, fmt.Errorf("failed to execute inserts on %s: %w", nodeName, err)
 	}
@@ -1830,7 +1990,6 @@ func (t *TableRepairTask) performBirectionalInserts(nodeName string, inserts map
 	if err != nil {
 		return 0, fmt.Errorf("failed to disable spock.repair_mode(false) on %s: %w", nodeName, err)
 	}
-	logger.Info("spock.repair_mode(false) set on %s", nodeName)
 
 	if err := tx.Commit(t.Ctx); err != nil {
 		return 0, fmt.Errorf("failed to commit transaction on %s: %w", nodeName, err)
@@ -2138,41 +2297,6 @@ func groupUpsertsByOrigin(upserts map[string]map[string]any, originInfoMap map[s
 	}
 }
 
-// groupNullUpdatesByOrigin groups fix-nulls updates by origin batch key.
-// When preserve-origin is disabled or no origin info is available, all updates are
-// grouped under a single zero-value key.
-func groupNullUpdatesByOrigin(updates []*nullUpdate, originInfoMap map[string]*rowOriginInfo, preserveOrigin bool, keyCols []string) map[originBatchKey][]*nullUpdate {
-	if preserveOrigin && originInfoMap != nil && len(originInfoMap) > 0 {
-		groups := make(map[originBatchKey][]*nullUpdate)
-		for _, nu := range updates {
-			pkeyStr, err := utils.StringifyKey(nu.pkMap, keyCols)
-			if err != nil {
-				if nu.sourceRow != nil {
-					pkeyStr, err = utils.StringifyOrderedMapKey(nu.sourceRow, keyCols)
-				}
-			}
-			// PK stringification failure: cannot look up origin metadata; group under zero-origin.
-			// Graceful degradation: no timestamp/origin preservation for this row.
-			// Data integrity priority: fix-nulls must repair ALL NULL divergences, even without metadata.
-			// Warning logged for troubleshooting which rows fell back to non-preserving repair.
-			var batchKey originBatchKey
-			if err == nil {
-				originInfo, hasOrigin := originInfoMap[pkeyStr]
-				if hasOrigin && originInfo != nil {
-					batchKey = makeOriginBatchKey(originInfo)
-				}
-			} else {
-				logger.Warn("groupNullUpdatesByOrigin: failed to stringify primary key, grouping row under zero origin: %v", err)
-			}
-			groups[batchKey] = append(groups[batchKey], nu)
-		}
-		return groups
-	}
-	return map[originBatchKey][]*nullUpdate{
-		{}: updates,
-	}
-}
-
 // executeUpsertBatch is the canonical implementation of upsert SQL building and
 // execution. It converts values via ConvertToPgxType, applies dynamic batch
 // sizing (max-placeholders guard), and builds INSERT ... ON CONFLICT SQL.
@@ -2295,50 +2419,23 @@ func executeUpsertBatch(tx pgx.Tx, task *TableRepairTask, upserts map[string]map
 	return totalUpsertedCount, nil
 }
 
-// executeUpserts handles upserting rows in batches.
-// originInfoMap maps primary key strings to their origin information.
-// If originInfoMap is nil or empty, origin tracking is skipped.
+// executeUpserts handles upserting rows in a shared transaction.
+//
+// IMPORTANT: This function must NOT be used for preserve-origin upserts.
+// pg_replication_origin_xact_setup() is transaction-scoped — each call
+// overwrites the previous. When multiple origin batches share one
+// transaction, only the last batch's metadata survives at commit.
+// Use executePreserveOriginUpserts (per-batch transactions) instead.
 func executeUpserts(tx pgx.Tx, task *TableRepairTask, nodeName string, upserts map[string]map[string]any, colTypes map[string]string, originInfoMap map[string]*rowOriginInfo) (int, error) {
+	if len(originInfoMap) > 0 {
+		return 0, fmt.Errorf("executeUpserts must not be called with origin info; use executePreserveOriginUpserts for preserve-origin repairs")
+	}
+
 	if err := task.filterStaleRepairs(task.Ctx, tx, nodeName, upserts, colTypes, "upsert"); err != nil {
 		return 0, err
 	}
 
-	originGroups := groupUpsertsByOrigin(upserts, originInfoMap, task.PreserveOrigin)
-
-	totalUpsertedCount := 0
-	setupSessions := make(map[string]bool)
-
-	for batchKey, originUpserts := range originGroups {
-		if len(originUpserts) == 0 {
-			continue
-		}
-
-		preserveThisGroup, err := task.setupOriginForBatchKey(tx, batchKey, nodeName, setupSessions)
-		if err != nil {
-			return totalUpsertedCount, err
-		}
-
-		count, err := executeUpsertBatch(tx, task, originUpserts, colTypes)
-		if err != nil {
-			if preserveThisGroup {
-				if resetErr := task.resetReplicationOriginXact(tx); resetErr != nil {
-					logger.Warn("failed to reset replication origin xact during cleanup: %v", resetErr)
-				}
-				if resetErr := task.resetReplicationOriginSession(tx); resetErr != nil {
-					logger.Warn("failed to reset replication origin session during cleanup: %v", resetErr)
-				}
-			}
-			return totalUpsertedCount, err
-		}
-		totalUpsertedCount += count
-	}
-
-	// NOTE: Do NOT reset the replication origin session here.
-	// The session must remain active until after tx.Commit() so the origin
-	// metadata is persisted in the WAL commit record. The caller is
-	// responsible for resetting after commit.
-
-	return totalUpsertedCount, nil
+	return executeUpsertBatch(tx, task, upserts, colTypes)
 }
 
 // extractOriginInfoForNode extracts origin metadata from diff rows for the
@@ -2886,7 +2983,8 @@ func (t *TableRepairTask) resolveOriginLSN(batchKey originBatchKey, nodeName str
 	}
 
 	if survivorNode == "" {
-		return nil, false, fmt.Errorf("no survivor node available to fetch LSN for origin node %s", batchKey.nodeOrigin)
+		logger.Warn("preserve-origin: no survivor node available to fetch LSN for origin %s, falling back to regular repair", batchKey.nodeOrigin)
+		return nil, false, nil
 	}
 
 	fetchedLSN, err := t.getOriginLSNForNode(batchKey.nodeOrigin, survivorNode)
@@ -2904,73 +3002,6 @@ func (t *TableRepairTask) resolveOriginLSN(batchKey originBatchKey, nodeName str
 	}
 	uniqueLSN := baseLSN + offset
 	return &uniqueLSN, true, nil
-}
-
-// setupOriginForBatchKey sets up replication origin session and transaction for
-// a batch key. When setupSessions is non-nil, session setup is memoized per
-// origin node (for shared transactions). When nil, setup always runs (for
-// per-group transactions). Returns (false, nil) when preserve-origin is
-// disabled or when falling back to regular repair.
-func (t *TableRepairTask) setupOriginForBatchKey(tx pgx.Tx, batchKey originBatchKey, nodeName string, setupSessions map[string]bool) (bool, error) {
-	if !t.PreserveOrigin || batchKey.nodeOrigin == "" {
-		return false, nil
-	}
-
-	commitTS, err := parseBatchKeyTimestamp(batchKey)
-	if err != nil {
-		return false, err
-	}
-
-	lsn, ok, err := t.resolveOriginLSN(batchKey, nodeName, commitTS)
-	if err != nil {
-		return false, err
-	}
-	if !ok {
-		logger.Warn("preserve-origin: falling back to regular upsert for node %s (origin=%s, timestamp=%s)", nodeName, batchKey.nodeOrigin, batchKey.timestamp)
-		return false, nil
-	}
-
-	// Setup session (memoized when setupSessions is non-nil).
-	// PG only allows one replication origin per session, so reset the
-	// previous session before setting up a different origin node.
-	if setupSessions == nil || !setupSessions[batchKey.nodeOrigin] {
-		if setupSessions != nil {
-			for origin := range setupSessions {
-				if origin != batchKey.nodeOrigin {
-					t.resetReplicationOriginSession(tx)
-					delete(setupSessions, origin)
-					break
-				}
-			}
-		}
-		if _, err := t.setupReplicationOriginSession(tx, batchKey.nodeOrigin); err != nil {
-			return false, fmt.Errorf("failed to setup replication origin session for node %s: %w", batchKey.nodeOrigin, err)
-		}
-		if setupSessions != nil {
-			setupSessions[batchKey.nodeOrigin] = true
-		}
-	}
-
-	// Setup xact (only when both LSN and timestamp are available).
-	// Without a timestamp, we still preserve the origin node ID via the
-	// session setup above — just without the original commit timestamp.
-	if lsn != nil && commitTS != nil {
-		// Xact setup failure: session is in setupOriginSession state but xact failed (e.g. LSN/timestamp invalid).
-		// Reset session to clear pg_replication_origin_session_setup() for clean rollback.
-		// Remove from setupSessions so next batch attempt starts fresh (no stale state).
-		// Prevents subsequent batches from incorrectly assuming session is properly configured.
-		if err := t.setupReplicationOriginXact(tx, lsn, commitTS); err != nil {
-			t.resetReplicationOriginSession(tx)
-			if setupSessions != nil {
-				delete(setupSessions, batchKey.nodeOrigin)
-			}
-			return false, fmt.Errorf("failed to setup replication origin xact for node %s (LSN=%v, TS=%v): %w", batchKey.nodeOrigin, lsn, commitTS, err)
-		}
-	} else if commitTS == nil {
-		logger.Warn("preserve-origin: no commit timestamp for origin %s on node %s, preserving origin ID only", batchKey.nodeOrigin, nodeName)
-	}
-
-	return true, nil
 }
 
 // setupReplicationOriginSession sets up the replication origin for the session.
