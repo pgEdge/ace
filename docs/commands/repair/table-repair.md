@@ -94,10 +94,10 @@ When `--preserve-origin` is enabled, repaired rows maintain the correct replicat
    - Executes the repairs
    - Resets the session
 
-4. **Transaction management**: Deletes and upserts run atomically in a single transaction:
-   - Rows are grouped by (origin node, LSN, timestamp) tuples
-   - Each group's replication origin xact is configured with its exact commit timestamp
-   - All operations commit together, ensuring the repair is all-or-nothing
+4. **Transaction management**: When preserve-origin is active, repairs use a two-phase commit pattern (not a single atomic transaction):
+   - **Phase 1**: All deletes are executed and committed in a single transaction.
+   - **Phase 2**: Upserts are grouped by (origin node, LSN, timestamp) tuples. Each group runs in its own transaction with its replication origin xact configured (LSN and commit timestamp), then commits. This is required because `pg_replication_origin_xact_setup` is transaction-scoped.
+   - **Failure/rollback boundaries**: If a failure occurs during phase 2, deletes remain committed and any upsert batches that already committed remain committed; only the current batch rolls back. The repair is not all-or-nothing.
 
 5. **Timestamp precision**: Timestamps are stored in RFC3339Nano format (e.g., `2026-01-15T14:23:45.123456Z`) to preserve microsecond-level accuracy. This precision is essential when:
    - Multiple transactions occurred within the same second on the origin node
