@@ -115,6 +115,11 @@ type TableDiffTask struct {
 	totalDiffRows      atomic.Int64
 	diffLimitTriggered atomic.Bool
 
+	// diffSem limits how many recursive diff goroutines can run at the same time.
+	// It is a buffered channel of size maxConcurrent. A goroutine "acquires" a slot
+	// by sending into the channel (blocks when full) and "releases" by receiving.
+	diffSem chan struct{}
+
 	resolvedAgainstOrigin string
 	untilTime             *time.Time
 
@@ -1231,6 +1236,7 @@ func (t *TableDiffTask) ExecuteTask() (err error) {
 	}
 	logger.Info("Using %d CPUs, max concurrent workers = %d", runtime.NumCPU(), maxConcurrent)
 	sem := make(chan struct{}, maxConcurrent)
+	t.diffSem = make(chan struct{}, maxConcurrent)
 
 	pools := make(map[string]*pgxpool.Pool)
 	for _, nodeInfo := range t.ClusterNodes {
@@ -1550,6 +1556,21 @@ func (t *TableDiffTask) ExecuteTask() (err error) {
 			}
 			diffWg.Add(1)
 			go func(task RecursiveDiffTask) {
+				// Wait for a semaphore slot — blocks here if maxConcurrent goroutines
+				// are already doing diff work. This prevents OOM from unbounded fan-out.
+				// Uses select so that context cancellation unblocks the wait and avoids
+				// hanging diffWg.Wait() indefinitely.
+				select {
+				case t.diffSem <- struct{}{}:
+					// Got a slot — release it when this goroutine finishes.
+					defer func() { <-t.diffSem }()
+				case <-ctx.Done():
+					// Context was cancelled while waiting for a slot. Decrement the
+					// WaitGroup so the caller's diffWg.Wait() can return.
+					diffWg.Done()
+					diffBar.Increment()
+					return
+				}
 				defer diffBar.Increment()
 				t.recursiveDiff(ctx, task, &diffWg)
 			}(task)
@@ -2062,12 +2083,28 @@ func (t *TableDiffTask) recursiveDiff(
 			}
 
 			wg.Add(1)
-			go t.recursiveDiff(ctx, RecursiveDiffTask{
-				Node1Name:                 node1Name,
-				Node2Name:                 node2Name,
-				CurrentRange:              sr,
-				CurrentEstimatedBlockSize: newEstimatedBlockSize,
-			}, wg)
+			go func(sr Range, newEstimatedBlockSize int) {
+				// Wait for a semaphore slot — blocks here if maxConcurrent goroutines
+				// are already doing diff work. This prevents OOM from unbounded fan-out.
+				// Uses select so that context cancellation unblocks the wait and avoids
+				// hanging wg.Wait() indefinitely.
+				select {
+				case t.diffSem <- struct{}{}:
+					// Got a slot — release it when this goroutine finishes.
+					defer func() { <-t.diffSem }()
+				case <-ctx.Done():
+					// Context was cancelled while waiting for a slot. Decrement the
+					// WaitGroup so the caller's wg.Wait() can return.
+					wg.Done()
+					return
+				}
+				t.recursiveDiff(ctx, RecursiveDiffTask{
+					Node1Name:                 node1Name,
+					Node2Name:                 node2Name,
+					CurrentRange:              sr,
+					CurrentEstimatedBlockSize: newEstimatedBlockSize,
+				}, wg)
+			}(sr, newEstimatedBlockSize)
 		} else {
 			logger.Debug("%s Match in sub-range %v-%v for %s vs %s.", utils.CheckMark, sr.Start, sr.End, node1Name, node2Name)
 		}
