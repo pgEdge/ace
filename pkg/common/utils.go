@@ -1216,15 +1216,22 @@ func WriteDiffReport(diffResult types.DiffOutput, schema, table, format string) 
 	)
 	jsonFileName := outputPrefix + ".json"
 
-	jsonData, err := json.MarshalIndent(diffResult, "", "  ")
+	// Stream JSON directly to file — avoids holding a second full copy in memory
+	f, err := os.Create(jsonFileName)
 	if err != nil {
-		logger.Error("ERROR marshalling diff output to JSON: %v", err)
-		return "", "", fmt.Errorf("failed to marshal diffs: %w", err)
+		logger.Error("ERROR creating diff output file %s: %v", jsonFileName, err)
+		return "", "", fmt.Errorf("failed to create diffs file: %w", err)
 	}
-
-	if err := os.WriteFile(jsonFileName, jsonData, 0644); err != nil {
-		logger.Error("ERROR writing diff output to file %s: %v", jsonFileName, err)
-		return "", "", fmt.Errorf("failed to write diffs file: %w", err)
+	enc := json.NewEncoder(f)
+	enc.SetIndent("", "  ")
+	if err := enc.Encode(diffResult); err != nil {
+		logger.Error("ERROR writing diff output to JSON: %v", err)
+		f.Close()
+		return "", "", fmt.Errorf("failed to write diffs: %w", err)
+	}
+	if err := f.Close(); err != nil {
+		logger.Error("ERROR closing diff output file %s: %v", jsonFileName, err)
+		return "", "", fmt.Errorf("failed to close diffs file: %w", err)
 	}
 
 	logger.Warn("%s TABLES DO NOT MATCH", CrossMark)

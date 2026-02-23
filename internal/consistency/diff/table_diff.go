@@ -873,7 +873,6 @@ func (t *TableDiffTask) RunChecks(skipValidation bool) (err error) {
 		if err != nil {
 			return fmt.Errorf("failed to connect to node %s: %w", hostname, err)
 		}
-		defer conn.Close()
 
 		currCols, err := queries.GetColumns(t.Ctx, conn, schema, table)
 		if err != nil {
@@ -930,6 +929,8 @@ func (t *TableDiffTask) RunChecks(skipValidation bool) (err error) {
 		if t.TableFilter != "" {
 			logger.Info("Applying table filter for diff: %s", t.TableFilter)
 		}
+
+		conn.Close()
 	}
 
 	logger.Info("Connections successful to nodes in cluster")
@@ -1001,13 +1002,14 @@ func (t *TableDiffTask) cleanupFilteredView() {
 			logger.Warn("table-diff: failed to get connection for filtered view cleanup on node %s: %v", name, err)
 			continue
 		}
-		defer pool.Close()
 
 		if _, err := pool.Exec(t.Ctx, dropSQL); err != nil {
 			logger.Warn("table-diff: failed to drop filtered view %s.%s on node %s: %v", t.Schema, t.FilteredViewName, name, err)
 		} else {
 			logger.Info("table-diff: dropped filtered view %s.%s on node %s", t.Schema, t.FilteredViewName, name)
 		}
+
+		pool.Close()
 	}
 
 	t.FilteredViewCreated = false
