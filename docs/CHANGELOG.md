@@ -2,16 +2,20 @@
 
 All notable changes to ACE will be captured in this document. This project follows semantic versioning; the latest changes appear first.
 
-## [v1.6.0-beta2] 2026-02-17
+## [v1.6.0] 2026-02-25
 
 ### Changed
 - To accommodate value comparison fix below, changed row hash algorithm and added algorithm versioning
     - If using Merkle Trees, it will automatically update to the new format when detected.
       Alternatively, you can reinitialize the trees.
+- Batch concat_ws calls to support tales with 100+ columns
+- Avoid extra memory usage when writing JSON table diff to output file
 
 ### Fixed
+- Fixed OOM in recursive diff by limiting goroutine concurrency
 - Fixed column comparisons with equal values but different scales (e.g., 3000.00 vs 3000.0).
 - Fixed timestamp without timezone column value repair
+- Close connections in table diff sooner
 
 ## [v1.5.5] - 2026-02-12
 
