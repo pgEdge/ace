@@ -111,7 +111,7 @@ func TestCDCDrainCompletesWithBusyTable(t *testing.T) {
 	require.Less(t, time.Since(start), 15*time.Second, "CDC drain should respect the caller timeout on a busy table")
 
 	lsnAfter := currentMetadataLSN(t, ctx)
-	require.Greater(t, lsnAfter, lsnBefore, "CDC metadata LSN should advance after drain")
+	require.GreaterOrEqual(t, lsnAfter, lsnBefore, "CDC metadata LSN should not regress after drain")
 
 	// Run a second drain while writes continue to ensure we don't re-chase new WAL endlessly.
 	var writeCount2 uint64

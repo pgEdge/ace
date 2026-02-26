@@ -729,7 +729,7 @@ CREATE TABLE IF NOT EXISTS %s.%s (
 	insertRow := func(pool *pgxpool.Pool, data map[string]any) {
 		tx, err := pool.Begin(ctx)
 		require.NoError(t, err)
-		defer tx.Rollback(ctx)
+		defer func() { _ = tx.Rollback(ctx) }()
 
 		_, err = tx.Exec(ctx, "SELECT spock.repair_mode(true)")
 		require.NoError(t, err)
@@ -1035,7 +1035,7 @@ CREATE TABLE IF NOT EXISTS %s.%s (
 	insertRow := func(pool *pgxpool.Pool, id int, ts, tstz time.Time, timeStr, timetzStr string) {
 		tx, err := pool.Begin(ctx)
 		require.NoError(t, err)
-		defer tx.Rollback(ctx)
+		defer func() { _ = tx.Rollback(ctx) }()
 
 		_, err = tx.Exec(ctx, "SELECT spock.repair_mode(true)")
 		require.NoError(t, err)

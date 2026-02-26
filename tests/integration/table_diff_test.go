@@ -123,6 +123,7 @@ func runCustomerTableDiffTests(t *testing.T) {
 }
 
 func testTableDiff_NoDifferences(t *testing.T) {
+	resetSharedTable(t, "customers")
 	tableName := "customers"
 	qualifiedTableName := fmt.Sprintf("%s.%s", testSchema, tableName)
 	nodesToCompare := []string{serviceN1, serviceN2}
