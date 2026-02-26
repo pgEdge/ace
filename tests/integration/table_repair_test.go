@@ -1358,6 +1358,7 @@ func TestTableRepair_PreserveOrigin(t *testing.T) {
 
 	t.Cleanup(func() {
 		for _, pool := range []*pgxpool.Pool{pgCluster.Node1Pool, pgCluster.Node2Pool, pgCluster.Node3Pool} {
+			_, _ = pool.Exec(ctx, fmt.Sprintf(`SELECT spock.repset_remove_table('default', '%s');`, qualifiedTableName))
 			pool.Exec(ctx, fmt.Sprintf("DROP TABLE IF EXISTS %s CASCADE;", qualifiedTableName))
 		}
 	})
@@ -1429,6 +1430,7 @@ func TestTableRepair_PreserveOrigin(t *testing.T) {
 	log.Println("Simulating data loss on n2...")
 	tx, err := pgCluster.Node2Pool.Begin(ctx)
 	require.NoError(t, err, "Failed to begin transaction on n2")
+	defer func() { _ = tx.Rollback(ctx) }()
 	_, err = tx.Exec(ctx, "SELECT spock.repair_mode(true)")
 	require.NoError(t, err, "Failed to enable repair_mode on n2")
 
@@ -1494,6 +1496,7 @@ func TestTableRepair_PreserveOrigin(t *testing.T) {
 	log.Println("\nResetting: Deleting rows from n2 again for preserve-origin test...")
 	tx2, err := pgCluster.Node2Pool.Begin(ctx)
 	require.NoError(t, err)
+	defer func() { _ = tx2.Rollback(ctx) }()
 	_, err = tx2.Exec(ctx, "SELECT spock.repair_mode(true)")
 	require.NoError(t, err)
 	for _, id := range sampleIDs {
@@ -1661,6 +1664,7 @@ func TestTableRepair_FixNulls_PreserveOrigin(t *testing.T) {
 		for _, pool := range []*pgxpool.Pool{
 			pgCluster.Node1Pool, pgCluster.Node2Pool, pgCluster.Node3Pool,
 		} {
+			_, _ = pool.Exec(ctx, fmt.Sprintf(`SELECT spock.repset_remove_table('default', '%s');`, qualifiedTableName))
 			pool.Exec(ctx, fmt.Sprintf(
 				"DROP TABLE IF EXISTS %s CASCADE;", qualifiedTableName))
 		}
@@ -1704,6 +1708,7 @@ func TestTableRepair_FixNulls_PreserveOrigin(t *testing.T) {
 	// Set some columns to NULL on n2 in repair_mode (creating divergence)
 	tx, err := pgCluster.Node2Pool.Begin(ctx)
 	require.NoError(t, err)
+	defer func() { _ = tx.Rollback(ctx) }()
 	_, err = tx.Exec(ctx, "SELECT spock.repair_mode(true)")
 	require.NoError(t, err)
 	_, err = tx.Exec(ctx, fmt.Sprintf(
@@ -1793,6 +1798,7 @@ func TestTableRepair_Bidirectional_PreserveOrigin(t *testing.T) {
 		for _, pool := range []*pgxpool.Pool{
 			pgCluster.Node1Pool, pgCluster.Node2Pool, pgCluster.Node3Pool,
 		} {
+			_, _ = pool.Exec(ctx, fmt.Sprintf(`SELECT spock.repset_remove_table('default', '%s');`, qualifiedTableName))
 			pool.Exec(ctx, fmt.Sprintf(
 				"DROP TABLE IF EXISTS %s CASCADE;",
 				qualifiedTableName))
@@ -1839,6 +1845,7 @@ func TestTableRepair_Bidirectional_PreserveOrigin(t *testing.T) {
 	// Delete row 2 from n1, row 1 from n2 (symmetric divergence)
 	tx1, err := pgCluster.Node1Pool.Begin(ctx)
 	require.NoError(t, err)
+	defer func() { _ = tx1.Rollback(ctx) }()
 	_, err = tx1.Exec(ctx, "SELECT spock.repair_mode(true)")
 	require.NoError(t, err)
 	_, err = tx1.Exec(ctx, fmt.Sprintf(
@@ -1850,6 +1857,7 @@ func TestTableRepair_Bidirectional_PreserveOrigin(t *testing.T) {
 
 	tx2, err := pgCluster.Node2Pool.Begin(ctx)
 	require.NoError(t, err)
+	defer func() { _ = tx2.Rollback(ctx) }()
 	_, err = tx2.Exec(ctx, "SELECT spock.repair_mode(true)")
 	require.NoError(t, err)
 	_, err = tx2.Exec(ctx, fmt.Sprintf(
@@ -1941,6 +1949,7 @@ func TestTableRepair_MixedOps_PreserveOrigin(t *testing.T) {
 
 	t.Cleanup(func() {
 		for _, pool := range []*pgxpool.Pool{pgCluster.Node1Pool, pgCluster.Node2Pool, pgCluster.Node3Pool} {
+			_, _ = pool.Exec(ctx, fmt.Sprintf(`SELECT spock.repset_remove_table('default', '%s');`, qualifiedTableName))
 			pool.Exec(ctx, fmt.Sprintf("DROP TABLE IF EXISTS %s CASCADE;", qualifiedTableName))
 		}
 		files, _ := filepath.Glob("*_diffs-*.json")
@@ -2018,6 +2027,7 @@ func TestTableRepair_MixedOps_PreserveOrigin(t *testing.T) {
 	log.Println("Creating divergence on n2...")
 	tx, err := pgCluster.Node2Pool.Begin(ctx)
 	require.NoError(t, err)
+	defer func() { _ = tx.Rollback(ctx) }()
 	_, err = tx.Exec(ctx, "SELECT spock.repair_mode(true)")
 	require.NoError(t, err)
 

@@ -1247,6 +1247,11 @@ func (t *TableRepairTask) applyFixNullsUpdates(tx pgx.Tx, column string, columnT
 // transactions so that pg_replication_origin_xact_setup correctly preserves
 // per-row origin metadata. Each unique (origin, timestamp) combination gets
 // its own transaction.
+// executePreserveOriginFixNulls handles fix-nulls updates with per-batch-key
+// transactions so that pg_replication_origin_xact_setup preserves per-row timestamps.
+// Note: filterStaleRepairs is not called here because fix-nulls only patches individual
+// NULL columns (not full row replacements) and uses []*nullUpdate rather than the
+// map[string]map[string]any format that filterStaleRepairs expects.
 func (t *TableRepairTask) executePreserveOriginFixNulls(pool *pgxpool.Pool, nodeName string, columns []string, columnsByRow map[string][]*nullUpdate, colTypes map[string]string, originInfoMap map[string]*rowOriginInfo) (int, error) {
 	// Group all updates by origin batch key.
 	type colUpdate struct {
@@ -1295,7 +1300,9 @@ func (t *TableRepairTask) executePreserveOriginFixNulls(pool *pgxpool.Pool, node
 		return 0, fmt.Errorf("failed to acquire connection for preserve-origin fix-nulls: %w", err)
 	}
 	defer func() {
-		queries.ResetReplicationOriginSession(t.Ctx, conn)
+		if resetErr := queries.ResetReplicationOriginSession(t.Ctx, conn); resetErr != nil {
+			logger.Warn("failed to reset replication origin session on connection release: %v", resetErr)
+		}
 		conn.Release()
 	}()
 
@@ -1310,7 +1317,9 @@ func (t *TableRepairTask) executePreserveOriginFixNulls(pool *pgxpool.Pool, node
 		// Manage session-level origin
 		if batchKey.nodeOrigin != "" && batchKey.nodeOrigin != currentSessionOrigin {
 			if currentSessionOrigin != "" {
-				queries.ResetReplicationOriginSession(t.Ctx, conn)
+				if resetErr := queries.ResetReplicationOriginSession(t.Ctx, conn); resetErr != nil {
+					logger.Warn("failed to reset replication origin session before switching origin: %v", resetErr)
+				}
 			}
 			originName := fmt.Sprintf("node_%s", batchKey.nodeOrigin)
 			originID, err := queries.GetReplicationOriginByName(t.Ctx, conn, originName)
@@ -1329,7 +1338,9 @@ func (t *TableRepairTask) executePreserveOriginFixNulls(pool *pgxpool.Pool, node
 			}
 			currentSessionOrigin = batchKey.nodeOrigin
 		} else if batchKey.nodeOrigin == "" && currentSessionOrigin != "" {
-			queries.ResetReplicationOriginSession(t.Ctx, conn)
+			if resetErr := queries.ResetReplicationOriginSession(t.Ctx, conn); resetErr != nil {
+				logger.Warn("failed to reset replication origin session for empty origin batch: %v", resetErr)
+			}
 			currentSessionOrigin = ""
 		}
 
@@ -2503,8 +2514,9 @@ func (t *TableRepairTask) executePreserveOriginUpserts(pool *pgxpool.Pool, nodeN
 		return 0, fmt.Errorf("failed to acquire connection for preserve-origin upserts: %w", err)
 	}
 	defer func() {
-		// Reset session origin before releasing connection back to pool.
-		queries.ResetReplicationOriginSession(t.Ctx, conn)
+		if resetErr := queries.ResetReplicationOriginSession(t.Ctx, conn); resetErr != nil {
+			logger.Warn("failed to reset replication origin session on connection release: %v", resetErr)
+		}
 		conn.Release()
 	}()
 
@@ -2519,7 +2531,9 @@ func (t *TableRepairTask) executePreserveOriginUpserts(pool *pgxpool.Pool, nodeN
 		// Manage session-level origin: only reset+setup when origin node changes.
 		if batchKey.nodeOrigin != "" && batchKey.nodeOrigin != currentSessionOrigin {
 			if currentSessionOrigin != "" {
-				queries.ResetReplicationOriginSession(t.Ctx, conn)
+				if resetErr := queries.ResetReplicationOriginSession(t.Ctx, conn); resetErr != nil {
+					logger.Warn("failed to reset replication origin session before switching origin: %v", resetErr)
+				}
 			}
 			originName := fmt.Sprintf("node_%s", batchKey.nodeOrigin)
 			originID, err := queries.GetReplicationOriginByName(t.Ctx, conn, originName)
@@ -2538,7 +2552,9 @@ func (t *TableRepairTask) executePreserveOriginUpserts(pool *pgxpool.Pool, nodeN
 			}
 			currentSessionOrigin = batchKey.nodeOrigin
 		} else if batchKey.nodeOrigin == "" && currentSessionOrigin != "" {
-			queries.ResetReplicationOriginSession(t.Ctx, conn)
+			if resetErr := queries.ResetReplicationOriginSession(t.Ctx, conn); resetErr != nil {
+				logger.Warn("failed to reset replication origin session for empty origin batch: %v", resetErr)
+			}
 			currentSessionOrigin = ""
 		}
 
@@ -2569,6 +2585,11 @@ func (t *TableRepairTask) executePreserveOriginUpserts(pool *pgxpool.Pool, nodeN
 				batchTx.Rollback(t.Ctx)
 				return totalUpsertedCount, fmt.Errorf("failed to setup origin xact: %w", err)
 			}
+		}
+
+		if err := t.filterStaleRepairs(t.Ctx, batchTx, nodeName, originUpserts, colTypes, "upsert"); err != nil {
+			batchTx.Rollback(t.Ctx)
+			return totalUpsertedCount, fmt.Errorf("failed to filter stale repairs for origin %s: %w", batchKey.nodeOrigin, err)
 		}
 
 		count, err := executeUpsertBatch(batchTx, t, originUpserts, colTypes)
@@ -3014,40 +3035,6 @@ func (t *TableRepairTask) resolveOriginLSN(batchKey originBatchKey, nodeName str
 	return &uniqueLSN, true, nil
 }
 
-// setupReplicationOriginSession sets up the replication origin for the session.
-// This should be called before starting the transaction or at the very start.
-// Returns the origin ID for use in xact setup.
-func (t *TableRepairTask) setupReplicationOriginSession(tx pgx.Tx, originNodeName string) (uint32, error) {
-	// Normalize origin node name - use "node_X" format for replication origin
-	originName := fmt.Sprintf("node_%s", originNodeName)
-
-	// Get or create replication origin
-	originID, err := queries.GetReplicationOriginByName(t.Ctx, tx, originName)
-	if err != nil {
-		return 0, fmt.Errorf("failed to get replication origin by name '%s': %w", originName, err)
-	}
-
-	if originID == nil {
-		// Create the replication origin if it doesn't exist
-		createdID, createErr := queries.CreateReplicationOrigin(t.Ctx, tx, originName)
-		if createErr != nil {
-			return 0, fmt.Errorf("failed to create replication origin '%s': %w", originName, createErr)
-		}
-		originID = &createdID
-		logger.Debug("Created replication origin '%s' with ID %d", originName, *originID)
-	} else {
-		logger.Debug("Found existing replication origin '%s' with ID %d", originName, *originID)
-	}
-
-	// Set up the replication origin session
-	if err := queries.SetupReplicationOriginSession(t.Ctx, tx, originName); err != nil {
-		return 0, fmt.Errorf("failed to setup replication origin session for '%s': %w", originName, err)
-	}
-	logger.Debug("Replication origin session set up for '%s' (ID=%d)", originName, *originID)
-
-	return *originID, nil
-}
-
 // setupReplicationOriginXact sets up the transaction-level LSN and timestamp.
 // This must be called within the transaction, before any DML operations.
 func (t *TableRepairTask) setupReplicationOriginXact(tx pgx.Tx, originLSN *uint64, originTimestamp *time.Time) error {
@@ -3069,29 +3056,3 @@ func (t *TableRepairTask) setupReplicationOriginXact(tx pgx.Tx, originLSN *uint6
 	return nil
 }
 
-// resetReplicationOriginXact resets the transaction-level replication origin state (for error cleanup within transaction).
-//
-// Cleanup error strategy (replication origin): When a batch or DML fails, we attempt
-// resetReplicationOriginXact and resetReplicationOriginSession so the transaction can be
-// rolled back cleanly. Reset failures are logged (Warn) but not propagated; the caller
-// returns the original error and the transaction is rolled back. This avoids masking the
-// primary failure while still attempting to leave the connection in a safe state. On
-// successful batch completion (no error), session reset errors are propagated (see
-// applyFixNullsUpdates and executeUpserts).
-func (t *TableRepairTask) resetReplicationOriginXact(tx pgx.Tx) error {
-	if err := queries.ResetReplicationOriginXact(t.Ctx, tx); err != nil {
-		return fmt.Errorf("failed to reset replication origin xact: %w", err)
-	}
-	logger.Debug("Reset replication origin xact")
-	return nil
-}
-
-// resetReplicationOriginSession resets the session-level replication origin state.
-// See resetReplicationOriginXact for the documented cleanup error strategy.
-func (t *TableRepairTask) resetReplicationOriginSession(tx pgx.Tx) error {
-	if err := queries.ResetReplicationOriginSession(t.Ctx, tx); err != nil {
-		return fmt.Errorf("failed to reset replication origin session: %w", err)
-	}
-	logger.Debug("Reset replication origin session")
-	return nil
-}
