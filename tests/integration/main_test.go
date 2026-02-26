@@ -27,6 +27,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/pgedge/ace/pkg/config"
 	"github.com/pgedge/ace/pkg/types"
+	"github.com/stretchr/testify/require"
 	tcLog "github.com/testcontainers/testcontainers-go/log"
 	"github.com/testcontainers/testcontainers-go/modules/compose"
 	"github.com/testcontainers/testcontainers-go/wait"
@@ -468,4 +469,25 @@ func setupSharedCustomersTable(tableName string) error {
 		}
 	}
 	return nil
+}
+
+// resetSharedTable truncates and reloads the given table from CSV on node1 and node2.
+// Use this so tests that expect identical content (e.g. NoDifferences) get a clean state
+// after other tests may have modified the table.
+func resetSharedTable(t *testing.T, tableName string) {
+	t.Helper()
+	ctx := context.Background()
+	qualifiedTableName := fmt.Sprintf("%s.%s", testSchema, tableName)
+	csvPath, err := filepath.Abs(defaultCsvFilePath + tableName + ".csv")
+	require.NoError(t, err)
+	for i, pool := range []*pgxpool.Pool{pgCluster.Node1Pool, pgCluster.Node2Pool} {
+		nodeName := pgCluster.ClusterNodes[i]["Name"].(string)
+		_, err := pool.Exec(ctx, "SELECT spock.repair_mode(true)")
+		require.NoError(t, err, "enable repair_mode on %s", nodeName)
+		_, err = pool.Exec(ctx, fmt.Sprintf("TRUNCATE TABLE %s CASCADE", qualifiedTableName))
+		require.NoError(t, err, "truncate %s on %s", qualifiedTableName, nodeName)
+		_, err = pool.Exec(ctx, "SELECT spock.repair_mode(false)")
+		require.NoError(t, err, "disable repair_mode on %s", nodeName)
+		require.NoError(t, loadDataFromCSV(ctx, pool, testSchema, tableName, csvPath), "load CSV into %s on %s", qualifiedTableName, nodeName)
+	}
 }

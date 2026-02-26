@@ -8,6 +8,10 @@
 // https://opensource.org/license/postgresql
 //
 // ///////////////////////////////////////////////////////////////////////////
+//
+// When adding preserve-origin or replication-origin session code: do not ignore
+// ResetReplicationOriginSession errors in defers. Handle them (e.g. log and avoid
+// reusing the connection) so stale session origin cannot bleed into later batches.
 
 package repair
 

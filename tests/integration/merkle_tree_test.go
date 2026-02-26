@@ -30,6 +30,7 @@ import (
 	"github.com/pgedge/ace/internal/consistency/mtree"
 	"github.com/pgedge/ace/internal/infra/cdc"
 	"github.com/pgedge/ace/pkg/config"
+	"github.com/pgedge/ace/pkg/types"
 	"github.com/stretchr/testify/require"
 )
 
@@ -55,6 +56,9 @@ func TestMerkleTreeCompositePK(t *testing.T) {
 }
 
 func runMerkleTreeTests(t *testing.T, tableName string) {
+	if tableName == "customers" {
+		resetSharedTable(t, "customers")
+	}
 	t.Run("Init", func(t *testing.T) {
 		testMerkleTreeInit(t, tableName)
 	})
@@ -241,23 +245,31 @@ func testMerkleTreeDiffDataOnlyOnNode1(t *testing.T, tableName string) {
 	nodeDiffs, ok := mtreeTask.DiffResult.NodeDiffs[pairKey]
 	require.True(t, ok, "Expected diffs for pair %s, but none found. Result: %+v", pairKey, mtreeTask.DiffResult)
 
-	require.Equal(t, 1, len(nodeDiffs.Rows[serviceN1]), "Expected 1 modified row on %s, got %d", serviceN1, len(nodeDiffs.Rows[serviceN1]))
-	require.Equal(t, 1, len(nodeDiffs.Rows[serviceN2]), "Expected 1 original row on %s, got %d", serviceN2, len(nodeDiffs.Rows[serviceN2]))
+	require.GreaterOrEqual(t, len(nodeDiffs.Rows[serviceN1]), 1, "Expected at least 1 modified row on %s, got %d", serviceN1, len(nodeDiffs.Rows[serviceN1]))
+	require.GreaterOrEqual(t, len(nodeDiffs.Rows[serviceN2]), 1, "Expected at least 1 original row on %s, got %d", serviceN2, len(nodeDiffs.Rows[serviceN2]))
 
-	require.Equal(t, 1, mtreeTask.DiffResult.Summary.DiffRowsCount[pairKey], "Expected summary diff count to be 1")
+	require.GreaterOrEqual(t, mtreeTask.DiffResult.Summary.DiffRowsCount[pairKey], 1, "Expected summary diff count to be at least 1")
 
-	diffRowN1 := nodeDiffs.Rows[serviceN1][0]
-	indexValN1, ok := diffRowN1.Get("index")
-	require.True(t, ok, "index not found in diff row for node1")
-	require.Equal(t, int32(1), indexValN1, "Incorrect index found in diff row for node1")
+	// Find the row with index=1 in the diff (block-based diff may include other rows in the same block)
+	var diffRowN1, diffRowN2 types.OrderedMap
+	for _, row := range nodeDiffs.Rows[serviceN1] {
+		if idx, ok := row.Get("index"); ok && idx.(int32) == 1 {
+			diffRowN1 = row
+			break
+		}
+	}
+	for _, row := range nodeDiffs.Rows[serviceN2] {
+		if idx, ok := row.Get("index"); ok && idx.(int32) == 1 {
+			diffRowN2 = row
+			break
+		}
+	}
+	require.NotZero(t, diffRowN1, "Expected to find index=1 in diff rows for node1")
+	require.NotZero(t, diffRowN2, "Expected to find index=1 in diff rows for node2")
+
 	emailValN1, ok := diffRowN1.Get("email")
 	require.True(t, ok, "email not found in diff row for node1")
 	require.Equal(t, "updated.on.n1@example.com", emailValN1, "Incorrect email found in diff row for node1")
-
-	diffRowN2 := nodeDiffs.Rows[serviceN2][0]
-	indexValN2, ok := diffRowN2.Get("index")
-	require.True(t, ok, "index not found in diff row for node2")
-	require.Equal(t, int32(1), indexValN2, "Incorrect index found in diff row for node2")
 	emailValN2, ok := diffRowN2.Get("email")
 	require.True(t, ok, "email not found in diff row for node2")
 	require.Equal(t, "tinaevans@dalton.com", emailValN2, "Incorrect email found in diff row for node2")
@@ -1064,11 +1076,11 @@ func TestMerkleTreeNumericScaleInvariance(t *testing.T) {
 	numericTable := "ace_numeric_scale_test"
 	qualifiedTable := fmt.Sprintf("%s.%s", testSchema, numericTable)
 
-	// Create the table on both nodes
+	// Create the table on both nodes (NUMERIC without scale so ::text can differ between nodes)
 	createSQL := fmt.Sprintf(`
 		CREATE TABLE IF NOT EXISTS %s (
 			id INT PRIMARY KEY,
-			amount NUMERIC(18,6),
+			amount NUMERIC,
 			label TEXT
 		)`, qualifiedTable)
 	for _, pool := range []*pgxpool.Pool{pgCluster.Node1Pool, pgCluster.Node2Pool} {
@@ -1103,6 +1115,7 @@ func TestMerkleTreeNumericScaleInvariance(t *testing.T) {
 	for _, pool := range []*pgxpool.Pool{pgCluster.Node1Pool, pgCluster.Node2Pool} {
 		tx, err := pool.Begin(ctx)
 		require.NoError(t, err)
+		defer func(tx pgx.Tx) { _ = tx.Rollback(ctx) }(tx)
 		_, err = tx.Exec(ctx, "SELECT spock.repair_mode(true)")
 		require.NoError(t, err)
 		for _, r := range rows {
@@ -1132,7 +1145,7 @@ func TestMerkleTreeNumericScaleInvariance(t *testing.T) {
 	// Now run merkle tree init + build + diff
 	nodes := []string{serviceN1, serviceN2}
 	mtreeTask := newTestMerkleTreeTask(t, qualifiedTable, nodes)
-	mtreeTask.BlockSize = 10 // small block size for this small table
+	mtreeTask.BlockSize = 1000 // must be >= 1000 for RunChecks; table has 5 rows so 1 block
 
 	err = mtreeTask.RunChecks(false)
 	require.NoError(t, err, "RunChecks should succeed")
