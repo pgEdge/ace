@@ -1350,11 +1350,6 @@ func (m *MerkleTreeTask) BuildMtree() (err error) {
 		}
 		rows.Close()
 
-		// Use actual number of ranges for metadata so it matches leaf count
-		if len(blockRanges) > 0 {
-			numBlocks = len(blockRanges)
-		}
-
 		if m.WriteRanges {
 			now := time.Now().Format("20060102_150405")
 			filename := fmt.Sprintf("%s_%s_%s_ranges.json", now, m.Schema, m.Table)
@@ -1367,6 +1362,11 @@ func (m *MerkleTreeTask) BuildMtree() (err error) {
 			}
 			logger.Info("Block ranges written to %s", filename)
 		}
+	}
+
+	// Ensure numBlocks matches actual block range count (covers both computed and RangesFile paths).
+	if len(blockRanges) > 0 {
+		numBlocks = len(blockRanges)
 	}
 
 	for _, nodeInfo := range m.ClusterNodes {
