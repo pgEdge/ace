@@ -14,6 +14,7 @@ package config
 import (
 	"os"
 	"strings"
+	"sync"
 
 	"gopkg.in/yaml.v3"
 )
@@ -113,9 +114,20 @@ type CertAuthConfig struct {
 }
 
 // Cfg holds the loaded config for the whole app.
+// Reads may use Cfg directly; concurrent reloads must go through Set/Get.
 var Cfg *Config
 
-// Load reads and parses path into a Config.
+// CfgPath is the path from which the current config was loaded.
+// It is set by Init and used by the SIGHUP reload handler.
+var CfgPath string
+
+// cfgMu protects Cfg and CfgPath during live reloads.
+var cfgMu sync.RWMutex
+
+// Load reads the YAML file at the given path and unmarshals it into a Config.
+// It performs no mutation of package-level state; callers must call Set to apply
+// the loaded configuration. It returns the parsed Config or an error if the
+// file cannot be read or the YAML cannot be decoded.
 func Load(path string) (*Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -128,20 +140,59 @@ func Load(path string) (*Config, error) {
 	return &c, nil
 }
 
-// Init loads the config and assigns it to the package variable.
+// Init loads the configuration from the file at path and sets the package-level
+// Cfg and CfgPath under a write lock to enable safe concurrent access.
+// It returns any error encountered while loading or parsing the configuration.
 func Init(path string) error {
 	c, err := Load(path)
 	if err != nil {
 		return err
 	}
+	cfgMu.Lock()
 	Cfg = c
+	CfgPath = path
+	cfgMu.Unlock()
 	return nil
 }
 
+// Reload loads a new Config from path and returns it for validation.
+// The caller is responsible for calling Set to apply the new config.
+// Reload attempts to parse the configuration file at the given path without applying it.
+// If path is empty, Reload uses the most recently loaded configuration path (CfgPath) while holding a read lock.
+// It does not modify the active package configuration (Cfg).
+// It returns the parsed *Config on success, or an error if loading or parsing fails.
+func Reload(path string) (*Config, error) {
+	if path == "" {
+		cfgMu.RLock()
+		path = CfgPath
+		cfgMu.RUnlock()
+	}
+	return Load(path)
+}
+
+// Set replaces the package's active configuration with c atomically.
+// Passing nil sets the active configuration to nil.
+func Set(c *Config) {
+	cfgMu.Lock()
+	Cfg = c
+	cfgMu.Unlock()
+}
+
+// Get returns the active configuration under a read lock.
+// Prefer Get() over reading Cfg directly in code that runs concurrently with
+// Get returns the currently active Config instance and is safe for concurrent use.
+func Get() *Config {
+	cfgMu.RLock()
+	defer cfgMu.RUnlock()
+	return Cfg
+}
+
 // DefaultCluster returns the trimmed default cluster name from the loaded config.
+// If no configuration is loaded, it returns the empty string.
 func DefaultCluster() string {
-	if Cfg == nil {
+	c := Get()
+	if c == nil {
 		return ""
 	}
-	return strings.TrimSpace(Cfg.DefaultCluster)
+	return strings.TrimSpace(c.DefaultCluster)
 }
