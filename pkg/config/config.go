@@ -14,6 +14,7 @@ package config
 import (
 	"os"
 	"strings"
+	"sync"
 
 	"gopkg.in/yaml.v3"
 )
@@ -113,9 +114,17 @@ type CertAuthConfig struct {
 }
 
 // Cfg holds the loaded config for the whole app.
+// Reads may use Cfg directly; concurrent reloads must go through Set/Get.
 var Cfg *Config
 
-// Load reads and parses path into a Config.
+// CfgPath is the path from which the current config was loaded.
+// It is set by Init and used by the SIGHUP reload handler.
+var CfgPath string
+
+// cfgMu protects Cfg and CfgPath during live reloads.
+var cfgMu sync.RWMutex
+
+// Load reads and parses path into a Config without applying it.
 func Load(path string) (*Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -128,20 +137,52 @@ func Load(path string) (*Config, error) {
 	return &c, nil
 }
 
-// Init loads the config and assigns it to the package variable.
+// Init loads the config from path and assigns it to the package variables.
 func Init(path string) error {
 	c, err := Load(path)
 	if err != nil {
 		return err
 	}
+	cfgMu.Lock()
 	Cfg = c
+	CfgPath = path
+	cfgMu.Unlock()
 	return nil
+}
+
+// Reload loads a new Config from path and returns it for validation.
+// The caller is responsible for calling Set to apply the new config.
+// Reload does NOT modify the active Cfg; use it as a dry-run / validation step.
+func Reload(path string) (*Config, error) {
+	if path == "" {
+		cfgMu.RLock()
+		path = CfgPath
+		cfgMu.RUnlock()
+	}
+	return Load(path)
+}
+
+// Set atomically replaces the active configuration.
+func Set(c *Config) {
+	cfgMu.Lock()
+	Cfg = c
+	cfgMu.Unlock()
+}
+
+// Get returns the active configuration under a read lock.
+// Prefer Get() over reading Cfg directly in code that runs concurrently with
+// SIGHUP reload (e.g. the scheduler loop).
+func Get() *Config {
+	cfgMu.RLock()
+	defer cfgMu.RUnlock()
+	return Cfg
 }
 
 // DefaultCluster returns the trimmed default cluster name from the loaded config.
 func DefaultCluster() string {
-	if Cfg == nil {
+	c := Get()
+	if c == nil {
 		return ""
 	}
-	return strings.TrimSpace(Cfg.DefaultCluster)
+	return strings.TrimSpace(c.DefaultCluster)
 }
