@@ -1517,6 +1517,17 @@ func schedulerReloadLoop(
 				}
 				return nil
 
+			case err := <-schedDone:
+				// The scheduler exited on its own – without being told to via
+				// schedCancel.  This is unexpected (RunJobs normally blocks until
+				// its context is canceled).  Treat a real error as fatal; a nil
+				// or Canceled result means it exited cleanly and we just stop.
+				schedCancel()
+				if err != nil && !errors.Is(err, context.Canceled) {
+					return err
+				}
+				return nil
+
 			case <-sighupCh:
 				logger.Info("scheduler: received SIGHUP – reloading configuration from %s", config.CfgPath)
 
