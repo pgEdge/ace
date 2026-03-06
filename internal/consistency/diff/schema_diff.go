@@ -12,10 +12,12 @@
 package diff
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
 	"maps"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -107,6 +109,29 @@ func NewSchemaDiffTask() *SchemaDiffCmd {
 	}
 }
 
+func (c *SchemaDiffCmd) parseSkipList() error {
+	var tables []string
+	if c.SkipTables != "" {
+		tables = append(tables, strings.Split(c.SkipTables, ",")...)
+	}
+	if c.SkipFile != "" {
+		file, err := os.Open(c.SkipFile)
+		if err != nil {
+			return fmt.Errorf("could not open skip file: %w", err)
+		}
+		defer file.Close()
+		scanner := bufio.NewScanner(file)
+		for scanner.Scan() {
+			tables = append(tables, scanner.Text())
+		}
+		if err := scanner.Err(); err != nil {
+			return fmt.Errorf("error reading skip file: %w", err)
+		}
+	}
+	c.skipTablesList = tables
+	return nil
+}
+
 func (c *SchemaDiffCmd) Validate() error {
 	if c.ClusterName == "" {
 		return fmt.Errorf("cluster name is required")
@@ -137,6 +162,10 @@ func (c *SchemaDiffCmd) RunChecks(skipValidation bool) error {
 		if err := c.Validate(); err != nil {
 			return err
 		}
+	}
+
+	if err := c.parseSkipList(); err != nil {
+		return err
 	}
 
 	if err := utils.ReadClusterInfo(c); err != nil {
@@ -340,7 +369,7 @@ func (task *SchemaDiffCmd) SchemaTableDiff() (err error) {
 		}
 	}
 
-	var tablesProcessed, tablesFailed int
+	var tablesProcessed, tablesFailed, tablesSkipped int
 	var failedTables []string
 
 	defer func() {
@@ -356,10 +385,11 @@ func (task *SchemaDiffCmd) SchemaTableDiff() (err error) {
 
 		if recorder != nil && recorder.Created() {
 			ctx := map[string]any{
-				"tables_total":  len(task.tableList),
-				"tables_diffed": tablesProcessed,
-				"tables_failed": tablesFailed,
-				"ddl_only":      task.DDLOnly,
+				"tables_total":   len(task.tableList),
+				"tables_diffed":  tablesProcessed,
+				"tables_failed":  tablesFailed,
+				"tables_skipped": tablesSkipped,
+				"ddl_only":       task.DDLOnly,
 			}
 			if len(failedTables) > 0 {
 				ctx["failed_tables"] = failedTables
@@ -396,6 +426,21 @@ func (task *SchemaDiffCmd) SchemaTableDiff() (err error) {
 	}
 
 	for _, tableName := range task.tableList {
+		var skipped bool
+		for _, skip := range task.skipTablesList {
+			if strings.TrimSpace(skip) == tableName {
+				if !task.Quiet {
+					logger.Info("Skipping table: %s", tableName)
+				}
+				skipped = true
+				break
+			}
+		}
+		if skipped {
+			tablesSkipped++
+			continue
+		}
+
 		qualifiedTableName := fmt.Sprintf("%s.%s", task.SchemaName, tableName)
 		if !task.Quiet {
 			logger.Info("Diffing table: %s", qualifiedTableName)
