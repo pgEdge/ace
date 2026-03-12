@@ -157,6 +157,19 @@ func (c *RepsetDiffCmd) RunChecks(skipValidation bool) error {
 			return fmt.Errorf("could not connect to node %s: %w", nodeName, err)
 		}
 
+		// Check if spock extension is installed (only on first node)
+		if len(repsetNodeNames) == 0 {
+			spockInstalled, err := queries.CheckSpockInstalled(c.Ctx, pool)
+			if err != nil {
+				pool.Close()
+				return fmt.Errorf("failed to check for spock extension on node %s: %w", nodeName, err)
+			}
+			if !spockInstalled {
+				pool.Close()
+				return fmt.Errorf("repset-diff requires the spock extension, which is not installed on this cluster")
+			}
+		}
+
 		repsetExists, err := queries.CheckRepSetExists(c.Ctx, pool, c.RepsetName)
 		if err != nil {
 			pool.Close()
