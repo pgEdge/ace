@@ -445,6 +445,9 @@ func SetupCLI() *cli.App {
 				},
 				Action: StartSchedulerCLI,
 				Before: func(ctx *cli.Context) error {
+					if err := applyInterspersedFlags(ctx); err != nil {
+						return err
+					}
 					if ctx.Bool("debug") {
 						logger.SetLevel(log.DebugLevel)
 					} else {
@@ -465,6 +468,9 @@ func SetupCLI() *cli.App {
 				},
 				Action: StartAPIServerCLI,
 				Before: func(ctx *cli.Context) error {
+					if err := applyInterspersedFlags(ctx); err != nil {
+						return err
+					}
 					if ctx.Bool("debug") {
 						logger.SetLevel(log.DebugLevel)
 					} else {
@@ -492,7 +498,7 @@ func SetupCLI() *cli.App {
 				Description: "A tool for comparing tables between PostgreSQL databases " +
 					"and detecting data inconsistencies",
 				Action: func(ctx *cli.Context) error {
-					argsLen := ctx.Args().Len()
+					argsLen := len(filteredPositionalArgs(ctx))
 					if argsLen == 0 {
 						return fmt.Errorf("missing required argument for table-diff: needs <table>")
 					}
@@ -503,6 +509,9 @@ func SetupCLI() *cli.App {
 				},
 				Flags: tableDiffFlags,
 				Before: func(ctx *cli.Context) error {
+					if err := applyInterspersedFlags(ctx); err != nil {
+						return err
+					}
 					if ctx.Bool("debug") {
 						logger.SetLevel(log.DebugLevel)
 					} else {
@@ -517,12 +526,15 @@ func SetupCLI() *cli.App {
 				ArgsUsage: "[cluster]",
 				Flags:     tableRerunFlags,
 				Action: func(ctx *cli.Context) error {
-					if ctx.Args().Len() > 1 {
+					if len(filteredPositionalArgs(ctx)) > 1 {
 						return fmt.Errorf("unexpected arguments for table-rerun (usage: [cluster])")
 					}
 					return TableRerunCLI(ctx)
 				},
 				Before: func(ctx *cli.Context) error {
+					if err := applyInterspersedFlags(ctx); err != nil {
+						return err
+					}
 					if ctx.Bool("debug") {
 						logger.SetLevel(log.DebugLevel)
 					} else {
@@ -537,7 +549,7 @@ func SetupCLI() *cli.App {
 				ArgsUsage: "[cluster] <table>",
 				Flags:     tableRepairFlags,
 				Action: func(ctx *cli.Context) error {
-					argsLen := ctx.Args().Len()
+					argsLen := len(filteredPositionalArgs(ctx))
 					if argsLen == 0 {
 						return fmt.Errorf("missing required argument for table-repair: needs <table>")
 					}
@@ -547,6 +559,9 @@ func SetupCLI() *cli.App {
 					return TableRepairCLI(ctx)
 				},
 				Before: func(ctx *cli.Context) error {
+					if err := applyInterspersedFlags(ctx); err != nil {
+						return err
+					}
 					if ctx.Bool("debug") {
 						logger.SetLevel(log.DebugLevel)
 					} else {
@@ -561,12 +576,15 @@ func SetupCLI() *cli.App {
 				ArgsUsage: "[cluster]",
 				Flags:     spockDiffFlags,
 				Action: func(ctx *cli.Context) error {
-					if ctx.Args().Len() > 1 {
+					if len(filteredPositionalArgs(ctx)) > 1 {
 						return fmt.Errorf("unexpected arguments for spock-diff (usage: [cluster])")
 					}
 					return SpockDiffCLI(ctx)
 				},
 				Before: func(ctx *cli.Context) error {
+					if err := applyInterspersedFlags(ctx); err != nil {
+						return err
+					}
 					if ctx.Bool("debug") {
 						logger.SetLevel(log.DebugLevel)
 					} else {
@@ -581,7 +599,7 @@ func SetupCLI() *cli.App {
 				ArgsUsage: "[cluster] <schema>",
 				Flags:     schemaDiffFlags,
 				Action: func(ctx *cli.Context) error {
-					argsLen := ctx.Args().Len()
+					argsLen := len(filteredPositionalArgs(ctx))
 					if argsLen == 0 {
 						return fmt.Errorf("missing required argument for schema-diff: needs <schema>")
 					}
@@ -591,6 +609,9 @@ func SetupCLI() *cli.App {
 					return SchemaDiffCLI(ctx)
 				},
 				Before: func(ctx *cli.Context) error {
+					if err := applyInterspersedFlags(ctx); err != nil {
+						return err
+					}
 					if ctx.Bool("debug") {
 						logger.SetLevel(log.DebugLevel)
 					} else {
@@ -605,7 +626,7 @@ func SetupCLI() *cli.App {
 				ArgsUsage: "[cluster] <repset>",
 				Flags:     repsetDiffFlags,
 				Action: func(ctx *cli.Context) error {
-					argsLen := ctx.Args().Len()
+					argsLen := len(filteredPositionalArgs(ctx))
 					if argsLen == 0 {
 						return fmt.Errorf("missing required argument for repset-diff: needs <repset>")
 					}
@@ -615,6 +636,9 @@ func SetupCLI() *cli.App {
 					return RepsetDiffCLI(ctx)
 				},
 				Before: func(ctx *cli.Context) error {
+					if err := applyInterspersedFlags(ctx); err != nil {
+						return err
+					}
 					if ctx.Bool("debug") {
 						logger.SetLevel(log.DebugLevel)
 					} else {
@@ -633,12 +657,15 @@ func SetupCLI() *cli.App {
 						ArgsUsage: "[cluster]",
 						Flags:     commonFlags,
 						Action: func(ctx *cli.Context) error {
-							if ctx.Args().Len() > 1 {
+							if len(filteredPositionalArgs(ctx)) > 1 {
 								return fmt.Errorf("unexpected arguments for mtree init (usage: [cluster])")
 							}
 							return MtreeInitCLI(ctx)
 						},
 						Before: func(ctx *cli.Context) error {
+							if err := applyInterspersedFlags(ctx); err != nil {
+								return err
+							}
 							if ctx.Bool("debug") {
 								logger.SetLevel(log.DebugLevel)
 							} else {
@@ -653,12 +680,15 @@ func SetupCLI() *cli.App {
 						ArgsUsage: "[cluster]",
 						Flags:     commonFlags,
 						Action: func(ctx *cli.Context) error {
-							if ctx.Args().Len() > 1 {
+							if len(filteredPositionalArgs(ctx)) > 1 {
 								return fmt.Errorf("unexpected arguments for mtree listen (usage: [cluster])")
 							}
 							return MtreeListenCLI(ctx)
 						},
 						Before: func(ctx *cli.Context) error {
+							if err := applyInterspersedFlags(ctx); err != nil {
+								return err
+							}
 							if ctx.Bool("debug") {
 								logger.SetLevel(log.DebugLevel)
 							} else {
@@ -673,12 +703,15 @@ func SetupCLI() *cli.App {
 						ArgsUsage: "[cluster]",
 						Flags:     commonFlags,
 						Action: func(ctx *cli.Context) error {
-							if ctx.Args().Len() > 1 {
+							if len(filteredPositionalArgs(ctx)) > 1 {
 								return fmt.Errorf("unexpected arguments for mtree teardown (usage: [cluster])")
 							}
 							return MtreeTeardownCLI(ctx)
 						},
 						Before: func(ctx *cli.Context) error {
+							if err := applyInterspersedFlags(ctx); err != nil {
+								return err
+							}
 							if ctx.Bool("debug") {
 								logger.SetLevel(log.DebugLevel)
 							} else {
@@ -693,7 +726,7 @@ func SetupCLI() *cli.App {
 						ArgsUsage: "[cluster] <table>",
 						Flags:     commonFlags,
 						Action: func(ctx *cli.Context) error {
-							argsLen := ctx.Args().Len()
+							argsLen := len(filteredPositionalArgs(ctx))
 							if argsLen == 0 {
 								return fmt.Errorf("missing required argument for mtree teardown-table: needs <table>")
 							}
@@ -703,6 +736,9 @@ func SetupCLI() *cli.App {
 							return MtreeTeardownTableCLI(ctx)
 						},
 						Before: func(ctx *cli.Context) error {
+							if err := applyInterspersedFlags(ctx); err != nil {
+								return err
+							}
 							if ctx.Bool("debug") {
 								logger.SetLevel(log.DebugLevel)
 							} else {
@@ -716,7 +752,7 @@ func SetupCLI() *cli.App {
 						Usage:     "Build a new Merkle tree for a table",
 						ArgsUsage: "[cluster] <table>",
 						Action: func(ctx *cli.Context) error {
-							argsLen := ctx.Args().Len()
+							argsLen := len(filteredPositionalArgs(ctx))
 							if argsLen == 0 {
 								return fmt.Errorf("missing required argument for mtree build: needs <table>")
 							}
@@ -727,6 +763,9 @@ func SetupCLI() *cli.App {
 						},
 						Flags: mtreeBuildFlags,
 						Before: func(ctx *cli.Context) error {
+							if err := applyInterspersedFlags(ctx); err != nil {
+								return err
+							}
 							if ctx.Bool("debug") {
 								logger.SetLevel(log.DebugLevel)
 							} else {
@@ -740,7 +779,7 @@ func SetupCLI() *cli.App {
 						Usage:     "Update an existing Merkle tree for a table",
 						ArgsUsage: "[cluster] <table>",
 						Action: func(ctx *cli.Context) error {
-							argsLen := ctx.Args().Len()
+							argsLen := len(filteredPositionalArgs(ctx))
 							if argsLen == 0 {
 								return fmt.Errorf("missing required argument for mtree update: needs <table>")
 							}
@@ -751,6 +790,9 @@ func SetupCLI() *cli.App {
 						},
 						Flags: mtreeUpdateFlags,
 						Before: func(ctx *cli.Context) error {
+							if err := applyInterspersedFlags(ctx); err != nil {
+								return err
+							}
 							if ctx.Bool("debug") {
 								logger.SetLevel(log.DebugLevel)
 							} else {
@@ -764,7 +806,7 @@ func SetupCLI() *cli.App {
 						Usage:     "Use Merkle Trees for performing table-diff",
 						ArgsUsage: "[cluster] <table>",
 						Action: func(ctx *cli.Context) error {
-							argsLen := ctx.Args().Len()
+							argsLen := len(filteredPositionalArgs(ctx))
 							if argsLen == 0 {
 								return fmt.Errorf("missing required argument for mtree diff: needs <table>")
 							}
@@ -775,6 +817,9 @@ func SetupCLI() *cli.App {
 						},
 						Flags: mtreeDiffFlags,
 						Before: func(ctx *cli.Context) error {
+							if err := applyInterspersedFlags(ctx); err != nil {
+								return err
+							}
 							if ctx.Bool("debug") {
 								logger.SetLevel(log.DebugLevel)
 							} else {
@@ -860,8 +905,131 @@ func resolveClusterArg(cmd, missingUsage, argsUsage string, required int, args [
 	return "", nil, fmt.Errorf("unexpected arguments for %s (usage: %s)", cmd, argsUsage)
 }
 
-func TableDiffCLI(ctx *cli.Context) error {
+// findFlag returns the flag definition matching name (including aliases).
+func findFlag(flags []cli.Flag, name string) cli.Flag {
+	for _, f := range flags {
+		for _, n := range f.Names() {
+			if n == name {
+				return f
+			}
+		}
+	}
+	return nil
+}
+
+func isBoolFlag(f cli.Flag) bool {
+	_, ok := f.(*cli.BoolFlag)
+	return ok
+}
+
+// filteredPositionalArgs returns ctx.Args().Slice() with known flag tokens
+// removed.  Unknown flag-like tokens are kept as-is so that resolveClusterArg
+// will surface an "unexpected arguments" error rather than silently dropping
+// them.  Tokens after a bare "--" separator are always kept as positional args.
+func filteredPositionalArgs(ctx *cli.Context) []string {
 	args := ctx.Args().Slice()
+	result := make([]string, 0, len(args))
+	i := 0
+	for i < len(args) {
+		arg := args[i]
+		if arg == "--" {
+			result = append(result, args[i+1:]...)
+			break
+		}
+		if !strings.HasPrefix(arg, "-") {
+			result = append(result, arg)
+			i++
+			continue
+		}
+		// Determine the flag name (strip leading dashes and any =value suffix).
+		flagName := strings.TrimLeft(arg, "-")
+		if idx := strings.IndexByte(flagName, '='); idx >= 0 {
+			flagName = flagName[:idx]
+		}
+		f := findFlag(ctx.Command.Flags, flagName)
+		if f == nil && flagName != "h" && flagName != "help" {
+			// Unknown flag: pass through so resolveClusterArg can report it.
+			result = append(result, arg)
+			i++
+			continue
+		}
+		if strings.IndexByte(strings.TrimLeft(arg, "-"), '=') >= 0 {
+			// --key=value form: single token, just skip it.
+			i++
+			continue
+		}
+		// For non-bool flags, skip the following value token only when it is
+		// not itself a flag (avoids consuming "--quiet" as the value of "--nodes").
+		if f != nil && !isBoolFlag(f) && i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
+			i++
+		}
+		i++
+	}
+	return result
+}
+
+// applyInterspersedFlags applies any flags in ctx.Args() that were not parsed
+// because they appeared after a positional argument.  Returns cli.Exit("", 0)
+// when -h/--help is detected so the caller's Before hook can return early.
+// Unknown flags and missing values are returned as errors, consistent with
+// how urfave/cli handles flags that appear before positional arguments.
+func applyInterspersedFlags(ctx *cli.Context) error {
+	args := ctx.Args().Slice()
+	i := 0
+	for i < len(args) {
+		arg := args[i]
+		if arg == "--" {
+			break
+		}
+		if !strings.HasPrefix(arg, "-") {
+			i++
+			continue
+		}
+		name := strings.TrimLeft(arg, "-")
+		value := ""
+		hasValue := false
+		if idx := strings.IndexByte(name, '='); idx >= 0 {
+			value = name[idx+1:]
+			name = name[:idx]
+			hasValue = true
+		}
+		if name == "h" || name == "help" {
+			if lineage := ctx.Lineage(); len(lineage) > 1 {
+				_ = cli.ShowCommandHelp(lineage[1], ctx.Command.Name)
+			}
+			return cli.Exit("", 0)
+		}
+		f := findFlag(ctx.Command.Flags, name)
+		if f == nil {
+			return fmt.Errorf("flag provided but not defined: %s", arg)
+		}
+		canonicalName := f.Names()[0]
+		if isBoolFlag(f) {
+			if !hasValue {
+				value = "true"
+			}
+			if err := ctx.Set(canonicalName, value); err != nil {
+				return err
+			}
+		} else {
+			if !hasValue {
+				if i+1 >= len(args) || strings.HasPrefix(args[i+1], "-") {
+					return fmt.Errorf("flag needs an argument: %s", arg)
+				}
+				i++
+				value = args[i]
+			}
+			if err := ctx.Set(canonicalName, value); err != nil {
+				return err
+			}
+		}
+		i++
+	}
+	return nil
+}
+
+func TableDiffCLI(ctx *cli.Context) error {
+	args := filteredPositionalArgs(ctx)
 	clusterName, positional, err := resolveClusterArg("table-diff", "<table>", "[cluster] <table>", 1, args)
 	if err != nil {
 		return err
@@ -937,7 +1105,7 @@ func TableDiffCLI(ctx *cli.Context) error {
 }
 
 func MtreeInitCLI(ctx *cli.Context) error {
-	args := ctx.Args().Slice()
+	args := filteredPositionalArgs(ctx)
 	clusterName, _, err := resolveClusterArg("mtree init", "", "[cluster]", 0, args)
 	if err != nil {
 		return err
@@ -958,7 +1126,7 @@ func MtreeInitCLI(ctx *cli.Context) error {
 }
 
 func MtreeListenCLI(ctx *cli.Context) error {
-	args := ctx.Args().Slice()
+	args := filteredPositionalArgs(ctx)
 	clusterName, _, err := resolveClusterArg("mtree listen", "", "[cluster]", 0, args)
 	if err != nil {
 		return err
@@ -1006,7 +1174,7 @@ func MtreeListenCLI(ctx *cli.Context) error {
 }
 
 func MtreeTeardownCLI(ctx *cli.Context) error {
-	args := ctx.Args().Slice()
+	args := filteredPositionalArgs(ctx)
 	clusterName, _, err := resolveClusterArg("mtree teardown", "", "[cluster]", 0, args)
 	if err != nil {
 		return err
@@ -1027,7 +1195,7 @@ func MtreeTeardownCLI(ctx *cli.Context) error {
 }
 
 func MtreeTeardownTableCLI(ctx *cli.Context) error {
-	args := ctx.Args().Slice()
+	args := filteredPositionalArgs(ctx)
 	clusterName, positional, err := resolveClusterArg("mtree teardown-table", "<table>", "[cluster] <table>", 1, args)
 	if err != nil {
 		return err
@@ -1049,7 +1217,7 @@ func MtreeTeardownTableCLI(ctx *cli.Context) error {
 }
 
 func MtreeBuildCLI(ctx *cli.Context) error {
-	args := ctx.Args().Slice()
+	args := filteredPositionalArgs(ctx)
 	clusterName, positional, err := resolveClusterArg("mtree build", "<table>", "[cluster] <table>", 1, args)
 	if err != nil {
 		return err
@@ -1092,7 +1260,7 @@ func MtreeBuildCLI(ctx *cli.Context) error {
 }
 
 func MtreeUpdateCLI(ctx *cli.Context) error {
-	args := ctx.Args().Slice()
+	args := filteredPositionalArgs(ctx)
 	clusterName, positional, err := resolveClusterArg("mtree update", "<table>", "[cluster] <table>", 1, args)
 	if err != nil {
 		return err
@@ -1124,7 +1292,7 @@ func MtreeUpdateCLI(ctx *cli.Context) error {
 }
 
 func MtreeDiffCLI(ctx *cli.Context) error {
-	args := ctx.Args().Slice()
+	args := filteredPositionalArgs(ctx)
 	clusterName, positional, err := resolveClusterArg("mtree diff", "<table>", "[cluster] <table>", 1, args)
 	if err != nil {
 		return err
@@ -1157,7 +1325,7 @@ func MtreeDiffCLI(ctx *cli.Context) error {
 }
 
 func TableRerunCLI(ctx *cli.Context) error {
-	args := ctx.Args().Slice()
+	args := filteredPositionalArgs(ctx)
 	clusterName, _, err := resolveClusterArg("table-rerun", "", "[cluster]", 0, args)
 	if err != nil {
 		return err
@@ -1180,7 +1348,7 @@ func TableRerunCLI(ctx *cli.Context) error {
 }
 
 func TableRepairCLI(ctx *cli.Context) error {
-	args := ctx.Args().Slice()
+	args := filteredPositionalArgs(ctx)
 	clusterName, positional, err := resolveClusterArg("table-repair", "<table>", "[cluster] <table>", 1, args)
 	if err != nil {
 		return err
@@ -1218,7 +1386,7 @@ func TableRepairCLI(ctx *cli.Context) error {
 }
 
 func SpockDiffCLI(ctx *cli.Context) error {
-	args := ctx.Args().Slice()
+	args := filteredPositionalArgs(ctx)
 	clusterName, _, err := resolveClusterArg("spock-diff", "", "[cluster]", 0, args)
 	if err != nil {
 		return err
@@ -1245,7 +1413,7 @@ func SpockDiffCLI(ctx *cli.Context) error {
 }
 
 func SchemaDiffCLI(ctx *cli.Context) error {
-	args := ctx.Args().Slice()
+	args := filteredPositionalArgs(ctx)
 	clusterName, positional, err := resolveClusterArg("schema-diff", "<schema>", "[cluster] <schema>", 1, args)
 	if err != nil {
 		return err
@@ -1324,7 +1492,7 @@ func SchemaDiffCLI(ctx *cli.Context) error {
 }
 
 func RepsetDiffCLI(ctx *cli.Context) error {
-	args := ctx.Args().Slice()
+	args := filteredPositionalArgs(ctx)
 	clusterName, positional, err := resolveClusterArg("repset-diff", "<repset>", "[cluster] <repset>", 1, args)
 	if err != nil {
 		return err

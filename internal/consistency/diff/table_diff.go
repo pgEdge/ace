@@ -727,6 +727,10 @@ func (t *TableDiffTask) Validate() error {
 		return fmt.Errorf("cluster_name and table_name are required arguments")
 	}
 
+	if config.Cfg == nil {
+		return fmt.Errorf("configuration not loaded")
+	}
+
 	if t.BlockSize > config.Cfg.TableDiff.MaxBlockSize && !t.OverrideBlockSize {
 		return fmt.Errorf("block row size should be <= %d", config.Cfg.TableDiff.MaxBlockSize)
 	}
