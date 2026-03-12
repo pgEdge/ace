@@ -277,7 +277,7 @@ func fetchRowsByPkeys(ctx context.Context, pool *pgxpool.Pool, t *TableDiffTask,
 	}
 
 	selectCols := make([]string, 0, len(t.Cols)+2)
-	selectCols = append(selectCols, "pg_xact_commit_timestamp(t.xmin) as commit_ts", "to_json(spock.xact_commit_timestamp_origin(t.xmin))->>'roident' as node_origin")
+	selectCols = append(selectCols, "pg_xact_commit_timestamp(t.xmin) as commit_ts", "to_json(pg_xact_commit_timestamp_origin(t.xmin))->>'roident' as node_origin")
 	for _, col := range t.Cols {
 		selectCols = append(selectCols, "t."+pgx.Identifier{col}.Sanitize())
 	}

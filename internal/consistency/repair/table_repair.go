@@ -98,6 +98,8 @@ type TableRepairTask struct {
 	autoSelectionFailedNode   string
 	autoSelectionDetails      map[string]map[string]string
 
+	spockAvailable bool
+
 	Ctx context.Context
 }
 
@@ -160,13 +162,35 @@ func (t *TableRepairTask) setRole(tx pgx.Tx, nodeName string) error {
 	return nil
 }
 
-// setupTransactionMode enables spock repair mode, sets the session replication
-// role, and applies the client role for a repair transaction.
-func (t *TableRepairTask) setupTransactionMode(tx pgx.Tx, nodeName string) error {
-	if _, err := tx.Exec(t.Ctx, "SELECT spock.repair_mode(true)"); err != nil {
-		return fmt.Errorf("enabling spock.repair_mode(true) on %s: %w", nodeName, err)
+// detectSpock checks whether the spock extension is installed on any available
+// node and stores the result in t.spockAvailable.
+func (t *TableRepairTask) detectSpock() {
+	for nodeName, pool := range t.Pools {
+		spockInstalled, err := queries.CheckSpockInstalled(t.Ctx, pool)
+		if err != nil {
+			logger.Warn("failed to detect spock extension on %s: %v", nodeName, err)
+			continue
+		}
+		t.spockAvailable = spockInstalled
+		logger.Info("spock extension detected: %v (checked on %s)", spockInstalled, nodeName)
+		return
 	}
-	logger.Debug("spock.repair_mode(true) set on %s", nodeName)
+	logger.Warn("could not detect spock extension on any node; assuming not available")
+	t.spockAvailable = false
+}
+
+// setupTransactionMode enables spock repair mode (when available), sets the session replication
+// role, and applies the client role for a repair transaction.
+// Returns true if spock repair mode was activated, false otherwise.
+func (t *TableRepairTask) setupTransactionMode(tx pgx.Tx, nodeName string) (bool, error) {
+	spockRepairModeActive := false
+	if t.spockAvailable {
+		if _, err := tx.Exec(t.Ctx, "SELECT spock.repair_mode(true)"); err != nil {
+			return false, fmt.Errorf("enabling spock.repair_mode(true) on %s: %w", nodeName, err)
+		}
+		logger.Debug("spock.repair_mode(true) set on %s", nodeName)
+		spockRepairModeActive = true
+	}
 
 	var err error
 	if t.FireTriggers {
@@ -175,13 +199,27 @@ func (t *TableRepairTask) setupTransactionMode(tx pgx.Tx, nodeName string) error
 		_, err = tx.Exec(t.Ctx, "SET session_replication_role = 'replica'")
 	}
 	if err != nil {
-		return fmt.Errorf("setting session_replication_role on %s: %w", nodeName, err)
+		return false, fmt.Errorf("setting session_replication_role on %s: %w", nodeName, err)
 	}
 	logger.Debug("session_replication_role set on %s (fire_triggers: %v)", nodeName, t.FireTriggers)
 
 	if err := t.setRole(tx, nodeName); err != nil {
-		return err
+		return false, err
 	}
+	return spockRepairModeActive, nil
+}
+
+// disableSpockRepairMode disables spock repair mode on the given transaction.
+// When spock is not available, this is a no-op.
+func (t *TableRepairTask) disableSpockRepairMode(tx pgx.Tx, nodeName string) error {
+	if !t.spockAvailable {
+		return nil
+	}
+	_, err := tx.Exec(t.Ctx, "SELECT spock.repair_mode(false)")
+	if err != nil {
+		return fmt.Errorf("disabling spock.repair_mode(false) on %s: %w", nodeName, err)
+	}
+	logger.Debug("spock.repair_mode(false) set on %s", nodeName)
 	return nil
 }
 
@@ -715,6 +753,11 @@ func (t *TableRepairTask) Run(skipValidation bool) (err error) {
 		}
 	}()
 
+	// Detect whether spock extension is available before any repair path
+	if !t.DryRun {
+		t.detectSpock()
+	}
+
 	if t.FixNulls {
 		return t.runFixNulls(startTime)
 	}
@@ -810,13 +853,13 @@ func (t *TableRepairTask) runFixNulls(startTime time.Time) error {
 			continue
 		}
 
-		if err := t.setupTransactionMode(tx, nodeName); err != nil {
+		spockRepairModeActive, err := t.setupTransactionMode(tx, nodeName)
+		if err != nil {
 			tx.Rollback(t.Ctx)
 			logger.Error("%v", err)
 			repairErrors = append(repairErrors, err.Error())
 			continue
 		}
-		spockRepairModeActive := true
 
 		colTypes, _, err := t.getColTypesForNode(nodeName)
 		if err != nil {
@@ -874,11 +917,10 @@ func (t *TableRepairTask) runFixNulls(startTime time.Time) error {
 			// Commit the initial tx (repair_mode setup) first, then use
 			// per-batch-key transactions for origin preservation.
 			if spockRepairModeActive {
-				_, err = tx.Exec(t.Ctx, "SELECT spock.repair_mode(false)")
-				if err != nil {
+				if err := t.disableSpockRepairMode(tx, nodeName); err != nil {
 					tx.Rollback(t.Ctx)
-					logger.Error("disabling spock.repair_mode(false) on %s: %v", nodeName, err)
-					repairErrors = append(repairErrors, fmt.Sprintf("spock.repair_mode(false) failed for %s: %v", nodeName, err))
+					logger.Error("%v", err)
+					repairErrors = append(repairErrors, err.Error())
 					continue
 				}
 			}
@@ -929,11 +971,10 @@ func (t *TableRepairTask) runFixNulls(startTime time.Time) error {
 
 			if !nodeFailed {
 				if spockRepairModeActive {
-					_, err = tx.Exec(t.Ctx, "SELECT spock.repair_mode(false)")
-					if err != nil {
+					if err := t.disableSpockRepairMode(tx, nodeName); err != nil {
 						tx.Rollback(t.Ctx)
-						logger.Error("disabling spock.repair_mode(false) on %s: %v", nodeName, err)
-						repairErrors = append(repairErrors, fmt.Sprintf("spock.repair_mode(false) failed for %s: %v", nodeName, err))
+						logger.Error("%v", err)
+						repairErrors = append(repairErrors, err.Error())
 						nodeFailed = true
 					}
 				}
@@ -1349,7 +1390,7 @@ func (t *TableRepairTask) executePreserveOriginFixNulls(pool *pgxpool.Pool, node
 			return totalUpdated, fmt.Errorf("failed to begin batch transaction for origin %s: %w", batchKey.nodeOrigin, err)
 		}
 
-		if err := t.setupTransactionMode(batchTx, nodeName); err != nil {
+		if _, err := t.setupTransactionMode(batchTx, nodeName); err != nil {
 			batchTx.Rollback(t.Ctx)
 			return totalUpdated, fmt.Errorf("failed to setup transaction mode for origin batch: %w", err)
 		}
@@ -1393,7 +1434,7 @@ func (t *TableRepairTask) executePreserveOriginFixNulls(pool *pgxpool.Pool, node
 			}
 		}
 
-		if _, err := batchTx.Exec(t.Ctx, "SELECT spock.repair_mode(false)"); err != nil {
+		if err := t.disableSpockRepairMode(batchTx, nodeName); err != nil {
 			batchTx.Rollback(t.Ctx)
 			return totalUpdated, fmt.Errorf("failed to disable repair mode for origin batch: %w", err)
 		}
@@ -1574,13 +1615,13 @@ func (t *TableRepairTask) runUnidirectionalRepair(startTime time.Time) error {
 			continue
 		}
 
-		if err := t.setupTransactionMode(tx, nodeName); err != nil {
+		spockRepairModeActive, err := t.setupTransactionMode(tx, nodeName)
+		if err != nil {
 			tx.Rollback(t.Ctx)
 			logger.Error("%v", err)
 			repairErrors = append(repairErrors, err.Error())
 			continue
 		}
-		spockRepairModeActive := true
 
 		// TODO: DROP PRIVILEGES HERE!
 
@@ -1634,11 +1675,10 @@ func (t *TableRepairTask) runUnidirectionalRepair(startTime time.Time) error {
 				// separate per-batch-key transactions so each batch gets its own
 				// pg_replication_origin_xact_setup (which is per-transaction).
 				if spockRepairModeActive {
-					_, err = tx.Exec(t.Ctx, "SELECT spock.repair_mode(false)")
-					if err != nil {
+					if err := t.disableSpockRepairMode(tx, nodeName); err != nil {
 						tx.Rollback(t.Ctx)
-						logger.Error("disabling spock.repair_mode(false) on %s: %v", nodeName, err)
-						repairErrors = append(repairErrors, fmt.Sprintf("spock.repair_mode(false) failed for %s: %v", nodeName, err))
+						logger.Error("%v", err)
+						repairErrors = append(repairErrors, err.Error())
 						continue
 					}
 				}
@@ -1691,15 +1731,22 @@ func (t *TableRepairTask) runUnidirectionalRepair(startTime time.Time) error {
 		if spockRepairModeActive {
 			// TODO: Need to elevate privileges here, but might be difficult
 			// with pgx transactions and connection pooling.
-			_, err = tx.Exec(t.Ctx, "SELECT spock.repair_mode(false)")
-			if err != nil {
+			if err := t.disableSpockRepairMode(tx, nodeName); err != nil {
 				tx.Rollback(t.Ctx)
-				logger.Error("disabling spock.repair_mode(false) on %s: %v", nodeName, err)
-				repairErrors = append(repairErrors, fmt.Sprintf("spock.repair_mode(false) failed for %s: %v", nodeName, err))
+				logger.Error("%v", err)
+				repairErrors = append(repairErrors, err.Error())
 				continue
 			}
-			logger.Debug("spock.repair_mode(false) set on %s", nodeName)
 
+			err = tx.Commit(t.Ctx)
+			if err != nil {
+				logger.Error("committing transaction on node %s: %v", nodeName, err)
+				repairErrors = append(repairErrors, fmt.Sprintf("commit failed for %s: %v", nodeName, err))
+				continue
+			}
+			logger.Debug("Transaction committed successfully on %s", nodeName)
+		} else if !t.PreserveOrigin || len(t.extractOriginInfoForNode(nodeName, fullUpserts[nodeName])) == 0 {
+			// Non-spock path: still need to commit the transaction
 			err = tx.Commit(t.Ctx)
 			if err != nil {
 				logger.Error("committing transaction on node %s: %v", nodeName, err)
@@ -1994,7 +2041,7 @@ func (t *TableRepairTask) performBirectionalInserts(nodeName string, inserts map
 	}
 	defer tx.Rollback(t.Ctx)
 
-	if err := t.setupTransactionMode(tx, nodeName); err != nil {
+	if _, err := t.setupTransactionMode(tx, nodeName); err != nil {
 		return 0, err
 	}
 
@@ -2004,9 +2051,8 @@ func (t *TableRepairTask) performBirectionalInserts(nodeName string, inserts map
 	}
 	logger.Info("Executed %d insert operations on %s", insertedCount, nodeName)
 
-	_, err = tx.Exec(t.Ctx, "SELECT spock.repair_mode(false)")
-	if err != nil {
-		return 0, fmt.Errorf("failed to disable spock.repair_mode(false) on %s: %w", nodeName, err)
+	if err := t.disableSpockRepairMode(tx, nodeName); err != nil {
+		return 0, err
 	}
 
 	if err := tx.Commit(t.Ctx); err != nil {
@@ -2563,7 +2609,7 @@ func (t *TableRepairTask) executePreserveOriginUpserts(pool *pgxpool.Pool, nodeN
 			return totalUpsertedCount, fmt.Errorf("failed to begin batch transaction for origin %s: %w", batchKey.nodeOrigin, err)
 		}
 
-		if err := t.setupTransactionMode(batchTx, nodeName); err != nil {
+		if _, err := t.setupTransactionMode(batchTx, nodeName); err != nil {
 			batchTx.Rollback(t.Ctx)
 			return totalUpsertedCount, fmt.Errorf("failed to setup transaction mode for origin batch: %w", err)
 		}
@@ -2599,7 +2645,7 @@ func (t *TableRepairTask) executePreserveOriginUpserts(pool *pgxpool.Pool, nodeN
 		}
 
 		// Disable repair mode before commit
-		if _, err := batchTx.Exec(t.Ctx, "SELECT spock.repair_mode(false)"); err != nil {
+		if err := t.disableSpockRepairMode(batchTx, nodeName); err != nil {
 			batchTx.Rollback(t.Ctx)
 			return totalUpsertedCount, fmt.Errorf("failed to disable repair mode for origin batch: %w", err)
 		}
@@ -2866,8 +2912,17 @@ func calculateRepairSetsWithSourceOfTruth(task *TableRepairTask) (map[string]map
 
 func (t *TableRepairTask) fetchLSNsForNode(pool *pgxpool.Pool, failedNode, survivor string) (originLSN *uint64, slotLSN *uint64, err error) {
 	var originStr *string
-	originStr, err = queries.GetSpockOriginLSNForNode(t.Ctx, pool, failedNode)
+	if t.spockAvailable {
+		originStr, err = queries.GetSpockOriginLSNForNode(t.Ctx, pool, failedNode)
+	} else {
+		originStr, err = queries.GetNativeOriginLSNForNode(t.Ctx, pool, failedNode)
+	}
 	if err != nil {
+		if !t.spockAvailable {
+			// Native PG queries may fail if subscription naming doesn't match; treat as no data
+			logger.Warn("failed to fetch native origin lsn on %s: %v", survivor, err)
+			return nil, nil, nil
+		}
 		return nil, nil, fmt.Errorf("failed to fetch origin lsn on %s: %w", survivor, err)
 	}
 	if originStr != nil {
@@ -2878,8 +2933,17 @@ func (t *TableRepairTask) fetchLSNsForNode(pool *pgxpool.Pool, failedNode, survi
 	}
 
 	var slotStr *string
-	slotStr, err = queries.GetSpockSlotLSNForNode(t.Ctx, pool, failedNode)
+	if t.spockAvailable {
+		slotStr, err = queries.GetSpockSlotLSNForNode(t.Ctx, pool, failedNode)
+	} else {
+		slotStr, err = queries.GetNativeSlotLSNForNode(t.Ctx, pool, failedNode)
+	}
 	if err != nil {
+		if !t.spockAvailable {
+			// Native PG queries may fail if subscription naming doesn't match; treat as no data
+			logger.Warn("failed to fetch native slot lsn on %s: %v", survivor, err)
+			return originLSN, nil, nil
+		}
 		return originLSN, nil, fmt.Errorf("failed to fetch slot lsn on %s: %w", survivor, err)
 	}
 	if slotStr != nil {

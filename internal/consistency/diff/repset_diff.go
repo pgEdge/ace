@@ -147,6 +147,15 @@ func (c *RepsetDiffCmd) RunChecks(skipValidation bool) error {
 	}
 	defer pool.Close()
 
+	// Check if spock extension is installed
+	spockInstalled, err := queries.CheckSpockInstalled(c.Ctx, pool)
+	if err != nil {
+		return fmt.Errorf("failed to check for spock extension: %w", err)
+	}
+	if !spockInstalled {
+		return fmt.Errorf("repset-diff requires the spock extension, which is not installed on this cluster")
+	}
+
 	repsetExists, err := queries.CheckRepSetExists(c.Ctx, pool, c.RepsetName)
 	if err != nil {
 		return fmt.Errorf("could not check if repset exists: %w", err)
