@@ -1095,6 +1095,11 @@ func (m *MerkleTreeTask) Validate() error {
 	if m.Mode == "listen" {
 		return nil
 	}
+
+	if config.Cfg == nil {
+		return fmt.Errorf("configuration not loaded")
+	}
+
 	cfg := config.Cfg.MTree.Diff
 
 	if m.BlockSize != 0 && !m.OverrideBlockSize {
