@@ -39,87 +39,13 @@ import (
 // - 2 common rows modified on node2 (IDs 1, 2)
 func setupDivergence(t *testing.T, ctx context.Context, qualifiedTableName string, composite bool) {
 	t.Helper()
-	log.Println("Setting up data divergence for", qualifiedTableName)
-
-	// Truncate on both nodes
-	for i, pool := range []*pgxpool.Pool{pgCluster.Node1Pool, pgCluster.Node2Pool} {
-		nodeName := pgCluster.ClusterNodes[i]["Name"].(string)
-		_, err := pool.Exec(ctx, "SELECT spock.repair_mode(true)")
-		require.NoError(t, err, "Failed to enable repair mode on %s", nodeName)
-		_, err = pool.Exec(ctx, fmt.Sprintf("TRUNCATE TABLE %s CASCADE", qualifiedTableName))
-		require.NoError(t, err, "Failed to truncate table on node %s", nodeName)
-		_, err = pool.Exec(ctx, "SELECT spock.repair_mode(false)")
-		require.NoError(t, err, "Failed to disable repair mode on %s", nodeName)
-	}
-
-	// Insert common rows (always populate customer_id to support composite PK later)
-	for i := 1; i <= 5; i++ {
-		for _, pool := range []*pgxpool.Pool{pgCluster.Node1Pool, pgCluster.Node2Pool} {
-			_, err := pool.Exec(ctx, "SELECT spock.repair_mode(true)")
-			require.NoError(t, err)
-			_, err = pool.Exec(ctx, fmt.Sprintf("INSERT INTO %s (index, customer_id, first_name, last_name, email) VALUES ($1, $2, $3, $4, $5)", qualifiedTableName),
-				i, fmt.Sprintf("CUST-%d", i), fmt.Sprintf("FirstName%d", i), fmt.Sprintf("LastName%d", i), fmt.Sprintf("email%d@example.com", i))
-			require.NoError(t, err)
-			_, err = pool.Exec(ctx, "SELECT spock.repair_mode(false)")
-			require.NoError(t, err)
-		}
-	}
-
-	// Insert rows only on node1 (always include customer_id)
-	_, err := pgCluster.Node1Pool.Exec(ctx, "SELECT spock.repair_mode(true)")
-	require.NoError(t, err)
-	for i := 1001; i <= 1002; i++ {
-		_, err := pgCluster.Node1Pool.Exec(ctx, fmt.Sprintf("INSERT INTO %s (index, customer_id, first_name, last_name, email) VALUES ($1, $2, $3, $4, $5)", qualifiedTableName),
-			i, fmt.Sprintf("CUST-%d", i), fmt.Sprintf("N1OnlyFirst%d", i), fmt.Sprintf("N1OnlyLast%d", i), fmt.Sprintf("n1.only%d@example.com", i))
-		require.NoError(t, err)
-	}
-	_, err = pgCluster.Node1Pool.Exec(ctx, "SELECT spock.repair_mode(false)")
-	require.NoError(t, err)
-
-	// Insert rows only on node2 (always include customer_id)
-	_, err = pgCluster.Node2Pool.Exec(ctx, "SELECT spock.repair_mode(true)")
-	require.NoError(t, err)
-	for i := 2001; i <= 2002; i++ {
-		_, err := pgCluster.Node2Pool.Exec(ctx, fmt.Sprintf("INSERT INTO %s (index, customer_id, first_name, last_name, email) VALUES ($1, $2, $3, $4, $5)", qualifiedTableName),
-			i, fmt.Sprintf("CUST-%d", i), fmt.Sprintf("N2OnlyFirst%d", i), fmt.Sprintf("N2OnlyLast%d", i), fmt.Sprintf("n2.only%d@example.com", i))
-		require.NoError(t, err)
-	}
-	_, err = pgCluster.Node2Pool.Exec(ctx, "SELECT spock.repair_mode(false)")
-	require.NoError(t, err)
-
-	// Modify rows on node2
-	_, err = pgCluster.Node2Pool.Exec(ctx, "SELECT spock.repair_mode(true)")
-	require.NoError(t, err)
-	for i := 1; i <= 2; i++ {
-		_, err := pgCluster.Node2Pool.Exec(ctx, fmt.Sprintf("UPDATE %s SET email = $1 WHERE index = $2", qualifiedTableName),
-			fmt.Sprintf("modified.email%d@example.com", i), i)
-		require.NoError(t, err)
-	}
-	_, err = pgCluster.Node2Pool.Exec(ctx, "SELECT spock.repair_mode(false)")
-	require.NoError(t, err)
-
-	log.Println("Data divergence setup complete.")
+	newSpockEnv().setupDivergence(t, ctx, qualifiedTableName, composite)
 }
 
 // runTableDiff executes a table-diff task and returns the path to the latest diff file.
 func runTableDiff(t *testing.T, qualifiedTableName string, nodesToCompare []string) string {
 	t.Helper()
-	// Clean up any old diff files to ensure we get the correct one
-	files, _ := filepath.Glob("*_diffs-*.json")
-	for _, f := range files {
-		os.Remove(f)
-	}
-
-	tdTask := newTestTableDiffTask(t, qualifiedTableName, nodesToCompare)
-	err := tdTask.RunChecks(false)
-	require.NoError(t, err, "table-diff validation failed")
-	err = tdTask.ExecuteTask()
-	require.NoError(t, err, "table-diff execution failed")
-
-	latestDiffFile := getLatestDiffFile(t)
-	require.NotEmpty(t, latestDiffFile, "No diff file was generated")
-
-	return latestDiffFile
+	return newSpockEnv().runTableDiff(t, qualifiedTableName, nodesToCompare)
 }
 
 // getLatestDiffFile finds the most recently modified diff file.
@@ -145,16 +71,7 @@ func getLatestDiffFile(t *testing.T) string {
 // assertNoTableDiff runs a diff and asserts that there are no differences.
 func assertNoTableDiff(t *testing.T, qualifiedTableName string) {
 	t.Helper()
-	nodesToCompare := []string{serviceN1, serviceN2}
-	tdTask := newTestTableDiffTask(t, qualifiedTableName, nodesToCompare)
-
-	err := tdTask.RunChecks(false)
-	require.NoError(t, err, "assertNoTableDiff: validation failed")
-
-	err = tdTask.ExecuteTask()
-	require.NoError(t, err, "assertNoTableDiff: execution failed")
-
-	assert.Empty(t, tdTask.DiffResult.NodeDiffs, "Expected no differences after repair, but diffs were found")
+	newSpockEnv().assertNoTableDiff(t, qualifiedTableName)
 }
 
 // captureOutput executes a function while capturing its stdout and stderr.
@@ -196,42 +113,7 @@ func getTableCount(t *testing.T, ctx context.Context, pool *pgxpool.Pool, qualif
 
 func setupNullDivergence(t *testing.T, ctx context.Context, qualifiedTableName string) {
 	t.Helper()
-	log.Println("Setting up null divergence for", qualifiedTableName)
-
-	for i, pool := range []*pgxpool.Pool{pgCluster.Node1Pool, pgCluster.Node2Pool} {
-		nodeName := pgCluster.ClusterNodes[i]["Name"].(string)
-		_, err := pool.Exec(ctx, "SELECT spock.repair_mode(true)")
-		require.NoError(t, err, "Failed to enable repair mode on %s", nodeName)
-		_, err = pool.Exec(ctx, fmt.Sprintf("TRUNCATE TABLE %s CASCADE", qualifiedTableName))
-		require.NoError(t, err, "Failed to truncate table on node %s", nodeName)
-		_, err = pool.Exec(ctx, "SELECT spock.repair_mode(false)")
-		require.NoError(t, err, "Failed to disable repair mode on %s", nodeName)
-	}
-
-	insertSQL := fmt.Sprintf(
-		"INSERT INTO %s (index, customer_id, first_name, last_name, city) VALUES ($1, $2, $3, $4, $5)",
-		qualifiedTableName,
-	)
-
-	// Node1 rows: missing city for id 1, missing first_name for id 2
-	_, err := pgCluster.Node1Pool.Exec(ctx, "SELECT spock.repair_mode(true)")
-	require.NoError(t, err)
-	_, err = pgCluster.Node1Pool.Exec(ctx, insertSQL, 1, "CUST-1", "Michael", "Schumacher", nil)
-	require.NoError(t, err)
-	_, err = pgCluster.Node1Pool.Exec(ctx, insertSQL, 2, "CUST-2", nil, "Alonso", "Oviedo")
-	require.NoError(t, err)
-	_, err = pgCluster.Node1Pool.Exec(ctx, "SELECT spock.repair_mode(false)")
-	require.NoError(t, err)
-
-	// Node2 rows: missing last_name for id 1, missing city for id 2
-	_, err = pgCluster.Node2Pool.Exec(ctx, "SELECT spock.repair_mode(true)")
-	require.NoError(t, err)
-	_, err = pgCluster.Node2Pool.Exec(ctx, insertSQL, 1, "CUST-1", "Michael", nil, "Austria")
-	require.NoError(t, err)
-	_, err = pgCluster.Node2Pool.Exec(ctx, insertSQL, 2, "CUST-2", "Fernando", "Alonso", nil)
-	require.NoError(t, err)
-	_, err = pgCluster.Node2Pool.Exec(ctx, "SELECT spock.repair_mode(false)")
-	require.NoError(t, err)
+	newSpockEnv().setupNullDivergence(t, ctx, qualifiedTableName)
 }
 
 type nameCity struct {
@@ -252,9 +134,9 @@ func getNameCity(t *testing.T, ctx context.Context, pool *pgxpool.Pool, qualifie
 	return nameCity{first: first, last: last, city: city}
 }
 
-func TestTableRepair_UnidirectionalDefault(t *testing.T) {
+func testTableRepair_UnidirectionalDefault(t *testing.T, env *testEnv) {
 	tableName := "customers"
-	qualifiedTableName := fmt.Sprintf("%s.%s", testSchema, tableName)
+	qualifiedTableName := fmt.Sprintf("%s.%s", env.Schema, tableName)
 	ctx := context.Background()
 
 	testCases := []struct {
@@ -268,14 +150,14 @@ func TestTableRepair_UnidirectionalDefault(t *testing.T) {
 			name:      "composite_primary_key",
 			composite: true,
 			setup: func() {
-				for _, pool := range []*pgxpool.Pool{pgCluster.Node1Pool, pgCluster.Node2Pool} {
-					_err := alterTableToCompositeKey(ctx, pool, testSchema, tableName)
+				for _, pool := range []*pgxpool.Pool{env.N1Pool, env.N2Pool} {
+					_err := alterTableToCompositeKey(ctx, pool, env.Schema, tableName)
 					require.NoError(t, _err)
 				}
 			},
 			teardown: func() {
-				for _, pool := range []*pgxpool.Pool{pgCluster.Node1Pool, pgCluster.Node2Pool} {
-					_err := revertTableToSimpleKey(ctx, pool, testSchema, tableName)
+				for _, pool := range []*pgxpool.Pool{env.N1Pool, env.N2Pool} {
+					_err := revertTableToSimpleKey(ctx, pool, env.Schema, tableName)
 					require.NoError(t, _err)
 				}
 			},
@@ -287,34 +169,40 @@ func TestTableRepair_UnidirectionalDefault(t *testing.T) {
 			tc.setup()
 			t.Cleanup(tc.teardown)
 
-			setupDivergence(t, ctx, qualifiedTableName, tc.composite)
+			env.setupDivergence(t, ctx, qualifiedTableName, tc.composite)
 			t.Cleanup(func() {
-				repairTable(t, qualifiedTableName, serviceN1)
+				env.repairTable(t, qualifiedTableName, env.ServiceN1)
 			})
 
-			diffFile := runTableDiff(t, qualifiedTableName, []string{serviceN1, serviceN2})
+			diffFile := env.runTableDiff(t, qualifiedTableName, []string{env.ServiceN1, env.ServiceN2})
 
 			diffData, err := os.ReadFile(diffFile)
 			require.NoError(t, err)
-			assert.Contains(t, string(diffData), "_spock_metadata_", "Diff file should contain spock metadata before repair")
+			if env.HasSpock {
+				assert.Contains(t, string(diffData), "_spock_metadata_", "Diff file should contain spock metadata before repair")
+			}
 
-			repairTask := newTestTableRepairTask(serviceN1, qualifiedTableName, diffFile)
+			repairTask := env.newTableRepairTask(env.ServiceN1, qualifiedTableName, diffFile)
 			err = repairTask.Run(false)
 			require.NoError(t, err, "Table repair failed")
 
 			log.Println("Verifying repair for TestTableRepair_UnidirectionalDefault")
-			assertNoTableDiff(t, qualifiedTableName)
-			count1 := getTableCount(t, ctx, pgCluster.Node1Pool, qualifiedTableName)
-			count2 := getTableCount(t, ctx, pgCluster.Node2Pool, qualifiedTableName)
+			env.assertNoTableDiff(t, qualifiedTableName)
+			count1 := getTableCount(t, ctx, env.N1Pool, qualifiedTableName)
+			count2 := getTableCount(t, ctx, env.N2Pool, qualifiedTableName)
 			assert.Equal(t, count1, count2, "Row counts should be equal after default repair")
 			assert.Equal(t, 7, count1, "Expected 7 rows on node1")
 		})
 	}
 }
 
-func TestTableRepair_InsertOnly(t *testing.T) {
+func TestTableRepair_UnidirectionalDefault(t *testing.T) {
+	testTableRepair_UnidirectionalDefault(t, newSpockEnv())
+}
+
+func testTableRepair_InsertOnly(t *testing.T, env *testEnv) {
 	tableName := "customers"
-	qualifiedTableName := fmt.Sprintf("%s.%s", testSchema, tableName)
+	qualifiedTableName := fmt.Sprintf("%s.%s", env.Schema, tableName)
 	ctx := context.Background()
 
 	testCases := []struct {
@@ -328,14 +216,14 @@ func TestTableRepair_InsertOnly(t *testing.T) {
 			name:      "composite_primary_key",
 			composite: true,
 			setup: func() {
-				for _, pool := range []*pgxpool.Pool{pgCluster.Node1Pool, pgCluster.Node2Pool} {
-					_err := alterTableToCompositeKey(ctx, pool, testSchema, tableName)
+				for _, pool := range []*pgxpool.Pool{env.N1Pool, env.N2Pool} {
+					_err := alterTableToCompositeKey(ctx, pool, env.Schema, tableName)
 					require.NoError(t, _err)
 				}
 			},
 			teardown: func() {
-				for _, pool := range []*pgxpool.Pool{pgCluster.Node1Pool, pgCluster.Node2Pool} {
-					_err := revertTableToSimpleKey(ctx, pool, testSchema, tableName)
+				for _, pool := range []*pgxpool.Pool{env.N1Pool, env.N2Pool} {
+					_err := revertTableToSimpleKey(ctx, pool, env.Schema, tableName)
 					require.NoError(t, _err)
 				}
 			},
@@ -347,49 +235,50 @@ func TestTableRepair_InsertOnly(t *testing.T) {
 			tc.setup()
 			t.Cleanup(tc.teardown)
 
-			setupDivergence(t, ctx, qualifiedTableName, tc.composite)
+			env.setupDivergence(t, ctx, qualifiedTableName, tc.composite)
 			t.Cleanup(func() {
-				repairTable(t, qualifiedTableName, serviceN1)
+				env.repairTable(t, qualifiedTableName, env.ServiceN1)
 			})
 
-			diffFile := runTableDiff(t, qualifiedTableName, []string{serviceN1, serviceN2})
+			diffFile := env.runTableDiff(t, qualifiedTableName, []string{env.ServiceN1, env.ServiceN2})
 
-			repairTask := newTestTableRepairTask(serviceN1, qualifiedTableName, diffFile)
+			repairTask := env.newTableRepairTask(env.ServiceN1, qualifiedTableName, diffFile)
 			repairTask.InsertOnly = true
 			err := repairTask.Run(false)
 			require.NoError(t, err, "Table repair (insert-only) failed")
 
-			count1 := getTableCount(t, ctx, pgCluster.Node1Pool, qualifiedTableName)
-			count2 := getTableCount(t, ctx, pgCluster.Node2Pool, qualifiedTableName)
+			count1 := getTableCount(t, ctx, env.N1Pool, qualifiedTableName)
+			count2 := getTableCount(t, ctx, env.N2Pool, qualifiedTableName)
 			assert.Equal(t, 7, count1)
 			assert.Equal(t, 9, count2)
 
-			tdTask := newTestTableDiffTask(t, qualifiedTableName, []string{serviceN1, serviceN2})
+			tdTask := env.newTableDiffTask(t, qualifiedTableName, []string{env.ServiceN1, env.ServiceN2})
 			err = tdTask.RunChecks(false)
 			require.NoError(t, err)
 			err = tdTask.ExecuteTask()
 			require.NoError(t, err)
 
-			pairKey := serviceN1 + "/" + serviceN2
-			if strings.Compare(serviceN1, serviceN2) > 0 {
-				pairKey = serviceN2 + "/" + serviceN1
-			}
+			pairKey := env.pairKey()
 			// After insert-only repair with n1 as source (DO NOTHING on conflict):
 			// - Rows 1001, 1002 (n1-only) are inserted into n2
 			// - Rows 1, 2 (conflicting) are NOT overwritten on n2 (DO NOTHING), so they still differ
 			// - n1 has 2 differing rows (its versions of rows 1, 2)
 			// - n2 has 4 differing rows (its versions of rows 1, 2 + unique rows 2001, 2002)
 			// - Total diff count is 4
-			assert.Equal(t, 2, len(tdTask.DiffResult.NodeDiffs[pairKey].Rows[serviceN1]))
-			assert.Equal(t, 4, len(tdTask.DiffResult.NodeDiffs[pairKey].Rows[serviceN2]))
+			assert.Equal(t, 2, len(tdTask.DiffResult.NodeDiffs[pairKey].Rows[env.ServiceN1]))
+			assert.Equal(t, 4, len(tdTask.DiffResult.NodeDiffs[pairKey].Rows[env.ServiceN2]))
 			assert.Equal(t, 4, tdTask.DiffResult.Summary.DiffRowsCount[pairKey])
 		})
 	}
 }
 
-func TestTableRepair_UpsertOnly(t *testing.T) {
+func TestTableRepair_InsertOnly(t *testing.T) {
+	testTableRepair_InsertOnly(t, newSpockEnv())
+}
+
+func testTableRepair_UpsertOnly(t *testing.T, env *testEnv) {
 	tableName := "customers"
-	qualifiedTableName := fmt.Sprintf("%s.%s", testSchema, tableName)
+	qualifiedTableName := fmt.Sprintf("%s.%s", env.Schema, tableName)
 	ctx := context.Background()
 
 	testCases := []struct {
@@ -403,14 +292,14 @@ func TestTableRepair_UpsertOnly(t *testing.T) {
 			name:      "composite_primary_key",
 			composite: true,
 			setup: func() {
-				for _, pool := range []*pgxpool.Pool{pgCluster.Node1Pool, pgCluster.Node2Pool} {
-					_err := alterTableToCompositeKey(ctx, pool, testSchema, tableName)
+				for _, pool := range []*pgxpool.Pool{env.N1Pool, env.N2Pool} {
+					_err := alterTableToCompositeKey(ctx, pool, env.Schema, tableName)
 					require.NoError(t, _err)
 				}
 			},
 			teardown: func() {
-				for _, pool := range []*pgxpool.Pool{pgCluster.Node1Pool, pgCluster.Node2Pool} {
-					_err := revertTableToSimpleKey(ctx, pool, testSchema, tableName)
+				for _, pool := range []*pgxpool.Pool{env.N1Pool, env.N2Pool} {
+					_err := revertTableToSimpleKey(ctx, pool, env.Schema, tableName)
 					require.NoError(t, _err)
 				}
 			},
@@ -422,43 +311,44 @@ func TestTableRepair_UpsertOnly(t *testing.T) {
 			tc.setup()
 			t.Cleanup(tc.teardown)
 
-			setupDivergence(t, ctx, qualifiedTableName, tc.composite)
+			env.setupDivergence(t, ctx, qualifiedTableName, tc.composite)
 			t.Cleanup(func() {
-				repairTable(t, qualifiedTableName, serviceN1)
+				env.repairTable(t, qualifiedTableName, env.ServiceN1)
 			})
 
-			diffFile := runTableDiff(t, qualifiedTableName, []string{serviceN1, serviceN2})
+			diffFile := env.runTableDiff(t, qualifiedTableName, []string{env.ServiceN1, env.ServiceN2})
 
-			repairTask := newTestTableRepairTask(serviceN1, qualifiedTableName, diffFile)
+			repairTask := env.newTableRepairTask(env.ServiceN1, qualifiedTableName, diffFile)
 			repairTask.UpsertOnly = true
 			err := repairTask.Run(false)
 			require.NoError(t, err, "Table repair (upsert-only) failed")
 
-			count1 := getTableCount(t, ctx, pgCluster.Node1Pool, qualifiedTableName)
-			count2 := getTableCount(t, ctx, pgCluster.Node2Pool, qualifiedTableName)
+			count1 := getTableCount(t, ctx, env.N1Pool, qualifiedTableName)
+			count2 := getTableCount(t, ctx, env.N2Pool, qualifiedTableName)
 			assert.Equal(t, 7, count1)
 			assert.Equal(t, 9, count2)
 
-			tdTask := newTestTableDiffTask(t, qualifiedTableName, []string{serviceN1, serviceN2})
+			tdTask := env.newTableDiffTask(t, qualifiedTableName, []string{env.ServiceN1, env.ServiceN2})
 			err = tdTask.RunChecks(false)
 			require.NoError(t, err)
 			err = tdTask.ExecuteTask()
 			require.NoError(t, err)
 
-			pairKey := serviceN1 + "/" + serviceN2
-			if strings.Compare(serviceN1, serviceN2) > 0 {
-				pairKey = serviceN2 + "/" + serviceN1
-			}
-			assert.Equal(t, 0, len(tdTask.DiffResult.NodeDiffs[pairKey].Rows[serviceN1]))
-			assert.Equal(t, 2, len(tdTask.DiffResult.NodeDiffs[pairKey].Rows[serviceN2]))
+			pairKey := env.pairKey()
+			assert.Equal(t, 0, len(tdTask.DiffResult.NodeDiffs[pairKey].Rows[env.ServiceN1]))
+			assert.Equal(t, 2, len(tdTask.DiffResult.NodeDiffs[pairKey].Rows[env.ServiceN2]))
 			assert.Equal(t, 2, tdTask.DiffResult.Summary.DiffRowsCount[pairKey])
 		})
 	}
 }
 
-func TestTableRepair_Bidirectional(t *testing.T) {
+func TestTableRepair_UpsertOnly(t *testing.T) {
+	testTableRepair_UpsertOnly(t, newSpockEnv())
+}
+
+func testTableRepair_Bidirectional(t *testing.T, env *testEnv) {
 	tableName := "customers"
-	qualifiedTableName := fmt.Sprintf("%s.%s", testSchema, tableName)
+	qualifiedTableName := fmt.Sprintf("%s.%s", env.Schema, tableName)
 	ctx := context.Background()
 
 	testCases := []struct {
@@ -472,14 +362,14 @@ func TestTableRepair_Bidirectional(t *testing.T) {
 			name:      "composite_primary_key",
 			composite: true,
 			setup: func() {
-				for _, pool := range []*pgxpool.Pool{pgCluster.Node1Pool, pgCluster.Node2Pool} {
-					_err := alterTableToCompositeKey(ctx, pool, testSchema, tableName)
+				for _, pool := range []*pgxpool.Pool{env.N1Pool, env.N2Pool} {
+					_err := alterTableToCompositeKey(ctx, pool, env.Schema, tableName)
 					require.NoError(t, _err)
 				}
 			},
 			teardown: func() {
-				for _, pool := range []*pgxpool.Pool{pgCluster.Node1Pool, pgCluster.Node2Pool} {
-					_err := revertTableToSimpleKey(ctx, pool, testSchema, tableName)
+				for _, pool := range []*pgxpool.Pool{env.N1Pool, env.N2Pool} {
+					_err := revertTableToSimpleKey(ctx, pool, env.Schema, tableName)
 					require.NoError(t, _err)
 				}
 			},
@@ -492,55 +382,53 @@ func TestTableRepair_Bidirectional(t *testing.T) {
 			t.Cleanup(tc.teardown)
 
 			t.Cleanup(func() {
-				repairTable(t, qualifiedTableName, serviceN1)
+				env.repairTable(t, qualifiedTableName, env.ServiceN1)
 			})
 
 			log.Println("Setting up data for bidirectional test")
-			for _, pool := range []*pgxpool.Pool{pgCluster.Node1Pool, pgCluster.Node2Pool} {
-				_, err := pool.Exec(ctx, "SELECT spock.repair_mode(true)")
-				require.NoError(t, err)
-				_, err = pool.Exec(ctx, fmt.Sprintf("TRUNCATE TABLE %s CASCADE", qualifiedTableName))
-				require.NoError(t, err)
-				_, err = pool.Exec(ctx, "SELECT spock.repair_mode(false)")
-				require.NoError(t, err)
+			for _, pool := range []*pgxpool.Pool{env.N1Pool, env.N2Pool} {
+				env.withRepairMode(t, ctx, pool, func() {
+					_, err := pool.Exec(ctx, fmt.Sprintf("TRUNCATE TABLE %s CASCADE", qualifiedTableName))
+					require.NoError(t, err)
+				})
 			}
-			_, err := pgCluster.Node1Pool.Exec(ctx, "SELECT spock.repair_mode(true)")
-			require.NoError(t, err)
-			for i := 3001; i <= 3003; i++ {
-				_, err := pgCluster.Node1Pool.Exec(ctx, fmt.Sprintf("INSERT INTO %s (index, customer_id, first_name) VALUES ($1, $2, $3)", qualifiedTableName), i, fmt.Sprintf("CUST-%d", i), fmt.Sprintf("N1-Bi-%d", i))
-				require.NoError(t, err)
-			}
-			_, err = pgCluster.Node1Pool.Exec(ctx, "SELECT spock.repair_mode(false)")
-			require.NoError(t, err)
+			env.withRepairMode(t, ctx, env.N1Pool, func() {
+				for i := 3001; i <= 3003; i++ {
+					_, err := env.N1Pool.Exec(ctx, fmt.Sprintf("INSERT INTO %s (index, customer_id, first_name) VALUES ($1, $2, $3)", qualifiedTableName), i, fmt.Sprintf("CUST-%d", i), fmt.Sprintf("N1-Bi-%d", i))
+					require.NoError(t, err)
+				}
+			})
 
-			_, err = pgCluster.Node2Pool.Exec(ctx, "SELECT spock.repair_mode(true)")
-			require.NoError(t, err)
-			for i := 4001; i <= 4002; i++ {
-				_, err := pgCluster.Node2Pool.Exec(ctx, fmt.Sprintf("INSERT INTO %s (index, customer_id, first_name) VALUES ($1, $2, $3)", qualifiedTableName), i, fmt.Sprintf("CUST-%d", i), fmt.Sprintf("N2-Bi-%d", i))
-				require.NoError(t, err)
-			}
-			_, err = pgCluster.Node2Pool.Exec(ctx, "SELECT spock.repair_mode(false)")
-			require.NoError(t, err)
+			env.withRepairMode(t, ctx, env.N2Pool, func() {
+				for i := 4001; i <= 4002; i++ {
+					_, err := env.N2Pool.Exec(ctx, fmt.Sprintf("INSERT INTO %s (index, customer_id, first_name) VALUES ($1, $2, $3)", qualifiedTableName), i, fmt.Sprintf("CUST-%d", i), fmt.Sprintf("N2-Bi-%d", i))
+					require.NoError(t, err)
+				}
+			})
 
-			diffFile := runTableDiff(t, qualifiedTableName, []string{serviceN1, serviceN2})
-			repairTask := newTestTableRepairTask(serviceN1, qualifiedTableName, diffFile)
+			diffFile := env.runTableDiff(t, qualifiedTableName, []string{env.ServiceN1, env.ServiceN2})
+			repairTask := env.newTableRepairTask(env.ServiceN1, qualifiedTableName, diffFile)
 			repairTask.Bidirectional = true
-			err = repairTask.Run(false)
+			err := repairTask.Run(false)
 			require.NoError(t, err, "Table repair (bidirectional) failed")
 
 			log.Println("Verifying repair for TestTableRepair_Bidirectional")
-			assertNoTableDiff(t, qualifiedTableName)
-			count1 := getTableCount(t, ctx, pgCluster.Node1Pool, qualifiedTableName)
-			count2 := getTableCount(t, ctx, pgCluster.Node2Pool, qualifiedTableName)
+			env.assertNoTableDiff(t, qualifiedTableName)
+			count1 := getTableCount(t, ctx, env.N1Pool, qualifiedTableName)
+			count2 := getTableCount(t, ctx, env.N2Pool, qualifiedTableName)
 			assert.Equal(t, 5, count1, "Expected 5 rows on node1 after bidirectional repair")
 			assert.Equal(t, 5, count2, "Expected 5 rows on node2 after bidirectional repair")
 		})
 	}
 }
 
-func TestTableRepair_DryRun(t *testing.T) {
+func TestTableRepair_Bidirectional(t *testing.T) {
+	testTableRepair_Bidirectional(t, newSpockEnv())
+}
+
+func testTableRepair_DryRun(t *testing.T, env *testEnv) {
 	tableName := "customers"
-	qualifiedTableName := fmt.Sprintf("%s.%s", testSchema, tableName)
+	qualifiedTableName := fmt.Sprintf("%s.%s", env.Schema, tableName)
 	ctx := context.Background()
 
 	testCases := []struct {
@@ -554,14 +442,14 @@ func TestTableRepair_DryRun(t *testing.T) {
 			name:      "composite_primary_key",
 			composite: true,
 			setup: func() {
-				for _, pool := range []*pgxpool.Pool{pgCluster.Node1Pool, pgCluster.Node2Pool} {
-					_err := alterTableToCompositeKey(ctx, pool, testSchema, tableName)
+				for _, pool := range []*pgxpool.Pool{env.N1Pool, env.N2Pool} {
+					_err := alterTableToCompositeKey(ctx, pool, env.Schema, tableName)
 					require.NoError(t, _err)
 				}
 			},
 			teardown: func() {
-				for _, pool := range []*pgxpool.Pool{pgCluster.Node1Pool, pgCluster.Node2Pool} {
-					_err := revertTableToSimpleKey(ctx, pool, testSchema, tableName)
+				for _, pool := range []*pgxpool.Pool{env.N1Pool, env.N2Pool} {
+					_err := revertTableToSimpleKey(ctx, pool, env.Schema, tableName)
 					require.NoError(t, _err)
 				}
 			},
@@ -573,14 +461,14 @@ func TestTableRepair_DryRun(t *testing.T) {
 			tc.setup()
 			t.Cleanup(tc.teardown)
 
-			setupDivergence(t, ctx, qualifiedTableName, tc.composite)
+			env.setupDivergence(t, ctx, qualifiedTableName, tc.composite)
 			t.Cleanup(func() {
-				repairTable(t, qualifiedTableName, serviceN1)
+				env.repairTable(t, qualifiedTableName, env.ServiceN1)
 			})
-			count1Before, count2Before := getTableCount(t, ctx, pgCluster.Node1Pool, qualifiedTableName), getTableCount(t, ctx, pgCluster.Node2Pool, qualifiedTableName)
+			count1Before, count2Before := getTableCount(t, ctx, env.N1Pool, qualifiedTableName), getTableCount(t, ctx, env.N2Pool, qualifiedTableName)
 
-			diffFile := runTableDiff(t, qualifiedTableName, []string{serviceN1, serviceN2})
-			repairTask := newTestTableRepairTask(serviceN1, qualifiedTableName, diffFile)
+			diffFile := env.runTableDiff(t, qualifiedTableName, []string{env.ServiceN1, env.ServiceN2})
+			repairTask := env.newTableRepairTask(env.ServiceN1, qualifiedTableName, diffFile)
 			repairTask.DryRun = true
 
 			output := captureOutput(t, func() {
@@ -589,18 +477,22 @@ func TestTableRepair_DryRun(t *testing.T) {
 			})
 
 			assert.Contains(t, output, "DRY RUN")
-			assert.Contains(t, output, fmt.Sprintf("Node %s: Would attempt to UPSERT 4 rows and DELETE 2 rows.", serviceN2))
+			assert.Contains(t, output, fmt.Sprintf("Node %s: Would attempt to UPSERT 4 rows and DELETE 2 rows.", env.ServiceN2))
 
-			count1After, count2After := getTableCount(t, ctx, pgCluster.Node1Pool, qualifiedTableName), getTableCount(t, ctx, pgCluster.Node2Pool, qualifiedTableName)
+			count1After, count2After := getTableCount(t, ctx, env.N1Pool, qualifiedTableName), getTableCount(t, ctx, env.N2Pool, qualifiedTableName)
 			assert.Equal(t, count1Before, count1After, "Node1 count should not change after dry run")
 			assert.Equal(t, count2Before, count2After, "Node2 count should not change after dry run")
 		})
 	}
 }
 
-func TestTableRepair_GenerateReport(t *testing.T) {
+func TestTableRepair_DryRun(t *testing.T) {
+	testTableRepair_DryRun(t, newSpockEnv())
+}
+
+func testTableRepair_GenerateReport(t *testing.T, env *testEnv) {
 	tableName := "customers"
-	qualifiedTableName := fmt.Sprintf("%s.%s", testSchema, tableName)
+	qualifiedTableName := fmt.Sprintf("%s.%s", env.Schema, tableName)
 	ctx := context.Background()
 	reportDir := "reports"
 
@@ -615,14 +507,14 @@ func TestTableRepair_GenerateReport(t *testing.T) {
 			name:      "composite_primary_key",
 			composite: true,
 			setup: func() {
-				for _, pool := range []*pgxpool.Pool{pgCluster.Node1Pool, pgCluster.Node2Pool} {
-					_err := alterTableToCompositeKey(ctx, pool, testSchema, tableName)
+				for _, pool := range []*pgxpool.Pool{env.N1Pool, env.N2Pool} {
+					_err := alterTableToCompositeKey(ctx, pool, env.Schema, tableName)
 					require.NoError(t, _err)
 				}
 			},
 			teardown: func() {
-				for _, pool := range []*pgxpool.Pool{pgCluster.Node1Pool, pgCluster.Node2Pool} {
-					_err := revertTableToSimpleKey(ctx, pool, testSchema, tableName)
+				for _, pool := range []*pgxpool.Pool{env.N1Pool, env.N2Pool} {
+					_err := revertTableToSimpleKey(ctx, pool, env.Schema, tableName)
 					require.NoError(t, _err)
 				}
 			},
@@ -636,14 +528,14 @@ func TestTableRepair_GenerateReport(t *testing.T) {
 
 			t.Cleanup(func() {
 				os.RemoveAll(reportDir)
-				repairTable(t, qualifiedTableName, serviceN1)
+				env.repairTable(t, qualifiedTableName, env.ServiceN1)
 			})
 			os.RemoveAll(reportDir)
 
-			setupDivergence(t, ctx, qualifiedTableName, tc.composite)
+			env.setupDivergence(t, ctx, qualifiedTableName, tc.composite)
 
-			diffFile := runTableDiff(t, qualifiedTableName, []string{serviceN1, serviceN2})
-			repairTask := newTestTableRepairTask(serviceN1, qualifiedTableName, diffFile)
+			diffFile := env.runTableDiff(t, qualifiedTableName, []string{env.ServiceN1, env.ServiceN2})
+			repairTask := env.newTableRepairTask(env.ServiceN1, qualifiedTableName, diffFile)
 			repairTask.GenerateReport = true
 
 			err := repairTask.Run(false)
@@ -669,9 +561,13 @@ func TestTableRepair_GenerateReport(t *testing.T) {
 			require.NoError(t, err)
 			assert.True(t, len(data) > 0, "Report file is empty")
 			assert.Contains(t, string(data), "\"operation_type\": \"table-repair\"")
-			assert.Contains(t, string(data), fmt.Sprintf("\"source_of_truth\": \"%s\"", serviceN1))
+			assert.Contains(t, string(data), fmt.Sprintf("\"source_of_truth\": \"%s\"", env.ServiceN1))
 		})
 	}
+}
+
+func TestTableRepair_GenerateReport(t *testing.T) {
+	testTableRepair_GenerateReport(t, newSpockEnv())
 }
 
 func TestTableRepair_VariousDataTypes(t *testing.T) {
@@ -853,9 +749,9 @@ CREATE TABLE IF NOT EXISTS %s.%s (
 	assert.Equal(t, 0, row4Count, "Row present only on node2 should be deleted")
 }
 
-func TestTableRepair_FixNulls(t *testing.T) {
+func testTableRepair_FixNulls(t *testing.T, env *testEnv) {
 	tableName := "customers"
-	qualifiedTableName := fmt.Sprintf("%s.%s", testSchema, tableName)
+	qualifiedTableName := fmt.Sprintf("%s.%s", env.Schema, tableName)
 	ctx := context.Background()
 
 	testCases := []struct {
@@ -869,14 +765,14 @@ func TestTableRepair_FixNulls(t *testing.T) {
 			name:      "composite_primary_key",
 			composite: true,
 			setup: func() {
-				for _, pool := range []*pgxpool.Pool{pgCluster.Node1Pool, pgCluster.Node2Pool} {
-					_err := alterTableToCompositeKey(ctx, pool, testSchema, tableName)
+				for _, pool := range []*pgxpool.Pool{env.N1Pool, env.N2Pool} {
+					_err := alterTableToCompositeKey(ctx, pool, env.Schema, tableName)
 					require.NoError(t, _err)
 				}
 			},
 			teardown: func() {
-				for _, pool := range []*pgxpool.Pool{pgCluster.Node1Pool, pgCluster.Node2Pool} {
-					_err := revertTableToSimpleKey(ctx, pool, testSchema, tableName)
+				for _, pool := range []*pgxpool.Pool{env.N1Pool, env.N2Pool} {
+					_err := revertTableToSimpleKey(ctx, pool, env.Schema, tableName)
 					require.NoError(t, _err)
 				}
 			},
@@ -888,23 +784,23 @@ func TestTableRepair_FixNulls(t *testing.T) {
 			tc.setup()
 			t.Cleanup(tc.teardown)
 
-			setupNullDivergence(t, ctx, qualifiedTableName)
+			env.setupNullDivergence(t, ctx, qualifiedTableName)
 
-			diffFile := runTableDiff(t, qualifiedTableName, []string{serviceN1, serviceN2})
+			diffFile := env.runTableDiff(t, qualifiedTableName, []string{env.ServiceN1, env.ServiceN2})
 
-			repairTask := newTestTableRepairTask("", qualifiedTableName, diffFile)
+			repairTask := env.newTableRepairTask("", qualifiedTableName, diffFile)
 			repairTask.SourceOfTruth = ""
 			repairTask.FixNulls = true
 
 			err := repairTask.Run(false)
 			require.NoError(t, err, "Table repair (fix-nulls) failed")
 
-			assertNoTableDiff(t, qualifiedTableName)
+			env.assertNoTableDiff(t, qualifiedTableName)
 
-			row1N1 := getNameCity(t, ctx, pgCluster.Node1Pool, qualifiedTableName, 1, "CUST-1")
-			row1N2 := getNameCity(t, ctx, pgCluster.Node2Pool, qualifiedTableName, 1, "CUST-1")
-			row2N1 := getNameCity(t, ctx, pgCluster.Node1Pool, qualifiedTableName, 2, "CUST-2")
-			row2N2 := getNameCity(t, ctx, pgCluster.Node2Pool, qualifiedTableName, 2, "CUST-2")
+			row1N1 := getNameCity(t, ctx, env.N1Pool, qualifiedTableName, 1, "CUST-1")
+			row1N2 := getNameCity(t, ctx, env.N2Pool, qualifiedTableName, 1, "CUST-1")
+			row2N1 := getNameCity(t, ctx, env.N1Pool, qualifiedTableName, 2, "CUST-2")
+			row2N2 := getNameCity(t, ctx, env.N2Pool, qualifiedTableName, 2, "CUST-2")
 
 			require.NotNil(t, row1N1.city)
 			require.NotNil(t, row1N2.last)
@@ -919,9 +815,13 @@ func TestTableRepair_FixNulls(t *testing.T) {
 	}
 }
 
-func TestTableRepair_FixNulls_DryRun(t *testing.T) {
+func TestTableRepair_FixNulls(t *testing.T) {
+	testTableRepair_FixNulls(t, newSpockEnv())
+}
+
+func testTableRepair_FixNulls_DryRun(t *testing.T, env *testEnv) {
 	tableName := "customers"
-	qualifiedTableName := fmt.Sprintf("%s.%s", testSchema, tableName)
+	qualifiedTableName := fmt.Sprintf("%s.%s", env.Schema, tableName)
 	ctx := context.Background()
 
 	testCases := []struct {
@@ -935,14 +835,14 @@ func TestTableRepair_FixNulls_DryRun(t *testing.T) {
 			name:      "composite_primary_key",
 			composite: true,
 			setup: func() {
-				for _, pool := range []*pgxpool.Pool{pgCluster.Node1Pool, pgCluster.Node2Pool} {
-					_err := alterTableToCompositeKey(ctx, pool, testSchema, tableName)
+				for _, pool := range []*pgxpool.Pool{env.N1Pool, env.N2Pool} {
+					_err := alterTableToCompositeKey(ctx, pool, env.Schema, tableName)
 					require.NoError(t, _err)
 				}
 			},
 			teardown: func() {
-				for _, pool := range []*pgxpool.Pool{pgCluster.Node1Pool, pgCluster.Node2Pool} {
-					_err := revertTableToSimpleKey(ctx, pool, testSchema, tableName)
+				for _, pool := range []*pgxpool.Pool{env.N1Pool, env.N2Pool} {
+					_err := revertTableToSimpleKey(ctx, pool, env.Schema, tableName)
 					require.NoError(t, _err)
 				}
 			},
@@ -954,10 +854,10 @@ func TestTableRepair_FixNulls_DryRun(t *testing.T) {
 			tc.setup()
 			t.Cleanup(tc.teardown)
 
-			setupNullDivergence(t, ctx, qualifiedTableName)
+			env.setupNullDivergence(t, ctx, qualifiedTableName)
 
-			diffFile := runTableDiff(t, qualifiedTableName, []string{serviceN1, serviceN2})
-			repairTask := newTestTableRepairTask("", qualifiedTableName, diffFile)
+			diffFile := env.runTableDiff(t, qualifiedTableName, []string{env.ServiceN1, env.ServiceN2})
+			repairTask := env.newTableRepairTask("", qualifiedTableName, diffFile)
 			repairTask.SourceOfTruth = ""
 			repairTask.FixNulls = true
 			repairTask.DryRun = true
@@ -971,10 +871,10 @@ func TestTableRepair_FixNulls_DryRun(t *testing.T) {
 			assert.Contains(t, output, "Would update")
 
 			// Ensure data unchanged
-			row1N1 := getNameCity(t, ctx, pgCluster.Node1Pool, qualifiedTableName, 1, "CUST-1")
-			row1N2 := getNameCity(t, ctx, pgCluster.Node2Pool, qualifiedTableName, 1, "CUST-1")
-			row2N1 := getNameCity(t, ctx, pgCluster.Node1Pool, qualifiedTableName, 2, "CUST-2")
-			row2N2 := getNameCity(t, ctx, pgCluster.Node2Pool, qualifiedTableName, 2, "CUST-2")
+			row1N1 := getNameCity(t, ctx, env.N1Pool, qualifiedTableName, 1, "CUST-1")
+			row1N2 := getNameCity(t, ctx, env.N2Pool, qualifiedTableName, 1, "CUST-1")
+			row2N1 := getNameCity(t, ctx, env.N1Pool, qualifiedTableName, 2, "CUST-2")
+			row2N2 := getNameCity(t, ctx, env.N2Pool, qualifiedTableName, 2, "CUST-2")
 
 			assert.Nil(t, row1N1.city)
 			assert.Nil(t, row1N2.last)
@@ -982,13 +882,17 @@ func TestTableRepair_FixNulls_DryRun(t *testing.T) {
 			assert.Nil(t, row2N2.city)
 
 			// Cleanup: actually repair to leave table consistent for subsequent tests
-			fixTask := newTestTableRepairTask("", qualifiedTableName, diffFile)
+			fixTask := env.newTableRepairTask("", qualifiedTableName, diffFile)
 			fixTask.SourceOfTruth = ""
 			fixTask.FixNulls = true
 			err := fixTask.Run(false)
 			require.NoError(t, err, "Cleanup fix-nulls repair failed")
 		})
 	}
+}
+
+func TestTableRepair_FixNulls_DryRun(t *testing.T) {
+	testTableRepair_FixNulls_DryRun(t, newSpockEnv())
 }
 
 // TestTableRepair_TimestampAndTimeTypes verifies that the full diff→repair
@@ -1151,7 +1055,7 @@ CREATE TABLE IF NOT EXISTS %s.%s (
 	assert.Equal(t, r1n1.timetz, r1n2.timetz, "row 1 col_timetz mismatch")
 }
 
-// TestTableRepair_FixNulls_BidirectionalUpdate tests that when both nodes have NULLs
+// testTableRepair_FixNulls_BidirectionalUpdate tests that when both nodes have NULLs
 // in different columns for the same row, fix-nulls performs bidirectional updates.
 // This verifies the behavior discussed in code review: each node updates the other
 // with its non-NULL values.
@@ -1165,9 +1069,9 @@ CREATE TABLE IF NOT EXISTS %s.%s (
 //
 //	Node1: {id: 1, col_a: "value_a", col_b: "value_b", col_c: "value_c"}
 //	Node2: {id: 1, col_a: "value_a", col_b: "value_b", col_c: "value_c"}
-func TestTableRepair_FixNulls_BidirectionalUpdate(t *testing.T) {
+func testTableRepair_FixNulls_BidirectionalUpdate(t *testing.T, env *testEnv) {
 	tableName := "customers"
-	qualifiedTableName := fmt.Sprintf("%s.%s", testSchema, tableName)
+	qualifiedTableName := fmt.Sprintf("%s.%s", env.Schema, tableName)
 	ctx := context.Background()
 
 	testCases := []struct {
@@ -1181,14 +1085,14 @@ func TestTableRepair_FixNulls_BidirectionalUpdate(t *testing.T) {
 			name:      "composite_primary_key",
 			composite: true,
 			setup: func() {
-				for _, pool := range []*pgxpool.Pool{pgCluster.Node1Pool, pgCluster.Node2Pool} {
-					_err := alterTableToCompositeKey(ctx, pool, testSchema, tableName)
+				for _, pool := range []*pgxpool.Pool{env.N1Pool, env.N2Pool} {
+					_err := alterTableToCompositeKey(ctx, pool, env.Schema, tableName)
 					require.NoError(t, _err)
 				}
 			},
 			teardown: func() {
-				for _, pool := range []*pgxpool.Pool{pgCluster.Node1Pool, pgCluster.Node2Pool} {
-					_err := revertTableToSimpleKey(ctx, pool, testSchema, tableName)
+				for _, pool := range []*pgxpool.Pool{env.N1Pool, env.N2Pool} {
+					_err := revertTableToSimpleKey(ctx, pool, env.Schema, tableName)
 					require.NoError(t, _err)
 				}
 			},
@@ -1203,14 +1107,11 @@ func TestTableRepair_FixNulls_BidirectionalUpdate(t *testing.T) {
 			log.Println("Setting up bidirectional NULL divergence for", qualifiedTableName)
 
 			// Clean table on both nodes
-			for i, pool := range []*pgxpool.Pool{pgCluster.Node1Pool, pgCluster.Node2Pool} {
-				nodeName := pgCluster.ClusterNodes[i]["Name"].(string)
-				_, err := pool.Exec(ctx, "SELECT spock.repair_mode(true)")
-				require.NoError(t, err, "Failed to enable repair mode on %s", nodeName)
-				_, err = pool.Exec(ctx, fmt.Sprintf("TRUNCATE TABLE %s CASCADE", qualifiedTableName))
-				require.NoError(t, err, "Failed to truncate table on node %s", nodeName)
-				_, err = pool.Exec(ctx, "SELECT spock.repair_mode(false)")
-				require.NoError(t, err, "Failed to disable repair mode on %s", nodeName)
+			for _, pool := range []*pgxpool.Pool{env.N1Pool, env.N2Pool} {
+				env.withRepairMode(t, ctx, pool, func() {
+					_, err := pool.Exec(ctx, fmt.Sprintf("TRUNCATE TABLE %s CASCADE", qualifiedTableName))
+					require.NoError(t, err, "Failed to truncate table")
+				})
 			}
 
 			// Insert row with complementary NULLs on each node
@@ -1222,38 +1123,34 @@ func TestTableRepair_FixNulls_BidirectionalUpdate(t *testing.T) {
 			)
 
 			// Node1 data
-			_, err := pgCluster.Node1Pool.Exec(ctx, "SELECT spock.repair_mode(true)")
-			require.NoError(t, err)
-			// Row 1 on Node1: NULL first_name and city
-			_, err = pgCluster.Node1Pool.Exec(ctx, insertSQL, 100, "CUST-100", nil, "LastName100", nil, "email100@example.com")
-			require.NoError(t, err)
-			// Row 2 on Node1: NULL last_name and email
-			_, err = pgCluster.Node1Pool.Exec(ctx, insertSQL, 200, "CUST-200", "FirstName200", nil, "City200", nil)
-			require.NoError(t, err)
-			_, err = pgCluster.Node1Pool.Exec(ctx, "SELECT spock.repair_mode(false)")
-			require.NoError(t, err)
+			env.withRepairMode(t, ctx, env.N1Pool, func() {
+				// Row 1 on Node1: NULL first_name and city
+				_, err := env.N1Pool.Exec(ctx, insertSQL, 100, "CUST-100", nil, "LastName100", nil, "email100@example.com")
+				require.NoError(t, err)
+				// Row 2 on Node1: NULL last_name and email
+				_, err = env.N1Pool.Exec(ctx, insertSQL, 200, "CUST-200", "FirstName200", nil, "City200", nil)
+				require.NoError(t, err)
+			})
 
 			// Node2 data
-			_, err = pgCluster.Node2Pool.Exec(ctx, "SELECT spock.repair_mode(true)")
-			require.NoError(t, err)
-			// Row 1 on Node2: NULL last_name and email
-			_, err = pgCluster.Node2Pool.Exec(ctx, insertSQL, 100, "CUST-100", "FirstName100", nil, "City100", nil)
-			require.NoError(t, err)
-			// Row 2 on Node2: NULL first_name and city
-			_, err = pgCluster.Node2Pool.Exec(ctx, insertSQL, 200, "CUST-200", nil, "LastName200", nil, "email200@example.com")
-			require.NoError(t, err)
-			_, err = pgCluster.Node2Pool.Exec(ctx, "SELECT spock.repair_mode(false)")
-			require.NoError(t, err)
+			env.withRepairMode(t, ctx, env.N2Pool, func() {
+				// Row 1 on Node2: NULL last_name and email
+				_, err := env.N2Pool.Exec(ctx, insertSQL, 100, "CUST-100", "FirstName100", nil, "City100", nil)
+				require.NoError(t, err)
+				// Row 2 on Node2: NULL first_name and city
+				_, err = env.N2Pool.Exec(ctx, insertSQL, 200, "CUST-200", nil, "LastName200", nil, "email200@example.com")
+				require.NoError(t, err)
+			})
 
 			// Run table-diff to detect the NULL differences
-			diffFile := runTableDiff(t, qualifiedTableName, []string{serviceN1, serviceN2})
+			diffFile := env.runTableDiff(t, qualifiedTableName, []string{env.ServiceN1, env.ServiceN2})
 
 			// Run fix-nulls repair
-			repairTask := newTestTableRepairTask("", qualifiedTableName, diffFile)
+			repairTask := env.newTableRepairTask("", qualifiedTableName, diffFile)
 			repairTask.SourceOfTruth = ""
 			repairTask.FixNulls = true
 
-			err = repairTask.Run(false)
+			err := repairTask.Run(false)
 			require.NoError(t, err, "Table repair (fix-nulls bidirectional) failed")
 
 			// Verify bidirectional updates happened
@@ -1276,8 +1173,8 @@ func TestTableRepair_FixNulls_BidirectionalUpdate(t *testing.T) {
 			}
 
 			// Check Row 1 (id=100) on both nodes
-			row1N1 := getFullRow(pgCluster.Node1Pool, 100, "CUST-100")
-			row1N2 := getFullRow(pgCluster.Node2Pool, 100, "CUST-100")
+			row1N1 := getFullRow(env.N1Pool, 100, "CUST-100")
+			row1N2 := getFullRow(env.N2Pool, 100, "CUST-100")
 
 			// Node1's NULLs (first_name, city) should be filled from Node2
 			require.NotNil(t, row1N1.firstName, "Node1 row 100 first_name should be filled from Node2")
@@ -1302,8 +1199,8 @@ func TestTableRepair_FixNulls_BidirectionalUpdate(t *testing.T) {
 			assert.Equal(t, "email100@example.com", *row1N2.email)
 
 			// Check Row 2 (id=200) on both nodes
-			row2N1 := getFullRow(pgCluster.Node1Pool, 200, "CUST-200")
-			row2N2 := getFullRow(pgCluster.Node2Pool, 200, "CUST-200")
+			row2N1 := getFullRow(env.N1Pool, 200, "CUST-200")
+			row2N2 := getFullRow(env.N2Pool, 200, "CUST-200")
 
 			// Node1's NULLs (last_name, email) should be filled from Node2
 			require.NotNil(t, row2N1.lastName, "Node1 row 200 last_name should be filled from Node2")
@@ -1328,11 +1225,15 @@ func TestTableRepair_FixNulls_BidirectionalUpdate(t *testing.T) {
 			assert.Equal(t, "email200@example.com", *row2N2.email)
 
 			// Verify no diffs remain
-			assertNoTableDiff(t, qualifiedTableName)
+			env.assertNoTableDiff(t, qualifiedTableName)
 
 			log.Println("Bidirectional fix-nulls test completed successfully")
 		})
 	}
+}
+
+func TestTableRepair_FixNulls_BidirectionalUpdate(t *testing.T) {
+	testTableRepair_FixNulls_BidirectionalUpdate(t, newSpockEnv())
 }
 
 // TestTableRepair_PreserveOrigin tests that the preserve-origin flag correctly preserves
