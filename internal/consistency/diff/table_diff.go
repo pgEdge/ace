@@ -215,7 +215,7 @@ func (t *TableDiffTask) loadSpockNodeNames() error {
 		return fmt.Errorf("no connection pool available to load spock node names")
 	}
 
-	names, err := queries.GetSpockNodeNames(t.Ctx, firstPool)
+	names, err := queries.GetNodeOriginNames(t.Ctx, firstPool)
 	if err != nil {
 		t.SpockNodeNames = make(map[string]string)
 		return err
@@ -465,7 +465,7 @@ func (t *TableDiffTask) fetchRows(nodeName string, r Range) ([]types.OrderedMap,
 	}
 
 	selectCols := make([]string, 0, len(t.Cols)+2)
-	selectCols = append(selectCols, "pg_xact_commit_timestamp(xmin) as commit_ts", "to_json(spock.xact_commit_timestamp_origin(xmin))->>'roident' as node_origin")
+	selectCols = append(selectCols, "pg_xact_commit_timestamp(xmin) as commit_ts", "to_json(pg_xact_commit_timestamp_origin(xmin))->>'roident' as node_origin")
 
 	for _, colName := range t.Cols {
 		colType := colTypes[colName]

@@ -939,6 +939,85 @@ func GetSpockSlotLSNForNode(ctx context.Context, db DBQuerier, failedNode string
 	return lsn, nil
 }
 
+func GetNativeOriginLSNForNode(ctx context.Context, db DBQuerier, originNodeName string) (*string, error) {
+	sql, err := RenderSQL(SQLTemplates.GetNativeOriginLSNForNode, nil)
+	if err != nil {
+		return nil, err
+	}
+	var lsn *string
+	if err := db.QueryRow(ctx, sql, originNodeName).Scan(&lsn); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("failed to fetch native origin lsn: %w", err)
+	}
+	return lsn, nil
+}
+
+func GetNativeSlotLSNForNode(ctx context.Context, db DBQuerier, failedNode string) (*string, error) {
+	sql, err := RenderSQL(SQLTemplates.GetNativeSlotLSNForNode, nil)
+	if err != nil {
+		return nil, err
+	}
+	var lsn *string
+	if err := db.QueryRow(ctx, sql, failedNode).Scan(&lsn); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("failed to fetch native slot lsn: %w", err)
+	}
+	return lsn, nil
+}
+
+func GetReplicationOriginNames(ctx context.Context, db DBQuerier) (map[string]string, error) {
+	sql, err := RenderSQL(SQLTemplates.GetReplicationOriginNames, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	rows, err := db.Query(ctx, sql)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	names := make(map[string]string)
+	for rows.Next() {
+		var id, name string
+		if err := rows.Scan(&id, &name); err != nil {
+			return nil, err
+		}
+		names[id] = name
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	return names, nil
+}
+
+func GetNodeOriginNames(ctx context.Context, db DBQuerier) (map[string]string, error) {
+	var spockAvailable bool
+	err := db.QueryRow(ctx, "SELECT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'spock')").Scan(&spockAvailable)
+	if err != nil {
+		return nil, fmt.Errorf("detecting spock extension: %w", err)
+	}
+	if spockAvailable {
+		return GetSpockNodeNames(ctx, db)
+	}
+	return GetReplicationOriginNames(ctx, db)
+}
+
+func CheckSpockInstalled(ctx context.Context, db DBQuerier) (bool, error) {
+	var exists bool
+	err := db.QueryRow(ctx, "SELECT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'spock')").Scan(&exists)
+	if err != nil {
+		return false, fmt.Errorf("detecting spock extension: %w", err)
+	}
+	return exists, nil
+}
+
 func GetSpockRepSetInfo(ctx context.Context, db DBQuerier) ([]types.SpockRepSetInfo, error) {
 	sql, err := RenderSQL(SQLTemplates.SpockRepSetInfo, nil)
 	if err != nil {

@@ -119,6 +119,9 @@ type Templates struct {
 	RemoveTableFromCDCMetadata       *template.Template
 	GetSpockOriginLSNForNode         *template.Template
 	GetSpockSlotLSNForNode           *template.Template
+	GetNativeOriginLSNForNode        *template.Template
+	GetNativeSlotLSNForNode          *template.Template
+	GetReplicationOriginNames        *template.Template
 	EnsureHashVersionColumn          *template.Template
 	GetHashVersion                   *template.Template
 	MarkAllLeavesDirty               *template.Template
@@ -1526,6 +1529,27 @@ var SQLTemplates = Templates{
 		UPDATE spock.ace_mtree_metadata
 		SET hash_version = $1, last_updated = current_timestamp
 		WHERE schema_name = $2 AND table_name = $3
+	`)),
+	GetNativeOriginLSNForNode: template.Must(template.New("getNativeOriginLSNForNode").Parse(`
+		SELECT ros.remote_lsn::text
+		FROM pg_catalog.pg_replication_origin_status ros
+		JOIN pg_catalog.pg_replication_origin ro ON ro.roident = ros.local_id
+		JOIN pg_catalog.pg_subscription s ON ro.roname LIKE 'pg_%' || s.oid::text
+		WHERE s.subname LIKE '%' || $1 || '%'
+			AND ros.remote_lsn IS NOT NULL
+		LIMIT 1
+	`)),
+	GetNativeSlotLSNForNode: template.Must(template.New("getNativeSlotLSNForNode").Parse(`
+		SELECT rs.confirmed_flush_lsn::text
+		FROM pg_catalog.pg_replication_slots rs
+		JOIN pg_catalog.pg_subscription s ON rs.slot_name = s.subslotname
+		WHERE s.subname LIKE '%' || $1 || '%'
+			AND rs.confirmed_flush_lsn IS NOT NULL
+		ORDER BY rs.confirmed_flush_lsn DESC
+		LIMIT 1
+	`)),
+	GetReplicationOriginNames: template.Must(template.New("getReplicationOriginNames").Parse(`
+		SELECT roident::text, roname FROM pg_replication_origin;
 	`)),
 	GetReplicationOriginByName: template.Must(template.New("getReplicationOriginByName").Parse(`
 		SELECT roident FROM pg_replication_origin WHERE roname = $1
