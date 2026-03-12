@@ -15,7 +15,6 @@ import (
 	"context"
 	"fmt"
 	"log"
-	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -24,7 +23,6 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/pgedge/ace/internal/consistency/diff"
-	"github.com/pgedge/ace/pkg/types"
 	"github.com/stretchr/testify/require"
 )
 
@@ -33,29 +31,7 @@ func newTestTableDiffTask(
 	qualifiedTableName string,
 	nodes []string,
 ) *diff.TableDiffTask {
-	task := diff.NewTableDiffTask()
-	task.ClusterName = "test_cluster"
-	task.DBName = dbName
-	task.QualifiedTableName = qualifiedTableName
-	task.Nodes = strings.Join(nodes, ",")
-	task.Output = "json"
-	task.BlockSize = 1000
-	task.CompareUnitSize = 100
-	task.ConcurrencyFactor = 1
-	task.MaxDiffRows = math.MaxInt64
-
-	task.DiffResult = types.DiffOutput{
-		NodeDiffs: make(map[string]types.DiffByNodePair),
-		Summary: types.DiffSummary{
-			Nodes:             nodes,
-			BlockSize:         task.BlockSize,
-			CompareUnitSize:   task.CompareUnitSize,
-			ConcurrencyFactor: task.ConcurrencyFactor,
-			DiffRowsCount:     make(map[string]int),
-		},
-	}
-
-	return task
+	return newSpockEnv().newTableDiffTask(t, qualifiedTableName, nodes)
 }
 
 func TestTableDiffUntilFilter(t *testing.T) {
@@ -127,11 +103,12 @@ func TestTableDiffUntilFilter(t *testing.T) {
 }
 
 func TestTableDiffSimplePK(t *testing.T) {
+	env := newSpockEnv()
 	t.Run("Customers", func(t *testing.T) {
-		runCustomerTableDiffTests(t)
+		runCustomerTableDiffTests(t, env)
 	})
 	t.Run("MixedCaseIdentifiers", func(t *testing.T) {
-		testTableDiff_MixedCaseIdentifiers(t, false)
+		testTableDiff_MixedCaseIdentifiers(t, env, false)
 	})
 	t.Run("VariousDataTypes", func(t *testing.T) {
 		testTableDiff_VariousDataTypes(t, false)
@@ -148,23 +125,24 @@ func TestTableDiffSimplePK(t *testing.T) {
 }
 
 func TestTableDiffCompositePK(t *testing.T) {
+	env := newSpockEnv()
 	t.Run("Customers", func(t *testing.T) {
 		ctx := context.Background()
 		tableName := "customers"
-		for _, pool := range []*pgxpool.Pool{pgCluster.Node1Pool, pgCluster.Node2Pool} {
-			err := alterTableToCompositeKey(ctx, pool, testSchema, tableName)
+		for _, pool := range []*pgxpool.Pool{env.N1Pool, env.N2Pool} {
+			err := alterTableToCompositeKey(ctx, pool, env.Schema, tableName)
 			require.NoError(t, err)
 		}
 		t.Cleanup(func() {
-			for _, pool := range []*pgxpool.Pool{pgCluster.Node1Pool, pgCluster.Node2Pool} {
-				err := revertTableToSimpleKey(ctx, pool, testSchema, tableName)
+			for _, pool := range []*pgxpool.Pool{env.N1Pool, env.N2Pool} {
+				err := revertTableToSimpleKey(ctx, pool, env.Schema, tableName)
 				require.NoError(t, err)
 			}
 		})
-		runCustomerTableDiffTests(t)
+		runCustomerTableDiffTests(t, env)
 	})
 	t.Run("MixedCaseIdentifiers", func(t *testing.T) {
-		testTableDiff_MixedCaseIdentifiers(t, true)
+		testTableDiff_MixedCaseIdentifiers(t, env, true)
 	})
 	t.Run("VariousDataTypes", func(t *testing.T) {
 		testTableDiff_VariousDataTypes(t, true)
@@ -180,22 +158,22 @@ func TestTableDiffCompositePK(t *testing.T) {
 	})
 }
 
-func runCustomerTableDiffTests(t *testing.T) {
-	t.Run("NoDifferences", testTableDiff_NoDifferences)
-	t.Run("DataOnlyOnNode1", testTableDiff_DataOnlyOnNode1)
-	t.Run("DataOnlyOnNode2", testTableDiff_DataOnlyOnNode2)
-	t.Run("ModifiedRows", testTableDiff_ModifiedRows)
-	t.Run("TableFiltering", testTableDiff_TableFiltering)
-	t.Run("TableFilterNoRows", testTableDiff_TableFilterNoRows)
-	t.Run("MaxDiffRowsLimit", testTableDiff_MaxDiffRowsLimit)
+func runCustomerTableDiffTests(t *testing.T, env *testEnv) {
+	t.Run("NoDifferences", func(t *testing.T) { testTableDiff_NoDifferences(t, env) })
+	t.Run("DataOnlyOnNode1", func(t *testing.T) { testTableDiff_DataOnlyOnNode1(t, env) })
+	t.Run("DataOnlyOnNode2", func(t *testing.T) { testTableDiff_DataOnlyOnNode2(t, env) })
+	t.Run("ModifiedRows", func(t *testing.T) { testTableDiff_ModifiedRows(t, env) })
+	t.Run("TableFiltering", func(t *testing.T) { testTableDiff_TableFiltering(t, env) })
+	t.Run("TableFilterNoRows", func(t *testing.T) { testTableDiff_TableFilterNoRows(t, env) })
+	t.Run("MaxDiffRowsLimit", func(t *testing.T) { testTableDiff_MaxDiffRowsLimit(t, env) })
 }
 
-func testTableDiff_NoDifferences(t *testing.T) {
-	resetSharedTable(t, "customers")
+func testTableDiff_NoDifferences(t *testing.T, env *testEnv) {
+	env.resetSharedTable(t, "customers")
 	tableName := "customers"
-	qualifiedTableName := fmt.Sprintf("%s.%s", testSchema, tableName)
-	nodesToCompare := []string{serviceN1, serviceN2}
-	tdTask := newTestTableDiffTask(t, qualifiedTableName, nodesToCompare)
+	qualifiedTableName := fmt.Sprintf("%s.%s", env.Schema, tableName)
+	nodesToCompare := []string{env.ServiceN1, env.ServiceN2}
+	tdTask := env.newTableDiffTask(t, qualifiedTableName, nodesToCompare)
 
 	err := tdTask.RunChecks(false)
 	if err != nil {
@@ -228,13 +206,13 @@ func testTableDiff_NoDifferences(t *testing.T) {
 	log.Println("TestTableDiff_NoDifferences completed.")
 }
 
-func testTableDiff_DataOnlyOnNode1(t *testing.T) {
+func testTableDiff_DataOnlyOnNode1(t *testing.T, env *testEnv) {
 	ctx := context.Background()
 	tableName := "customers"
-	qualifiedTableName := fmt.Sprintf("%s.%s", testSchema, tableName)
+	qualifiedTableName := fmt.Sprintf("%s.%s", env.Schema, tableName)
 
 	t.Cleanup(func() {
-		repairTable(t, qualifiedTableName, serviceN1)
+		env.repairTable(t, qualifiedTableName, env.ServiceN1)
 		files, _ := filepath.Glob("*_diffs-*.json")
 		for _, f := range files {
 			os.Remove(f)
@@ -242,32 +220,26 @@ func testTableDiff_DataOnlyOnNode1(t *testing.T) {
 	})
 
 	// Truncate the table on the second node to create the diff
-	tx, err := pgCluster.Node2Pool.Begin(ctx)
+	tx, err := env.N2Pool.Begin(ctx)
 	if err != nil {
-		t.Fatalf("Failed to begin transaction on node %s: %v", serviceN2, err)
+		t.Fatalf("Failed to begin transaction on node %s: %v", env.ServiceN2, err)
 	}
 	defer tx.Rollback(ctx)
 
-	_, err = tx.Exec(ctx, "SELECT spock.repair_mode(true)")
-	if err != nil {
-		t.Fatalf("Failed to enable spock repair mode on node %s: %v", serviceN2, err)
-	}
-	_, err = tx.Exec(ctx, fmt.Sprintf("TRUNCATE TABLE %s.%s CASCADE", testSchema, tableName))
-	if err != nil {
-		t.Fatalf("Failed to truncate table %s on node2: %v", qualifiedTableName, err)
-	}
-	_, err = tx.Exec(ctx, "SELECT spock.repair_mode(false)")
-	if err != nil {
-		t.Fatalf("Failed to disable spock repair mode on node %s: %v", serviceN2, err)
-	}
+	env.withRepairModeTx(t, ctx, tx, func() {
+		_, err = tx.Exec(ctx, fmt.Sprintf("TRUNCATE TABLE %s.%s CASCADE", env.Schema, tableName))
+		if err != nil {
+			t.Fatalf("Failed to truncate table %s on node2: %v", qualifiedTableName, err)
+		}
+	})
 	if err = tx.Commit(ctx); err != nil {
-		t.Fatalf("Failed to commit transaction on node %s: %v", serviceN2, err)
+		t.Fatalf("Failed to commit transaction on node %s: %v", env.ServiceN2, err)
 	}
 
-	log.Printf("Data loaded only into %s for table %s", serviceN1, qualifiedTableName)
+	log.Printf("Data loaded only into %s for table %s", env.ServiceN1, qualifiedTableName)
 
-	nodesToCompare := []string{serviceN1, serviceN2}
-	tdTask := newTestTableDiffTask(t, qualifiedTableName, nodesToCompare)
+	nodesToCompare := []string{env.ServiceN1, env.ServiceN2}
+	tdTask := env.newTableDiffTask(t, qualifiedTableName, nodesToCompare)
 
 	err = tdTask.RunChecks(false)
 	if err != nil {
@@ -278,10 +250,7 @@ func testTableDiff_DataOnlyOnNode1(t *testing.T) {
 		t.Fatalf("ExecuteTask failed: %v", err)
 	}
 
-	pairKey := serviceN1 + "/" + serviceN2
-	if strings.Compare(serviceN1, serviceN2) > 0 {
-		pairKey = serviceN2 + "/" + serviceN1
-	}
+	pairKey := env.pairKey()
 
 	nodeDiffs, ok := tdTask.DiffResult.NodeDiffs[pairKey]
 	if !ok {
@@ -293,26 +262,26 @@ func testTableDiff_DataOnlyOnNode1(t *testing.T) {
 	}
 
 	var expectedDiffCount int
-	err = pgCluster.Node1Pool.QueryRow(ctx, fmt.Sprintf("SELECT count(*) FROM %s", qualifiedTableName)).Scan(&expectedDiffCount)
+	err = env.N1Pool.QueryRow(ctx, fmt.Sprintf("SELECT count(*) FROM %s", qualifiedTableName)).Scan(&expectedDiffCount)
 	if err != nil {
 		t.Fatalf("Failed to count rows in %s on node1: %v", qualifiedTableName, err)
 	}
 
-	node1OnlyRows := nodeDiffs.Rows[serviceN1]
+	node1OnlyRows := nodeDiffs.Rows[env.ServiceN1]
 	if len(node1OnlyRows) != expectedDiffCount {
 		t.Errorf(
 			"Expected %d rows only on %s, but got %d",
 			expectedDiffCount,
-			serviceN1,
+			env.ServiceN1,
 			len(node1OnlyRows),
 		)
 	}
 
-	node2OnlyRows := nodeDiffs.Rows[serviceN2]
+	node2OnlyRows := nodeDiffs.Rows[env.ServiceN2]
 	if len(node2OnlyRows) != 0 {
 		t.Errorf(
 			"Expected 0 rows only on %s, but got %d",
-			serviceN2,
+			env.ServiceN2,
 			len(node2OnlyRows),
 		)
 	}
@@ -329,45 +298,39 @@ func testTableDiff_DataOnlyOnNode1(t *testing.T) {
 	log.Println("TestTableDiff_DataOnlyOnNode1 completed.")
 }
 
-func testTableDiff_DataOnlyOnNode2(t *testing.T) {
+func testTableDiff_DataOnlyOnNode2(t *testing.T, env *testEnv) {
 	ctx := context.Background()
 	tableName := "customers"
-	qualifiedTableName := fmt.Sprintf("%s.%s", testSchema, tableName)
+	qualifiedTableName := fmt.Sprintf("%s.%s", env.Schema, tableName)
 
 	t.Cleanup(func() {
-		repairTable(t, qualifiedTableName, serviceN2)
+		env.repairTable(t, qualifiedTableName, env.ServiceN2)
 		files, _ := filepath.Glob("*_diffs-*.json")
 		for _, f := range files {
 			os.Remove(f)
 		}
 	})
 
-	tx, err := pgCluster.Node1Pool.Begin(ctx)
+	tx, err := env.N1Pool.Begin(ctx)
 	if err != nil {
-		t.Fatalf("Failed to begin transaction on node %s: %v", serviceN1, err)
+		t.Fatalf("Failed to begin transaction on node %s: %v", env.ServiceN1, err)
 	}
 	defer tx.Rollback(ctx)
 
-	_, err = tx.Exec(ctx, "SELECT spock.repair_mode(true)")
-	if err != nil {
-		t.Fatalf("Failed to enable spock repair mode on node %s: %v", serviceN1, err)
-	}
-	_, err = tx.Exec(ctx, fmt.Sprintf("TRUNCATE TABLE %s.%s CASCADE", testSchema, tableName))
-	if err != nil {
-		t.Fatalf("Failed to truncate table %s on node1: %v", qualifiedTableName, err)
-	}
-	_, err = tx.Exec(ctx, "SELECT spock.repair_mode(false)")
-	if err != nil {
-		t.Fatalf("Failed to disable spock repair mode on node %s: %v", serviceN1, err)
-	}
+	env.withRepairModeTx(t, ctx, tx, func() {
+		_, err = tx.Exec(ctx, fmt.Sprintf("TRUNCATE TABLE %s.%s CASCADE", env.Schema, tableName))
+		if err != nil {
+			t.Fatalf("Failed to truncate table %s on node1: %v", qualifiedTableName, err)
+		}
+	})
 	if err = tx.Commit(ctx); err != nil {
-		t.Fatalf("Failed to commit transaction on node %s: %v", serviceN1, err)
+		t.Fatalf("Failed to commit transaction on node %s: %v", env.ServiceN1, err)
 	}
 
-	log.Printf("Data loaded only into %s for table %s", serviceN2, qualifiedTableName)
+	log.Printf("Data loaded only into %s for table %s", env.ServiceN2, qualifiedTableName)
 
-	nodesToCompare := []string{serviceN1, serviceN2}
-	tdTask := newTestTableDiffTask(t, qualifiedTableName, nodesToCompare)
+	nodesToCompare := []string{env.ServiceN1, env.ServiceN2}
+	tdTask := env.newTableDiffTask(t, qualifiedTableName, nodesToCompare)
 
 	err = tdTask.RunChecks(false)
 	if err != nil {
@@ -378,10 +341,7 @@ func testTableDiff_DataOnlyOnNode2(t *testing.T) {
 		t.Fatalf("ExecuteTask failed: %v", err)
 	}
 
-	pairKey := serviceN1 + "/" + serviceN2
-	if strings.Compare(serviceN1, serviceN2) > 0 {
-		pairKey = serviceN2 + "/" + serviceN1
-	}
+	pairKey := env.pairKey()
 
 	nodeDiffs, ok := tdTask.DiffResult.NodeDiffs[pairKey]
 	if !ok {
@@ -393,26 +353,26 @@ func testTableDiff_DataOnlyOnNode2(t *testing.T) {
 	}
 
 	var expectedDiffCount int
-	err = pgCluster.Node2Pool.QueryRow(ctx, fmt.Sprintf("SELECT count(*) FROM %s", qualifiedTableName)).Scan(&expectedDiffCount)
+	err = env.N2Pool.QueryRow(ctx, fmt.Sprintf("SELECT count(*) FROM %s", qualifiedTableName)).Scan(&expectedDiffCount)
 	if err != nil {
 		t.Fatalf("Failed to count rows in %s on node2: %v", qualifiedTableName, err)
 	}
 
-	node1OnlyRows := nodeDiffs.Rows[serviceN1]
+	node1OnlyRows := nodeDiffs.Rows[env.ServiceN1]
 	if len(node1OnlyRows) != 0 {
 		t.Errorf(
 			"Expected 0 rows only on %s, but got %d",
-			serviceN1,
+			env.ServiceN1,
 			len(node1OnlyRows),
 		)
 	}
 
-	node2OnlyRows := nodeDiffs.Rows[serviceN2]
+	node2OnlyRows := nodeDiffs.Rows[env.ServiceN2]
 	if len(node2OnlyRows) != expectedDiffCount {
 		t.Errorf(
 			"Expected %d rows only on %s, but got %d",
 			expectedDiffCount,
-			serviceN2,
+			env.ServiceN2,
 			len(node2OnlyRows),
 		)
 	}
@@ -429,13 +389,13 @@ func testTableDiff_DataOnlyOnNode2(t *testing.T) {
 	log.Println("TestTableDiff_DataOnlyOnNode2 completed.")
 }
 
-func testTableDiff_ModifiedRows(t *testing.T) {
+func testTableDiff_ModifiedRows(t *testing.T, env *testEnv) {
 	ctx := context.Background()
 	tableName := "customers"
-	qualifiedTableName := fmt.Sprintf("%s.%s", testSchema, tableName)
+	qualifiedTableName := fmt.Sprintf("%s.%s", env.Schema, tableName)
 
 	t.Cleanup(func() {
-		repairTable(t, qualifiedTableName, serviceN1)
+		env.repairTable(t, qualifiedTableName, env.ServiceN1)
 		files, _ := filepath.Glob("*_diffs-*.json")
 		for _, f := range files {
 			os.Remove(f)
@@ -459,50 +419,44 @@ func testTableDiff_ModifiedRows(t *testing.T) {
 		},
 	}
 
-	tx, err := pgCluster.Node2Pool.Begin(ctx)
+	tx, err := env.N2Pool.Begin(ctx)
 	if err != nil {
-		t.Fatalf("Failed to begin transaction on node %s: %v", serviceN2, err)
+		t.Fatalf("Failed to begin transaction on node %s: %v", env.ServiceN2, err)
 	}
 	defer tx.Rollback(ctx)
 
-	_, err = tx.Exec(ctx, "SELECT spock.repair_mode(true)")
-	if err != nil {
-		t.Fatalf("Failed to enable spock repair mode on node %s: %v", serviceN2, err)
-	}
-	for _, mod := range modifications {
-		updateSQL := fmt.Sprintf(
-			"UPDATE %s.%s SET %s = $1 WHERE index = $2",
-			testSchema,
-			tableName,
-			mod.field,
-		)
-		_, err := tx.Exec(ctx, updateSQL, mod.value, mod.indexVal)
-		if err != nil {
-			t.Fatalf(
-				"Failed to update row with index %d on node %s: %v",
-				mod.indexVal,
-				serviceN2,
-				err,
+	env.withRepairModeTx(t, ctx, tx, func() {
+		for _, mod := range modifications {
+			updateSQL := fmt.Sprintf(
+				"UPDATE %s.%s SET %s = $1 WHERE index = $2",
+				env.Schema,
+				tableName,
+				mod.field,
 			)
+			_, err := tx.Exec(ctx, updateSQL, mod.value, mod.indexVal)
+			if err != nil {
+				t.Fatalf(
+					"Failed to update row with index %d on node %s: %v",
+					mod.indexVal,
+					env.ServiceN2,
+					err,
+				)
+			}
 		}
-	}
-	_, err = tx.Exec(ctx, "SELECT spock.repair_mode(false)")
-	if err != nil {
-		t.Fatalf("Failed to disable spock repair mode on node %s: %v", serviceN2, err)
-	}
+	})
 	if err = tx.Commit(ctx); err != nil {
-		t.Fatalf("Failed to commit transaction on node %s: %v", serviceN2, err)
+		t.Fatalf("Failed to commit transaction on node %s: %v", env.ServiceN2, err)
 	}
 
 	log.Printf(
 		"%d rows modified on %s for table %s",
 		len(modifications),
-		serviceN2,
+		env.ServiceN2,
 		qualifiedTableName,
 	)
 
-	nodesToCompare := []string{serviceN1, serviceN2}
-	tdTask := newTestTableDiffTask(t, qualifiedTableName, nodesToCompare)
+	nodesToCompare := []string{env.ServiceN1, env.ServiceN2}
+	tdTask := env.newTableDiffTask(t, qualifiedTableName, nodesToCompare)
 
 	err = tdTask.RunChecks(false)
 	if err != nil {
@@ -513,10 +467,7 @@ func testTableDiff_ModifiedRows(t *testing.T) {
 		t.Fatalf("ExecuteTask failed: %v", err)
 	}
 
-	pairKey := serviceN1 + "/" + serviceN2
-	if strings.Compare(serviceN1, serviceN2) > 0 {
-		pairKey = serviceN2 + "/" + serviceN1
-	}
+	pairKey := env.pairKey()
 
 	nodeDiffs, ok := tdTask.DiffResult.NodeDiffs[pairKey]
 	if !ok {
@@ -527,26 +478,26 @@ func testTableDiff_ModifiedRows(t *testing.T) {
 		)
 	}
 
-	if len(nodeDiffs.Rows[serviceN1]) != len(modifications) {
+	if len(nodeDiffs.Rows[env.ServiceN1]) != len(modifications) {
 		t.Errorf(
 			"Expected %d modified rows to be reported for %s (original values), but got %d. Rows: %+v",
 			len(
 				modifications,
 			),
-			serviceN1,
-			len(nodeDiffs.Rows[serviceN1]),
-			nodeDiffs.Rows[serviceN1],
+			env.ServiceN1,
+			len(nodeDiffs.Rows[env.ServiceN1]),
+			nodeDiffs.Rows[env.ServiceN1],
 		)
 	}
-	if len(nodeDiffs.Rows[serviceN2]) != len(modifications) {
+	if len(nodeDiffs.Rows[env.ServiceN2]) != len(modifications) {
 		t.Errorf(
 			"Expected %d modified rows to be reported for %s (modified values), but got %d. Rows: %+v",
 			len(
 				modifications,
 			),
-			serviceN2,
-			len(nodeDiffs.Rows[serviceN2]),
-			nodeDiffs.Rows[serviceN2],
+			env.ServiceN2,
+			len(nodeDiffs.Rows[env.ServiceN2]),
+			nodeDiffs.Rows[env.ServiceN2],
 		)
 	}
 
@@ -563,7 +514,7 @@ func testTableDiff_ModifiedRows(t *testing.T) {
 
 	for _, mod := range modifications {
 		found := false
-		for _, rowN2 := range nodeDiffs.Rows[serviceN2] {
+		for _, rowN2 := range nodeDiffs.Rows[env.ServiceN2] {
 			if indexVal, ok := rowN2.Get("index"); ok &&
 				indexVal == int32(mod.indexVal) {
 				actualModifiedValue, _ := rowN2.Get(mod.field)
@@ -584,7 +535,7 @@ func testTableDiff_ModifiedRows(t *testing.T) {
 			t.Errorf(
 				"Modified row with Index %d not found in diff results for node %s",
 				mod.indexVal,
-				serviceN2,
+				env.ServiceN2,
 			)
 		}
 	}
@@ -592,10 +543,10 @@ func testTableDiff_ModifiedRows(t *testing.T) {
 	log.Println("TestTableDiff_ModifiedRows completed.")
 }
 
-func testTableDiff_MixedCaseIdentifiers(t *testing.T, compositeKey bool) {
+func testTableDiff_MixedCaseIdentifiers(t *testing.T, env *testEnv, compositeKey bool) {
 	ctx := context.Background()
 	tableName := "CustomersMixedCase"
-	qualifiedTableName := fmt.Sprintf("%s.\"%s\"", testSchema, tableName)
+	qualifiedTableName := fmt.Sprintf("%s.\"%s\"", env.Schema, tableName)
 
 	compositeKeyPart := ""
 	if compositeKey {
@@ -610,25 +561,22 @@ func testTableDiff_MixedCaseIdentifiers(t *testing.T, compositeKey bool) {
     "LastName" VARCHAR(100),
     "EmailAddress" VARCHAR(100),
 	PRIMARY KEY("ID"%s)
-);`, testSchema, qualifiedTableName, compositeKeyPart)
+);`, env.Schema, qualifiedTableName, compositeKeyPart)
 
-	for i, pool := range []*pgxpool.Pool{pgCluster.Node1Pool, pgCluster.Node2Pool} {
-		nodeName := pgCluster.ClusterNodes[i]["Name"].(string)
+	for _, pool := range []*pgxpool.Pool{env.N1Pool, env.N2Pool} {
 		_, err := pool.Exec(ctx, createMixedCaseTableSQL)
 		if err != nil {
 			t.Fatalf(
-				"Failed to create mixed-case table %s on node %s: %v",
+				"Failed to create mixed-case table %s: %v",
 				qualifiedTableName,
-				nodeName,
 				err,
 			)
 		}
 		_, err = pool.Exec(ctx, fmt.Sprintf("TRUNCATE TABLE %s CASCADE", qualifiedTableName))
 		if err != nil {
 			t.Fatalf(
-				"Failed to truncate mixed-case table %s on node %s: %v",
+				"Failed to truncate mixed-case table %s: %v",
 				qualifiedTableName,
-				nodeName,
 				err,
 			)
 		}
@@ -636,7 +584,7 @@ func testTableDiff_MixedCaseIdentifiers(t *testing.T, compositeKey bool) {
 	log.Printf("Mixed-case table %s created on both nodes", qualifiedTableName)
 
 	t.Cleanup(func() {
-		for _, pool := range []*pgxpool.Pool{pgCluster.Node1Pool, pgCluster.Node2Pool} {
+		for _, pool := range []*pgxpool.Pool{env.N1Pool, env.N2Pool} {
 			_, err := pool.Exec(ctx, fmt.Sprintf("DROP TABLE IF EXISTS %s CASCADE", qualifiedTableName))
 			if err != nil {
 				t.Logf("Failed to drop test table %s: %v", qualifiedTableName, err)
@@ -668,30 +616,30 @@ func testTableDiff_MixedCaseIdentifiers(t *testing.T, compositeKey bool) {
 		qualifiedTableName,
 	)
 	for _, row := range commonRows {
-		_, err := pgCluster.Node1Pool.Exec(ctx, insertSQL,
+		_, err := env.N1Pool.Exec(ctx, insertSQL,
 			row["ID"], row["FirstName"], row["LastName"], row["EmailAddress"])
 		if err != nil {
 			t.Fatalf(
 				"Failed to insert data into mixed-case table %s on node %s: %v",
 				qualifiedTableName,
-				serviceN1, err)
+				env.ServiceN1, err)
 		}
-		_, err = pgCluster.Node2Pool.Exec(ctx, insertSQL,
+		_, err = env.N2Pool.Exec(ctx, insertSQL,
 			row["ID"], row["FirstName"], row["LastName"], row["EmailAddress"])
 		if err != nil {
 			t.Fatalf(
 				"Failed to insert data into mixed-case table %s on node %s: %v",
 				qualifiedTableName,
-				serviceN2, err)
+				env.ServiceN2, err)
 		}
 	}
 
 	log.Printf("Data loaded into mixed-case table %s on both nodes", qualifiedTableName)
 
-	nodesToCompare := []string{serviceN1, serviceN2}
-	tdTask := newTestTableDiffTask(
+	nodesToCompare := []string{env.ServiceN1, env.ServiceN2}
+	tdTask := env.newTableDiffTask(
 		t,
-		fmt.Sprintf("%s.%s", testSchema, tableName),
+		fmt.Sprintf("%s.%s", env.Schema, tableName),
 		nodesToCompare,
 	)
 
@@ -1153,13 +1101,13 @@ CREATE TABLE IF NOT EXISTS %s.%s (
 	log.Println("TestTableDiff_UUIDColumn completed.")
 }
 
-func testTableDiff_TableFiltering(t *testing.T) {
+func testTableDiff_TableFiltering(t *testing.T, env *testEnv) {
 	ctx := context.Background()
 	tableName := "customers"
-	qualifiedTableName := fmt.Sprintf("%s.%s", testSchema, tableName)
+	qualifiedTableName := fmt.Sprintf("%s.%s", env.Schema, tableName)
 
 	t.Cleanup(func() {
-		repairTable(t, qualifiedTableName, serviceN1)
+		env.repairTable(t, qualifiedTableName, env.ServiceN1)
 		files, _ := filepath.Glob("*_diffs-*.json")
 		for _, f := range files {
 			os.Remove(f)
@@ -1188,45 +1136,39 @@ func testTableDiff_TableFiltering(t *testing.T) {
 		},
 	}
 
-	tx, err := pgCluster.Node2Pool.Begin(ctx)
+	tx, err := env.N2Pool.Begin(ctx)
 	if err != nil {
-		t.Fatalf("Failed to begin transaction on node %s: %v", serviceN2, err)
+		t.Fatalf("Failed to begin transaction on node %s: %v", env.ServiceN2, err)
 	}
 	defer tx.Rollback(ctx)
 
-	_, err = tx.Exec(ctx, "SELECT spock.repair_mode(true)")
-	if err != nil {
-		t.Fatalf("Failed to enable spock repair mode on node %s: %v", serviceN2, err)
-	}
-	for _, mod := range updatesNode2 {
-		updateSQL := fmt.Sprintf(
-			"UPDATE %s.%s SET %s = $1 WHERE index = $2",
-			testSchema,
-			tableName,
-			mod.field,
-		)
-		_, err := tx.Exec(ctx, updateSQL, mod.value, mod.indexVal)
-		if err != nil {
-			t.Fatalf(
-				"Failed to update row with index %d on node %s for filter test: %v",
-				mod.indexVal,
-				serviceN2,
-				err,
+	env.withRepairModeTx(t, ctx, tx, func() {
+		for _, mod := range updatesNode2 {
+			updateSQL := fmt.Sprintf(
+				"UPDATE %s.%s SET %s = $1 WHERE index = $2",
+				env.Schema,
+				tableName,
+				mod.field,
 			)
+			_, err := tx.Exec(ctx, updateSQL, mod.value, mod.indexVal)
+			if err != nil {
+				t.Fatalf(
+					"Failed to update row with index %d on node %s for filter test: %v",
+					mod.indexVal,
+					env.ServiceN2,
+					err,
+				)
+			}
 		}
-	}
-	_, err = tx.Exec(ctx, "SELECT spock.repair_mode(false)")
-	if err != nil {
-		t.Fatalf("Failed to disable spock repair mode on node %s: %v", serviceN2, err)
-	}
+	})
 	if err = tx.Commit(ctx); err != nil {
-		t.Fatalf("Failed to commit transaction on node %s: %v", serviceN2, err)
+		t.Fatalf("Failed to commit transaction on node %s: %v", env.ServiceN2, err)
 	}
 
-	log.Printf("Data modified on %s for filter test", serviceN2)
+	log.Printf("Data modified on %s for filter test", env.ServiceN2)
 
-	nodesToCompare := []string{serviceN1, serviceN2}
-	tdTask := newTestTableDiffTask(t, qualifiedTableName, nodesToCompare)
+	nodesToCompare := []string{env.ServiceN1, env.ServiceN2}
+	tdTask := env.newTableDiffTask(t, qualifiedTableName, nodesToCompare)
 	tdTask.TableFilter = "index <= 100"
 
 	err = tdTask.RunChecks(false)
@@ -1238,10 +1180,7 @@ func testTableDiff_TableFiltering(t *testing.T) {
 		t.Fatalf("ExecuteTask failed for table filtering test: %v", err)
 	}
 
-	pairKey := serviceN1 + "/" + serviceN2
-	if strings.Compare(serviceN1, serviceN2) > 0 {
-		pairKey = serviceN2 + "/" + serviceN1
-	}
+	pairKey := env.pairKey()
 
 	nodeDiffs, ok := tdTask.DiffResult.NodeDiffs[pairKey]
 	if !ok {
@@ -1253,22 +1192,22 @@ func testTableDiff_TableFiltering(t *testing.T) {
 	}
 
 	expectedFilteredModifications := 3
-	if len(nodeDiffs.Rows[serviceN1]) != expectedFilteredModifications {
+	if len(nodeDiffs.Rows[env.ServiceN1]) != expectedFilteredModifications {
 		t.Errorf(
 			"Expected %d modified rows (original) for %s due to filter, but got %d. Rows: %+v",
 			expectedFilteredModifications,
-			serviceN1,
-			len(nodeDiffs.Rows[serviceN1]),
-			nodeDiffs.Rows[serviceN1],
+			env.ServiceN1,
+			len(nodeDiffs.Rows[env.ServiceN1]),
+			nodeDiffs.Rows[env.ServiceN1],
 		)
 	}
-	if len(nodeDiffs.Rows[serviceN2]) != expectedFilteredModifications {
+	if len(nodeDiffs.Rows[env.ServiceN2]) != expectedFilteredModifications {
 		t.Errorf(
 			"Expected %d modified rows (updated) for %s due to filter, but got %d. Rows: %+v",
 			expectedFilteredModifications,
-			serviceN2,
-			len(nodeDiffs.Rows[serviceN2]),
-			nodeDiffs.Rows[serviceN2],
+			env.ServiceN2,
+			len(nodeDiffs.Rows[env.ServiceN2]),
+			nodeDiffs.Rows[env.ServiceN2],
 		)
 	}
 	if tdTask.DiffResult.Summary.DiffRowsCount[pairKey] != expectedFilteredModifications {
@@ -1284,7 +1223,7 @@ func testTableDiff_TableFiltering(t *testing.T) {
 	foundIndex1 := false
 	foundIndex2 := false
 	foundIndex3 := false
-	for _, row := range nodeDiffs.Rows[serviceN2] {
+	for _, row := range nodeDiffs.Rows[env.ServiceN2] {
 		indexVal, _ := row.Get("index")
 		email, _ := row.Get("email")
 		firstName, _ := row.Get("first_name")
@@ -1315,12 +1254,12 @@ func testTableDiff_TableFiltering(t *testing.T) {
 	log.Println("TestTableDiff_TableFiltering completed.")
 }
 
-func testTableDiff_TableFilterNoRows(t *testing.T) {
+func testTableDiff_TableFilterNoRows(t *testing.T, env *testEnv) {
 	tableName := "customers"
-	qualifiedTableName := fmt.Sprintf("%s.%s", testSchema, tableName)
-	nodesToCompare := []string{serviceN1, serviceN2}
+	qualifiedTableName := fmt.Sprintf("%s.%s", env.Schema, tableName)
+	nodesToCompare := []string{env.ServiceN1, env.ServiceN2}
 
-	tdTask := newTestTableDiffTask(t, qualifiedTableName, nodesToCompare)
+	tdTask := env.newTableDiffTask(t, qualifiedTableName, nodesToCompare)
 	tdTask.TableFilter = "index < 0" // no rows satisfy this
 
 	require.NoError(t, tdTask.RunChecks(false))
@@ -1329,13 +1268,13 @@ func testTableDiff_TableFilterNoRows(t *testing.T) {
 	require.Contains(t, err.Error(), "table filter produced no rows")
 }
 
-func testTableDiff_MaxDiffRowsLimit(t *testing.T) {
+func testTableDiff_MaxDiffRowsLimit(t *testing.T, env *testEnv) {
 	ctx := context.Background()
 	tableName := "customers"
-	qualifiedTableName := fmt.Sprintf("%s.%s", testSchema, tableName)
+	qualifiedTableName := fmt.Sprintf("%s.%s", env.Schema, tableName)
 
 	t.Cleanup(func() {
-		repairTable(t, qualifiedTableName, serviceN1)
+		env.repairTable(t, qualifiedTableName, env.ServiceN1)
 		files, _ := filepath.Glob("*_diffs-*.json")
 		for _, f := range files {
 			os.Remove(f)
@@ -1352,25 +1291,21 @@ func testTableDiff_MaxDiffRowsLimit(t *testing.T) {
 		{indexVal: 4, email: "limit-test-4@example.com"},
 	}
 
-	tx, err := pgCluster.Node2Pool.Begin(ctx)
+	tx, err := env.N2Pool.Begin(ctx)
 	require.NoError(t, err)
 	defer tx.Rollback(ctx)
 
-	_, err = tx.Exec(ctx, "SELECT spock.repair_mode(true)")
-	require.NoError(t, err)
-
-	updateSQL := fmt.Sprintf("UPDATE %s.%s SET email = $1 WHERE index = $2", testSchema, tableName)
-	for _, mod := range modifications {
-		_, err := tx.Exec(ctx, updateSQL, mod.email, mod.indexVal)
-		require.NoErrorf(t, err, "failed to update row with index %d on node %s", mod.indexVal, serviceN2)
-	}
-
-	_, err = tx.Exec(ctx, "SELECT spock.repair_mode(false)")
-	require.NoError(t, err)
+	env.withRepairModeTx(t, ctx, tx, func() {
+		updateSQL := fmt.Sprintf("UPDATE %s.%s SET email = $1 WHERE index = $2", env.Schema, tableName)
+		for _, mod := range modifications {
+			_, err := tx.Exec(ctx, updateSQL, mod.email, mod.indexVal)
+			require.NoErrorf(t, err, "failed to update row with index %d on node %s", mod.indexVal, env.ServiceN2)
+		}
+	})
 	require.NoError(t, tx.Commit(ctx))
 
-	nodesToCompare := []string{serviceN1, serviceN2}
-	tdTask := newTestTableDiffTask(t, qualifiedTableName, nodesToCompare)
+	nodesToCompare := []string{env.ServiceN1, env.ServiceN2}
+	tdTask := env.newTableDiffTask(t, qualifiedTableName, nodesToCompare)
 	tdTask.BlockSize = 10
 	tdTask.CompareUnitSize = 1
 	tdTask.MaxDiffRows = 2
@@ -1381,10 +1316,7 @@ func testTableDiff_MaxDiffRowsLimit(t *testing.T) {
 	err = tdTask.ExecuteTask()
 	require.NoError(t, err)
 
-	pairKey := serviceN1 + "/" + serviceN2
-	if strings.Compare(serviceN1, serviceN2) > 0 {
-		pairKey = serviceN2 + "/" + serviceN1
-	}
+	pairKey := env.pairKey()
 
 	if _, ok := tdTask.DiffResult.NodeDiffs[pairKey]; !ok {
 		t.Fatalf("expected diffs for pair %s when enforcing max diff rows", pairKey)
