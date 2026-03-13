@@ -59,9 +59,8 @@ func main() {
 		}
 	}
 
-	app := cli.SetupCLI()
-	err := app.Run(os.Args)
-	if err != nil {
+	rootCmd := cli.SetupCLI()
+	if err := rootCmd.Execute(); err != nil {
 		logger.Error("%v", err)
 	}
 }

@@ -34,7 +34,7 @@ import (
 	"github.com/pgedge/ace/internal/jobs"
 	"github.com/pgedge/ace/pkg/config"
 	"github.com/pgedge/ace/pkg/logger"
-	"github.com/urfave/cli/v2"
+	"github.com/spf13/cobra"
 )
 
 //go:embed default_config.yaml
@@ -43,811 +43,363 @@ var defaultConfigYAML string
 //go:embed default_pg_service.conf
 var defaultPgServiceConf string
 
-func SetupCLI() *cli.App {
-	commonFlags := []cli.Flag{
-		&cli.StringFlag{
-			Name:    "dbname",
-			Aliases: []string{"d"},
-			Usage:   "Name of the database",
-			Value:   "",
-		},
-		&cli.StringFlag{
-			Name:    "nodes",
-			Aliases: []string{"n"},
-			Usage:   "Nodes to include in the diff (default: all)",
-			Value:   "all",
-		},
-		&cli.BoolFlag{
-			Name:    "quiet",
-			Aliases: []string{"q"},
-			Usage:   "Whether to suppress output",
-			Value:   false,
-		},
-		&cli.BoolFlag{
-			Name:    "debug",
-			Aliases: []string{"v"},
-			Usage:   "Enable debug logging",
-			Value:   false,
-		},
-	}
+// ─── Flag helpers ──────────────────────────────────────────────────────────
 
-	diffFlags := []cli.Flag{
-		&cli.StringFlag{
-			Name:    "block-size",
-			Aliases: []string{"b"},
-			Usage:   "Number of rows per block",
-			Value:   "100000",
-		},
-		&cli.Float64Flag{
-			Name:    "concurrency-factor",
-			Aliases: []string{"c"},
-			Usage:   "CPU ratio for concurrency (0.0–4.0, e.g. 0.5 uses half of available CPUs)",
-			Value:   0.5,
-		},
-		&cli.IntFlag{
-			Name:    "compare-unit-size",
-			Aliases: []string{"u"},
-			Usage:   "Max size of the smallest block to use when diffs are present",
-			Value:   10000,
-		},
-		&cli.StringFlag{
-			Name:    "output",
-			Aliases: []string{"o"},
-			Usage:   "Output format",
-			Value:   "json",
-		},
-		&cli.BoolFlag{
-			Name:    "override-block-size",
-			Aliases: []string{"B"},
-			Usage:   "Override block size",
-			Value:   false,
-		},
-	}
-
-	rerunOnlyFlags := []cli.Flag{
-		&cli.StringFlag{
-			Name:     "diff-file",
-			Aliases:  []string{"f"},
-			Usage:    "Path to the diff file to rerun from (required)",
-			Required: true,
-		},
-	}
-
-	skipFlags := []cli.Flag{
-		&cli.StringFlag{
-			Name:    "skip-tables",
-			Aliases: []string{"T"},
-			Usage:   "Comma-separated list of tables to skip",
-		},
-		&cli.StringFlag{
-			Name:    "skip-file",
-			Aliases: []string{"s"},
-			Usage:   "Path to a file with a list of tables to skip",
-		},
-	}
-
-	tableDiffFlags := append(commonFlags, diffFlags...)
-	tableDiffFlags = append(tableDiffFlags,
-		&cli.StringFlag{
-			Name:    "table-filter",
-			Aliases: []string{"F"},
-			Usage:   "Where clause expression to use while diffing tables",
-			Value:   "",
-		},
-		&cli.StringFlag{
-			Name:  "against-origin",
-			Usage: "Restrict diff to rows whose node_origin matches this Spock node id or name",
-			Value: "",
-		},
-		&cli.StringFlag{
-			Name:  "until",
-			Usage: "Optional commit timestamp upper bound (RFC3339) for rows to include",
-			Value: "",
-		},
-		&cli.BoolFlag{
-			Name:  "ensure-pgcrypto",
-			Usage: "Ensure pgcrypto extension is installed on each node before diffing",
-			Value: false,
-		},
-		&cli.BoolFlag{
-			Name:    "schedule",
-			Aliases: []string{"S"},
-			Usage:   "Schedule a table-diff job to run periodically",
-			Value:   false,
-		},
-		&cli.StringFlag{
-			Name:    "every",
-			Aliases: []string{"e"},
-			Usage:   "Time duration (e.g., 5m, 3h, etc.)",
-			Value:   "",
-		},
-	)
-
-	tableRerunFlags := append(commonFlags, rerunOnlyFlags...)
-
-	tableRepairFlags := []cli.Flag{
-		&cli.StringFlag{
-			Name:     "diff-file",
-			Aliases:  []string{"f"},
-			Usage:    "Path to the diff file (required)",
-			Required: true,
-		},
-		&cli.StringFlag{
-			Name:    "repair-plan",
-			Aliases: []string{"p"},
-			Usage:   "Path to the advanced repair plan (YAML/JSON); skips source-of-truth requirement",
-		},
-		&cli.StringFlag{
-			Name:    "source-of-truth",
-			Aliases: []string{"r"},
-			Usage:   "Name of the node to be considered the source of truth",
-		},
-		&cli.BoolFlag{
-			Name:    "dry-run",
-			Aliases: []string{"y"},
-			Usage:   "Show what would be done without executing",
-			Value:   false,
-		},
-		&cli.BoolFlag{
-			Name:    "generate-report",
-			Aliases: []string{"g"},
-			Usage:   "Generate a report of the repair operation",
-			Value:   false,
-		},
-		&cli.BoolFlag{
-			Name:    "insert-only",
-			Aliases: []string{"i"},
-			Usage:   "Only perform inserts, no updates or deletes",
-			Value:   false,
-		},
-		&cli.BoolFlag{
-			Name:    "upsert-only",
-			Aliases: []string{"P"},
-			Usage:   "Only perform upserts (insert or update), no deletes",
-			Value:   false,
-		},
-		&cli.BoolFlag{
-			Name:    "fire-triggers",
-			Aliases: []string{"t"},
-			Usage:   "Whether to fire triggers during repairs",
-			Value:   false,
-		},
-		&cli.BoolFlag{
-			Name:    "bidirectional",
-			Aliases: []string{"Z"},
-			Usage:   "Whether to perform repairs in both directions. Can be used only with the insert-only option",
-			Value:   false,
-		},
-		&cli.BoolFlag{
-			Name:  "recovery-mode",
-			Usage: "Enable recovery-mode repair using origin-only diffs",
-			Value: false,
-		},
-		&cli.BoolFlag{
-			Name:    "preserve-origin",
-			Usage:   "Preserve replication origin node ID and commit timestamp for repaired rows",
-			Value:   false,
-		},
-		&cli.BoolFlag{
-			Name:    "fix-nulls",
-			Aliases: []string{"X"},
-			Usage:   "Fill NULL columns on each node using non-NULL values from its peers (no source-of-truth required)",
-			Value:   false,
-		},
-	}
-
-	tableRepairFlags = append(commonFlags, tableRepairFlags...)
-
-	spockDiffFlags := append(commonFlags, &cli.StringFlag{
-		Name:    "output",
-		Aliases: []string{"o"},
-		Usage:   "Output format",
-		Value:   "json",
-	})
-
-	repsetDiffFlags := append(commonFlags, diffFlags...)
-	repsetDiffFlags = append(repsetDiffFlags, skipFlags...)
-	repsetDiffFlags = append(repsetDiffFlags,
-		&cli.BoolFlag{
-			Name:    "schedule",
-			Aliases: []string{"S"},
-			Usage:   "Schedule a repset-diff job to run periodically",
-			Value:   false,
-		},
-		&cli.StringFlag{
-			Name:    "every",
-			Aliases: []string{"e"},
-			Usage:   "Time duration (e.g., 5m, 3h, etc.)",
-			Value:   "",
-		},
-	)
-
-	schemaDiffFlags := append(commonFlags, diffFlags...)
-	schemaDiffFlags = append(schemaDiffFlags, skipFlags...)
-	schemaDiffFlags = append(schemaDiffFlags, &cli.BoolFlag{
-		Name:    "ddl-only",
-		Aliases: []string{"L"},
-		Usage:   "Compare only schema objects (tables, functions, etc.), not table data",
-		Value:   false,
-	},
-		&cli.BoolFlag{
-			Name:    "schedule",
-			Aliases: []string{"S"},
-			Usage:   "Schedule a schema-diff job to run periodically",
-			Value:   false,
-		},
-		&cli.StringFlag{
-			Name:    "every",
-			Aliases: []string{"e"},
-			Usage:   "Time duration (e.g., 5m, 3h, etc.)",
-			Value:   "",
-		},
-	)
-
-	mtreeBuildFlags := []cli.Flag{
-		&cli.StringFlag{
-			Name:    "block-size",
-			Aliases: []string{"b"},
-			Usage:   "Rows per leaf block",
-			Value:   "10000",
-		},
-		&cli.Float64Flag{
-			Name:    "max-cpu-ratio",
-			Aliases: []string{"m"},
-			Usage:   "Max CPU for parallel operations",
-			Value:   0.5,
-		},
-		&cli.BoolFlag{
-			Name:    "override-block-size",
-			Aliases: []string{"B"},
-			Usage:   "Skip block size check, and potentially tolerate unsafe block sizes",
-			Value:   false,
-		},
-		&cli.BoolFlag{
-			Name:    "analyse",
-			Aliases: []string{"a"},
-			Usage:   "Run ANALYZE on the table",
-			Value:   false,
-		},
-		&cli.BoolFlag{
-			Name:    "recreate-objects",
-			Aliases: []string{"R"},
-			Usage:   "Drop and recreate Merkle tree objects",
-			Value:   false,
-		},
-		&cli.BoolFlag{
-			Name:    "write-ranges",
-			Aliases: []string{"w"},
-			Usage:   "Write block ranges to a JSON file",
-			Value:   false,
-		},
-		&cli.StringFlag{
-			Name:    "ranges-file",
-			Aliases: []string{"k"},
-			Usage:   "Path to a file with pre-computed ranges",
-		},
-	}
-	mtreeBuildFlags = append(mtreeBuildFlags, commonFlags...)
-
-	mtreeUpdateFlags := []cli.Flag{
-		&cli.Float64Flag{
-			Name:    "max-cpu-ratio",
-			Aliases: []string{"m"},
-			Usage:   "Max CPU for parallel operations",
-			Value:   0.5,
-		},
-		&cli.BoolFlag{
-			Name:    "rebalance",
-			Aliases: []string{"l"},
-			Usage:   "Rebalance the tree by merging small blocks",
-			Value:   false,
-		},
-		&cli.BoolFlag{
-			Name:    "skip-cdc",
-			Aliases: []string{"U"},
-			Usage:   "Skip CDC processing (only rehash dirty blocks)",
-			Value:   false,
-		},
-	}
-	mtreeUpdateFlags = append(mtreeUpdateFlags, commonFlags...)
-
-	mtreeDiffFlags := []cli.Flag{
-		&cli.Float64Flag{
-			Name:    "max-cpu-ratio",
-			Aliases: []string{"m"},
-			Usage:   "Max CPU for parallel operations",
-			Value:   0.5,
-		},
-		&cli.StringFlag{
-			Name:    "output",
-			Aliases: []string{"o"},
-			Usage:   "Output format",
-			Value:   "json",
-		},
-		&cli.BoolFlag{
-			Name:    "skip-cdc",
-			Aliases: []string{"U"},
-			Usage:   "Skip CDC processing (only rehash dirty blocks and compare)",
-			Value:   false,
-		},
-	}
-	mtreeDiffFlags = append(mtreeDiffFlags, commonFlags...)
-
-	configInitFlags := []cli.Flag{
-		&cli.StringFlag{
-			Name:    "path",
-			Aliases: []string{"p"},
-			Usage:   "Path to write the config file",
-			Value:   "ace.yaml",
-		},
-		&cli.BoolFlag{
-			Name:    "force",
-			Aliases: []string{"x"},
-			Usage:   "Overwrite the config file if it already exists",
-		},
-		&cli.BoolFlag{
-			Name:    "stdout",
-			Aliases: []string{"z"},
-			Usage:   "Print the config to stdout instead of writing a file",
-		},
-	}
-
-	clusterInitFlags := []cli.Flag{
-		&cli.StringFlag{
-			Name:    "path",
-			Aliases: []string{"p"},
-			Usage:   "Path to write the pg service file",
-			Value:   "pg_service.conf",
-		},
-		&cli.BoolFlag{
-			Name:    "force",
-			Aliases: []string{"x"},
-			Usage:   "Overwrite the service file if it already exists",
-		},
-		&cli.BoolFlag{
-			Name:    "stdout",
-			Aliases: []string{"z"},
-			Usage:   "Print the service file to stdout instead of writing a file",
-		},
-	}
-
-	app := &cli.App{
-		Name:  "ace",
-		Usage: "ACE - Active Consistency Engine",
-		Commands: []*cli.Command{
-			{
-				Name:  "config",
-				Usage: "Manage ACE configuration files",
-				Subcommands: []*cli.Command{
-					{
-						Name:   "init",
-						Usage:  "Create a default ace.yaml file",
-						Flags:  configInitFlags,
-						Action: ConfigInitCLI,
-					},
-				},
-			},
-			{
-				Name:  "start",
-				Usage: "Start the ACE scheduler for configured jobs",
-				Flags: []cli.Flag{
-					&cli.BoolFlag{
-						Name:    "debug",
-						Aliases: []string{"v"},
-						Usage:   "Enable debug logging",
-					},
-					&cli.StringFlag{
-						Name:    "component",
-						Aliases: []string{"C"},
-						Usage:   "Component to start: scheduler, api, or all",
-						Value:   "all",
-					},
-				},
-				Action: StartSchedulerCLI,
-				Before: func(ctx *cli.Context) error {
-					if err := applyInterspersedFlags(ctx); err != nil {
-						return err
-					}
-					if ctx.Bool("debug") {
-						logger.SetLevel(log.DebugLevel)
-					} else {
-						logger.SetLevel(log.InfoLevel)
-					}
-					return nil
-				},
-			},
-			{
-				Name:  "server",
-				Usage: "Run the ACE REST API server",
-				Flags: []cli.Flag{
-					&cli.BoolFlag{
-						Name:    "debug",
-						Aliases: []string{"v"},
-						Usage:   "Enable debug logging",
-					},
-				},
-				Action: StartAPIServerCLI,
-				Before: func(ctx *cli.Context) error {
-					if err := applyInterspersedFlags(ctx); err != nil {
-						return err
-					}
-					if ctx.Bool("debug") {
-						logger.SetLevel(log.DebugLevel)
-					} else {
-						logger.SetLevel(log.InfoLevel)
-					}
-					return nil
-				},
-			},
-			{
-				Name:  "cluster",
-				Usage: "Manage ACE cluster service definitions",
-				Subcommands: []*cli.Command{
-					{
-						Name:   "init",
-						Usage:  "Create a sample pg_service.conf file",
-						Flags:  clusterInitFlags,
-						Action: ClusterInitCLI,
-					},
-				},
-			},
-			{
-				Name:      "table-diff",
-				Usage:     "Compare tables between PostgreSQL databases",
-				ArgsUsage: "[cluster] <table>",
-				Description: "A tool for comparing tables between PostgreSQL databases " +
-					"and detecting data inconsistencies",
-				Action: func(ctx *cli.Context) error {
-					argsLen := len(filteredPositionalArgs(ctx))
-					if argsLen == 0 {
-						return fmt.Errorf("missing required argument for table-diff: needs <table>")
-					}
-					if argsLen > 2 {
-						return fmt.Errorf("unexpected arguments for table-diff (usage: [cluster] <table>)")
-					}
-					return TableDiffCLI(ctx)
-				},
-				Flags: tableDiffFlags,
-				Before: func(ctx *cli.Context) error {
-					if err := applyInterspersedFlags(ctx); err != nil {
-						return err
-					}
-					if ctx.Bool("debug") {
-						logger.SetLevel(log.DebugLevel)
-					} else {
-						logger.SetLevel(log.InfoLevel)
-					}
-					return nil
-				},
-			},
-			{
-				Name:      "table-rerun",
-				Usage:     "Re-run a diff from a file to check for persistent differences",
-				ArgsUsage: "[cluster]",
-				Flags:     tableRerunFlags,
-				Action: func(ctx *cli.Context) error {
-					if len(filteredPositionalArgs(ctx)) > 1 {
-						return fmt.Errorf("unexpected arguments for table-rerun (usage: [cluster])")
-					}
-					return TableRerunCLI(ctx)
-				},
-				Before: func(ctx *cli.Context) error {
-					if err := applyInterspersedFlags(ctx); err != nil {
-						return err
-					}
-					if ctx.Bool("debug") {
-						logger.SetLevel(log.DebugLevel)
-					} else {
-						logger.SetLevel(log.InfoLevel)
-					}
-					return nil
-				},
-			},
-			{
-				Name:      "table-repair",
-				Usage:     "Repair table inconsistencies based on a diff file",
-				ArgsUsage: "[cluster] <table>",
-				Flags:     tableRepairFlags,
-				Action: func(ctx *cli.Context) error {
-					argsLen := len(filteredPositionalArgs(ctx))
-					if argsLen == 0 {
-						return fmt.Errorf("missing required argument for table-repair: needs <table>")
-					}
-					if argsLen > 2 {
-						return fmt.Errorf("unexpected arguments for table-repair (usage: [cluster] <table>)")
-					}
-					return TableRepairCLI(ctx)
-				},
-				Before: func(ctx *cli.Context) error {
-					if err := applyInterspersedFlags(ctx); err != nil {
-						return err
-					}
-					if ctx.Bool("debug") {
-						logger.SetLevel(log.DebugLevel)
-					} else {
-						logger.SetLevel(log.InfoLevel)
-					}
-					return nil
-				},
-			},
-			{
-				Name:      "spock-diff",
-				Usage:     "Compare spock metadata across cluster nodes",
-				ArgsUsage: "[cluster]",
-				Flags:     spockDiffFlags,
-				Action: func(ctx *cli.Context) error {
-					if len(filteredPositionalArgs(ctx)) > 1 {
-						return fmt.Errorf("unexpected arguments for spock-diff (usage: [cluster])")
-					}
-					return SpockDiffCLI(ctx)
-				},
-				Before: func(ctx *cli.Context) error {
-					if err := applyInterspersedFlags(ctx); err != nil {
-						return err
-					}
-					if ctx.Bool("debug") {
-						logger.SetLevel(log.DebugLevel)
-					} else {
-						logger.SetLevel(log.InfoLevel)
-					}
-					return nil
-				},
-			},
-			{
-				Name:      "schema-diff",
-				Usage:     "Compare schemas across cluster nodes",
-				ArgsUsage: "[cluster] <schema>",
-				Flags:     schemaDiffFlags,
-				Action: func(ctx *cli.Context) error {
-					argsLen := len(filteredPositionalArgs(ctx))
-					if argsLen == 0 {
-						return fmt.Errorf("missing required argument for schema-diff: needs <schema>")
-					}
-					if argsLen > 2 {
-						return fmt.Errorf("unexpected arguments for schema-diff (usage: [cluster] <schema>)")
-					}
-					return SchemaDiffCLI(ctx)
-				},
-				Before: func(ctx *cli.Context) error {
-					if err := applyInterspersedFlags(ctx); err != nil {
-						return err
-					}
-					if ctx.Bool("debug") {
-						logger.SetLevel(log.DebugLevel)
-					} else {
-						logger.SetLevel(log.InfoLevel)
-					}
-					return nil
-				},
-			},
-			{
-				Name:      "repset-diff",
-				Usage:     "Compare replication sets across cluster nodes",
-				ArgsUsage: "[cluster] <repset>",
-				Flags:     repsetDiffFlags,
-				Action: func(ctx *cli.Context) error {
-					argsLen := len(filteredPositionalArgs(ctx))
-					if argsLen == 0 {
-						return fmt.Errorf("missing required argument for repset-diff: needs <repset>")
-					}
-					if argsLen > 2 {
-						return fmt.Errorf("unexpected arguments for repset-diff (usage: [cluster] <repset>)")
-					}
-					return RepsetDiffCLI(ctx)
-				},
-				Before: func(ctx *cli.Context) error {
-					if err := applyInterspersedFlags(ctx); err != nil {
-						return err
-					}
-					if ctx.Bool("debug") {
-						logger.SetLevel(log.DebugLevel)
-					} else {
-						logger.SetLevel(log.InfoLevel)
-					}
-					return nil
-				},
-			},
-			{
-				Name:  "mtree",
-				Usage: "Merkle tree operations",
-				Subcommands: []*cli.Command{
-					{
-						Name:      "init",
-						Usage:     "Initialise Merkle tree replication for a cluster",
-						ArgsUsage: "[cluster]",
-						Flags:     commonFlags,
-						Action: func(ctx *cli.Context) error {
-							if len(filteredPositionalArgs(ctx)) > 1 {
-								return fmt.Errorf("unexpected arguments for mtree init (usage: [cluster])")
-							}
-							return MtreeInitCLI(ctx)
-						},
-						Before: func(ctx *cli.Context) error {
-							if err := applyInterspersedFlags(ctx); err != nil {
-								return err
-							}
-							if ctx.Bool("debug") {
-								logger.SetLevel(log.DebugLevel)
-							} else {
-								logger.SetLevel(log.InfoLevel)
-							}
-							return nil
-						},
-					},
-					{
-						Name:      "listen",
-						Usage:     "Listen for changes and update Merkle trees",
-						ArgsUsage: "[cluster]",
-						Flags:     commonFlags,
-						Action: func(ctx *cli.Context) error {
-							if len(filteredPositionalArgs(ctx)) > 1 {
-								return fmt.Errorf("unexpected arguments for mtree listen (usage: [cluster])")
-							}
-							return MtreeListenCLI(ctx)
-						},
-						Before: func(ctx *cli.Context) error {
-							if err := applyInterspersedFlags(ctx); err != nil {
-								return err
-							}
-							if ctx.Bool("debug") {
-								logger.SetLevel(log.DebugLevel)
-							} else {
-								logger.SetLevel(log.InfoLevel)
-							}
-							return nil
-						},
-					},
-					{
-						Name:      "teardown",
-						Usage:     "Teardown Merkle tree replication for a cluster",
-						ArgsUsage: "[cluster]",
-						Flags:     commonFlags,
-						Action: func(ctx *cli.Context) error {
-							if len(filteredPositionalArgs(ctx)) > 1 {
-								return fmt.Errorf("unexpected arguments for mtree teardown (usage: [cluster])")
-							}
-							return MtreeTeardownCLI(ctx)
-						},
-						Before: func(ctx *cli.Context) error {
-							if err := applyInterspersedFlags(ctx); err != nil {
-								return err
-							}
-							if ctx.Bool("debug") {
-								logger.SetLevel(log.DebugLevel)
-							} else {
-								logger.SetLevel(log.InfoLevel)
-							}
-							return nil
-						},
-					},
-					{
-						Name:      "teardown-table",
-						Usage:     "Teardown Merkle tree objects for a specific table",
-						ArgsUsage: "[cluster] <table>",
-						Flags:     commonFlags,
-						Action: func(ctx *cli.Context) error {
-							argsLen := len(filteredPositionalArgs(ctx))
-							if argsLen == 0 {
-								return fmt.Errorf("missing required argument for mtree teardown-table: needs <table>")
-							}
-							if argsLen > 2 {
-								return fmt.Errorf("unexpected arguments for mtree teardown-table (usage: [cluster] <table>)")
-							}
-							return MtreeTeardownTableCLI(ctx)
-						},
-						Before: func(ctx *cli.Context) error {
-							if err := applyInterspersedFlags(ctx); err != nil {
-								return err
-							}
-							if ctx.Bool("debug") {
-								logger.SetLevel(log.DebugLevel)
-							} else {
-								logger.SetLevel(log.InfoLevel)
-							}
-							return nil
-						},
-					},
-					{
-						Name:      "build",
-						Usage:     "Build a new Merkle tree for a table",
-						ArgsUsage: "[cluster] <table>",
-						Action: func(ctx *cli.Context) error {
-							argsLen := len(filteredPositionalArgs(ctx))
-							if argsLen == 0 {
-								return fmt.Errorf("missing required argument for mtree build: needs <table>")
-							}
-							if argsLen > 2 {
-								return fmt.Errorf("unexpected arguments for mtree build (usage: [cluster] <table>)")
-							}
-							return MtreeBuildCLI(ctx)
-						},
-						Flags: mtreeBuildFlags,
-						Before: func(ctx *cli.Context) error {
-							if err := applyInterspersedFlags(ctx); err != nil {
-								return err
-							}
-							if ctx.Bool("debug") {
-								logger.SetLevel(log.DebugLevel)
-							} else {
-								logger.SetLevel(log.InfoLevel)
-							}
-							return nil
-						},
-					},
-					{
-						Name:      "update",
-						Usage:     "Update an existing Merkle tree for a table",
-						ArgsUsage: "[cluster] <table>",
-						Action: func(ctx *cli.Context) error {
-							argsLen := len(filteredPositionalArgs(ctx))
-							if argsLen == 0 {
-								return fmt.Errorf("missing required argument for mtree update: needs <table>")
-							}
-							if argsLen > 2 {
-								return fmt.Errorf("unexpected arguments for mtree update (usage: [cluster] <table>)")
-							}
-							return MtreeUpdateCLI(ctx)
-						},
-						Flags: mtreeUpdateFlags,
-						Before: func(ctx *cli.Context) error {
-							if err := applyInterspersedFlags(ctx); err != nil {
-								return err
-							}
-							if ctx.Bool("debug") {
-								logger.SetLevel(log.DebugLevel)
-							} else {
-								logger.SetLevel(log.InfoLevel)
-							}
-							return nil
-						},
-					},
-					{
-						Name:      "table-diff",
-						Usage:     "Use Merkle Trees for performing table-diff",
-						ArgsUsage: "[cluster] <table>",
-						Action: func(ctx *cli.Context) error {
-							argsLen := len(filteredPositionalArgs(ctx))
-							if argsLen == 0 {
-								return fmt.Errorf("missing required argument for mtree diff: needs <table>")
-							}
-							if argsLen > 2 {
-								return fmt.Errorf("unexpected arguments for mtree diff (usage: [cluster] <table>)")
-							}
-							return MtreeDiffCLI(ctx)
-						},
-						Flags: mtreeDiffFlags,
-						Before: func(ctx *cli.Context) error {
-							if err := applyInterspersedFlags(ctx); err != nil {
-								return err
-							}
-							if ctx.Bool("debug") {
-								logger.SetLevel(log.DebugLevel)
-							} else {
-								logger.SetLevel(log.InfoLevel)
-							}
-							return nil
-						},
-					},
-				},
-			},
-		},
-	}
-
-	return app
+func addCommonFlags(cmd *cobra.Command) {
+	cmd.Flags().StringP("dbname", "d", "", "Name of the database")
+	cmd.Flags().StringP("nodes", "n", "all", "Nodes to include in the diff (default: all)")
+	cmd.Flags().BoolP("quiet", "q", false, "Whether to suppress output")
+	cmd.Flags().BoolP("debug", "v", false, "Enable debug logging")
 }
 
-func initTemplateFile(ctx *cli.Context, content string, defaultPath string, label string, perm os.FileMode) error {
-	outputPath := ctx.String("path")
+func addDiffFlags(cmd *cobra.Command) {
+	cmd.Flags().StringP("block-size", "b", "100000", "Number of rows per block")
+	cmd.Flags().Float64P("concurrency-factor", "c", 0.5, "CPU ratio for concurrency (0.0–4.0, e.g. 0.5 uses half of available CPUs)")
+	cmd.Flags().IntP("compare-unit-size", "u", 10000, "Max size of the smallest block to use when diffs are present")
+	cmd.Flags().StringP("output", "o", "json", "Output format")
+	cmd.Flags().BoolP("override-block-size", "B", false, "Override block size")
+}
+
+func addSkipFlags(cmd *cobra.Command) {
+	cmd.Flags().StringP("skip-tables", "T", "", "Comma-separated list of tables to skip")
+	cmd.Flags().StringP("skip-file", "s", "", "Path to a file with a list of tables to skip")
+}
+
+func addScheduleFlags(cmd *cobra.Command) {
+	cmd.Flags().BoolP("schedule", "S", false, "Schedule a job to run periodically")
+	cmd.Flags().StringP("every", "e", "", "Time duration (e.g., 5m, 3h, etc.)")
+}
+
+func addConfigInitFlags(cmd *cobra.Command) {
+	cmd.Flags().StringP("path", "p", "ace.yaml", "Path to write the config file")
+	cmd.Flags().BoolP("force", "x", false, "Overwrite the config file if it already exists")
+	cmd.Flags().BoolP("stdout", "z", false, "Print the config to stdout instead of writing a file")
+}
+
+func addClusterInitFlags(cmd *cobra.Command) {
+	cmd.Flags().StringP("path", "p", "pg_service.conf", "Path to write the pg service file")
+	cmd.Flags().BoolP("force", "x", false, "Overwrite the service file if it already exists")
+	cmd.Flags().BoolP("stdout", "z", false, "Print the service file to stdout instead of writing a file")
+}
+
+func addTableRepairFlags(cmd *cobra.Command) {
+	addCommonFlags(cmd)
+	cmd.Flags().StringP("diff-file", "f", "", "Path to the diff file (required)")
+	_ = cmd.MarkFlagRequired("diff-file")
+	cmd.Flags().StringP("repair-plan", "p", "", "Path to the advanced repair plan (YAML/JSON); skips source-of-truth requirement")
+	cmd.Flags().StringP("source-of-truth", "r", "", "Name of the node to be considered the source of truth")
+	cmd.Flags().BoolP("dry-run", "y", false, "Show what would be done without executing")
+	cmd.Flags().BoolP("generate-report", "g", false, "Generate a report of the repair operation")
+	cmd.Flags().BoolP("insert-only", "i", false, "Only perform inserts, no updates or deletes")
+	cmd.Flags().BoolP("upsert-only", "P", false, "Only perform upserts (insert or update), no deletes")
+	cmd.Flags().BoolP("fire-triggers", "t", false, "Whether to fire triggers during repairs")
+	cmd.Flags().BoolP("bidirectional", "Z", false, "Whether to perform repairs in both directions. Can be used only with the insert-only option")
+	cmd.Flags().Bool("recovery-mode", false, "Enable recovery-mode repair using origin-only diffs")
+	cmd.Flags().Bool("preserve-origin", false, "Preserve replication origin node ID and commit timestamp for repaired rows")
+	cmd.Flags().BoolP("fix-nulls", "X", false, "Fill NULL columns on each node using non-NULL values from its peers (no source-of-truth required)")
+}
+
+func addMtreeBuildFlags(cmd *cobra.Command) {
+	cmd.Flags().StringP("block-size", "b", "10000", "Rows per leaf block")
+	cmd.Flags().Float64P("max-cpu-ratio", "m", 0.5, "Max CPU for parallel operations")
+	cmd.Flags().BoolP("override-block-size", "B", false, "Skip block size check, and potentially tolerate unsafe block sizes")
+	cmd.Flags().BoolP("analyse", "a", false, "Run ANALYZE on the table")
+	cmd.Flags().BoolP("recreate-objects", "R", false, "Drop and recreate Merkle tree objects")
+	cmd.Flags().BoolP("write-ranges", "w", false, "Write block ranges to a JSON file")
+	cmd.Flags().StringP("ranges-file", "k", "", "Path to a file with pre-computed ranges")
+	addCommonFlags(cmd)
+}
+
+func addMtreeUpdateFlags(cmd *cobra.Command) {
+	cmd.Flags().Float64P("max-cpu-ratio", "m", 0.5, "Max CPU for parallel operations")
+	cmd.Flags().BoolP("rebalance", "l", false, "Rebalance the tree by merging small blocks")
+	cmd.Flags().BoolP("skip-cdc", "U", false, "Skip CDC processing (only rehash dirty blocks)")
+	addCommonFlags(cmd)
+}
+
+func addMtreeDiffFlags(cmd *cobra.Command) {
+	cmd.Flags().Float64P("max-cpu-ratio", "m", 0.5, "Max CPU for parallel operations")
+	cmd.Flags().StringP("output", "o", "json", "Output format")
+	cmd.Flags().BoolP("skip-cdc", "U", false, "Skip CDC processing (only rehash dirty blocks and compare)")
+	addCommonFlags(cmd)
+}
+
+// debugPreRunE sets up log level based on the --debug flag.
+// It is used as PersistentPreRunE on group commands and as PreRunE
+// on leaf commands that carry the debug flag.
+func debugPreRunE(cmd *cobra.Command, _ []string) error {
+	debug, _ := cmd.Flags().GetBool("debug")
+	if debug {
+		logger.SetLevel(log.DebugLevel)
+	} else {
+		logger.SetLevel(log.InfoLevel)
+	}
+	return nil
+}
+
+// ─── SetupCLI ──────────────────────────────────────────────────────────────
+
+func SetupCLI() *cobra.Command {
+	rootCmd := &cobra.Command{
+		Use:   "ace",
+		Short: "ACE - Active Consistency Engine",
+		// Silence default usage/error output so we control it.
+		SilenceUsage:  true,
+		SilenceErrors: true,
+	}
+
+	// ── config ──────────────────────────────────────────────────────────
+
+	configCmd := &cobra.Command{
+		Use:   "config",
+		Short: "Manage ACE configuration files",
+	}
+
+	configInitCmd := &cobra.Command{
+		Use:   "init",
+		Short: "Create a default ace.yaml file",
+		RunE:  ConfigInitCLI,
+	}
+	addConfigInitFlags(configInitCmd)
+
+	configCmd.AddCommand(configInitCmd)
+
+	// ── start ───────────────────────────────────────────────────────────
+
+	startCmd := &cobra.Command{
+		Use:    "start",
+		Short:  "Start the ACE scheduler for configured jobs",
+		PreRunE: debugPreRunE,
+		RunE:   StartSchedulerCLI,
+	}
+	startCmd.Flags().BoolP("debug", "v", false, "Enable debug logging")
+	startCmd.Flags().StringP("component", "C", "all", "Component to start: scheduler, api, or all")
+
+	// ── server ──────────────────────────────────────────────────────────
+
+	serverCmd := &cobra.Command{
+		Use:    "server",
+		Short:  "Run the ACE REST API server",
+		PreRunE: debugPreRunE,
+		RunE:   StartAPIServerCLI,
+	}
+	serverCmd.Flags().BoolP("debug", "v", false, "Enable debug logging")
+
+	// ── cluster ─────────────────────────────────────────────────────────
+
+	clusterCmd := &cobra.Command{
+		Use:   "cluster",
+		Short: "Manage ACE cluster service definitions",
+	}
+
+	clusterInitCmd := &cobra.Command{
+		Use:   "init",
+		Short: "Create a sample pg_service.conf file",
+		RunE:  ClusterInitCLI,
+	}
+	addClusterInitFlags(clusterInitCmd)
+
+	clusterCmd.AddCommand(clusterInitCmd)
+
+	// ── table-diff ──────────────────────────────────────────────────────
+
+	tableDiffCmd := &cobra.Command{
+		Use:   "table-diff [cluster] <table>",
+		Short: "Compare tables between PostgreSQL databases",
+		Long: "A tool for comparing tables between PostgreSQL databases " +
+			"and detecting data inconsistencies",
+		Args:    cobra.RangeArgs(1, 2),
+		PreRunE: debugPreRunE,
+		RunE:    TableDiffCLI,
+	}
+	addCommonFlags(tableDiffCmd)
+	addDiffFlags(tableDiffCmd)
+	tableDiffCmd.Flags().StringP("table-filter", "F", "", "Where clause expression to use while diffing tables")
+	tableDiffCmd.Flags().String("against-origin", "", "Restrict diff to rows whose node_origin matches this Spock node id or name")
+	tableDiffCmd.Flags().String("until", "", "Optional commit timestamp upper bound (RFC3339) for rows to include")
+	tableDiffCmd.Flags().Bool("ensure-pgcrypto", false, "Ensure pgcrypto extension is installed on each node before diffing")
+	addScheduleFlags(tableDiffCmd)
+
+	// ── table-rerun ─────────────────────────────────────────────────────
+
+	tableRerunCmd := &cobra.Command{
+		Use:     "table-rerun [cluster]",
+		Short:   "Re-run a diff from a file to check for persistent differences",
+		Args:    cobra.MaximumNArgs(1),
+		PreRunE: debugPreRunE,
+		RunE:    TableRerunCLI,
+	}
+	addCommonFlags(tableRerunCmd)
+	tableRerunCmd.Flags().StringP("diff-file", "f", "", "Path to the diff file to rerun from (required)")
+	_ = tableRerunCmd.MarkFlagRequired("diff-file")
+
+	// ── table-repair ────────────────────────────────────────────────────
+
+	tableRepairCmd := &cobra.Command{
+		Use:     "table-repair [cluster] <table>",
+		Short:   "Repair table inconsistencies based on a diff file",
+		Args:    cobra.RangeArgs(1, 2),
+		PreRunE: debugPreRunE,
+		RunE:    TableRepairCLI,
+	}
+	addTableRepairFlags(tableRepairCmd)
+
+	// ── spock-diff ──────────────────────────────────────────────────────
+
+	spockDiffCmd := &cobra.Command{
+		Use:     "spock-diff [cluster]",
+		Short:   "Compare spock metadata across cluster nodes",
+		Args:    cobra.MaximumNArgs(1),
+		PreRunE: debugPreRunE,
+		RunE:    SpockDiffCLI,
+	}
+	addCommonFlags(spockDiffCmd)
+	spockDiffCmd.Flags().StringP("output", "o", "json", "Output format")
+
+	// ── schema-diff ─────────────────────────────────────────────────────
+
+	schemaDiffCmd := &cobra.Command{
+		Use:     "schema-diff [cluster] <schema>",
+		Short:   "Compare schemas across cluster nodes",
+		Args:    cobra.RangeArgs(1, 2),
+		PreRunE: debugPreRunE,
+		RunE:    SchemaDiffCLI,
+	}
+	addCommonFlags(schemaDiffCmd)
+	addDiffFlags(schemaDiffCmd)
+	addSkipFlags(schemaDiffCmd)
+	schemaDiffCmd.Flags().BoolP("ddl-only", "L", false, "Compare only schema objects (tables, functions, etc.), not table data")
+	addScheduleFlags(schemaDiffCmd)
+
+	// ── repset-diff ─────────────────────────────────────────────────────
+
+	repsetDiffCmd := &cobra.Command{
+		Use:     "repset-diff [cluster] <repset>",
+		Short:   "Compare replication sets across cluster nodes",
+		Args:    cobra.RangeArgs(1, 2),
+		PreRunE: debugPreRunE,
+		RunE:    RepsetDiffCLI,
+	}
+	addCommonFlags(repsetDiffCmd)
+	addDiffFlags(repsetDiffCmd)
+	addSkipFlags(repsetDiffCmd)
+	addScheduleFlags(repsetDiffCmd)
+
+	// ── mtree ───────────────────────────────────────────────────────────
+
+	mtreeCmd := &cobra.Command{
+		Use:   "mtree",
+		Short: "Merkle tree operations",
+	}
+
+	mtreeInitCmd := &cobra.Command{
+		Use:     "init [cluster]",
+		Short:   "Initialise Merkle tree replication for a cluster",
+		Args:    cobra.MaximumNArgs(1),
+		PreRunE: debugPreRunE,
+		RunE:    MtreeInitCLI,
+	}
+	addCommonFlags(mtreeInitCmd)
+
+	mtreeListenCmd := &cobra.Command{
+		Use:     "listen [cluster]",
+		Short:   "Listen for changes and update Merkle trees",
+		Args:    cobra.MaximumNArgs(1),
+		PreRunE: debugPreRunE,
+		RunE:    MtreeListenCLI,
+	}
+	addCommonFlags(mtreeListenCmd)
+
+	mtreeTeardownCmd := &cobra.Command{
+		Use:     "teardown [cluster]",
+		Short:   "Teardown Merkle tree replication for a cluster",
+		Args:    cobra.MaximumNArgs(1),
+		PreRunE: debugPreRunE,
+		RunE:    MtreeTeardownCLI,
+	}
+	addCommonFlags(mtreeTeardownCmd)
+
+	mtreeTeardownTableCmd := &cobra.Command{
+		Use:     "teardown-table [cluster] <table>",
+		Short:   "Teardown Merkle tree objects for a specific table",
+		Args:    cobra.RangeArgs(1, 2),
+		PreRunE: debugPreRunE,
+		RunE:    MtreeTeardownTableCLI,
+	}
+	addCommonFlags(mtreeTeardownTableCmd)
+
+	mtreeBuildCmd := &cobra.Command{
+		Use:     "build [cluster] <table>",
+		Short:   "Build a new Merkle tree for a table",
+		Args:    cobra.RangeArgs(1, 2),
+		PreRunE: debugPreRunE,
+		RunE:    MtreeBuildCLI,
+	}
+	addMtreeBuildFlags(mtreeBuildCmd)
+
+	mtreeUpdateCmd := &cobra.Command{
+		Use:     "update [cluster] <table>",
+		Short:   "Update an existing Merkle tree for a table",
+		Args:    cobra.RangeArgs(1, 2),
+		PreRunE: debugPreRunE,
+		RunE:    MtreeUpdateCLI,
+	}
+	addMtreeUpdateFlags(mtreeUpdateCmd)
+
+	mtreeTableDiffCmd := &cobra.Command{
+		Use:     "table-diff [cluster] <table>",
+		Short:   "Use Merkle Trees for performing table-diff",
+		Args:    cobra.RangeArgs(1, 2),
+		PreRunE: debugPreRunE,
+		RunE:    MtreeDiffCLI,
+	}
+	addMtreeDiffFlags(mtreeTableDiffCmd)
+
+	mtreeCmd.AddCommand(
+		mtreeInitCmd,
+		mtreeListenCmd,
+		mtreeTeardownCmd,
+		mtreeTeardownTableCmd,
+		mtreeBuildCmd,
+		mtreeUpdateCmd,
+		mtreeTableDiffCmd,
+	)
+
+	// ── assemble root ───────────────────────────────────────────────────
+
+	rootCmd.AddCommand(
+		configCmd,
+		startCmd,
+		serverCmd,
+		clusterCmd,
+		tableDiffCmd,
+		tableRerunCmd,
+		tableRepairCmd,
+		spockDiffCmd,
+		schemaDiffCmd,
+		repsetDiffCmd,
+		mtreeCmd,
+	)
+
+	return rootCmd
+}
+
+// ─── Template helpers ──────────────────────────────────────────────────────
+
+func initTemplateFile(cmd *cobra.Command, content string, defaultPath string, label string, perm os.FileMode) error {
+	outputPath, _ := cmd.Flags().GetString("path")
 	if outputPath == "" {
 		outputPath = defaultPath
 	}
 
-	if ctx.Bool("stdout") || outputPath == "-" {
+	stdout, _ := cmd.Flags().GetBool("stdout")
+	if stdout || outputPath == "-" {
 		fmt.Println(content)
 		return nil
 	}
 
-	if !ctx.Bool("force") {
+	force, _ := cmd.Flags().GetBool("force")
+	if !force {
 		if _, err := os.Stat(outputPath); err == nil {
 			return fmt.Errorf("%s already exists at %s (use --force to overwrite)", label, outputPath)
 		} else if !errors.Is(err, os.ErrNotExist) {
@@ -870,20 +422,22 @@ func initTemplateFile(ctx *cli.Context, content string, defaultPath string, labe
 	return nil
 }
 
-func ConfigInitCLI(ctx *cli.Context) error {
-	return initTemplateFile(ctx, defaultConfigYAML, "ace.yaml", "config file", 0o644)
+func ConfigInitCLI(cmd *cobra.Command, _ []string) error {
+	return initTemplateFile(cmd, defaultConfigYAML, "ace.yaml", "config file", 0o644)
 }
 
-func ClusterInitCLI(ctx *cli.Context) error {
-	return initTemplateFile(ctx, defaultPgServiceConf, "pg_service.conf", "pg service file", 0o600)
+func ClusterInitCLI(cmd *cobra.Command, _ []string) error {
+	return initTemplateFile(cmd, defaultPgServiceConf, "pg_service.conf", "pg service file", 0o600)
 }
 
-func resolveClusterArg(cmd, missingUsage, argsUsage string, required int, args []string) (string, []string, error) {
+// ─── Cluster arg resolution ────────────────────────────────────────────────
+
+func resolveClusterArg(cmdName, missingUsage, argsUsage string, required int, args []string) (string, []string, error) {
 	if len(args) < required {
 		if required == 1 {
-			return "", nil, fmt.Errorf("missing required argument for %s: needs %s", cmd, missingUsage)
+			return "", nil, fmt.Errorf("missing required argument for %s: needs %s", cmdName, missingUsage)
 		}
-		return "", nil, fmt.Errorf("missing required arguments for %s: needs %s", cmd, missingUsage)
+		return "", nil, fmt.Errorf("missing required arguments for %s: needs %s", cmdName, missingUsage)
 	}
 
 	if len(args) == required {
@@ -902,162 +456,52 @@ func resolveClusterArg(cmd, missingUsage, argsUsage string, required int, args [
 		return cluster, args[1:], nil
 	}
 
-	return "", nil, fmt.Errorf("unexpected arguments for %s (usage: %s)", cmd, argsUsage)
+	return "", nil, fmt.Errorf("unexpected arguments for %s (usage: %s)", cmdName, argsUsage)
 }
 
-// findFlag returns the flag definition matching name (including aliases).
-func findFlag(flags []cli.Flag, name string) cli.Flag {
-	for _, f := range flags {
-		for _, n := range f.Names() {
-			if n == name {
-				return f
-			}
-		}
-	}
-	return nil
-}
+// ─── Command implementations ───────────────────────────────────────────────
 
-func isBoolFlag(f cli.Flag) bool {
-	_, ok := f.(*cli.BoolFlag)
-	return ok
-}
-
-// filteredPositionalArgs returns ctx.Args().Slice() with known flag tokens
-// removed.  Unknown flag-like tokens are kept as-is so that resolveClusterArg
-// will surface an "unexpected arguments" error rather than silently dropping
-// them.  Tokens after a bare "--" separator are always kept as positional args.
-func filteredPositionalArgs(ctx *cli.Context) []string {
-	args := ctx.Args().Slice()
-	result := make([]string, 0, len(args))
-	i := 0
-	for i < len(args) {
-		arg := args[i]
-		if arg == "--" {
-			result = append(result, args[i+1:]...)
-			break
-		}
-		if !strings.HasPrefix(arg, "-") {
-			result = append(result, arg)
-			i++
-			continue
-		}
-		// Determine the flag name (strip leading dashes and any =value suffix).
-		flagName := strings.TrimLeft(arg, "-")
-		if idx := strings.IndexByte(flagName, '='); idx >= 0 {
-			flagName = flagName[:idx]
-		}
-		f := findFlag(ctx.Command.Flags, flagName)
-		if f == nil && flagName != "h" && flagName != "help" {
-			// Unknown flag: pass through so resolveClusterArg can report it.
-			result = append(result, arg)
-			i++
-			continue
-		}
-		if strings.IndexByte(strings.TrimLeft(arg, "-"), '=') >= 0 {
-			// --key=value form: single token, just skip it.
-			i++
-			continue
-		}
-		// For non-bool flags, skip the following value token only when it is
-		// not itself a flag (avoids consuming "--quiet" as the value of "--nodes").
-		if f != nil && !isBoolFlag(f) && i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
-			i++
-		}
-		i++
-	}
-	return result
-}
-
-// applyInterspersedFlags applies any flags in ctx.Args() that were not parsed
-// because they appeared after a positional argument.  Returns cli.Exit("", 0)
-// when -h/--help is detected so the caller's Before hook can return early.
-// Unknown flags and missing values are returned as errors, consistent with
-// how urfave/cli handles flags that appear before positional arguments.
-func applyInterspersedFlags(ctx *cli.Context) error {
-	args := ctx.Args().Slice()
-	i := 0
-	for i < len(args) {
-		arg := args[i]
-		if arg == "--" {
-			break
-		}
-		if !strings.HasPrefix(arg, "-") {
-			i++
-			continue
-		}
-		name := strings.TrimLeft(arg, "-")
-		value := ""
-		hasValue := false
-		if idx := strings.IndexByte(name, '='); idx >= 0 {
-			value = name[idx+1:]
-			name = name[:idx]
-			hasValue = true
-		}
-		if name == "h" || name == "help" {
-			if lineage := ctx.Lineage(); len(lineage) > 1 {
-				_ = cli.ShowCommandHelp(lineage[1], ctx.Command.Name)
-			}
-			return cli.Exit("", 0)
-		}
-		f := findFlag(ctx.Command.Flags, name)
-		if f == nil {
-			return fmt.Errorf("flag provided but not defined: %s", arg)
-		}
-		canonicalName := f.Names()[0]
-		if isBoolFlag(f) {
-			if !hasValue {
-				value = "true"
-			}
-			if err := ctx.Set(canonicalName, value); err != nil {
-				return err
-			}
-		} else {
-			if !hasValue {
-				if i+1 >= len(args) || strings.HasPrefix(args[i+1], "-") {
-					return fmt.Errorf("flag needs an argument: %s", arg)
-				}
-				i++
-				value = args[i]
-			}
-			if err := ctx.Set(canonicalName, value); err != nil {
-				return err
-			}
-		}
-		i++
-	}
-	return nil
-}
-
-func TableDiffCLI(ctx *cli.Context) error {
-	args := filteredPositionalArgs(ctx)
+func TableDiffCLI(cmd *cobra.Command, args []string) error {
 	clusterName, positional, err := resolveClusterArg("table-diff", "<table>", "[cluster] <table>", 1, args)
 	if err != nil {
 		return err
 	}
 
-	blockSizeStr := ctx.String("block-size")
+	blockSizeStr, _ := cmd.Flags().GetString("block-size")
 	blockSizeInt, err := strconv.ParseInt(blockSizeStr, 10, 64)
 	if err != nil {
 		return fmt.Errorf("invalid block size '%s': %w", blockSizeStr, err)
 	}
 
+	dbname, _ := cmd.Flags().GetString("dbname")
+	concurrencyFactor, _ := cmd.Flags().GetFloat64("concurrency-factor")
+	compareUnitSize, _ := cmd.Flags().GetInt("compare-unit-size")
+	output, _ := cmd.Flags().GetString("output")
+	nodes, _ := cmd.Flags().GetString("nodes")
+	ensurePgcrypto, _ := cmd.Flags().GetBool("ensure-pgcrypto")
+	scheduleEnabled, _ := cmd.Flags().GetBool("schedule")
+	scheduleEvery, _ := cmd.Flags().GetString("every")
+	tableFilter, _ := cmd.Flags().GetString("table-filter")
+	againstOrigin, _ := cmd.Flags().GetString("against-origin")
+	until, _ := cmd.Flags().GetString("until")
+	quietMode, _ := cmd.Flags().GetBool("quiet")
+	overrideBlockSize, _ := cmd.Flags().GetBool("override-block-size")
+
 	task := diff.NewTableDiffTask()
 	task.ClusterName = clusterName
 	task.QualifiedTableName = positional[0]
-	task.DBName = ctx.String("dbname")
+	task.DBName = dbname
 	task.BlockSize = int(blockSizeInt)
-	task.ConcurrencyFactor = ctx.Float64("concurrency-factor")
-	task.CompareUnitSize = ctx.Int("compare-unit-size")
-	task.Output = strings.ToLower(ctx.String("output"))
-	task.Nodes = ctx.String("nodes")
-	task.EnsurePgcrypto = ctx.Bool("ensure-pgcrypto")
-	scheduleEnabled := ctx.Bool("schedule")
-	scheduleEvery := ctx.String("every")
-	task.TableFilter = ctx.String("table-filter")
-	task.AgainstOrigin = ctx.String("against-origin")
-	task.Until = ctx.String("until")
-	task.QuietMode = ctx.Bool("quiet")
-	task.OverrideBlockSize = ctx.Bool("override-block-size")
+	task.ConcurrencyFactor = concurrencyFactor
+	task.CompareUnitSize = compareUnitSize
+	task.Output = strings.ToLower(output)
+	task.Nodes = nodes
+	task.EnsurePgcrypto = ensurePgcrypto
+	task.TableFilter = tableFilter
+	task.AgainstOrigin = againstOrigin
+	task.Until = until
+	task.QuietMode = quietMode
+	task.OverrideBlockSize = overrideBlockSize
 	task.Ctx = context.Background()
 
 	if err := task.Validate(); err != nil {
@@ -1104,17 +548,21 @@ func TableDiffCLI(ctx *cli.Context) error {
 	return scheduler.RunSingleJob(runCtx, job)
 }
 
-func MtreeInitCLI(ctx *cli.Context) error {
-	args := filteredPositionalArgs(ctx)
+func MtreeInitCLI(cmd *cobra.Command, args []string) error {
 	clusterName, _, err := resolveClusterArg("mtree init", "", "[cluster]", 0, args)
 	if err != nil {
 		return err
 	}
+
+	dbname, _ := cmd.Flags().GetString("dbname")
+	nodes, _ := cmd.Flags().GetString("nodes")
+	quietMode, _ := cmd.Flags().GetBool("quiet")
+
 	task := mtree.NewMerkleTreeTask()
 	task.ClusterName = clusterName
-	task.DBName = ctx.String("dbname")
-	task.Nodes = ctx.String("nodes")
-	task.QuietMode = ctx.Bool("quiet")
+	task.DBName = dbname
+	task.Nodes = nodes
+	task.QuietMode = quietMode
 	task.Mode = "init"
 	task.Ctx = context.Background()
 
@@ -1125,17 +573,21 @@ func MtreeInitCLI(ctx *cli.Context) error {
 	return nil
 }
 
-func MtreeListenCLI(ctx *cli.Context) error {
-	args := filteredPositionalArgs(ctx)
+func MtreeListenCLI(cmd *cobra.Command, args []string) error {
 	clusterName, _, err := resolveClusterArg("mtree listen", "", "[cluster]", 0, args)
 	if err != nil {
 		return err
 	}
+
+	dbname, _ := cmd.Flags().GetString("dbname")
+	nodes, _ := cmd.Flags().GetString("nodes")
+	quietMode, _ := cmd.Flags().GetBool("quiet")
+
 	task := mtree.NewMerkleTreeTask()
 	task.ClusterName = clusterName
-	task.DBName = ctx.String("dbname")
-	task.Nodes = ctx.String("nodes")
-	task.QuietMode = ctx.Bool("quiet")
+	task.DBName = dbname
+	task.Nodes = nodes
+	task.QuietMode = quietMode
 	task.Mode = "listen"
 	task.Ctx = context.Background()
 
@@ -1173,17 +625,21 @@ func MtreeListenCLI(ctx *cli.Context) error {
 	return nil
 }
 
-func MtreeTeardownCLI(ctx *cli.Context) error {
-	args := filteredPositionalArgs(ctx)
+func MtreeTeardownCLI(cmd *cobra.Command, args []string) error {
 	clusterName, _, err := resolveClusterArg("mtree teardown", "", "[cluster]", 0, args)
 	if err != nil {
 		return err
 	}
+
+	dbname, _ := cmd.Flags().GetString("dbname")
+	nodes, _ := cmd.Flags().GetString("nodes")
+	quietMode, _ := cmd.Flags().GetBool("quiet")
+
 	task := mtree.NewMerkleTreeTask()
 	task.ClusterName = clusterName
-	task.DBName = ctx.String("dbname")
-	task.Nodes = ctx.String("nodes")
-	task.QuietMode = ctx.Bool("quiet")
+	task.DBName = dbname
+	task.Nodes = nodes
+	task.QuietMode = quietMode
 	task.Mode = "teardown"
 	task.Ctx = context.Background()
 
@@ -1194,18 +650,22 @@ func MtreeTeardownCLI(ctx *cli.Context) error {
 	return nil
 }
 
-func MtreeTeardownTableCLI(ctx *cli.Context) error {
-	args := filteredPositionalArgs(ctx)
+func MtreeTeardownTableCLI(cmd *cobra.Command, args []string) error {
 	clusterName, positional, err := resolveClusterArg("mtree teardown-table", "<table>", "[cluster] <table>", 1, args)
 	if err != nil {
 		return err
 	}
+
+	dbname, _ := cmd.Flags().GetString("dbname")
+	nodes, _ := cmd.Flags().GetString("nodes")
+	quietMode, _ := cmd.Flags().GetBool("quiet")
+
 	task := mtree.NewMerkleTreeTask()
 	task.ClusterName = clusterName
 	task.QualifiedTableName = positional[0]
-	task.DBName = ctx.String("dbname")
-	task.Nodes = ctx.String("nodes")
-	task.QuietMode = ctx.Bool("quiet")
+	task.DBName = dbname
+	task.Nodes = nodes
+	task.QuietMode = quietMode
 	task.Mode = "teardown-table"
 	task.Ctx = context.Background()
 
@@ -1216,31 +676,41 @@ func MtreeTeardownTableCLI(ctx *cli.Context) error {
 	return nil
 }
 
-func MtreeBuildCLI(ctx *cli.Context) error {
-	args := filteredPositionalArgs(ctx)
+func MtreeBuildCLI(cmd *cobra.Command, args []string) error {
 	clusterName, positional, err := resolveClusterArg("mtree build", "<table>", "[cluster] <table>", 1, args)
 	if err != nil {
 		return err
 	}
-	blockSizeStr := ctx.String("block-size")
+
+	blockSizeStr, _ := cmd.Flags().GetString("block-size")
 	blockSizeInt, err := strconv.ParseInt(blockSizeStr, 10, 64)
 	if err != nil {
 		return fmt.Errorf("invalid block size '%s': %w", blockSizeStr, err)
 	}
 
+	dbname, _ := cmd.Flags().GetString("dbname")
+	nodes, _ := cmd.Flags().GetString("nodes")
+	quietMode, _ := cmd.Flags().GetBool("quiet")
+	maxCpuRatio, _ := cmd.Flags().GetFloat64("max-cpu-ratio")
+	overrideBlockSize, _ := cmd.Flags().GetBool("override-block-size")
+	analyse, _ := cmd.Flags().GetBool("analyse")
+	recreateObjects, _ := cmd.Flags().GetBool("recreate-objects")
+	writeRanges, _ := cmd.Flags().GetBool("write-ranges")
+	rangesFile, _ := cmd.Flags().GetString("ranges-file")
+
 	task := mtree.NewMerkleTreeTask()
 	task.ClusterName = clusterName
 	task.QualifiedTableName = positional[0]
-	task.DBName = ctx.String("dbname")
-	task.Nodes = ctx.String("nodes")
-	task.QuietMode = ctx.Bool("quiet")
+	task.DBName = dbname
+	task.Nodes = nodes
+	task.QuietMode = quietMode
 	task.BlockSize = int(blockSizeInt)
-	task.MaxCpuRatio = ctx.Float64("max-cpu-ratio")
-	task.OverrideBlockSize = ctx.Bool("override-block-size")
-	task.Analyse = ctx.Bool("analyse")
-	task.RecreateObjects = ctx.Bool("recreate-objects")
-	task.WriteRanges = ctx.Bool("write-ranges")
-	task.RangesFile = ctx.String("ranges-file")
+	task.MaxCpuRatio = maxCpuRatio
+	task.OverrideBlockSize = overrideBlockSize
+	task.Analyse = analyse
+	task.RecreateObjects = recreateObjects
+	task.WriteRanges = writeRanges
+	task.RangesFile = rangesFile
 	task.Mode = "build"
 	task.Ctx = context.Background()
 
@@ -1259,21 +729,28 @@ func MtreeBuildCLI(ctx *cli.Context) error {
 	return nil
 }
 
-func MtreeUpdateCLI(ctx *cli.Context) error {
-	args := filteredPositionalArgs(ctx)
+func MtreeUpdateCLI(cmd *cobra.Command, args []string) error {
 	clusterName, positional, err := resolveClusterArg("mtree update", "<table>", "[cluster] <table>", 1, args)
 	if err != nil {
 		return err
 	}
+
+	dbname, _ := cmd.Flags().GetString("dbname")
+	nodes, _ := cmd.Flags().GetString("nodes")
+	quietMode, _ := cmd.Flags().GetBool("quiet")
+	maxCpuRatio, _ := cmd.Flags().GetFloat64("max-cpu-ratio")
+	rebalance, _ := cmd.Flags().GetBool("rebalance")
+	skipCDC, _ := cmd.Flags().GetBool("skip-cdc")
+
 	task := mtree.NewMerkleTreeTask()
 	task.ClusterName = clusterName
 	task.QualifiedTableName = positional[0]
-	task.DBName = ctx.String("dbname")
-	task.Nodes = ctx.String("nodes")
-	task.QuietMode = ctx.Bool("quiet")
-	task.MaxCpuRatio = ctx.Float64("max-cpu-ratio")
-	task.Rebalance = ctx.Bool("rebalance")
-	task.NoCDC = ctx.Bool("skip-cdc")
+	task.DBName = dbname
+	task.Nodes = nodes
+	task.QuietMode = quietMode
+	task.MaxCpuRatio = maxCpuRatio
+	task.Rebalance = rebalance
+	task.NoCDC = skipCDC
 	task.Mode = "update"
 	task.Ctx = context.Background()
 
@@ -1291,21 +768,28 @@ func MtreeUpdateCLI(ctx *cli.Context) error {
 	return nil
 }
 
-func MtreeDiffCLI(ctx *cli.Context) error {
-	args := filteredPositionalArgs(ctx)
+func MtreeDiffCLI(cmd *cobra.Command, args []string) error {
 	clusterName, positional, err := resolveClusterArg("mtree diff", "<table>", "[cluster] <table>", 1, args)
 	if err != nil {
 		return err
 	}
+
+	dbname, _ := cmd.Flags().GetString("dbname")
+	nodes, _ := cmd.Flags().GetString("nodes")
+	quietMode, _ := cmd.Flags().GetBool("quiet")
+	maxCpuRatio, _ := cmd.Flags().GetFloat64("max-cpu-ratio")
+	output, _ := cmd.Flags().GetString("output")
+	skipCDC, _ := cmd.Flags().GetBool("skip-cdc")
+
 	task := mtree.NewMerkleTreeTask()
 	task.ClusterName = clusterName
 	task.QualifiedTableName = positional[0]
-	task.DBName = ctx.String("dbname")
-	task.Nodes = ctx.String("nodes")
-	task.QuietMode = ctx.Bool("quiet")
-	task.MaxCpuRatio = ctx.Float64("max-cpu-ratio")
-	task.Output = ctx.String("output")
-	task.NoCDC = ctx.Bool("skip-cdc")
+	task.DBName = dbname
+	task.Nodes = nodes
+	task.QuietMode = quietMode
+	task.MaxCpuRatio = maxCpuRatio
+	task.Output = output
+	task.NoCDC = skipCDC
 	task.Mode = "diff"
 	task.Ctx = context.Background()
 
@@ -1324,20 +808,25 @@ func MtreeDiffCLI(ctx *cli.Context) error {
 	return nil
 }
 
-func TableRerunCLI(ctx *cli.Context) error {
-	args := filteredPositionalArgs(ctx)
+func TableRerunCLI(cmd *cobra.Command, args []string) error {
 	clusterName, _, err := resolveClusterArg("table-rerun", "", "[cluster]", 0, args)
 	if err != nil {
 		return err
 	}
+
+	diffFile, _ := cmd.Flags().GetString("diff-file")
+	dbname, _ := cmd.Flags().GetString("dbname")
+	nodes, _ := cmd.Flags().GetString("nodes")
+	quietMode, _ := cmd.Flags().GetBool("quiet")
+
 	task := diff.NewTableDiffTask()
 	task.TaskID = uuid.NewString()
 	task.Mode = "rerun"
 	task.ClusterName = clusterName
-	task.DiffFilePath = ctx.String("diff-file")
-	task.DBName = ctx.String("dbname")
-	task.Nodes = ctx.String("nodes")
-	task.QuietMode = ctx.Bool("quiet")
+	task.DiffFilePath = diffFile
+	task.DBName = dbname
+	task.Nodes = nodes
+	task.QuietMode = quietMode
 	task.Ctx = context.Background()
 
 	if err := task.ExecuteTask(); err != nil {
@@ -1347,32 +836,48 @@ func TableRerunCLI(ctx *cli.Context) error {
 	return nil
 }
 
-func TableRepairCLI(ctx *cli.Context) error {
-	args := filteredPositionalArgs(ctx)
+func TableRepairCLI(cmd *cobra.Command, args []string) error {
 	clusterName, positional, err := resolveClusterArg("table-repair", "<table>", "[cluster] <table>", 1, args)
 	if err != nil {
 		return err
 	}
+
+	diffFile, _ := cmd.Flags().GetString("diff-file")
+	repairPlan, _ := cmd.Flags().GetString("repair-plan")
+	dbname, _ := cmd.Flags().GetString("dbname")
+	nodes, _ := cmd.Flags().GetString("nodes")
+	sourceOfTruth, _ := cmd.Flags().GetString("source-of-truth")
+	quietMode, _ := cmd.Flags().GetBool("quiet")
+	dryRun, _ := cmd.Flags().GetBool("dry-run")
+	insertOnly, _ := cmd.Flags().GetBool("insert-only")
+	upsertOnly, _ := cmd.Flags().GetBool("upsert-only")
+	fireTriggers, _ := cmd.Flags().GetBool("fire-triggers")
+	fixNulls, _ := cmd.Flags().GetBool("fix-nulls")
+	bidirectional, _ := cmd.Flags().GetBool("bidirectional")
+	generateReport, _ := cmd.Flags().GetBool("generate-report")
+	recoveryMode, _ := cmd.Flags().GetBool("recovery-mode")
+	preserveOrigin, _ := cmd.Flags().GetBool("preserve-origin")
+
 	task := repair.NewTableRepairTask()
 	task.ClusterName = clusterName
 	task.QualifiedTableName = positional[0]
-	task.DiffFilePath = ctx.String("diff-file")
-	task.RepairPlanPath = ctx.String("repair-plan")
-	task.DBName = ctx.String("dbname")
-	task.Nodes = ctx.String("nodes")
-	task.SourceOfTruth = ctx.String("source-of-truth")
-	task.QuietMode = ctx.Bool("quiet")
+	task.DiffFilePath = diffFile
+	task.RepairPlanPath = repairPlan
+	task.DBName = dbname
+	task.Nodes = nodes
+	task.SourceOfTruth = sourceOfTruth
+	task.QuietMode = quietMode
 	task.Ctx = context.Background()
 
-	task.DryRun = ctx.Bool("dry-run")
-	task.InsertOnly = ctx.Bool("insert-only")
-	task.UpsertOnly = ctx.Bool("upsert-only")
-	task.FireTriggers = ctx.Bool("fire-triggers")
-	task.FixNulls = ctx.Bool("fix-nulls")
-	task.Bidirectional = ctx.Bool("bidirectional")
-	task.GenerateReport = ctx.Bool("generate-report")
-	task.RecoveryMode = ctx.Bool("recovery-mode")
-	task.PreserveOrigin = ctx.Bool("preserve-origin")
+	task.DryRun = dryRun
+	task.InsertOnly = insertOnly
+	task.UpsertOnly = upsertOnly
+	task.FireTriggers = fireTriggers
+	task.FixNulls = fixNulls
+	task.Bidirectional = bidirectional
+	task.GenerateReport = generateReport
+	task.RecoveryMode = recoveryMode
+	task.PreserveOrigin = preserveOrigin
 
 	if err := task.ValidateAndPrepare(); err != nil {
 		return fmt.Errorf("validation failed: %w", err)
@@ -1385,17 +890,21 @@ func TableRepairCLI(ctx *cli.Context) error {
 	return nil
 }
 
-func SpockDiffCLI(ctx *cli.Context) error {
-	args := filteredPositionalArgs(ctx)
+func SpockDiffCLI(cmd *cobra.Command, args []string) error {
 	clusterName, _, err := resolveClusterArg("spock-diff", "", "[cluster]", 0, args)
 	if err != nil {
 		return err
 	}
+
+	dbname, _ := cmd.Flags().GetString("dbname")
+	nodes, _ := cmd.Flags().GetString("nodes")
+	output, _ := cmd.Flags().GetString("output")
+
 	task := diff.NewSpockDiffTask()
 	task.ClusterName = clusterName
-	task.DBName = ctx.String("dbname")
-	task.Nodes = ctx.String("nodes")
-	task.Output = ctx.String("output")
+	task.DBName = dbname
+	task.Nodes = nodes
+	task.Output = output
 	task.Ctx = context.Background()
 
 	if err := task.Validate(); err != nil {
@@ -1412,29 +921,40 @@ func SpockDiffCLI(ctx *cli.Context) error {
 	return nil
 }
 
-func SchemaDiffCLI(ctx *cli.Context) error {
-	args := filteredPositionalArgs(ctx)
+func SchemaDiffCLI(cmd *cobra.Command, args []string) error {
 	clusterName, positional, err := resolveClusterArg("schema-diff", "<schema>", "[cluster] <schema>", 1, args)
 	if err != nil {
 		return err
 	}
-	blockSizeStr := ctx.String("block-size")
+
+	blockSizeStr, _ := cmd.Flags().GetString("block-size")
 	blockSizeInt, err := strconv.ParseInt(blockSizeStr, 10, 64)
 	if err != nil {
 		return fmt.Errorf("invalid block size '%s': %w", blockSizeStr, err)
 	}
 
+	dbname, _ := cmd.Flags().GetString("dbname")
+	nodes, _ := cmd.Flags().GetString("nodes")
+	skipTables, _ := cmd.Flags().GetString("skip-tables")
+	scheduleEnabled, _ := cmd.Flags().GetBool("schedule")
+	scheduleEvery, _ := cmd.Flags().GetString("every")
+	skipFile, _ := cmd.Flags().GetString("skip-file")
+	quiet, _ := cmd.Flags().GetBool("quiet")
+	ddlOnly, _ := cmd.Flags().GetBool("ddl-only")
+	concurrencyFactor, _ := cmd.Flags().GetFloat64("concurrency-factor")
+	compareUnitSize, _ := cmd.Flags().GetInt("compare-unit-size")
+	output, _ := cmd.Flags().GetString("output")
+	overrideBlockSize, _ := cmd.Flags().GetBool("override-block-size")
+
 	task := diff.NewSchemaDiffTask()
 	task.ClusterName = clusterName
 	task.SchemaName = positional[0]
-	task.DBName = ctx.String("dbname")
-	task.Nodes = ctx.String("nodes")
-	task.SkipTables = ctx.String("skip-tables")
-	scheduleEnabled := ctx.Bool("schedule")
-	scheduleEvery := ctx.String("every")
-	task.SkipFile = ctx.String("skip-file")
-	task.Quiet = ctx.Bool("quiet")
-	task.DDLOnly = ctx.Bool("ddl-only")
+	task.DBName = dbname
+	task.Nodes = nodes
+	task.SkipTables = skipTables
+	task.SkipFile = skipFile
+	task.Quiet = quiet
+	task.DDLOnly = ddlOnly
 	task.Ctx = context.Background()
 
 	if scheduleEnabled && task.DDLOnly {
@@ -1442,10 +962,10 @@ func SchemaDiffCLI(ctx *cli.Context) error {
 	}
 
 	task.BlockSize = int(blockSizeInt)
-	task.ConcurrencyFactor = ctx.Float64("concurrency-factor")
-	task.CompareUnitSize = ctx.Int("compare-unit-size")
-	task.Output = ctx.String("output")
-	task.OverrideBlockSize = ctx.Bool("override-block-size")
+	task.ConcurrencyFactor = concurrencyFactor
+	task.CompareUnitSize = compareUnitSize
+	task.Output = output
+	task.OverrideBlockSize = overrideBlockSize
 
 	if err := task.Validate(); err != nil {
 		return fmt.Errorf("validation failed: %w", err)
@@ -1491,36 +1011,45 @@ func SchemaDiffCLI(ctx *cli.Context) error {
 	return scheduler.RunSingleJob(runCtx, job)
 }
 
-func RepsetDiffCLI(ctx *cli.Context) error {
-	args := filteredPositionalArgs(ctx)
+func RepsetDiffCLI(cmd *cobra.Command, args []string) error {
 	clusterName, positional, err := resolveClusterArg("repset-diff", "<repset>", "[cluster] <repset>", 1, args)
 	if err != nil {
 		return err
 	}
-	blockSizeStr := ctx.String("block-size")
+
+	blockSizeStr, _ := cmd.Flags().GetString("block-size")
 	blockSizeInt, err := strconv.ParseInt(blockSizeStr, 10, 64)
 	if err != nil {
 		return fmt.Errorf("invalid block size '%s': %w", blockSizeStr, err)
 	}
 
-	scheduleEnabled := ctx.Bool("schedule")
-	scheduleEvery := ctx.String("every")
+	scheduleEnabled, _ := cmd.Flags().GetBool("schedule")
+	scheduleEvery, _ := cmd.Flags().GetString("every")
+	dbname, _ := cmd.Flags().GetString("dbname")
+	nodes, _ := cmd.Flags().GetString("nodes")
+	skipTables, _ := cmd.Flags().GetString("skip-tables")
+	skipFile, _ := cmd.Flags().GetString("skip-file")
+	quiet, _ := cmd.Flags().GetBool("quiet")
+	concurrencyFactor, _ := cmd.Flags().GetFloat64("concurrency-factor")
+	compareUnitSize, _ := cmd.Flags().GetInt("compare-unit-size")
+	output, _ := cmd.Flags().GetString("output")
+	overrideBlockSize, _ := cmd.Flags().GetBool("override-block-size")
 
 	task := diff.NewRepsetDiffTask()
 	task.ClusterName = clusterName
 	task.RepsetName = positional[0]
-	task.DBName = ctx.String("dbname")
-	task.Nodes = ctx.String("nodes")
-	task.SkipTables = ctx.String("skip-tables")
-	task.SkipFile = ctx.String("skip-file")
-	task.Quiet = ctx.Bool("quiet")
+	task.DBName = dbname
+	task.Nodes = nodes
+	task.SkipTables = skipTables
+	task.SkipFile = skipFile
+	task.Quiet = quiet
 	task.Ctx = context.Background()
 
 	task.BlockSize = int(blockSizeInt)
-	task.ConcurrencyFactor = ctx.Float64("concurrency-factor")
-	task.CompareUnitSize = ctx.Int("compare-unit-size")
-	task.Output = ctx.String("output")
-	task.OverrideBlockSize = ctx.Bool("override-block-size")
+	task.ConcurrencyFactor = concurrencyFactor
+	task.CompareUnitSize = compareUnitSize
+	task.Output = output
+	task.OverrideBlockSize = overrideBlockSize
 
 	if err := task.Validate(); err != nil {
 		return fmt.Errorf("validation failed: %w", err)
@@ -1566,12 +1095,13 @@ func RepsetDiffCLI(ctx *cli.Context) error {
 	return scheduler.RunSingleJob(runCtx, job)
 }
 
-func StartSchedulerCLI(ctx *cli.Context) error {
+func StartSchedulerCLI(cmd *cobra.Command, _ []string) error {
 	if config.Cfg == nil {
 		return fmt.Errorf("configuration not loaded; run inside a directory with ace.yaml or set ACE_CONFIG")
 	}
 
-	component := strings.ToLower(strings.TrimSpace(ctx.String("component")))
+	component, _ := cmd.Flags().GetString("component")
+	component = strings.ToLower(strings.TrimSpace(component))
 	runScheduler := false
 	runAPI := false
 	switch component {
@@ -1657,7 +1187,7 @@ func StartSchedulerCLI(ctx *cli.Context) error {
 	return nil
 }
 
-func StartAPIServerCLI(ctx *cli.Context) error {
+func StartAPIServerCLI(_ *cobra.Command, _ []string) error {
 	if config.Cfg == nil {
 		return fmt.Errorf("configuration not loaded; run inside a directory with ace.yaml or set ACE_CONFIG")
 	}
