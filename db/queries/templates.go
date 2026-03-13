@@ -88,6 +88,7 @@ type Templates struct {
 	GetBlockCountSimple              *template.Template
 	GetBlockSizeFromMetadata         *template.Template
 	GetMaxNodeLevel                  *template.Template
+	CompareBlocksSQL                 *template.Template
 
 	DropXORFunction                  *template.Template
 	DropMetadataTable                *template.Template
