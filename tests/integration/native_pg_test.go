@@ -221,6 +221,17 @@ func TestNativePG(t *testing.T) {
 			"load CSV into customers")
 	}
 
+	// Create and load customers_1M table (needed by merkle tree CDC and split tests).
+	for _, pool := range env.pools() {
+		require.NoError(t, createTestTable(ctx, pool, testSchema, "customers_1M"))
+	}
+	csv1MPath, err := filepath.Abs(defaultCsvFilePath + "customers_1M.csv")
+	require.NoError(t, err)
+	for _, pool := range env.pools() {
+		require.NoError(t, loadDataFromCSV(ctx, pool, testSchema, "customers_1M", csv1MPath),
+			"load CSV into customers_1M")
+	}
+
 	// ── Native-specific tests ─────────────────────────────────────────────
 
 	t.Run("CheckSpockInstalled_ReturnsFalse", func(t *testing.T) {
@@ -318,5 +329,29 @@ func TestNativePG(t *testing.T) {
 	})
 	t.Run("TableRepair_FixNulls_BidirectionalUpdate", func(t *testing.T) {
 		testTableRepair_FixNulls_BidirectionalUpdate(t, env)
+	})
+
+	// ── Merkle tree tests ────────────────────────────────────────────────
+
+	t.Run("MerkleTreeSimplePK", func(t *testing.T) {
+		runMerkleTreeTests(t, env, "customers")
+	})
+
+	t.Run("MerkleTreeCompositePK", func(t *testing.T) {
+		for _, pool := range env.pools() {
+			err := alterTableToCompositeKey(ctx, pool, env.Schema, "customers")
+			require.NoError(t, err)
+		}
+		t.Cleanup(func() {
+			for _, pool := range env.pools() {
+				err := revertTableToSimpleKey(ctx, pool, env.Schema, "customers")
+				require.NoError(t, err)
+			}
+		})
+		runMerkleTreeTests(t, env, "customers")
+	})
+
+	t.Run("MerkleTreeNumericScaleInvariance", func(t *testing.T) {
+		testMerkleTreeNumericScaleInvariance(t, env)
 	})
 }

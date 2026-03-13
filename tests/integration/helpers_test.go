@@ -24,6 +24,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/pgedge/ace/internal/consistency/mtree"
 	"github.com/pgedge/ace/internal/consistency/repair"
 	"github.com/stretchr/testify/require"
 )
@@ -284,6 +285,10 @@ func loadDataFromCSV(
 
 func newTestTableRepairTask(sourceOfTruthNode, qualifiedTableName, diffFilePath string) *repair.TableRepairTask {
 	return newSpockEnv().newTableRepairTask(sourceOfTruthNode, qualifiedTableName, diffFilePath)
+}
+
+func newTestMerkleTreeTask(t *testing.T, qualifiedTableName string, nodes []string) *mtree.MerkleTreeTask {
+	return newSpockEnv().newMerkleTreeTask(t, qualifiedTableName, nodes)
 }
 
 func repairTable(t *testing.T, qualifiedTableName, sourceOfTruthNode string) {

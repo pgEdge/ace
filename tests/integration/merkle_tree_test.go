@@ -27,7 +27,6 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/pgedge/ace/internal/consistency/mtree"
 	"github.com/pgedge/ace/internal/infra/cdc"
 	"github.com/pgedge/ace/pkg/config"
 	"github.com/pgedge/ace/pkg/types"
@@ -35,89 +34,80 @@ import (
 )
 
 func TestMerkleTreeSimplePK(t *testing.T) {
+	env := newSpockEnv()
 	tableName := "customers"
-	runMerkleTreeTests(t, tableName)
+	runMerkleTreeTests(t, env, tableName)
 }
 
 func TestMerkleTreeCompositePK(t *testing.T) {
+	env := newSpockEnv()
 	tableName := "customers"
 	ctx := context.Background()
-	for _, pool := range []*pgxpool.Pool{pgCluster.Node1Pool, pgCluster.Node2Pool} {
+	for _, pool := range []*pgxpool.Pool{env.N1Pool, env.N2Pool} {
 		err := alterTableToCompositeKey(ctx, pool, testSchema, tableName)
 		require.NoError(t, err)
 	}
 	t.Cleanup(func() {
-		for _, pool := range []*pgxpool.Pool{pgCluster.Node1Pool, pgCluster.Node2Pool} {
+		for _, pool := range []*pgxpool.Pool{env.N1Pool, env.N2Pool} {
 			err := revertTableToSimpleKey(ctx, pool, testSchema, tableName)
 			require.NoError(t, err)
 		}
 	})
-	runMerkleTreeTests(t, tableName)
+	runMerkleTreeTests(t, env, tableName)
 }
 
-func runMerkleTreeTests(t *testing.T, tableName string) {
+func runMerkleTreeTests(t *testing.T, env *testEnv, tableName string) {
 	if tableName == "customers" {
-		resetSharedTable(t, "customers")
+		env.resetSharedTable(t, "customers")
 	}
 	t.Run("Init", func(t *testing.T) {
-		testMerkleTreeInit(t, tableName)
+		testMerkleTreeInit(t, env, tableName)
 	})
 	t.Run("Build", func(t *testing.T) {
-		testMerkleTreeBuild(t, tableName)
+		testMerkleTreeBuild(t, env, tableName)
 	})
 	if tableName == "customers" {
 		t.Run("Diff_DataOnlyOnNode1", func(t *testing.T) {
-			testMerkleTreeDiffDataOnlyOnNode1(t, tableName)
+			testMerkleTreeDiffDataOnlyOnNode1(t, env, tableName)
 		})
 		t.Run("Diff_ModifiedRows", func(t *testing.T) {
-			testMerkleTreeDiffModifiedRows(t, tableName)
+			testMerkleTreeDiffModifiedRows(t, env, tableName)
 		})
 		t.Run("Diff_BoundaryModifications", func(t *testing.T) {
-			testMerkleTreeDiffBoundaryModifications(t, tableName)
+			testMerkleTreeDiffBoundaryModifications(t, env, tableName)
 		})
 		t.Run("MergeInitialRanges", func(t *testing.T) {
-			testMerkleTreeMergeInitialRanges(t, tableName)
+			testMerkleTreeMergeInitialRanges(t, env, tableName)
 		})
 		t.Run("MergeMiddleRanges", func(t *testing.T) {
-			testMerkleTreeMergeMiddleRanges(t, tableName)
+			testMerkleTreeMergeMiddleRanges(t, env, tableName)
 		})
 		t.Run("MergeLastRanges", func(t *testing.T) {
-			testMerkleTreeMergeLastRanges(t, tableName)
+			testMerkleTreeMergeLastRanges(t, env, tableName)
 		})
 		t.Run("SplitInitialRanges", func(t *testing.T) {
-			testMerkleTreeSplitInitialRanges(t, tableName)
+			testMerkleTreeSplitInitialRanges(t, env, tableName)
 		})
 		t.Run("SplitMiddleRanges", func(t *testing.T) {
-			testMerkleTreeSplitMiddleRanges(t, tableName)
+			testMerkleTreeSplitMiddleRanges(t, env, tableName)
 		})
 		t.Run("SplitLastRanges", func(t *testing.T) {
-			testMerkleTreeSplitLastRanges(t, tableName)
+			testMerkleTreeSplitLastRanges(t, env, tableName)
 		})
 		t.Run("ContinuousCDC", func(t *testing.T) {
-			testMerkleTreeContinuousCDC(t, tableName)
+			testMerkleTreeContinuousCDC(t, env, tableName)
 		})
 	}
 	t.Run("Teardown", func(t *testing.T) {
-		testMerkleTreeTeardown(t, tableName)
+		testMerkleTreeTeardown(t, env, tableName)
 	})
 }
 
-func newTestMerkleTreeTask(t *testing.T, qualifiedTableName string, nodes []string) *mtree.MerkleTreeTask {
-	t.Helper()
-	task := mtree.NewMerkleTreeTask()
-	task.ClusterName = "test_cluster"
-	task.DBName = dbName
-	task.QualifiedTableName = qualifiedTableName
-	task.Nodes = strings.Join(nodes, ",")
-	task.BlockSize = 1000
-	return task
-}
-
-func testMerkleTreeInit(t *testing.T, tableName string) {
+func testMerkleTreeInit(t *testing.T, env *testEnv, tableName string) {
 	ctx := context.Background()
 	qualifiedTableName := fmt.Sprintf("%s.%s", testSchema, tableName)
-	nodes := []string{serviceN1, serviceN2}
-	mtreeTask := newTestMerkleTreeTask(t, qualifiedTableName, nodes)
+	nodes := []string{env.ServiceN1, env.ServiceN2}
+	mtreeTask := env.newMerkleTreeTask(t, qualifiedTableName, nodes)
 
 	err := mtreeTask.MtreeInit()
 	require.NoError(t, err, "MtreeInit should succeed")
@@ -133,7 +123,7 @@ func testMerkleTreeInit(t *testing.T, tableName string) {
 	cdcPubName := config.Cfg.MTree.CDC.PublicationName
 	cdcSlotName := config.Cfg.MTree.CDC.SlotName
 
-	for _, pool := range []*pgxpool.Pool{pgCluster.Node1Pool, pgCluster.Node2Pool} {
+	for _, pool := range []*pgxpool.Pool{env.N1Pool, env.N2Pool} {
 		require.True(t, schemaExists(t, ctx, pool, aceSchema), "Schema '%s' should exist", aceSchema)
 		require.True(t, functionExists(t, ctx, pool, "bytea_xor", aceSchema), "Function 'bytea_xor' should exist in schema '%s'", aceSchema)
 		require.True(t, tableExists(t, ctx, pool, "ace_cdc_metadata", aceSchema), "Table 'ace_cdc_metadata' should exist in schema '%s'", aceSchema)
@@ -142,11 +132,11 @@ func testMerkleTreeInit(t *testing.T, tableName string) {
 	}
 }
 
-func testMerkleTreeBuild(t *testing.T, tableName string) {
+func testMerkleTreeBuild(t *testing.T, env *testEnv, tableName string) {
 	ctx := context.Background()
 	qualifiedTableName := fmt.Sprintf("%s.%s", testSchema, tableName)
-	nodes := []string{serviceN1}
-	mtreeTask := newTestMerkleTreeTask(t, qualifiedTableName, nodes)
+	nodes := []string{env.ServiceN1}
+	mtreeTask := env.newMerkleTreeTask(t, qualifiedTableName, nodes)
 
 	err := mtreeTask.RunChecks(false)
 	require.NoError(t, err, "RunChecks should succeed")
@@ -165,7 +155,7 @@ func testMerkleTreeBuild(t *testing.T, tableName string) {
 
 	aceSchema := config.Cfg.MTree.Schema
 	mtreeTableName := fmt.Sprintf("ace_mtree_%s_%s", testSchema, tableName)
-	pool := pgCluster.Node1Pool
+	pool := env.N1Pool
 
 	require.True(t, tableExists(t, ctx, pool, mtreeTableName, aceSchema), "Merkle tree table '%s' should exist", mtreeTableName)
 
@@ -186,11 +176,11 @@ func testMerkleTreeBuild(t *testing.T, tableName string) {
 	require.Greater(t, totalNodeCount, leafNodeCount, "Total nodes should be greater than leaf nodes")
 }
 
-func testMerkleTreeDiffDataOnlyOnNode1(t *testing.T, tableName string) {
+func testMerkleTreeDiffDataOnlyOnNode1(t *testing.T, env *testEnv, tableName string) {
 	ctx := context.Background()
 	qualifiedTableName := fmt.Sprintf("%s.%s", testSchema, tableName)
-	nodes := []string{serviceN1, serviceN2}
-	mtreeTask := newTestMerkleTreeTask(t, qualifiedTableName, nodes)
+	nodes := []string{env.ServiceN1, env.ServiceN2}
+	mtreeTask := env.newMerkleTreeTask(t, qualifiedTableName, nodes)
 
 	err := mtreeTask.RunChecks(false)
 	require.NoError(t, err, "RunChecks should succeed")
@@ -201,7 +191,7 @@ func testMerkleTreeDiffDataOnlyOnNode1(t *testing.T, tableName string) {
 		if err != nil {
 			t.Logf("Warning: MtreeTeardown failed during cleanup: %v", err)
 		}
-		repairTable(t, qualifiedTableName, serviceN2)
+		env.repairTable(t, qualifiedTableName, env.ServiceN2)
 		files, _ := filepath.Glob("*_diffs-*.json")
 		for _, f := range files {
 			os.Remove(f)
@@ -210,55 +200,51 @@ func testMerkleTreeDiffDataOnlyOnNode1(t *testing.T, tableName string) {
 	err = mtreeTask.BuildMtree()
 	require.NoError(t, err, "BuildMtree should succeed")
 
-	tx, err := pgCluster.Node1Pool.Begin(ctx)
+	tx, err := env.N1Pool.Begin(ctx)
 	require.NoError(t, err)
 	defer tx.Rollback(ctx)
 
-	_, err = tx.Exec(ctx, "SELECT spock.repair_mode(true)")
-	require.NoError(t, err)
-
-	if mtreeTask.SimplePrimaryKey {
-		updateSQL := fmt.Sprintf("UPDATE %s SET email = 'updated.on.n1@example.com' WHERE index = 1", qualifiedTableName)
-		_, err = tx.Exec(ctx, updateSQL)
-		require.NoError(t, err)
-	} else {
-		var customerID string
-		err := pgCluster.Node1Pool.QueryRow(ctx, fmt.Sprintf("SELECT customer_id FROM %s WHERE index = 1 LIMIT 1", qualifiedTableName)).Scan(&customerID)
-		require.NoError(t, err, "could not get customer_id for index 1")
-		updateSQL := fmt.Sprintf("UPDATE %s SET email = 'updated.on.n1@example.com' WHERE index = 1 AND customer_id = $1", qualifiedTableName)
-		_, err = tx.Exec(ctx, updateSQL, customerID)
-		require.NoError(t, err)
-	}
-
-	_, err = tx.Exec(ctx, "SELECT spock.repair_mode(false)")
-	require.NoError(t, err)
+	env.withRepairModeTx(t, ctx, tx, func() {
+		if mtreeTask.SimplePrimaryKey {
+			updateSQL := fmt.Sprintf("UPDATE %s SET email = 'updated.on.n1@example.com' WHERE index = 1", qualifiedTableName)
+			_, err = tx.Exec(ctx, updateSQL)
+			require.NoError(t, err)
+		} else {
+			var customerID string
+			err := env.N1Pool.QueryRow(ctx, fmt.Sprintf("SELECT customer_id FROM %s WHERE index = 1 LIMIT 1", qualifiedTableName)).Scan(&customerID)
+			require.NoError(t, err, "could not get customer_id for index 1")
+			updateSQL := fmt.Sprintf("UPDATE %s SET email = 'updated.on.n1@example.com' WHERE index = 1 AND customer_id = $1", qualifiedTableName)
+			_, err = tx.Exec(ctx, updateSQL, customerID)
+			require.NoError(t, err)
+		}
+	})
 	require.NoError(t, tx.Commit(ctx))
 
 	err = mtreeTask.DiffMtree()
 	require.NoError(t, err, "DiffMtree should succeed")
 
-	pairKey := serviceN1 + "/" + serviceN2
-	if strings.Compare(serviceN1, serviceN2) > 0 {
-		pairKey = serviceN2 + "/" + serviceN1
+	pairKey := env.ServiceN1 + "/" + env.ServiceN2
+	if strings.Compare(env.ServiceN1, env.ServiceN2) > 0 {
+		pairKey = env.ServiceN2 + "/" + env.ServiceN1
 	}
 
 	nodeDiffs, ok := mtreeTask.DiffResult.NodeDiffs[pairKey]
 	require.True(t, ok, "Expected diffs for pair %s, but none found. Result: %+v", pairKey, mtreeTask.DiffResult)
 
-	require.GreaterOrEqual(t, len(nodeDiffs.Rows[serviceN1]), 1, "Expected at least 1 modified row on %s, got %d", serviceN1, len(nodeDiffs.Rows[serviceN1]))
-	require.GreaterOrEqual(t, len(nodeDiffs.Rows[serviceN2]), 1, "Expected at least 1 original row on %s, got %d", serviceN2, len(nodeDiffs.Rows[serviceN2]))
+	require.GreaterOrEqual(t, len(nodeDiffs.Rows[env.ServiceN1]), 1, "Expected at least 1 modified row on %s, got %d", env.ServiceN1, len(nodeDiffs.Rows[env.ServiceN1]))
+	require.GreaterOrEqual(t, len(nodeDiffs.Rows[env.ServiceN2]), 1, "Expected at least 1 original row on %s, got %d", env.ServiceN2, len(nodeDiffs.Rows[env.ServiceN2]))
 
 	require.GreaterOrEqual(t, mtreeTask.DiffResult.Summary.DiffRowsCount[pairKey], 1, "Expected summary diff count to be at least 1")
 
 	// Find the row with index=1 in the diff (block-based diff may include other rows in the same block)
 	var diffRowN1, diffRowN2 types.OrderedMap
-	for _, row := range nodeDiffs.Rows[serviceN1] {
+	for _, row := range nodeDiffs.Rows[env.ServiceN1] {
 		if idx, ok := row.Get("index"); ok && idx.(int32) == 1 {
 			diffRowN1 = row
 			break
 		}
 	}
-	for _, row := range nodeDiffs.Rows[serviceN2] {
+	for _, row := range nodeDiffs.Rows[env.ServiceN2] {
 		if idx, ok := row.Get("index"); ok && idx.(int32) == 1 {
 			diffRowN2 = row
 			break
@@ -280,23 +266,23 @@ type compositeBoundaryKey struct {
 	CustomerID string
 }
 
-func testMerkleTreeDiffBoundaryModifications(t *testing.T, tableName string) {
+func testMerkleTreeDiffBoundaryModifications(t *testing.T, env *testEnv, tableName string) {
 	ctx := context.Background()
 	qualifiedTableName := fmt.Sprintf("%s.%s", testSchema, tableName)
-	nodes := []string{serviceN1, serviceN2}
-	mtreeTask := newTestMerkleTreeTask(t, qualifiedTableName, nodes)
+	nodes := []string{env.ServiceN1, env.ServiceN2}
+	mtreeTask := env.newMerkleTreeTask(t, qualifiedTableName, nodes)
 
 	err := mtreeTask.RunChecks(false)
 	require.NoError(t, err, "RunChecks should succeed")
 	err = mtreeTask.MtreeInit()
 	require.NoError(t, err, "MtreeInit should succeed")
 	t.Cleanup(func() {
-		_, _ = pgCluster.Node1Pool.Exec(ctx, fmt.Sprintf("UPDATE %s SET email = regexp_replace(email, '\\\\.(cdc_hw|cdc_fallback)$', '')", qualifiedTableName))
+		_, _ = env.N1Pool.Exec(ctx, fmt.Sprintf("UPDATE %s SET email = regexp_replace(email, '\\\\.(cdc_hw|cdc_fallback)$', '')", qualifiedTableName))
 		err := mtreeTask.MtreeTeardown()
 		if err != nil {
 			t.Logf("Warning: MtreeTeardown failed during cleanup: %v", err)
 		}
-		repairTable(t, qualifiedTableName, serviceN1)
+		env.repairTable(t, qualifiedTableName, env.ServiceN1)
 		files, _ := filepath.Glob("*_diffs-*.json")
 		for _, f := range files {
 			os.Remove(f)
@@ -311,7 +297,7 @@ func testMerkleTreeDiffBoundaryModifications(t *testing.T, tableName string) {
 	var boundaryPkeys []any
 	if mtreeTask.SimplePrimaryKey {
 		query := fmt.Sprintf("SELECT range_start FROM %s.%s WHERE node_level = 0 AND range_start IS NOT NULL UNION SELECT range_end FROM %s.%s WHERE node_level=0 AND range_end IS NOT NULL", aceSchema, mtreeTableName, aceSchema, mtreeTableName)
-		rows, err := pgCluster.Node1Pool.Query(ctx, query)
+		rows, err := env.N1Pool.Query(ctx, query)
 		require.NoError(t, err)
 		defer rows.Close()
 		for rows.Next() {
@@ -323,7 +309,7 @@ func testMerkleTreeDiffBoundaryModifications(t *testing.T, tableName string) {
 	} else {
 		// For composite keys, we get the text representation and parse it.
 		query := fmt.Sprintf("SELECT range_start::text FROM %s.%s WHERE node_level = 0 AND range_start IS NOT NULL UNION SELECT range_end::text FROM %s.%s WHERE node_level=0 AND range_end IS NOT NULL", aceSchema, mtreeTableName, aceSchema, mtreeTableName)
-		rows, err := pgCluster.Node1Pool.Query(ctx, query)
+		rows, err := env.N1Pool.Query(ctx, query)
 		require.NoError(t, err)
 		defer rows.Close()
 		re := regexp.MustCompile(`^\((\d+),"?([^",]+)"?\)$`)
@@ -367,59 +353,55 @@ func testMerkleTreeDiffBoundaryModifications(t *testing.T, tableName string) {
 	}
 	pkeysToModify = uniquePkeysList
 
-	tx, err := pgCluster.Node2Pool.Begin(ctx)
+	tx, err := env.N2Pool.Begin(ctx)
 	require.NoError(t, err)
 	defer tx.Rollback(ctx)
 
-	_, err = tx.Exec(ctx, "SELECT spock.repair_mode(true)")
-	require.NoError(t, err)
-
-	if mtreeTask.SimplePrimaryKey {
-		for _, pkey := range pkeysToModify {
-			updateSQL := fmt.Sprintf("UPDATE %s SET email = 'boundary.update.%v@example.com' WHERE index = $1", qualifiedTableName, pkey)
-			_, err := tx.Exec(ctx, updateSQL, pkey)
-			require.NoError(t, err)
+	env.withRepairModeTx(t, ctx, tx, func() {
+		if mtreeTask.SimplePrimaryKey {
+			for _, pkey := range pkeysToModify {
+				updateSQL := fmt.Sprintf("UPDATE %s SET email = 'boundary.update.%v@example.com' WHERE index = $1", qualifiedTableName, pkey)
+				_, err := tx.Exec(ctx, updateSQL, pkey)
+				require.NoError(t, err)
+			}
+		} else {
+			for _, pkey := range pkeysToModify {
+				ckey := pkey.(compositeBoundaryKey)
+				updateSQL := fmt.Sprintf("UPDATE %s SET email = 'boundary.update.%v@example.com' WHERE index = $1 AND customer_id = $2", qualifiedTableName, ckey.Index)
+				_, err := tx.Exec(ctx, updateSQL, ckey.Index, ckey.CustomerID)
+				require.NoError(t, err)
+			}
 		}
-	} else {
-		for _, pkey := range pkeysToModify {
-			ckey := pkey.(compositeBoundaryKey)
-			updateSQL := fmt.Sprintf("UPDATE %s SET email = 'boundary.update.%v@example.com' WHERE index = $1 AND customer_id = $2", qualifiedTableName, ckey.Index)
-			_, err := tx.Exec(ctx, updateSQL, ckey.Index, ckey.CustomerID)
-			require.NoError(t, err)
-		}
-	}
-
-	_, err = tx.Exec(ctx, "SELECT spock.repair_mode(false)")
-	require.NoError(t, err)
+	})
 	require.NoError(t, tx.Commit(ctx))
 
 	err = mtreeTask.DiffMtree()
 	require.NoError(t, err, "DiffMtree should succeed")
 
-	pairKey := serviceN1 + "/" + serviceN2
-	if strings.Compare(serviceN1, serviceN2) > 0 {
-		pairKey = serviceN2 + "/" + serviceN1
+	pairKey := env.ServiceN1 + "/" + env.ServiceN2
+	if strings.Compare(env.ServiceN1, env.ServiceN2) > 0 {
+		pairKey = env.ServiceN2 + "/" + env.ServiceN1
 	}
 
 	nodeDiffs, ok := mtreeTask.DiffResult.NodeDiffs[pairKey]
 	require.True(t, ok, "Expected diffs for pair %s, but none found.", pairKey)
 
 	expectedDiffCount := len(pkeysToModify)
-	require.Equal(t, expectedDiffCount, len(nodeDiffs.Rows[serviceN1]), "Expected %d modified rows on %s", expectedDiffCount, serviceN1)
-	require.Equal(t, expectedDiffCount, len(nodeDiffs.Rows[serviceN2]), "Expected %d modified rows on %s", expectedDiffCount, serviceN2)
+	require.Equal(t, expectedDiffCount, len(nodeDiffs.Rows[env.ServiceN1]), "Expected %d modified rows on %s", expectedDiffCount, env.ServiceN1)
+	require.Equal(t, expectedDiffCount, len(nodeDiffs.Rows[env.ServiceN2]), "Expected %d modified rows on %s", expectedDiffCount, env.ServiceN2)
 	require.Equal(t, expectedDiffCount, mtreeTask.DiffResult.Summary.DiffRowsCount[pairKey], "Expected summary diff count to be %d", expectedDiffCount)
 
 	if mtreeTask.SimplePrimaryKey {
 		for _, pkey := range pkeysToModify {
 			foundN1 := false
 			foundN2 := false
-			for _, row := range nodeDiffs.Rows[serviceN1] {
+			for _, row := range nodeDiffs.Rows[env.ServiceN1] {
 				if rIndex, ok := row.Get("index"); ok && rIndex == pkey {
 					foundN1 = true
 					break
 				}
 			}
-			for _, row := range nodeDiffs.Rows[serviceN2] {
+			for _, row := range nodeDiffs.Rows[env.ServiceN2] {
 				if rIndex, ok := row.Get("index"); ok && rIndex == pkey {
 					foundN2 = true
 					emailVal, _ := row.Get("email")
@@ -436,7 +418,7 @@ func testMerkleTreeDiffBoundaryModifications(t *testing.T, tableName string) {
 			ckey := pkey.(compositeBoundaryKey)
 			foundN1 := false
 			foundN2 := false
-			for _, row := range nodeDiffs.Rows[serviceN1] {
+			for _, row := range nodeDiffs.Rows[env.ServiceN1] {
 				rIndex, _ := row.Get("index")
 				rCustomerID, _ := row.Get("customer_id")
 				if rIndex == ckey.Index && rCustomerID == ckey.CustomerID {
@@ -444,7 +426,7 @@ func testMerkleTreeDiffBoundaryModifications(t *testing.T, tableName string) {
 					break
 				}
 			}
-			for _, row := range nodeDiffs.Rows[serviceN2] {
+			for _, row := range nodeDiffs.Rows[env.ServiceN2] {
 				rIndex, _ := row.Get("index")
 				rCustomerID, _ := row.Get("customer_id")
 				if rIndex == ckey.Index && rCustomerID == ckey.CustomerID {
@@ -461,14 +443,14 @@ func testMerkleTreeDiffBoundaryModifications(t *testing.T, tableName string) {
 	}
 }
 
-func testMerkleTreeContinuousCDC(t *testing.T, tableName string) {
+func testMerkleTreeContinuousCDC(t *testing.T, env *testEnv, tableName string) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	largeTableName := "customers_1M"
 	qualifiedTableName := fmt.Sprintf("%s.%s", testSchema, tableName)
-	nodes := []string{serviceN1}
-	mtreeTask := newTestMerkleTreeTask(t, qualifiedTableName, nodes)
+	nodes := []string{env.ServiceN1}
+	mtreeTask := env.newMerkleTreeTask(t, qualifiedTableName, nodes)
 
 	err := mtreeTask.RunChecks(false)
 	require.NoError(t, err, "RunChecks should succeed")
@@ -479,7 +461,7 @@ func testMerkleTreeContinuousCDC(t *testing.T, tableName string) {
 		if err != nil {
 			t.Logf("Warning: MtreeTeardown failed during cleanup: %v", err)
 		}
-		repairTable(t, qualifiedTableName, serviceN2)
+		env.repairTable(t, qualifiedTableName, env.ServiceN2)
 		files, _ := filepath.Glob("*_diffs-*.json")
 		for _, f := range files {
 			os.Remove(f)
@@ -493,7 +475,7 @@ func testMerkleTreeContinuousCDC(t *testing.T, tableName string) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		nodeInfo := pgCluster.ClusterNodes[0]
+		nodeInfo := env.ClusterNodes[0]
 		cdc.ListenForChanges(ctx, nodeInfo)
 	}()
 
@@ -501,7 +483,7 @@ func testMerkleTreeContinuousCDC(t *testing.T, tableName string) {
 
 	aceSchema := config.Cfg.MTree.Schema
 	mtreeTableName := fmt.Sprintf("ace_mtree_%s_%s", testSchema, tableName)
-	pool := pgCluster.Node1Pool
+	pool := env.N1Pool
 
 	var leafNodeCount int
 	err = pool.QueryRow(context.Background(), fmt.Sprintf("SELECT count(*) FROM %s.%s WHERE node_level = 0", aceSchema, mtreeTableName)).Scan(&leafNodeCount)
@@ -516,75 +498,71 @@ func testMerkleTreeContinuousCDC(t *testing.T, tableName string) {
 	require.NoError(t, err)
 	defer tx.Rollback(context.Background())
 
-	_, err = tx.Exec(context.Background(), "SELECT spock.repair_mode(true)")
-	require.NoError(t, err)
-
-	if mtreeTask.SimplePrimaryKey {
-		var firstBlockStart, middleBlockStart, lastBlockStart int32
-		err = tx.QueryRow(context.Background(), fmt.Sprintf("SELECT range_start FROM %s.%s WHERE node_level = 0 AND node_position = $1", aceSchema, mtreeTableName), firstBlockPos).Scan(&firstBlockStart)
-		require.NoError(t, err)
-		err = tx.QueryRow(context.Background(), fmt.Sprintf("SELECT range_start FROM %s.%s WHERE node_level = 0 AND node_position = $1", aceSchema, mtreeTableName), middleBlockPos).Scan(&middleBlockStart)
-		require.NoError(t, err)
-		err = tx.QueryRow(context.Background(), fmt.Sprintf("SELECT range_start FROM %s.%s WHERE node_level = 0 AND node_position = $1", aceSchema, mtreeTableName), lastBlockPos).Scan(&lastBlockStart)
-		require.NoError(t, err)
-
-		// DELETE + INSERT in first block
-		_, err = tx.Exec(context.Background(), fmt.Sprintf("DELETE FROM %s WHERE index = $1", qualifiedTableName), firstBlockStart)
-		require.NoError(t, err)
-		insertSQL := fmt.Sprintf("INSERT INTO %s  SELECT * FROM %s WHERE index = $1", qualifiedTableName, pgx.Identifier{largeTableName}.Sanitize())
-		_, err = tx.Exec(context.Background(), insertSQL, firstBlockStart)
-		require.NoError(t, err)
-
-		// UPDATE in middle block
-		updateSQL := fmt.Sprintf("UPDATE %s SET email = 'cdc.update.test@example.com' WHERE index = $1", qualifiedTableName)
-		_, err = tx.Exec(context.Background(), updateSQL, middleBlockStart)
-		require.NoError(t, err)
-
-		// DELETE in last block
-		_, err = tx.Exec(context.Background(), fmt.Sprintf("DELETE FROM %s WHERE index = $1", qualifiedTableName), lastBlockStart)
-		require.NoError(t, err)
-
-	} else { // Composite Primary Key
-		re := regexp.MustCompile(`^\((\d+),"?([^",]+)"?\)$`)
-		parseKey := func(keyStr string) (int32, string) {
-			matches := re.FindStringSubmatch(keyStr)
-			require.Len(t, matches, 3, "could not parse composite key: %s", keyStr)
-			index, err := strconv.Atoi(matches[1])
+	env.withRepairModeTx(t, context.Background(), tx, func() {
+		if mtreeTask.SimplePrimaryKey {
+			var firstBlockStart, middleBlockStart, lastBlockStart int32
+			err = tx.QueryRow(context.Background(), fmt.Sprintf("SELECT range_start FROM %s.%s WHERE node_level = 0 AND node_position = $1", aceSchema, mtreeTableName), firstBlockPos).Scan(&firstBlockStart)
 			require.NoError(t, err)
-			return int32(index), matches[2]
+			err = tx.QueryRow(context.Background(), fmt.Sprintf("SELECT range_start FROM %s.%s WHERE node_level = 0 AND node_position = $1", aceSchema, mtreeTableName), middleBlockPos).Scan(&middleBlockStart)
+			require.NoError(t, err)
+			err = tx.QueryRow(context.Background(), fmt.Sprintf("SELECT range_start FROM %s.%s WHERE node_level = 0 AND node_position = $1", aceSchema, mtreeTableName), lastBlockPos).Scan(&lastBlockStart)
+			require.NoError(t, err)
+
+			// DELETE + INSERT in first block
+			_, err = tx.Exec(context.Background(), fmt.Sprintf("DELETE FROM %s WHERE index = $1", qualifiedTableName), firstBlockStart)
+			require.NoError(t, err)
+			insertSQL := fmt.Sprintf("INSERT INTO %s  SELECT * FROM %s WHERE index = $1", qualifiedTableName, pgx.Identifier{largeTableName}.Sanitize())
+			_, err = tx.Exec(context.Background(), insertSQL, firstBlockStart)
+			require.NoError(t, err)
+
+			// UPDATE in middle block
+			updateSQL := fmt.Sprintf("UPDATE %s SET email = 'cdc.update.test@example.com' WHERE index = $1", qualifiedTableName)
+			_, err = tx.Exec(context.Background(), updateSQL, middleBlockStart)
+			require.NoError(t, err)
+
+			// DELETE in last block
+			_, err = tx.Exec(context.Background(), fmt.Sprintf("DELETE FROM %s WHERE index = $1", qualifiedTableName), lastBlockStart)
+			require.NoError(t, err)
+
+		} else { // Composite Primary Key
+			re := regexp.MustCompile(`^\((\d+),"?([^",]+)"?\)$`)
+			parseKey := func(keyStr string) (int32, string) {
+				matches := re.FindStringSubmatch(keyStr)
+				require.Len(t, matches, 3, "could not parse composite key: %s", keyStr)
+				index, err := strconv.Atoi(matches[1])
+				require.NoError(t, err)
+				return int32(index), matches[2]
+			}
+
+			var firstKeyStr, middleKeyStr, lastKeyStr string
+			err = tx.QueryRow(context.Background(), fmt.Sprintf("SELECT range_start::text FROM %s.%s WHERE node_level = 0 AND node_position = $1", aceSchema, mtreeTableName), firstBlockPos).Scan(&firstKeyStr)
+			require.NoError(t, err)
+			err = tx.QueryRow(context.Background(), fmt.Sprintf("SELECT range_start::text FROM %s.%s WHERE node_level = 0 AND node_position = $1", aceSchema, mtreeTableName), middleBlockPos).Scan(&middleKeyStr)
+			require.NoError(t, err)
+			err = tx.QueryRow(context.Background(), fmt.Sprintf("SELECT range_start::text FROM %s.%s WHERE node_level = 0 AND node_position = $1", aceSchema, mtreeTableName), lastBlockPos).Scan(&lastKeyStr)
+			require.NoError(t, err)
+
+			firstIdx, firstCustId := parseKey(firstKeyStr)
+			middleIdx, middleCustId := parseKey(middleKeyStr)
+			lastIdx, lastCustId := parseKey(lastKeyStr)
+
+			// DELETE + INSERT in first block
+			_, err = tx.Exec(context.Background(), fmt.Sprintf("DELETE FROM %s WHERE index = $1 AND customer_id = $2", qualifiedTableName), firstIdx, firstCustId)
+			require.NoError(t, err)
+			insertSQL := fmt.Sprintf("INSERT INTO %s SELECT * FROM %s WHERE index = $1 AND customer_id = $2", qualifiedTableName, pgx.Identifier{largeTableName}.Sanitize())
+			_, err = tx.Exec(context.Background(), insertSQL, firstIdx, firstCustId)
+			require.NoError(t, err)
+
+			// UPDATE in middle block
+			updateSQL := fmt.Sprintf("UPDATE %s SET email = 'cdc.update.test.composite@example.com' WHERE index = $1 AND customer_id = $2", qualifiedTableName)
+			_, err = tx.Exec(context.Background(), updateSQL, middleIdx, middleCustId)
+			require.NoError(t, err)
+
+			// DELETE in last block
+			_, err = tx.Exec(context.Background(), fmt.Sprintf("DELETE FROM %s WHERE index = $1 AND customer_id = $2", qualifiedTableName), lastIdx, lastCustId)
+			require.NoError(t, err)
 		}
-
-		var firstKeyStr, middleKeyStr, lastKeyStr string
-		err = tx.QueryRow(context.Background(), fmt.Sprintf("SELECT range_start::text FROM %s.%s WHERE node_level = 0 AND node_position = $1", aceSchema, mtreeTableName), firstBlockPos).Scan(&firstKeyStr)
-		require.NoError(t, err)
-		err = tx.QueryRow(context.Background(), fmt.Sprintf("SELECT range_start::text FROM %s.%s WHERE node_level = 0 AND node_position = $1", aceSchema, mtreeTableName), middleBlockPos).Scan(&middleKeyStr)
-		require.NoError(t, err)
-		err = tx.QueryRow(context.Background(), fmt.Sprintf("SELECT range_start::text FROM %s.%s WHERE node_level = 0 AND node_position = $1", aceSchema, mtreeTableName), lastBlockPos).Scan(&lastKeyStr)
-		require.NoError(t, err)
-
-		firstIdx, firstCustId := parseKey(firstKeyStr)
-		middleIdx, middleCustId := parseKey(middleKeyStr)
-		lastIdx, lastCustId := parseKey(lastKeyStr)
-
-		// DELETE + INSERT in first block
-		_, err = tx.Exec(context.Background(), fmt.Sprintf("DELETE FROM %s WHERE index = $1 AND customer_id = $2", qualifiedTableName), firstIdx, firstCustId)
-		require.NoError(t, err)
-		insertSQL := fmt.Sprintf("INSERT INTO %s SELECT * FROM %s WHERE index = $1 AND customer_id = $2", qualifiedTableName, pgx.Identifier{largeTableName}.Sanitize())
-		_, err = tx.Exec(context.Background(), insertSQL, firstIdx, firstCustId)
-		require.NoError(t, err)
-
-		// UPDATE in middle block
-		updateSQL := fmt.Sprintf("UPDATE %s SET email = 'cdc.update.test.composite@example.com' WHERE index = $1 AND customer_id = $2", qualifiedTableName)
-		_, err = tx.Exec(context.Background(), updateSQL, middleIdx, middleCustId)
-		require.NoError(t, err)
-
-		// DELETE in last block
-		_, err = tx.Exec(context.Background(), fmt.Sprintf("DELETE FROM %s WHERE index = $1 AND customer_id = $2", qualifiedTableName), lastIdx, lastCustId)
-		require.NoError(t, err)
-	}
-
-	_, err = tx.Exec(context.Background(), "SELECT spock.repair_mode(false)")
-	require.NoError(t, err)
+	})
 	require.NoError(t, tx.Commit(context.Background()))
 
 	time.Sleep(5 * time.Second)
@@ -620,8 +598,8 @@ func testMerkleTreeContinuousCDC(t *testing.T, tableName string) {
 	cancel()
 	wg.Wait()
 
-	nodes = []string{serviceN1, serviceN2}
-	tdTask := newTestTableDiffTask(t, qualifiedTableName, nodes)
+	nodes = []string{env.ServiceN1, env.ServiceN2}
+	tdTask := env.newTableDiffTask(t, qualifiedTableName, nodes)
 	err = tdTask.RunChecks(false)
 	require.NoError(t, err, "RunChecks after CDC should succeed")
 
@@ -645,35 +623,35 @@ const (
 	splitLast    splitCase = "last"
 )
 
-func testMerkleTreeMergeInitialRanges(t *testing.T, tableName string) {
-	runMerkleTreeMergeTest(t, tableName, initial)
+func testMerkleTreeMergeInitialRanges(t *testing.T, env *testEnv, tableName string) {
+	runMerkleTreeMergeTest(t, env, tableName, initial)
 }
 
-func testMerkleTreeMergeMiddleRanges(t *testing.T, tableName string) {
-	runMerkleTreeMergeTest(t, tableName, middle)
+func testMerkleTreeMergeMiddleRanges(t *testing.T, env *testEnv, tableName string) {
+	runMerkleTreeMergeTest(t, env, tableName, middle)
 }
 
-func testMerkleTreeMergeLastRanges(t *testing.T, tableName string) {
-	runMerkleTreeMergeTest(t, tableName, last)
+func testMerkleTreeMergeLastRanges(t *testing.T, env *testEnv, tableName string) {
+	runMerkleTreeMergeTest(t, env, tableName, last)
 }
 
-func testMerkleTreeSplitInitialRanges(t *testing.T, tableName string) {
-	runMerkleTreeSplitTest(t, tableName, splitInitial)
+func testMerkleTreeSplitInitialRanges(t *testing.T, env *testEnv, tableName string) {
+	runMerkleTreeSplitTest(t, env, tableName, splitInitial)
 }
 
-func testMerkleTreeSplitMiddleRanges(t *testing.T, tableName string) {
-	runMerkleTreeSplitTest(t, tableName, splitMiddle)
+func testMerkleTreeSplitMiddleRanges(t *testing.T, env *testEnv, tableName string) {
+	runMerkleTreeSplitTest(t, env, tableName, splitMiddle)
 }
 
-func testMerkleTreeSplitLastRanges(t *testing.T, tableName string) {
-	runMerkleTreeSplitTest(t, tableName, splitLast)
+func testMerkleTreeSplitLastRanges(t *testing.T, env *testEnv, tableName string) {
+	runMerkleTreeSplitTest(t, env, tableName, splitLast)
 }
 
-func runMerkleTreeMergeTest(t *testing.T, tableName string, mc mergeCase) {
+func runMerkleTreeMergeTest(t *testing.T, env *testEnv, tableName string, mc mergeCase) {
 	ctx := context.Background()
 	qualifiedTableName := fmt.Sprintf("%s.%s", testSchema, tableName)
-	nodes := []string{serviceN1, serviceN2}
-	mtreeTask := newTestMerkleTreeTask(t, qualifiedTableName, nodes)
+	nodes := []string{env.ServiceN1, env.ServiceN2}
+	mtreeTask := env.newMerkleTreeTask(t, qualifiedTableName, nodes)
 
 	err := mtreeTask.RunChecks(false)
 	require.NoError(t, err, "RunChecks should succeed")
@@ -684,7 +662,7 @@ func runMerkleTreeMergeTest(t *testing.T, tableName string, mc mergeCase) {
 		if err != nil {
 			t.Logf("Warning: MtreeTeardown failed during cleanup: %v", err)
 		}
-		repairTable(t, qualifiedTableName, serviceN2)
+		env.repairTable(t, qualifiedTableName, env.ServiceN2)
 		files, _ := filepath.Glob("*_diffs-*.json")
 		for _, f := range files {
 			os.Remove(f)
@@ -697,7 +675,7 @@ func runMerkleTreeMergeTest(t *testing.T, tableName string, mc mergeCase) {
 	mtreeTableName := fmt.Sprintf("ace_mtree_%s_%s", testSchema, tableName)
 
 	var leafNodeCountBefore int
-	err = pgCluster.Node1Pool.QueryRow(ctx, fmt.Sprintf("SELECT count(*) FROM %s.%s WHERE node_level = 0", aceSchema, mtreeTableName)).Scan(&leafNodeCountBefore)
+	err = env.N1Pool.QueryRow(ctx, fmt.Sprintf("SELECT count(*) FROM %s.%s WHERE node_level = 0", aceSchema, mtreeTableName)).Scan(&leafNodeCountBefore)
 	require.NoError(t, err)
 
 	var startPos, endPos int
@@ -720,20 +698,20 @@ func runMerkleTreeMergeTest(t *testing.T, tableName string, mc mergeCase) {
 
 	if mtreeTask.SimplePrimaryKey {
 		var startKey int32
-		err = pgCluster.Node1Pool.QueryRow(ctx, fmt.Sprintf("SELECT range_start FROM %s.%s WHERE node_level = 0 AND node_position = $1", aceSchema, mtreeTableName), startPos).Scan(&startKey)
+		err = env.N1Pool.QueryRow(ctx, fmt.Sprintf("SELECT range_start FROM %s.%s WHERE node_level = 0 AND node_position = $1", aceSchema, mtreeTableName), startPos).Scan(&startKey)
 		require.NoError(t, err)
 		startRange = []any{startKey}
 
 		if endPos != -1 {
 			var endKey int32
-			err = pgCluster.Node1Pool.QueryRow(ctx, fmt.Sprintf("SELECT range_end FROM %s.%s WHERE node_level = 0 AND node_position = $1", aceSchema, mtreeTableName), endPos).Scan(&endKey)
+			err = env.N1Pool.QueryRow(ctx, fmt.Sprintf("SELECT range_end FROM %s.%s WHERE node_level = 0 AND node_position = $1", aceSchema, mtreeTableName), endPos).Scan(&endKey)
 			require.NoError(t, err)
 			endRange = []any{endKey}
 		}
 	} else {
 		re := regexp.MustCompile(`^\((\d+),"?([^",]+)"?\)$`)
 		var startStr string
-		err = pgCluster.Node1Pool.QueryRow(ctx, fmt.Sprintf("SELECT range_start::text FROM %s.%s WHERE node_level = 0 AND node_position = $1", aceSchema, mtreeTableName), startPos).Scan(&startStr)
+		err = env.N1Pool.QueryRow(ctx, fmt.Sprintf("SELECT range_start::text FROM %s.%s WHERE node_level = 0 AND node_position = $1", aceSchema, mtreeTableName), startPos).Scan(&startStr)
 		require.NoError(t, err)
 		startMatches := re.FindStringSubmatch(startStr)
 		require.Len(t, startMatches, 3, "should parse composite key from string")
@@ -742,7 +720,7 @@ func runMerkleTreeMergeTest(t *testing.T, tableName string, mc mergeCase) {
 
 		if endPos != -1 {
 			var endStr string
-			err = pgCluster.Node1Pool.QueryRow(ctx, fmt.Sprintf("SELECT range_end::text FROM %s.%s WHERE node_level = 0 AND node_position = $1", aceSchema, mtreeTableName), endPos).Scan(&endStr)
+			err = env.N1Pool.QueryRow(ctx, fmt.Sprintf("SELECT range_end::text FROM %s.%s WHERE node_level = 0 AND node_position = $1", aceSchema, mtreeTableName), endPos).Scan(&endStr)
 			require.NoError(t, err)
 			endMatches := re.FindStringSubmatch(endStr)
 			require.Len(t, endMatches, 3, "should parse composite key from string")
@@ -751,47 +729,43 @@ func runMerkleTreeMergeTest(t *testing.T, tableName string, mc mergeCase) {
 		}
 	}
 
-	tx, err := pgCluster.Node1Pool.Begin(ctx)
+	tx, err := env.N1Pool.Begin(ctx)
 	require.NoError(t, err)
 	defer tx.Rollback(ctx)
 
-	_, err = tx.Exec(ctx, "SELECT spock.repair_mode(true)")
-	require.NoError(t, err)
-
-	var cmdTag pgconn.CommandTag
-	if endPos == -1 { // Deletion to the end
-		if mtreeTask.SimplePrimaryKey {
-			deleteSQL := fmt.Sprintf("DELETE FROM %s WHERE index >= $1", qualifiedTableName)
-			cmdTag, err = tx.Exec(ctx, deleteSQL, startRange[0])
-		} else {
-			deleteSQL := fmt.Sprintf("DELETE FROM %s WHERE (index, customer_id) >= ($1, $2)", qualifiedTableName)
-			cmdTag, err = tx.Exec(ctx, deleteSQL, startRange[0], startRange[1])
+	env.withRepairModeTx(t, ctx, tx, func() {
+		var cmdTag pgconn.CommandTag
+		if endPos == -1 { // Deletion to the end
+			if mtreeTask.SimplePrimaryKey {
+				deleteSQL := fmt.Sprintf("DELETE FROM %s WHERE index >= $1", qualifiedTableName)
+				cmdTag, err = tx.Exec(ctx, deleteSQL, startRange[0])
+			} else {
+				deleteSQL := fmt.Sprintf("DELETE FROM %s WHERE (index, customer_id) >= ($1, $2)", qualifiedTableName)
+				cmdTag, err = tx.Exec(ctx, deleteSQL, startRange[0], startRange[1])
+			}
+		} else { // Deletion within a range
+			if mtreeTask.SimplePrimaryKey {
+				deleteSQL := fmt.Sprintf("DELETE FROM %s WHERE index >= $1 AND index <= $2", qualifiedTableName)
+				cmdTag, err = tx.Exec(ctx, deleteSQL, startRange[0], endRange[0])
+			} else {
+				deleteSQL := fmt.Sprintf("DELETE FROM %s WHERE (index, customer_id) >= ($1, $2) AND (index, customer_id) <= ($3, $4)", qualifiedTableName)
+				cmdTag, err = tx.Exec(ctx, deleteSQL, startRange[0], startRange[1], endRange[0], endRange[1])
+			}
 		}
-	} else { // Deletion within a range
-		if mtreeTask.SimplePrimaryKey {
-			deleteSQL := fmt.Sprintf("DELETE FROM %s WHERE index >= $1 AND index <= $2", qualifiedTableName)
-			cmdTag, err = tx.Exec(ctx, deleteSQL, startRange[0], endRange[0])
-		} else {
-			deleteSQL := fmt.Sprintf("DELETE FROM %s WHERE (index, customer_id) >= ($1, $2) AND (index, customer_id) <= ($3, $4)", qualifiedTableName)
-			cmdTag, err = tx.Exec(ctx, deleteSQL, startRange[0], startRange[1], endRange[0], endRange[1])
-		}
-	}
-	require.NoError(t, err)
-	deletedCount = cmdTag.RowsAffected()
-
-	_, err = tx.Exec(ctx, "SELECT spock.repair_mode(false)")
-	require.NoError(t, err)
+		require.NoError(t, err)
+		deletedCount = cmdTag.RowsAffected()
+	})
 	require.NoError(t, tx.Commit(ctx))
 
 	require.Greater(t, deletedCount, int64(0), "should have deleted some rows")
 
-	mtreeTask.Nodes = serviceN1
+	mtreeTask.Nodes = env.ServiceN1
 	mtreeTask.Rebalance = true
 	err = mtreeTask.UpdateMtree(true)
 	require.NoError(t, err, "UpdateMtree with rebalance should succeed")
 
 	var leafNodeCountAfter int
-	err = pgCluster.Node1Pool.QueryRow(ctx, fmt.Sprintf("SELECT count(*) FROM %s.%s WHERE node_level = 0", aceSchema, mtreeTableName)).Scan(&leafNodeCountAfter)
+	err = env.N1Pool.QueryRow(ctx, fmt.Sprintf("SELECT count(*) FROM %s.%s WHERE node_level = 0", aceSchema, mtreeTableName)).Scan(&leafNodeCountAfter)
 	require.NoError(t, err)
 	require.Less(t, leafNodeCountAfter, leafNodeCountBefore, "Number of leaf nodes should decrease after merge")
 
@@ -802,25 +776,25 @@ func runMerkleTreeMergeTest(t *testing.T, tableName string, mc mergeCase) {
 	err = mtreeTask.DiffMtree()
 	require.NoError(t, err, "DiffMtree should succeed")
 
-	pairKey := serviceN1 + "/" + serviceN2
-	if strings.Compare(serviceN1, serviceN2) > 0 {
-		pairKey = serviceN2 + "/" + serviceN1
+	pairKey := env.ServiceN1 + "/" + env.ServiceN2
+	if strings.Compare(env.ServiceN1, env.ServiceN2) > 0 {
+		pairKey = env.ServiceN2 + "/" + env.ServiceN1
 	}
 
 	nodeDiffs, ok := mtreeTask.DiffResult.NodeDiffs[pairKey]
 	require.True(t, ok, "Expected diffs for pair %s, but none found.", pairKey)
 
-	require.Equal(t, 0, len(nodeDiffs.Rows[serviceN1]), "Expected 0 extra rows on %s", serviceN1)
-	require.Equal(t, int(deletedCount), len(nodeDiffs.Rows[serviceN2]), "Expected %d missing rows on %s", deletedCount, serviceN1)
+	require.Equal(t, 0, len(nodeDiffs.Rows[env.ServiceN1]), "Expected 0 extra rows on %s", env.ServiceN1)
+	require.Equal(t, int(deletedCount), len(nodeDiffs.Rows[env.ServiceN2]), "Expected %d missing rows on %s", deletedCount, env.ServiceN1)
 	require.Equal(t, int(deletedCount), mtreeTask.DiffResult.Summary.DiffRowsCount[pairKey], "Expected summary diff count to be %d", deletedCount)
 }
 
-func runMerkleTreeSplitTest(t *testing.T, tableName string, sc splitCase) {
+func runMerkleTreeSplitTest(t *testing.T, env *testEnv, tableName string, sc splitCase) {
 	ctx := context.Background()
 	qualifiedTableName := fmt.Sprintf("%s.%s", testSchema, tableName)
 	largeTableName := "customers_1M"
-	nodes := []string{serviceN1, serviceN2}
-	mtreeTask := newTestMerkleTreeTask(t, qualifiedTableName, nodes)
+	nodes := []string{env.ServiceN1, env.ServiceN2}
+	mtreeTask := env.newMerkleTreeTask(t, qualifiedTableName, nodes)
 
 	err := mtreeTask.RunChecks(false)
 	require.NoError(t, err, "RunChecks should succeed")
@@ -839,35 +813,32 @@ func runMerkleTreeSplitTest(t *testing.T, tableName string, sc splitCase) {
 		// No deletes needed for last split
 	}
 	if deleteRange != nil {
-		tx, err := pgCluster.Node2Pool.Begin(ctx)
+		tx, err := env.N2Pool.Begin(ctx)
 		require.NoError(t, err)
 		defer tx.Rollback(ctx)
 
-		_, err = tx.Exec(ctx, "SELECT spock.repair_mode(true)")
-		require.NoError(t, err)
-		_, err = tx.Exec(ctx, "DROP TABLE IF EXISTS "+tempTableName)
-		require.NoError(t, err)
+		env.withRepairModeTx(t, ctx, tx, func() {
+			_, err = tx.Exec(ctx, "DROP TABLE IF EXISTS "+tempTableName)
+			require.NoError(t, err)
 
-		createSQL := fmt.Sprintf("CREATE TABLE %s AS SELECT * FROM %s WHERE index >= %d AND index <= %d", tempTableName, qualifiedTableName, deleteRange[0], deleteRange[1])
-		_, err = tx.Exec(ctx, createSQL)
-		require.NoError(t, err)
+			createSQL := fmt.Sprintf("CREATE TABLE %s AS SELECT * FROM %s WHERE index >= %d AND index <= %d", tempTableName, qualifiedTableName, deleteRange[0], deleteRange[1])
+			_, err = tx.Exec(ctx, createSQL)
+			require.NoError(t, err)
 
-		_, err = tx.Exec(ctx, fmt.Sprintf("DELETE FROM %s WHERE index >= %d AND index <= %d", qualifiedTableName, deleteRange[0], deleteRange[1]))
-		require.NoError(t, err)
-
-		_, err = tx.Exec(ctx, "SELECT spock.repair_mode(false)")
-		require.NoError(t, err)
+			_, err = tx.Exec(ctx, fmt.Sprintf("DELETE FROM %s WHERE index >= %d AND index <= %d", qualifiedTableName, deleteRange[0], deleteRange[1]))
+			require.NoError(t, err)
+		})
 		require.NoError(t, tx.Commit(ctx))
 	}
 
 	t.Cleanup(func() {
-		repairTable(t, qualifiedTableName, serviceN1)
+		env.repairTable(t, qualifiedTableName, env.ServiceN1)
 		files, _ := filepath.Glob("*_diffs-*.json")
 		for _, f := range files {
 			os.Remove(f)
 		}
 
-		_, err = pgCluster.Node2Pool.Exec(ctx, "DROP TABLE IF EXISTS "+tempTableName)
+		_, err = env.N2Pool.Exec(ctx, "DROP TABLE IF EXISTS "+tempTableName)
 		if err != nil {
 			t.Logf("Warning: failed to drop temp table %s during cleanup: %v", tempTableName, err)
 		}
@@ -881,7 +852,7 @@ func runMerkleTreeSplitTest(t *testing.T, tableName string, sc splitCase) {
 	err = mtreeTask.MtreeInit()
 	require.NoError(t, err, "MtreeInit should succeed")
 
-	mtreeTask.Nodes = serviceN2
+	mtreeTask.Nodes = env.ServiceN2
 	mtreeTask.RunChecks(false)
 	err = mtreeTask.BuildMtree()
 	require.NoError(t, err, "BuildMtree should succeed")
@@ -890,7 +861,7 @@ func runMerkleTreeSplitTest(t *testing.T, tableName string, sc splitCase) {
 	mtreeTableName := fmt.Sprintf("ace_mtree_%s_%s", testSchema, tableName)
 
 	var leafNodeCountBefore int
-	err = pgCluster.Node2Pool.QueryRow(ctx, fmt.Sprintf("SELECT count(*) FROM %s.%s WHERE node_level = 0", aceSchema, mtreeTableName)).Scan(&leafNodeCountBefore)
+	err = env.N2Pool.QueryRow(ctx, fmt.Sprintf("SELECT count(*) FROM %s.%s WHERE node_level = 0", aceSchema, mtreeTableName)).Scan(&leafNodeCountBefore)
 	require.NoError(t, err)
 
 	var q string
@@ -899,28 +870,24 @@ func runMerkleTreeSplitTest(t *testing.T, tableName string, sc splitCase) {
 		q = fmt.Sprintf("INSERT INTO %s SELECT * FROM %s order by index", qualifiedTableName, tempTableName)
 	case splitLast:
 		var maxIndex int32
-		err := pgCluster.Node2Pool.QueryRow(ctx, "SELECT max(index) FROM "+qualifiedTableName).Scan(&maxIndex)
+		err := env.N2Pool.QueryRow(ctx, "SELECT max(index) FROM "+qualifiedTableName).Scan(&maxIndex)
 		require.NoError(t, err)
 		insertStartIndex := maxIndex + 1
 		q = fmt.Sprintf("INSERT INTO %s SELECT * FROM %s WHERE index >= %d order by index LIMIT %d", qualifiedTableName, pgx.Identifier{largeTableName}.Sanitize(), insertStartIndex, rowsToInsert)
 	}
 
-	tx, err := pgCluster.Node2Pool.Begin(ctx)
+	tx, err := env.N2Pool.Begin(ctx)
 	require.NoError(t, err)
 	defer tx.Rollback(ctx)
 
-	_, err = tx.Exec(ctx, "SELECT spock.repair_mode(true)")
-	require.NoError(t, err)
-
-	_, err = tx.Exec(ctx, q)
-	require.NoError(t, err)
-	if sc != splitLast {
-		_, err = tx.Exec(ctx, "DROP TABLE "+tempTableName)
+	env.withRepairModeTx(t, ctx, tx, func() {
+		_, err = tx.Exec(ctx, q)
 		require.NoError(t, err)
-	}
-
-	_, err = tx.Exec(ctx, "SELECT spock.repair_mode(false)")
-	require.NoError(t, err)
+		if sc != splitLast {
+			_, err = tx.Exec(ctx, "DROP TABLE "+tempTableName)
+			require.NoError(t, err)
+		}
+	})
 	require.NoError(t, tx.Commit(ctx))
 
 	mtreeTask.Rebalance = false
@@ -928,7 +895,7 @@ func runMerkleTreeSplitTest(t *testing.T, tableName string, sc splitCase) {
 	require.NoError(t, err, "UpdateMtree should succeed")
 
 	var leafNodeCountAfter int
-	pool, err := connectToNode(pgCluster.Node2Host, pgCluster.Node2Port, pgEdgeUser, pgEdgePassword, dbName)
+	pool, err := connectToNode(env.N2Host, env.N2Port, env.DBUser, env.DBPassword, env.DBName)
 	require.NoError(t, err)
 
 	err = pool.QueryRow(ctx, fmt.Sprintf("SELECT count(*) FROM %s.%s WHERE node_level = 0", aceSchema, mtreeTableName)).Scan(&leafNodeCountAfter)
@@ -943,11 +910,11 @@ func runMerkleTreeSplitTest(t *testing.T, tableName string, sc splitCase) {
 	// require.Empty(t, mtreeTask.DiffResult.NodeDiffs, "Merkle trees should be in sync after identical splits")
 }
 
-func testMerkleTreeDiffModifiedRows(t *testing.T, tableName string) {
+func testMerkleTreeDiffModifiedRows(t *testing.T, env *testEnv, tableName string) {
 	ctx := context.Background()
 	qualifiedTableName := fmt.Sprintf("%s.%s", testSchema, tableName)
-	nodes := []string{serviceN1, serviceN2}
-	mtreeTask := newTestMerkleTreeTask(t, qualifiedTableName, nodes)
+	nodes := []string{env.ServiceN1, env.ServiceN2}
+	mtreeTask := env.newMerkleTreeTask(t, qualifiedTableName, nodes)
 
 	err := mtreeTask.RunChecks(false)
 	require.NoError(t, err, "RunChecks should succeed")
@@ -958,7 +925,7 @@ func testMerkleTreeDiffModifiedRows(t *testing.T, tableName string) {
 		if err != nil {
 			t.Logf("Warning: MtreeTeardown failed during cleanup: %v", err)
 		}
-		repairTable(t, qualifiedTableName, serviceN1)
+		env.repairTable(t, qualifiedTableName, env.ServiceN1)
 		files, _ := filepath.Glob("*_diffs-*.json")
 		for _, f := range files {
 			os.Remove(f)
@@ -984,44 +951,40 @@ func testMerkleTreeDiffModifiedRows(t *testing.T, tableName string) {
 		},
 	}
 
-	tx, err := pgCluster.Node2Pool.Begin(ctx)
+	tx, err := env.N2Pool.Begin(ctx)
 	require.NoError(t, err)
 	defer tx.Rollback(ctx)
 
-	_, err = tx.Exec(ctx, "SELECT spock.repair_mode(true)")
-	require.NoError(t, err)
-
-	for _, mod := range modifications {
-		updateSQL := fmt.Sprintf("UPDATE %s SET %s = $1 WHERE index = $2", qualifiedTableName, mod.field)
-		_, err = tx.Exec(ctx, updateSQL, mod.value, mod.indexVal)
-		require.NoError(t, err)
-	}
-
-	_, err = tx.Exec(ctx, "SELECT spock.repair_mode(false)")
-	require.NoError(t, err)
+	env.withRepairModeTx(t, ctx, tx, func() {
+		for _, mod := range modifications {
+			updateSQL := fmt.Sprintf("UPDATE %s SET %s = $1 WHERE index = $2", qualifiedTableName, mod.field)
+			_, err = tx.Exec(ctx, updateSQL, mod.value, mod.indexVal)
+			require.NoError(t, err)
+		}
+	})
 	require.NoError(t, tx.Commit(ctx))
 
 	err = mtreeTask.DiffMtree()
 	require.NoError(t, err, "DiffMtree should succeed")
 
-	pairKey := serviceN1 + "/" + serviceN2
-	if strings.Compare(serviceN1, serviceN2) > 0 {
-		pairKey = serviceN2 + "/" + serviceN1
+	pairKey := env.ServiceN1 + "/" + env.ServiceN2
+	if strings.Compare(env.ServiceN1, env.ServiceN2) > 0 {
+		pairKey = env.ServiceN2 + "/" + env.ServiceN1
 	}
 
 	nodeDiffs, ok := mtreeTask.DiffResult.NodeDiffs[pairKey]
 	require.True(t, ok, "Expected diffs for pair %s, but none found.", pairKey)
 
 	expectedDiffCount := len(modifications)
-	require.Equal(t, expectedDiffCount, len(nodeDiffs.Rows[serviceN1]), "Expected %d modified rows on %s", expectedDiffCount, serviceN1)
-	require.Equal(t, expectedDiffCount, len(nodeDiffs.Rows[serviceN2]), "Expected %d modified rows on %s", expectedDiffCount, serviceN2)
+	require.Equal(t, expectedDiffCount, len(nodeDiffs.Rows[env.ServiceN1]), "Expected %d modified rows on %s", expectedDiffCount, env.ServiceN1)
+	require.Equal(t, expectedDiffCount, len(nodeDiffs.Rows[env.ServiceN2]), "Expected %d modified rows on %s", expectedDiffCount, env.ServiceN2)
 
 	require.Equal(t, expectedDiffCount, mtreeTask.DiffResult.Summary.DiffRowsCount[pairKey], "Expected summary diff count to be %d", expectedDiffCount)
 
 	for _, mod := range modifications {
 		foundN1 := false
 		foundN2 := false
-		for _, row := range nodeDiffs.Rows[serviceN1] {
+		for _, row := range nodeDiffs.Rows[env.ServiceN1] {
 			if rIndex, ok := row.Get("index"); ok && rIndex.(int32) == int32(mod.indexVal) {
 				foundN1 = true
 				fieldVal, _ := row.Get(mod.field)
@@ -1029,7 +992,7 @@ func testMerkleTreeDiffModifiedRows(t *testing.T, tableName string) {
 				break
 			}
 		}
-		for _, row := range nodeDiffs.Rows[serviceN2] {
+		for _, row := range nodeDiffs.Rows[env.ServiceN2] {
 			if rIndex, ok := row.Get("index"); ok && rIndex.(int32) == int32(mod.indexVal) {
 				foundN2 = true
 				fieldVal, _ := row.Get(mod.field)
@@ -1042,11 +1005,11 @@ func testMerkleTreeDiffModifiedRows(t *testing.T, tableName string) {
 	}
 }
 
-func testMerkleTreeTeardown(t *testing.T, tableName string) {
+func testMerkleTreeTeardown(t *testing.T, env *testEnv, tableName string) {
 	ctx := context.Background()
 	qualifiedTableName := fmt.Sprintf("%s.%s", testSchema, tableName)
-	nodes := []string{serviceN1, serviceN2}
-	mtreeTask := newTestMerkleTreeTask(t, qualifiedTableName, nodes)
+	nodes := []string{env.ServiceN1, env.ServiceN2}
+	mtreeTask := env.newMerkleTreeTask(t, qualifiedTableName, nodes)
 
 	err := mtreeTask.MtreeInit()
 	require.NoError(t, err, "MtreeInit should succeed")
@@ -1058,7 +1021,7 @@ func testMerkleTreeTeardown(t *testing.T, tableName string) {
 	cdcPubName := config.Cfg.MTree.CDC.PublicationName
 	cdcSlotName := config.Cfg.MTree.CDC.SlotName
 
-	for _, pool := range []*pgxpool.Pool{pgCluster.Node1Pool, pgCluster.Node2Pool} {
+	for _, pool := range []*pgxpool.Pool{env.N1Pool, env.N2Pool} {
 		require.False(t, tableExists(t, ctx, pool, "ace_cdc_metadata", aceSchema), "Table 'ace_cdc_metadata' should NOT exist after teardown")
 		require.False(t, publicationExists(t, ctx, pool, cdcPubName), "Publication '%s' should NOT exist after teardown", cdcPubName)
 		require.False(t, replicationSlotExists(t, ctx, pool, cdcSlotName), "Replication slot '%s' should NOT exist after teardown", cdcSlotName)
@@ -1072,6 +1035,11 @@ func testMerkleTreeTeardown(t *testing.T, tableName string) {
 // numeric values with different PostgreSQL scales (e.g., 3000.00 vs 3000.0)
 // produce identical merkle tree hashes and are NOT reported as differences.
 func TestMerkleTreeNumericScaleInvariance(t *testing.T) {
+	env := newSpockEnv()
+	testMerkleTreeNumericScaleInvariance(t, env)
+}
+
+func testMerkleTreeNumericScaleInvariance(t *testing.T, env *testEnv) {
 	ctx := context.Background()
 	numericTable := "ace_numeric_scale_test"
 	qualifiedTable := fmt.Sprintf("%s.%s", testSchema, numericTable)
@@ -1083,12 +1051,12 @@ func TestMerkleTreeNumericScaleInvariance(t *testing.T) {
 			amount NUMERIC,
 			label TEXT
 		)`, qualifiedTable)
-	for _, pool := range []*pgxpool.Pool{pgCluster.Node1Pool, pgCluster.Node2Pool} {
+	for _, pool := range []*pgxpool.Pool{env.N1Pool, env.N2Pool} {
 		_, err := pool.Exec(ctx, createSQL)
 		require.NoError(t, err, "failed to create numeric test table")
 	}
 	t.Cleanup(func() {
-		for _, pool := range []*pgxpool.Pool{pgCluster.Node1Pool, pgCluster.Node2Pool} {
+		for _, pool := range []*pgxpool.Pool{env.N1Pool, env.N2Pool} {
 			pool.Exec(ctx, fmt.Sprintf("DROP TABLE IF EXISTS %s", qualifiedTable))
 		}
 	})
@@ -1112,39 +1080,37 @@ func TestMerkleTreeNumericScaleInvariance(t *testing.T) {
 		{5, "0.00", "0.0", "scale-diff-zero"},
 	}
 
-	for _, pool := range []*pgxpool.Pool{pgCluster.Node1Pool, pgCluster.Node2Pool} {
+	for _, pool := range []*pgxpool.Pool{env.N1Pool, env.N2Pool} {
 		tx, err := pool.Begin(ctx)
 		require.NoError(t, err)
 		defer func(tx pgx.Tx) { _ = tx.Rollback(ctx) }(tx)
-		_, err = tx.Exec(ctx, "SELECT spock.repair_mode(true)")
-		require.NoError(t, err)
-		for _, r := range rows {
-			amt := r.n1Amt
-			if pool == pgCluster.Node2Pool {
-				amt = r.n2Amt
+		env.withRepairModeTx(t, ctx, tx, func() {
+			for _, r := range rows {
+				amt := r.n1Amt
+				if pool == env.N2Pool {
+					amt = r.n2Amt
+				}
+				insertSQL := fmt.Sprintf("INSERT INTO %s (id, amount, label) VALUES ($1, %s, $2) ON CONFLICT (id) DO UPDATE SET amount = %s, label = $2", qualifiedTable, amt, amt)
+				_, err := tx.Exec(ctx, insertSQL, r.id, r.label)
+				require.NoError(t, err)
 			}
-			insertSQL := fmt.Sprintf("INSERT INTO %s (id, amount, label) VALUES ($1, %s, $2) ON CONFLICT (id) DO UPDATE SET amount = %s, label = $2", qualifiedTable, amt, amt)
-			_, err := tx.Exec(ctx, insertSQL, r.id, r.label)
-			require.NoError(t, err)
-		}
-		_, err = tx.Exec(ctx, "SELECT spock.repair_mode(false)")
-		require.NoError(t, err)
+		})
 		require.NoError(t, tx.Commit(ctx))
 	}
 
 	// Verify the scales really are different in storage by checking ::text
 	var n1Text, n2Text string
-	err := pgCluster.Node1Pool.QueryRow(ctx, fmt.Sprintf("SELECT amount::text FROM %s WHERE id = 1", qualifiedTable)).Scan(&n1Text)
+	err := env.N1Pool.QueryRow(ctx, fmt.Sprintf("SELECT amount::text FROM %s WHERE id = 1", qualifiedTable)).Scan(&n1Text)
 	require.NoError(t, err)
-	err = pgCluster.Node2Pool.QueryRow(ctx, fmt.Sprintf("SELECT amount::text FROM %s WHERE id = 1", qualifiedTable)).Scan(&n2Text)
+	err = env.N2Pool.QueryRow(ctx, fmt.Sprintf("SELECT amount::text FROM %s WHERE id = 1", qualifiedTable)).Scan(&n2Text)
 	require.NoError(t, err)
 	t.Logf("Node1 amount::text = %q, Node2 amount::text = %q", n1Text, n2Text)
 	// They should differ in scale representation
 	require.NotEqual(t, n1Text, n2Text, "precondition: numeric ::text should differ between nodes (different scales)")
 
 	// Now run merkle tree init + build + diff
-	nodes := []string{serviceN1, serviceN2}
-	mtreeTask := newTestMerkleTreeTask(t, qualifiedTable, nodes)
+	nodes := []string{env.ServiceN1, env.ServiceN2}
+	mtreeTask := env.newMerkleTreeTask(t, qualifiedTable, nodes)
 	mtreeTask.BlockSize = 1000 // must be >= 1000 for RunChecks; table has 5 rows so 1 block
 
 	err = mtreeTask.RunChecks(false)
@@ -1165,16 +1131,16 @@ func TestMerkleTreeNumericScaleInvariance(t *testing.T) {
 
 	// The key assertion: there should be ZERO differences because trim_scale
 	// normalizes numeric values before hashing.
-	pairKey := serviceN1 + "/" + serviceN2
-	if strings.Compare(serviceN1, serviceN2) > 0 {
-		pairKey = serviceN2 + "/" + serviceN1
+	pairKey := env.ServiceN1 + "/" + env.ServiceN2
+	if strings.Compare(env.ServiceN1, env.ServiceN2) > 0 {
+		pairKey = env.ServiceN2 + "/" + env.ServiceN1
 	}
 
 	if nodeDiffs, ok := mtreeTask.DiffResult.NodeDiffs[pairKey]; ok {
-		n1Rows := len(nodeDiffs.Rows[serviceN1])
-		n2Rows := len(nodeDiffs.Rows[serviceN2])
-		require.Equal(t, 0, n1Rows, "Expected 0 diff rows on %s, got %d (numeric scale should not cause diffs)", serviceN1, n1Rows)
-		require.Equal(t, 0, n2Rows, "Expected 0 diff rows on %s, got %d (numeric scale should not cause diffs)", serviceN2, n2Rows)
+		n1Rows := len(nodeDiffs.Rows[env.ServiceN1])
+		n2Rows := len(nodeDiffs.Rows[env.ServiceN2])
+		require.Equal(t, 0, n1Rows, "Expected 0 diff rows on %s, got %d (numeric scale should not cause diffs)", env.ServiceN1, n1Rows)
+		require.Equal(t, 0, n2Rows, "Expected 0 diff rows on %s, got %d (numeric scale should not cause diffs)", env.ServiceN2, n2Rows)
 	}
 	// If pairKey is not in NodeDiffs at all, that means zero diffs — which is correct.
 
@@ -1195,9 +1161,9 @@ func functionExists(t *testing.T, ctx context.Context, pool *pgxpool.Pool, funct
 	var exists bool
 	err := pool.QueryRow(ctx, `
 		SELECT EXISTS (
-			SELECT 1 
-			FROM pg_proc p 
-			JOIN pg_namespace n ON p.pronamespace = n.oid 
+			SELECT 1
+			FROM pg_proc p
+			JOIN pg_namespace n ON p.pronamespace = n.oid
 			WHERE p.proname = $1 AND n.nspname = $2
 		)`, functionName, schemaName).Scan(&exists)
 	require.NoError(t, err)
@@ -1209,8 +1175,8 @@ func tableExists(t *testing.T, ctx context.Context, pool *pgxpool.Pool, tableNam
 	var exists bool
 	err := pool.QueryRow(ctx, `
 		SELECT EXISTS (
-			SELECT 1 
-			FROM information_schema.tables 
+			SELECT 1
+			FROM information_schema.tables
 			WHERE table_schema = $1 AND table_name = $2
 		)`, schemaName, tableName).Scan(&exists)
 	require.NoError(t, err)
