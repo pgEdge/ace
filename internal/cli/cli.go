@@ -106,10 +106,9 @@ func SetupCLI() *cli.App {
 
 	rerunOnlyFlags := []cli.Flag{
 		&cli.StringFlag{
-			Name:     "diff-file",
-			Aliases:  []string{"f"},
-			Usage:    "Path to the diff file to rerun from (required)",
-			Required: true,
+			Name:    "diff-file",
+			Aliases: []string{"f"},
+			Usage:   "Path to the diff file to rerun from (required)",
 		},
 	}
 
@@ -167,10 +166,9 @@ func SetupCLI() *cli.App {
 
 	tableRepairFlags := []cli.Flag{
 		&cli.StringFlag{
-			Name:     "diff-file",
-			Aliases:  []string{"f"},
-			Usage:    "Path to the diff file (required)",
-			Required: true,
+			Name:    "diff-file",
+			Aliases: []string{"f"},
+			Usage:   "Path to the diff file (required)",
 		},
 		&cli.StringFlag{
 			Name:    "repair-plan",
