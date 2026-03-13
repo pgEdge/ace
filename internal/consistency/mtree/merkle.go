@@ -48,7 +48,7 @@ import (
 )
 
 func aceSchema() string {
-	return config.Cfg.MTree.Schema
+	return config.Get().MTree.Schema
 }
 
 const (
@@ -782,7 +782,7 @@ func (m *MerkleTreeTask) MtreeInit() (err error) {
 		return fmt.Errorf("validation failed: %w", err)
 	}
 
-	cfg := config.Cfg.MTree.CDC
+	cfg := config.Get().MTree.CDC
 
 	for _, nodeInfo := range m.ClusterNodes {
 		logger.Info("Initialising Merkle tree objects on node: %s", nodeInfo["Name"])
@@ -877,7 +877,7 @@ func (m *MerkleTreeTask) MtreeTeardownTable() (err error) {
 		return fmt.Errorf("validation failed: %w", err)
 	}
 
-	cfg := config.Cfg.MTree.CDC
+	cfg := config.Get().MTree.CDC
 
 	for _, nodeInfo := range m.ClusterNodes {
 		logger.Info("Tearing down Merkle tree objects for table '%s' on node: %s", m.QualifiedTableName, nodeInfo["Name"])
@@ -1095,7 +1095,7 @@ func (m *MerkleTreeTask) Validate() error {
 	if m.Mode == "listen" {
 		return nil
 	}
-	cfg := config.Cfg.MTree.Diff
+	cfg := config.Get().MTree.Diff
 
 	if m.BlockSize != 0 && !m.OverrideBlockSize {
 		if m.BlockSize > cfg.MaxBlockSize {
@@ -1246,7 +1246,7 @@ func (m *MerkleTreeTask) BuildMtree() (err error) {
 
 	var blockRanges []types.BlockRange
 	var numBlocks int
-	cfg := config.Cfg.MTree.CDC
+	cfg := config.Get().MTree.CDC
 	pools := make(map[string]*pgxpool.Pool, len(m.ClusterNodes))
 
 	numWorkers := int(math.Ceil(float64(runtime.NumCPU()) * m.MaxCpuRatio * 2))
@@ -1484,7 +1484,7 @@ func (m *MerkleTreeTask) UpdateMtree(skipAllChecks bool) (err error) {
 	}
 
 	if !m.NoCDC {
-		cdcCfg := config.Cfg.MTree.CDC
+		cdcCfg := config.Get().MTree.CDC
 		timeout := 30 * time.Second
 		if cdcCfg.CDCProcessingTimeout > 0 {
 			timeout = time.Duration(cdcCfg.CDCProcessingTimeout) * time.Second

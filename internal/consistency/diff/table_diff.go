@@ -727,18 +727,19 @@ func (t *TableDiffTask) Validate() error {
 		return fmt.Errorf("cluster_name and table_name are required arguments")
 	}
 
-	if t.BlockSize > config.Cfg.TableDiff.MaxBlockSize && !t.OverrideBlockSize {
-		return fmt.Errorf("block row size should be <= %d", config.Cfg.TableDiff.MaxBlockSize)
+	cfg := config.Get()
+	if t.BlockSize > cfg.TableDiff.MaxBlockSize && !t.OverrideBlockSize {
+		return fmt.Errorf("block row size should be <= %d", cfg.TableDiff.MaxBlockSize)
 	}
-	if t.BlockSize < config.Cfg.TableDiff.MinBlockSize && !t.OverrideBlockSize {
-		return fmt.Errorf("block row size should be >= %d", config.Cfg.TableDiff.MinBlockSize)
+	if t.BlockSize < cfg.TableDiff.MinBlockSize && !t.OverrideBlockSize {
+		return fmt.Errorf("block row size should be >= %d", cfg.TableDiff.MinBlockSize)
 	}
 
 	if t.MaxDiffRows < 0 {
 		return fmt.Errorf("max_diff_rows must be >= 0")
 	}
-	if t.MaxDiffRows == 0 && config.Cfg.TableDiff.MaxDiffRows > 0 {
-		t.MaxDiffRows = config.Cfg.TableDiff.MaxDiffRows
+	if t.MaxDiffRows == 0 && cfg.TableDiff.MaxDiffRows > 0 {
+		t.MaxDiffRows = cfg.TableDiff.MaxDiffRows
 	}
 
 	if t.ConcurrencyFactor > 4.0 || t.ConcurrencyFactor <= 0 {

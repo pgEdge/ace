@@ -1449,7 +1449,19 @@ func StartSchedulerCLI(_ context.Context, cmd *cli.Command) error {
 	}
 
 	if !runScheduler {
-		// API-only mode: just wait for shutdown.
+		// API-only mode: reload config on SIGHUP, wait for shutdown.
+		go func() {
+			for range sighupCh {
+				logger.Info("api: received SIGHUP – reloading configuration")
+				newCfg, err := config.Reload(config.CfgPath)
+				if err != nil {
+					logger.Error("api: config reload failed (keeping current config): %v", err)
+					continue
+				}
+				config.Set(newCfg)
+				logger.Info("api: configuration reloaded successfully")
+			}
+		}()
 		<-runCtx.Done()
 		return nil
 	}
@@ -1580,6 +1592,22 @@ func StartAPIServerCLI(_ context.Context, cmd *cli.Command) error {
 
 	runCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+
+	sighupCh := make(chan os.Signal, 1)
+	signal.Notify(sighupCh, syscall.SIGHUP)
+	defer signal.Stop(sighupCh)
+	go func() {
+		for range sighupCh {
+			logger.Info("api: received SIGHUP – reloading configuration")
+			newCfg, err := config.Reload(config.CfgPath)
+			if err != nil {
+				logger.Error("api: config reload failed (keeping current config): %v", err)
+				continue
+			}
+			config.Set(newCfg)
+			logger.Info("api: configuration reloaded successfully")
+		}
+	}()
 
 	return apiServer.Run(runCtx)
 }

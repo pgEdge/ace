@@ -220,7 +220,7 @@ func (s *APIServer) handleTableDiff(w http.ResponseWriter, r *http.Request) {
 	task.QuietMode = req.Quiet
 	task.SkipDBUpdate = false
 	task.TaskStore = s.taskStore
-	task.TaskStorePath = s.cfg.Server.TaskStorePath
+	task.TaskStorePath = config.Get().Server.TaskStorePath
 
 	if err := task.Validate(); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
@@ -253,7 +253,7 @@ func (s *APIServer) resolveBlockSize(requested int) int {
 	if requested > 0 {
 		return requested
 	}
-	if cfg := s.cfg; cfg != nil && cfg.TableDiff.DiffBlockSize > 0 {
+	if cfg := config.Get(); cfg != nil && cfg.TableDiff.DiffBlockSize > 0 {
 		return cfg.TableDiff.DiffBlockSize
 	}
 	return 100000
@@ -263,7 +263,7 @@ func (s *APIServer) resolveConcurrency(requested float64) float64 {
 	if requested > 0 {
 		return requested
 	}
-	if cfg := s.cfg; cfg != nil && cfg.TableDiff.ConcurrencyFactor > 0 {
+	if cfg := config.Get(); cfg != nil && cfg.TableDiff.ConcurrencyFactor > 0 {
 		return cfg.TableDiff.ConcurrencyFactor
 	}
 	return 0.5
@@ -273,7 +273,7 @@ func (s *APIServer) resolveCompareUnitSize(requested int) int {
 	if requested > 0 {
 		return requested
 	}
-	if cfg := s.cfg; cfg != nil && cfg.TableDiff.CompareUnitSize > 0 {
+	if cfg := config.Get(); cfg != nil && cfg.TableDiff.CompareUnitSize > 0 {
 		return cfg.TableDiff.CompareUnitSize
 	}
 	return 10000
@@ -283,7 +283,7 @@ func (s *APIServer) resolveMaxDiffRows(requested int64) int64 {
 	if requested > 0 {
 		return requested
 	}
-	if cfg := s.cfg; cfg != nil && cfg.TableDiff.MaxDiffRows > 0 {
+	if cfg := config.Get(); cfg != nil && cfg.TableDiff.MaxDiffRows > 0 {
 		return cfg.TableDiff.MaxDiffRows
 	}
 	return 0
@@ -360,7 +360,7 @@ func (s *APIServer) handleTableRerun(w http.ResponseWriter, r *http.Request) {
 	task.InvokeMethod = "api"
 	task.SkipDBUpdate = false
 	task.TaskStore = s.taskStore
-	task.TaskStorePath = s.cfg.Server.TaskStorePath
+	task.TaskStorePath = config.Get().Server.TaskStorePath
 
 	if err := s.enqueueTask(task.TaskID, func(ctx context.Context) error {
 		task.Ctx = ctx
@@ -441,7 +441,7 @@ func (s *APIServer) handleTableRepair(w http.ResponseWriter, r *http.Request) {
 	task.InvokeMethod = "api"
 	task.SkipDBUpdate = false
 	task.TaskStore = s.taskStore
-	task.TaskStorePath = s.cfg.Server.TaskStorePath
+	task.TaskStorePath = config.Get().Server.TaskStorePath
 
 	if err := task.ValidateAndPrepare(); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
@@ -506,7 +506,7 @@ func (s *APIServer) handleSpockDiff(w http.ResponseWriter, r *http.Request) {
 	task.InvokeMethod = "api"
 	task.SkipDBUpdate = false
 	task.TaskStore = s.taskStore
-	task.TaskStorePath = s.cfg.Server.TaskStorePath
+	task.TaskStorePath = config.Get().Server.TaskStorePath
 
 	if err := task.Validate(); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
@@ -581,7 +581,7 @@ func (s *APIServer) handleSchemaDiff(w http.ResponseWriter, r *http.Request) {
 	task.Ctx = r.Context()
 	task.SkipDBUpdate = false
 	task.TaskStore = s.taskStore
-	task.TaskStorePath = s.cfg.Server.TaskStorePath
+	task.TaskStorePath = config.Get().Server.TaskStorePath
 
 	if err := task.Validate(); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
@@ -663,7 +663,7 @@ func (s *APIServer) handleRepsetDiff(w http.ResponseWriter, r *http.Request) {
 	task.InvokeMethod = "api"
 	task.SkipDBUpdate = false
 	task.TaskStore = s.taskStore
-	task.TaskStorePath = s.cfg.Server.TaskStorePath
+	task.TaskStorePath = config.Get().Server.TaskStorePath
 
 	if err := task.Validate(); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
@@ -741,7 +741,7 @@ func (s *APIServer) handleMtreeInit(w http.ResponseWriter, r *http.Request) {
 	task.InvokeMethod = "api"
 	task.SkipDBUpdate = false
 	task.TaskStore = s.taskStore
-	task.TaskStorePath = s.cfg.Server.TaskStorePath
+	task.TaskStorePath = config.Get().Server.TaskStorePath
 
 	if err := s.enqueueTask(task.TaskID, func(ctx context.Context) error {
 		task.Ctx = ctx
@@ -799,7 +799,7 @@ func (s *APIServer) handleMtreeTeardown(w http.ResponseWriter, r *http.Request) 
 	task.InvokeMethod = "api"
 	task.SkipDBUpdate = false
 	task.TaskStore = s.taskStore
-	task.TaskStorePath = s.cfg.Server.TaskStorePath
+	task.TaskStorePath = config.Get().Server.TaskStorePath
 
 	if err := s.enqueueTask(task.TaskID, func(ctx context.Context) error {
 		task.Ctx = ctx
@@ -863,7 +863,7 @@ func (s *APIServer) handleMtreeTeardownTable(w http.ResponseWriter, r *http.Requ
 	task.InvokeMethod = "api"
 	task.SkipDBUpdate = false
 	task.TaskStore = s.taskStore
-	task.TaskStorePath = s.cfg.Server.TaskStorePath
+	task.TaskStorePath = config.Get().Server.TaskStorePath
 
 	if err := s.enqueueTask(task.TaskID, func(ctx context.Context) error {
 		task.Ctx = ctx
@@ -934,7 +934,7 @@ func (s *APIServer) handleMtreeBuild(w http.ResponseWriter, r *http.Request) {
 	task.InvokeMethod = "api"
 	task.SkipDBUpdate = false
 	task.TaskStore = s.taskStore
-	task.TaskStorePath = s.cfg.Server.TaskStorePath
+	task.TaskStorePath = config.Get().Server.TaskStorePath
 
 	if err := task.Validate(); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
@@ -1009,7 +1009,7 @@ func (s *APIServer) handleMtreeUpdate(w http.ResponseWriter, r *http.Request) {
 	task.InvokeMethod = "api"
 	task.SkipDBUpdate = false
 	task.TaskStore = s.taskStore
-	task.TaskStorePath = s.cfg.Server.TaskStorePath
+	task.TaskStorePath = config.Get().Server.TaskStorePath
 
 	if err := task.Validate(); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
@@ -1088,7 +1088,7 @@ func (s *APIServer) handleMtreeDiff(w http.ResponseWriter, r *http.Request) {
 	task.InvokeMethod = "api"
 	task.SkipDBUpdate = false
 	task.TaskStore = s.taskStore
-	task.TaskStorePath = s.cfg.Server.TaskStorePath
+	task.TaskStorePath = config.Get().Server.TaskStorePath
 
 	if err := task.Validate(); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())

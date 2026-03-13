@@ -41,6 +41,10 @@ For long-lived automation, define jobs in `ace.yaml` and let `./ace start` orche
 - `schedule_jobs`: describes each job (what to run and with which arguments).
 - `schedule_config`: pairs a job name with either a frequency or a cron expression and marks it enabled/disabled.
 
+### Signaling the Scheduler to Reload the Configuration
+
+If you have a running scheduler and change the configuration but do not wish to restart it, you can signal the scheduler to reload its configuration with SIGHUP (1). It will wait for currently executing jobs to complete and then swap in the new configuration to take effect.
+
 ### Sample Configuration
 
 ```yaml

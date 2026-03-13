@@ -58,7 +58,7 @@ func processReplicationStream(ctx context.Context, nodeInfo map[string]any, cont
 	}
 	processingCtx := context.WithoutCancel(ctx)
 
-	cfg := config.Cfg.MTree.CDC
+	cfg := config.Get().MTree.CDC
 	publication := cfg.PublicationName
 	slotName := cfg.SlotName
 	var startLSNStr string
@@ -123,8 +123,8 @@ func processReplicationStream(ctx context.Context, nodeInfo map[string]any, cont
 	var lastLSNVal atomic.Uint64
 	lastLSNVal.Store(uint64(lastLSN))
 	flushInterval := 10 * time.Second
-	if config.Cfg.MTree.CDC.CDCMetadataFlushSec > 0 {
-		flushInterval = time.Duration(config.Cfg.MTree.CDC.CDCMetadataFlushSec) * time.Second
+	if cdcCfg := config.Get().MTree.CDC; cdcCfg.CDCMetadataFlushSec > 0 {
+		flushInterval = time.Duration(cdcCfg.CDCMetadataFlushSec) * time.Second
 	}
 	lastFlushTime := time.Now()
 	var conn *pgconn.PgConn
@@ -551,14 +551,15 @@ func processChanges(ctx context.Context, pool *pgxpool.Pool, changes []cdcMsg) e
 			firstChange := tableChanges[0]
 			schema := firstChange.schema
 			table := firstChange.table
-			mtreeTable := fmt.Sprintf("%s.ace_mtree_%s_%s", config.Cfg.MTree.Schema, schema, table)
+			mtreeSchema := config.Get().MTree.Schema
+			mtreeTable := fmt.Sprintf("%s.ace_mtree_%s_%s", mtreeSchema, schema, table)
 
 			logger.Debug("Processing %d changes for table %s.%s (mtree: %s)", len(tableChanges), schema, table, mtreeTable)
 
 			var inserts, deletes, updates []string
 			relation := firstChange.relation
 			isComposite := len(getPrimaryKeyColumns(relation)) > 1
-			compositeTypeName := fmt.Sprintf("%s.%s_%s_key_type", config.Cfg.MTree.Schema, schema, table)
+			compositeTypeName := fmt.Sprintf("%s.%s_%s_key_type", mtreeSchema, schema, table)
 			var pkeyType string
 			if !isComposite {
 				for _, col := range relation.Columns {
