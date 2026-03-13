@@ -192,7 +192,7 @@ func TestCDCFallbackToSlotLSN(t *testing.T) {
 	err := pgCluster.Node1Pool.QueryRow(ctx, "SELECT ($1::pg_lsn + 16)::text", slotConfirmed).Scan(&bumpedStart)
 	require.NoError(t, err)
 
-	_, err = pgCluster.Node1Pool.Exec(ctx, "UPDATE spock.ace_cdc_metadata SET start_lsn = $1 WHERE publication_name = $2", bumpedStart, config.Cfg.MTree.CDC.PublicationName)
+	_, err = pgCluster.Node1Pool.Exec(ctx, fmt.Sprintf("UPDATE %s.ace_cdc_metadata SET start_lsn = $1 WHERE publication_name = $2", config.Cfg.MTree.Schema), bumpedStart, config.Cfg.MTree.CDC.PublicationName)
 	require.NoError(t, err)
 
 	_, err = pgCluster.Node1Pool.Exec(ctx, fmt.Sprintf("UPDATE %s SET email = email || '.cdc_fallback' WHERE index = 2", qualifiedTableName))
@@ -263,7 +263,7 @@ func currentMetadataLSN(t *testing.T, ctx context.Context) pglogrepl.LSN {
 func metadataStartLSN(t *testing.T, ctx context.Context) pglogrepl.LSN {
 	t.Helper()
 	var lsnStr string
-	err := pgCluster.Node1Pool.QueryRow(ctx, "SELECT start_lsn FROM spock.ace_cdc_metadata WHERE publication_name = $1", config.Cfg.MTree.CDC.PublicationName).Scan(&lsnStr)
+	err := pgCluster.Node1Pool.QueryRow(ctx, fmt.Sprintf("SELECT start_lsn FROM %s.ace_cdc_metadata WHERE publication_name = $1", config.Cfg.MTree.Schema), config.Cfg.MTree.CDC.PublicationName).Scan(&lsnStr)
 	require.NoError(t, err)
 	return mustParseLSN(t, lsnStr)
 }

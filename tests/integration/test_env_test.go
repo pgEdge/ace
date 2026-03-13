@@ -26,6 +26,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/pgedge/ace/internal/consistency/diff"
+	"github.com/pgedge/ace/internal/consistency/mtree"
 	"github.com/pgedge/ace/internal/consistency/repair"
 	"github.com/pgedge/ace/pkg/types"
 	"github.com/stretchr/testify/assert"
@@ -38,6 +39,11 @@ type testEnv struct {
 	N1Pool *pgxpool.Pool
 	N2Pool *pgxpool.Pool
 	N3Pool *pgxpool.Pool // nil for native PG (only 2 nodes)
+
+	N1Host string
+	N1Port string
+	N2Host string
+	N2Port string
 
 	ServiceN1 string
 	ServiceN2 string
@@ -59,6 +65,10 @@ func newSpockEnv() *testEnv {
 		N1Pool:       pgCluster.Node1Pool,
 		N2Pool:       pgCluster.Node2Pool,
 		N3Pool:       pgCluster.Node3Pool,
+		N1Host:       pgCluster.Node1Host,
+		N1Port:       pgCluster.Node1Port,
+		N2Host:       pgCluster.Node2Host,
+		N2Port:       pgCluster.Node2Port,
 		ServiceN1:    serviceN1,
 		ServiceN2:    serviceN2,
 		ServiceN3:    serviceN3,
@@ -77,6 +87,10 @@ func newNativeEnv(state *nativeClusterState) *testEnv {
 		N1Pool:    state.n1Pool,
 		N2Pool:    state.n2Pool,
 		N3Pool:    nil,
+		N1Host:    state.n1Host,
+		N1Port:    state.n1Port,
+		N2Host:    state.n2Host,
+		N2Port:    state.n2Port,
 		ServiceN1: nativeServiceN1,
 		ServiceN2: nativeServiceN2,
 		ServiceN3: "",
@@ -369,4 +383,16 @@ func (e *testEnv) pairKey() string {
 		return e.ServiceN2 + "/" + e.ServiceN1
 	}
 	return e.ServiceN1 + "/" + e.ServiceN2
+}
+
+// newMerkleTreeTask creates a MerkleTreeTask configured for this environment.
+func (e *testEnv) newMerkleTreeTask(t *testing.T, qualifiedTableName string, nodes []string) *mtree.MerkleTreeTask {
+	t.Helper()
+	task := mtree.NewMerkleTreeTask()
+	task.ClusterName = e.ClusterName
+	task.DBName = e.DBName
+	task.QualifiedTableName = qualifiedTableName
+	task.Nodes = strings.Join(nodes, ",")
+	task.BlockSize = 1000
+	return task
 }
