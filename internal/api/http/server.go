@@ -18,7 +18,6 @@ import (
 )
 
 type APIServer struct {
-	cfg        *config.Config
 	server     *http.Server
 	validator  *certValidator
 	taskStore  *taskstore.Store
@@ -62,7 +61,6 @@ func New(cfg *config.Config) (*APIServer, error) {
 	mux := http.NewServeMux()
 
 	apiServer := &APIServer{
-		cfg:        cfg,
 		validator:  validator,
 		taskStore:  taskStore,
 		listenAddr: fmt.Sprintf("%s:%d", srvCfg.ListenAddress, srvCfg.ListenPort),

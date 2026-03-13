@@ -95,7 +95,7 @@ func toConnectionString(node map[string]any, dbName string) string {
 		parts = append(parts, "dbname="+dbToUse)
 	}
 
-	cfg := config.Cfg
+	cfg := config.Get()
 	if cfg != nil {
 		pgCfg := cfg.Postgres
 		if pgCfg.ConnectionTimeout > 0 {
@@ -208,7 +208,7 @@ func applyPostgresPoolConfig(poolCfg *pgxpool.Config) {
 	if poolCfg == nil || poolCfg.ConnConfig == nil {
 		return
 	}
-	cfg := config.Cfg
+	cfg := config.Get()
 	if cfg == nil {
 		return
 	}
@@ -226,7 +226,7 @@ func applyPostgresPgconnConfig(pgCfg *pgconn.Config) {
 	if pgCfg == nil {
 		return
 	}
-	cfg := config.Cfg
+	cfg := config.Get()
 	if cfg == nil {
 		return
 	}
