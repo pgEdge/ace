@@ -11,7 +11,17 @@
 
 package queries
 
-import "text/template"
+import (
+	"text/template"
+
+	"github.com/pgedge/ace/pkg/config"
+)
+
+// aceTemplateFuncs provides the {{aceSchema}} function to SQL templates.
+// The function is evaluated at render time (after config is loaded), not at parse time.
+var aceTemplateFuncs = template.FuncMap{
+	"aceSchema": func() string { return config.Cfg.MTree.Schema },
+}
 
 type Templates struct {
 	EstimateRowCount     *template.Template
@@ -136,8 +146,8 @@ type Templates struct {
 
 var SQLTemplates = Templates{
 	// A template isn't needed for this query; just keeping the struct uniform
-	CreateMetadataTable: template.Must(template.New("createMetadataTable").Parse(`
-		CREATE TABLE IF NOT EXISTS spock.ace_mtree_metadata (
+	CreateMetadataTable: template.Must(template.New("createMetadataTable").Funcs(aceTemplateFuncs).Parse(`
+		CREATE TABLE IF NOT EXISTS {{aceSchema}}.ace_mtree_metadata (
 			schema_name text,
 			table_name text,
 			total_rows bigint,
@@ -164,8 +174,8 @@ var SQLTemplates = Templates{
 		ALTER PUBLICATION {{.PublicationName}} DROP TABLE {{.TableName}}
 	`)),
 
-	RemoveTableFromCDCMetadata: template.Must(template.New("removeTableFromCDCMetadata").Parse(`
-		UPDATE spock.ace_cdc_metadata
+	RemoveTableFromCDCMetadata: template.Must(template.New("removeTableFromCDCMetadata").Funcs(aceTemplateFuncs).Parse(`
+		UPDATE {{aceSchema}}.ace_cdc_metadata
 		SET tables = array_remove(tables, $1)
 		WHERE publication_name = $2
 	`)),
@@ -182,9 +192,9 @@ var SQLTemplates = Templates{
 			)
 	`)),
 
-	UpdateCDCMetadata: template.Must(template.New("updateCdcMetadata").Parse(`
+	UpdateCDCMetadata: template.Must(template.New("updateCdcMetadata").Funcs(aceTemplateFuncs).Parse(`
 		INSERT INTO
-			spock.ace_cdc_metadata (
+			{{aceSchema}}.ace_cdc_metadata (
 				publication_name,
 				slot_name,
 				start_lsn,
@@ -223,17 +233,17 @@ var SQLTemplates = Templates{
 	CheckPIDExists: template.Must(template.New("checkPIDExists").Parse(`
 		SELECT pid FROM pg_stat_activity WHERE pid = $1
 	`)),
-	DropCDCMetadataTable: template.Must(template.New("dropCDCMetadataTable").Parse(`
-		DROP TABLE IF EXISTS spock.ace_cdc_metadata
+	DropCDCMetadataTable: template.Must(template.New("dropCDCMetadataTable").Funcs(aceTemplateFuncs).Parse(`
+		DROP TABLE IF EXISTS {{aceSchema}}.ace_cdc_metadata
 	`)),
 
-	GetCDCMetadata: template.Must(template.New("getCDCMetadata").Parse(`
+	GetCDCMetadata: template.Must(template.New("getCDCMetadata").Funcs(aceTemplateFuncs).Parse(`
 		SELECT
 			slot_name,
 			start_lsn,
 			tables
 		FROM
-			spock.ace_cdc_metadata
+			{{aceSchema}}.ace_cdc_metadata
 		WHERE
 			publication_name = $1
 	`)),
@@ -320,8 +330,8 @@ var SQLTemplates = Templates{
 			AND mt.node_position = b.node_position;
 	`)),
 
-	CreateCDCMetadataTable: template.Must(template.New("createCDCMetadataTable").Parse(`
-		CREATE TABLE IF NOT EXISTS spock.ace_cdc_metadata (
+	CreateCDCMetadataTable: template.Must(template.New("createCDCMetadataTable").Funcs(aceTemplateFuncs).Parse(`
+		CREATE TABLE IF NOT EXISTS {{aceSchema}}.ace_cdc_metadata (
 			publication_name text PRIMARY KEY,
 			slot_name text,
 			start_lsn text,
@@ -775,9 +785,9 @@ var SQLTemplates = Templates{
 		VALUES
 			(0, $1, {{.StartExpr}}, {{.EndExpr}});
 	`)),
-	CreateXORFunction: template.Must(template.New("createXORFunction").Parse(`
+	CreateXORFunction: template.Must(template.New("createXORFunction").Funcs(aceTemplateFuncs).Parse(`
 		CREATE
-		OR REPLACE FUNCTION spock.bytea_xor(a bytea, b bytea) RETURNS bytea AS $$
+		OR REPLACE FUNCTION {{aceSchema}}.bytea_xor(a bytea, b bytea) RETURNS bytea AS $$
 		DECLARE
 			result bytea;
 			len int;
@@ -808,7 +818,7 @@ var SQLTemplates = Templates{
 			CREATE OPERATOR # (
 				LEFTARG = bytea,
 				RIGHTARG = bytea,
-				PROCEDURE = spock.bytea_xor
+				PROCEDURE = {{aceSchema}}.bytea_xor
 			);
 			END IF;
 		END $$;
@@ -843,9 +853,9 @@ var SQLTemplates = Templates{
 			AND c.relname = $2
 			AND a.attname = $3
 	`)),
-	UpdateMetadata: template.Must(template.New("updateMetadata").Parse(`
+	UpdateMetadata: template.Must(template.New("updateMetadata").Funcs(aceTemplateFuncs).Parse(`
 		INSERT INTO
-			spock.ace_mtree_metadata (
+			{{aceSchema}}.ace_mtree_metadata (
 				schema_name,
 				table_name,
 				total_rows,
@@ -876,8 +886,8 @@ var SQLTemplates = Templates{
 			hash_version = EXCLUDED.hash_version,
 			last_updated = EXCLUDED.last_updated
 	`)),
-	DeleteMetadata: template.Must(template.New("deleteMetadata").Parse(`
-		DELETE FROM spock.ace_mtree_metadata WHERE schema_name = $1 AND table_name = $2
+	DeleteMetadata: template.Must(template.New("deleteMetadata").Funcs(aceTemplateFuncs).Parse(`
+		DELETE FROM {{aceSchema}}.ace_mtree_metadata WHERE schema_name = $1 AND table_name = $2
 	`)),
 	InsertBlockRanges: template.Must(template.New("insertBlockRanges").Parse(`
 		INSERT INTO
@@ -1058,11 +1068,11 @@ var SQLTemplates = Templates{
 		ORDER BY
 			node_position
 	`)),
-	GetRowCountEstimate: template.Must(template.New("getRowCountEstimate").Parse(`
+	GetRowCountEstimate: template.Must(template.New("getRowCountEstimate").Funcs(aceTemplateFuncs).Parse(`
 		SELECT
 			total_rows
 		FROM
-			spock.ace_mtree_metadata
+			{{aceSchema}}.ace_mtree_metadata
 		WHERE
 			schema_name = $1
 			AND table_name = $2
@@ -1297,11 +1307,11 @@ var SQLTemplates = Templates{
 			mt.range_start,
 			mt.range_end
 	`)),
-	GetBlockSizeFromMetadata: template.Must(template.New("getBlockSizeFromMetadata").Parse(`
+	GetBlockSizeFromMetadata: template.Must(template.New("getBlockSizeFromMetadata").Funcs(aceTemplateFuncs).Parse(`
 		SELECT
 			block_size
 		FROM
-			spock.ace_mtree_metadata
+			{{aceSchema}}.ace_mtree_metadata
 		WHERE
 			schema_name = $1
 			AND table_name = $2
@@ -1312,11 +1322,19 @@ var SQLTemplates = Templates{
 		FROM
 			{{.MtreeTable}}
 	`)),
-	DropXORFunction: template.Must(template.New("dropXORFunction").Parse(`
-		DROP FUNCTION IF EXISTS spock.bytea_xor(bytea, bytea) CASCADE
+	CompareBlocksSQL: template.Must(template.New("compareBlocksSQL").Parse(`
+		SELECT
+			*
+		FROM
+			{{.TableName}}
+		WHERE
+			{{.WhereClause}}
 	`)),
-	DropMetadataTable: template.Must(template.New("dropMetadataTable").Parse(`
-		DROP TABLE IF EXISTS spock.ace_mtree_metadata CASCADE
+	DropXORFunction: template.Must(template.New("dropXORFunction").Funcs(aceTemplateFuncs).Parse(`
+		DROP FUNCTION IF EXISTS {{aceSchema}}.bytea_xor(bytea, bytea) CASCADE
+	`)),
+	DropMetadataTable: template.Must(template.New("dropMetadataTable").Funcs(aceTemplateFuncs).Parse(`
+		DROP TABLE IF EXISTS {{aceSchema}}.ace_mtree_metadata CASCADE
 	`)),
 	DropMtreeTable: template.Must(template.New("dropMtreeTable").Parse(`
 		DROP TABLE IF EXISTS {{.MtreeTable}} CASCADE
@@ -1509,13 +1527,13 @@ var SQLTemplates = Templates{
 		ORDER BY rs.confirmed_flush_lsn DESC
 		LIMIT 1
 	`)),
-	EnsureHashVersionColumn: template.Must(template.New("ensureHashVersionColumn").Parse(`
-		ALTER TABLE spock.ace_mtree_metadata
+	EnsureHashVersionColumn: template.Must(template.New("ensureHashVersionColumn").Funcs(aceTemplateFuncs).Parse(`
+		ALTER TABLE {{aceSchema}}.ace_mtree_metadata
 		ADD COLUMN IF NOT EXISTS hash_version int NOT NULL DEFAULT 1
 	`)),
-	GetHashVersion: template.Must(template.New("getHashVersion").Parse(`
+	GetHashVersion: template.Must(template.New("getHashVersion").Funcs(aceTemplateFuncs).Parse(`
 		SELECT COALESCE(
-			(SELECT hash_version FROM spock.ace_mtree_metadata
+			(SELECT hash_version FROM {{aceSchema}}.ace_mtree_metadata
 			 WHERE schema_name = $1 AND table_name = $2),
 			1
 		)
@@ -1525,8 +1543,8 @@ var SQLTemplates = Templates{
 		SET dirty = true
 		WHERE node_level = 0
 	`)),
-	UpdateHashVersion: template.Must(template.New("updateHashVersion").Parse(`
-		UPDATE spock.ace_mtree_metadata
+	UpdateHashVersion: template.Must(template.New("updateHashVersion").Funcs(aceTemplateFuncs).Parse(`
+		UPDATE {{aceSchema}}.ace_mtree_metadata
 		SET hash_version = $1, last_updated = current_timestamp
 		WHERE schema_name = $2 AND table_name = $3
 	`)),
