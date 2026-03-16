@@ -34,7 +34,7 @@ import (
 	"github.com/pgedge/ace/internal/jobs"
 	"github.com/pgedge/ace/pkg/config"
 	"github.com/pgedge/ace/pkg/logger"
-	"github.com/urfave/cli/v2"
+	"github.com/urfave/cli/v3"
 )
 
 //go:embed default_config.yaml
@@ -43,7 +43,7 @@ var defaultConfigYAML string
 //go:embed default_pg_service.conf
 var defaultPgServiceConf string
 
-func SetupCLI() *cli.App {
+func SetupCLI() *cli.Command {
 	commonFlags := []cli.Flag{
 		&cli.StringFlag{
 			Name:    "dbname",
@@ -411,14 +411,14 @@ func SetupCLI() *cli.App {
 		},
 	}
 
-	app := &cli.App{
+	app := &cli.Command{
 		Name:  "ace",
 		Usage: "ACE - Active Consistency Engine",
 		Commands: []*cli.Command{
 			{
 				Name:  "config",
 				Usage: "Manage ACE configuration files",
-				Subcommands: []*cli.Command{
+				Commands: []*cli.Command{
 					{
 						Name:   "init",
 						Usage:  "Create a default ace.yaml file",
@@ -444,13 +444,13 @@ func SetupCLI() *cli.App {
 					},
 				},
 				Action: StartSchedulerCLI,
-				Before: func(ctx *cli.Context) error {
-					if ctx.Bool("debug") {
+				Before: func(ctx context.Context, cmd *cli.Command) (context.Context, error) {
+					if cmd.Bool("debug") {
 						logger.SetLevel(log.DebugLevel)
 					} else {
 						logger.SetLevel(log.InfoLevel)
 					}
-					return nil
+					return ctx, nil
 				},
 			},
 			{
@@ -464,19 +464,19 @@ func SetupCLI() *cli.App {
 					},
 				},
 				Action: StartAPIServerCLI,
-				Before: func(ctx *cli.Context) error {
-					if ctx.Bool("debug") {
+				Before: func(ctx context.Context, cmd *cli.Command) (context.Context, error) {
+					if cmd.Bool("debug") {
 						logger.SetLevel(log.DebugLevel)
 					} else {
 						logger.SetLevel(log.InfoLevel)
 					}
-					return nil
+					return ctx, nil
 				},
 			},
 			{
 				Name:  "cluster",
 				Usage: "Manage ACE cluster service definitions",
-				Subcommands: []*cli.Command{
+				Commands: []*cli.Command{
 					{
 						Name:   "init",
 						Usage:  "Create a sample pg_service.conf file",
@@ -491,24 +491,24 @@ func SetupCLI() *cli.App {
 				ArgsUsage: "[cluster] <table>",
 				Description: "A tool for comparing tables between PostgreSQL databases " +
 					"and detecting data inconsistencies",
-				Action: func(ctx *cli.Context) error {
-					argsLen := ctx.Args().Len()
+				Action: func(_ context.Context, cmd *cli.Command) error {
+					argsLen := cmd.Args().Len()
 					if argsLen == 0 {
 						return fmt.Errorf("missing required argument for table-diff: needs <table>")
 					}
 					if argsLen > 2 {
 						return fmt.Errorf("unexpected arguments for table-diff (usage: [cluster] <table>)")
 					}
-					return TableDiffCLI(ctx)
+					return TableDiffCLI(cmd)
 				},
 				Flags: tableDiffFlags,
-				Before: func(ctx *cli.Context) error {
-					if ctx.Bool("debug") {
+				Before: func(ctx context.Context, cmd *cli.Command) (context.Context, error) {
+					if cmd.Bool("debug") {
 						logger.SetLevel(log.DebugLevel)
 					} else {
 						logger.SetLevel(log.InfoLevel)
 					}
-					return nil
+					return ctx, nil
 				},
 			},
 			{
@@ -516,19 +516,19 @@ func SetupCLI() *cli.App {
 				Usage:     "Re-run a diff from a file to check for persistent differences",
 				ArgsUsage: "[cluster]",
 				Flags:     tableRerunFlags,
-				Action: func(ctx *cli.Context) error {
-					if ctx.Args().Len() > 1 {
+				Action: func(_ context.Context, cmd *cli.Command) error {
+					if cmd.Args().Len() > 1 {
 						return fmt.Errorf("unexpected arguments for table-rerun (usage: [cluster])")
 					}
-					return TableRerunCLI(ctx)
+					return TableRerunCLI(cmd)
 				},
-				Before: func(ctx *cli.Context) error {
-					if ctx.Bool("debug") {
+				Before: func(ctx context.Context, cmd *cli.Command) (context.Context, error) {
+					if cmd.Bool("debug") {
 						logger.SetLevel(log.DebugLevel)
 					} else {
 						logger.SetLevel(log.InfoLevel)
 					}
-					return nil
+					return ctx, nil
 				},
 			},
 			{
@@ -536,23 +536,23 @@ func SetupCLI() *cli.App {
 				Usage:     "Repair table inconsistencies based on a diff file",
 				ArgsUsage: "[cluster] <table>",
 				Flags:     tableRepairFlags,
-				Action: func(ctx *cli.Context) error {
-					argsLen := ctx.Args().Len()
+				Action: func(_ context.Context, cmd *cli.Command) error {
+					argsLen := cmd.Args().Len()
 					if argsLen == 0 {
 						return fmt.Errorf("missing required argument for table-repair: needs <table>")
 					}
 					if argsLen > 2 {
 						return fmt.Errorf("unexpected arguments for table-repair (usage: [cluster] <table>)")
 					}
-					return TableRepairCLI(ctx)
+					return TableRepairCLI(cmd)
 				},
-				Before: func(ctx *cli.Context) error {
-					if ctx.Bool("debug") {
+				Before: func(ctx context.Context, cmd *cli.Command) (context.Context, error) {
+					if cmd.Bool("debug") {
 						logger.SetLevel(log.DebugLevel)
 					} else {
 						logger.SetLevel(log.InfoLevel)
 					}
-					return nil
+					return ctx, nil
 				},
 			},
 			{
@@ -560,19 +560,19 @@ func SetupCLI() *cli.App {
 				Usage:     "Compare spock metadata across cluster nodes",
 				ArgsUsage: "[cluster]",
 				Flags:     spockDiffFlags,
-				Action: func(ctx *cli.Context) error {
-					if ctx.Args().Len() > 1 {
+				Action: func(_ context.Context, cmd *cli.Command) error {
+					if cmd.Args().Len() > 1 {
 						return fmt.Errorf("unexpected arguments for spock-diff (usage: [cluster])")
 					}
-					return SpockDiffCLI(ctx)
+					return SpockDiffCLI(cmd)
 				},
-				Before: func(ctx *cli.Context) error {
-					if ctx.Bool("debug") {
+				Before: func(ctx context.Context, cmd *cli.Command) (context.Context, error) {
+					if cmd.Bool("debug") {
 						logger.SetLevel(log.DebugLevel)
 					} else {
 						logger.SetLevel(log.InfoLevel)
 					}
-					return nil
+					return ctx, nil
 				},
 			},
 			{
@@ -580,23 +580,23 @@ func SetupCLI() *cli.App {
 				Usage:     "Compare schemas across cluster nodes",
 				ArgsUsage: "[cluster] <schema>",
 				Flags:     schemaDiffFlags,
-				Action: func(ctx *cli.Context) error {
-					argsLen := ctx.Args().Len()
+				Action: func(_ context.Context, cmd *cli.Command) error {
+					argsLen := cmd.Args().Len()
 					if argsLen == 0 {
 						return fmt.Errorf("missing required argument for schema-diff: needs <schema>")
 					}
 					if argsLen > 2 {
 						return fmt.Errorf("unexpected arguments for schema-diff (usage: [cluster] <schema>)")
 					}
-					return SchemaDiffCLI(ctx)
+					return SchemaDiffCLI(cmd)
 				},
-				Before: func(ctx *cli.Context) error {
-					if ctx.Bool("debug") {
+				Before: func(ctx context.Context, cmd *cli.Command) (context.Context, error) {
+					if cmd.Bool("debug") {
 						logger.SetLevel(log.DebugLevel)
 					} else {
 						logger.SetLevel(log.InfoLevel)
 					}
-					return nil
+					return ctx, nil
 				},
 			},
 			{
@@ -604,47 +604,47 @@ func SetupCLI() *cli.App {
 				Usage:     "Compare replication sets across cluster nodes",
 				ArgsUsage: "[cluster] <repset>",
 				Flags:     repsetDiffFlags,
-				Action: func(ctx *cli.Context) error {
-					argsLen := ctx.Args().Len()
+				Action: func(_ context.Context, cmd *cli.Command) error {
+					argsLen := cmd.Args().Len()
 					if argsLen == 0 {
 						return fmt.Errorf("missing required argument for repset-diff: needs <repset>")
 					}
 					if argsLen > 2 {
 						return fmt.Errorf("unexpected arguments for repset-diff (usage: [cluster] <repset>)")
 					}
-					return RepsetDiffCLI(ctx)
+					return RepsetDiffCLI(cmd)
 				},
-				Before: func(ctx *cli.Context) error {
-					if ctx.Bool("debug") {
+				Before: func(ctx context.Context, cmd *cli.Command) (context.Context, error) {
+					if cmd.Bool("debug") {
 						logger.SetLevel(log.DebugLevel)
 					} else {
 						logger.SetLevel(log.InfoLevel)
 					}
-					return nil
+					return ctx, nil
 				},
 			},
 			{
 				Name:  "mtree",
 				Usage: "Merkle tree operations",
-				Subcommands: []*cli.Command{
+				Commands: []*cli.Command{
 					{
 						Name:      "init",
 						Usage:     "Initialise Merkle tree replication for a cluster",
 						ArgsUsage: "[cluster]",
 						Flags:     commonFlags,
-						Action: func(ctx *cli.Context) error {
-							if ctx.Args().Len() > 1 {
+						Action: func(_ context.Context, cmd *cli.Command) error {
+							if cmd.Args().Len() > 1 {
 								return fmt.Errorf("unexpected arguments for mtree init (usage: [cluster])")
 							}
-							return MtreeInitCLI(ctx)
+							return MtreeInitCLI(cmd)
 						},
-						Before: func(ctx *cli.Context) error {
-							if ctx.Bool("debug") {
+						Before: func(ctx context.Context, cmd *cli.Command) (context.Context, error) {
+							if cmd.Bool("debug") {
 								logger.SetLevel(log.DebugLevel)
 							} else {
 								logger.SetLevel(log.InfoLevel)
 							}
-							return nil
+							return ctx, nil
 						},
 					},
 					{
@@ -652,19 +652,19 @@ func SetupCLI() *cli.App {
 						Usage:     "Listen for changes and update Merkle trees",
 						ArgsUsage: "[cluster]",
 						Flags:     commonFlags,
-						Action: func(ctx *cli.Context) error {
-							if ctx.Args().Len() > 1 {
+						Action: func(_ context.Context, cmd *cli.Command) error {
+							if cmd.Args().Len() > 1 {
 								return fmt.Errorf("unexpected arguments for mtree listen (usage: [cluster])")
 							}
-							return MtreeListenCLI(ctx)
+							return MtreeListenCLI(cmd)
 						},
-						Before: func(ctx *cli.Context) error {
-							if ctx.Bool("debug") {
+						Before: func(ctx context.Context, cmd *cli.Command) (context.Context, error) {
+							if cmd.Bool("debug") {
 								logger.SetLevel(log.DebugLevel)
 							} else {
 								logger.SetLevel(log.InfoLevel)
 							}
-							return nil
+							return ctx, nil
 						},
 					},
 					{
@@ -672,19 +672,19 @@ func SetupCLI() *cli.App {
 						Usage:     "Teardown Merkle tree replication for a cluster",
 						ArgsUsage: "[cluster]",
 						Flags:     commonFlags,
-						Action: func(ctx *cli.Context) error {
-							if ctx.Args().Len() > 1 {
+						Action: func(_ context.Context, cmd *cli.Command) error {
+							if cmd.Args().Len() > 1 {
 								return fmt.Errorf("unexpected arguments for mtree teardown (usage: [cluster])")
 							}
-							return MtreeTeardownCLI(ctx)
+							return MtreeTeardownCLI(cmd)
 						},
-						Before: func(ctx *cli.Context) error {
-							if ctx.Bool("debug") {
+						Before: func(ctx context.Context, cmd *cli.Command) (context.Context, error) {
+							if cmd.Bool("debug") {
 								logger.SetLevel(log.DebugLevel)
 							} else {
 								logger.SetLevel(log.InfoLevel)
 							}
-							return nil
+							return ctx, nil
 						},
 					},
 					{
@@ -692,95 +692,95 @@ func SetupCLI() *cli.App {
 						Usage:     "Teardown Merkle tree objects for a specific table",
 						ArgsUsage: "[cluster] <table>",
 						Flags:     commonFlags,
-						Action: func(ctx *cli.Context) error {
-							argsLen := ctx.Args().Len()
+						Action: func(_ context.Context, cmd *cli.Command) error {
+							argsLen := cmd.Args().Len()
 							if argsLen == 0 {
 								return fmt.Errorf("missing required argument for mtree teardown-table: needs <table>")
 							}
 							if argsLen > 2 {
 								return fmt.Errorf("unexpected arguments for mtree teardown-table (usage: [cluster] <table>)")
 							}
-							return MtreeTeardownTableCLI(ctx)
+							return MtreeTeardownTableCLI(cmd)
 						},
-						Before: func(ctx *cli.Context) error {
-							if ctx.Bool("debug") {
+						Before: func(ctx context.Context, cmd *cli.Command) (context.Context, error) {
+							if cmd.Bool("debug") {
 								logger.SetLevel(log.DebugLevel)
 							} else {
 								logger.SetLevel(log.InfoLevel)
 							}
-							return nil
+							return ctx, nil
 						},
 					},
 					{
 						Name:      "build",
 						Usage:     "Build a new Merkle tree for a table",
 						ArgsUsage: "[cluster] <table>",
-						Action: func(ctx *cli.Context) error {
-							argsLen := ctx.Args().Len()
+						Action: func(_ context.Context, cmd *cli.Command) error {
+							argsLen := cmd.Args().Len()
 							if argsLen == 0 {
 								return fmt.Errorf("missing required argument for mtree build: needs <table>")
 							}
 							if argsLen > 2 {
 								return fmt.Errorf("unexpected arguments for mtree build (usage: [cluster] <table>)")
 							}
-							return MtreeBuildCLI(ctx)
+							return MtreeBuildCLI(cmd)
 						},
 						Flags: mtreeBuildFlags,
-						Before: func(ctx *cli.Context) error {
-							if ctx.Bool("debug") {
+						Before: func(ctx context.Context, cmd *cli.Command) (context.Context, error) {
+							if cmd.Bool("debug") {
 								logger.SetLevel(log.DebugLevel)
 							} else {
 								logger.SetLevel(log.InfoLevel)
 							}
-							return nil
+							return ctx, nil
 						},
 					},
 					{
 						Name:      "update",
 						Usage:     "Update an existing Merkle tree for a table",
 						ArgsUsage: "[cluster] <table>",
-						Action: func(ctx *cli.Context) error {
-							argsLen := ctx.Args().Len()
+						Action: func(_ context.Context, cmd *cli.Command) error {
+							argsLen := cmd.Args().Len()
 							if argsLen == 0 {
 								return fmt.Errorf("missing required argument for mtree update: needs <table>")
 							}
 							if argsLen > 2 {
 								return fmt.Errorf("unexpected arguments for mtree update (usage: [cluster] <table>)")
 							}
-							return MtreeUpdateCLI(ctx)
+							return MtreeUpdateCLI(cmd)
 						},
 						Flags: mtreeUpdateFlags,
-						Before: func(ctx *cli.Context) error {
-							if ctx.Bool("debug") {
+						Before: func(ctx context.Context, cmd *cli.Command) (context.Context, error) {
+							if cmd.Bool("debug") {
 								logger.SetLevel(log.DebugLevel)
 							} else {
 								logger.SetLevel(log.InfoLevel)
 							}
-							return nil
+							return ctx, nil
 						},
 					},
 					{
 						Name:      "table-diff",
 						Usage:     "Use Merkle Trees for performing table-diff",
 						ArgsUsage: "[cluster] <table>",
-						Action: func(ctx *cli.Context) error {
-							argsLen := ctx.Args().Len()
+						Action: func(_ context.Context, cmd *cli.Command) error {
+							argsLen := cmd.Args().Len()
 							if argsLen == 0 {
 								return fmt.Errorf("missing required argument for mtree diff: needs <table>")
 							}
 							if argsLen > 2 {
 								return fmt.Errorf("unexpected arguments for mtree diff (usage: [cluster] <table>)")
 							}
-							return MtreeDiffCLI(ctx)
+							return MtreeDiffCLI(cmd)
 						},
 						Flags: mtreeDiffFlags,
-						Before: func(ctx *cli.Context) error {
-							if ctx.Bool("debug") {
+						Before: func(ctx context.Context, cmd *cli.Command) (context.Context, error) {
+							if cmd.Bool("debug") {
 								logger.SetLevel(log.DebugLevel)
 							} else {
 								logger.SetLevel(log.InfoLevel)
 							}
-							return nil
+							return ctx, nil
 						},
 					},
 				},
@@ -791,18 +791,18 @@ func SetupCLI() *cli.App {
 	return app
 }
 
-func initTemplateFile(ctx *cli.Context, content string, defaultPath string, label string, perm os.FileMode) error {
-	outputPath := ctx.String("path")
+func initTemplateFile(cmd *cli.Command, content string, defaultPath string, label string, perm os.FileMode) error {
+	outputPath := cmd.String("path")
 	if outputPath == "" {
 		outputPath = defaultPath
 	}
 
-	if ctx.Bool("stdout") || outputPath == "-" {
+	if cmd.Bool("stdout") || outputPath == "-" {
 		fmt.Println(content)
 		return nil
 	}
 
-	if !ctx.Bool("force") {
+	if !cmd.Bool("force") {
 		if _, err := os.Stat(outputPath); err == nil {
 			return fmt.Errorf("%s already exists at %s (use --force to overwrite)", label, outputPath)
 		} else if !errors.Is(err, os.ErrNotExist) {
@@ -825,12 +825,12 @@ func initTemplateFile(ctx *cli.Context, content string, defaultPath string, labe
 	return nil
 }
 
-func ConfigInitCLI(ctx *cli.Context) error {
-	return initTemplateFile(ctx, defaultConfigYAML, "ace.yaml", "config file", 0o644)
+func ConfigInitCLI(_ context.Context, cmd *cli.Command) error {
+	return initTemplateFile(cmd, defaultConfigYAML, "ace.yaml", "config file", 0o644)
 }
 
-func ClusterInitCLI(ctx *cli.Context) error {
-	return initTemplateFile(ctx, defaultPgServiceConf, "pg_service.conf", "pg service file", 0o600)
+func ClusterInitCLI(_ context.Context, cmd *cli.Command) error {
+	return initTemplateFile(cmd, defaultPgServiceConf, "pg_service.conf", "pg service file", 0o600)
 }
 
 func resolveClusterArg(cmd, missingUsage, argsUsage string, required int, args []string) (string, []string, error) {
@@ -860,14 +860,14 @@ func resolveClusterArg(cmd, missingUsage, argsUsage string, required int, args [
 	return "", nil, fmt.Errorf("unexpected arguments for %s (usage: %s)", cmd, argsUsage)
 }
 
-func TableDiffCLI(ctx *cli.Context) error {
-	args := ctx.Args().Slice()
+func TableDiffCLI(cmd *cli.Command) error {
+	args := cmd.Args().Slice()
 	clusterName, positional, err := resolveClusterArg("table-diff", "<table>", "[cluster] <table>", 1, args)
 	if err != nil {
 		return err
 	}
 
-	blockSizeStr := ctx.String("block-size")
+	blockSizeStr := cmd.String("block-size")
 	blockSizeInt, err := strconv.ParseInt(blockSizeStr, 10, 64)
 	if err != nil {
 		return fmt.Errorf("invalid block size '%s': %w", blockSizeStr, err)
@@ -876,20 +876,20 @@ func TableDiffCLI(ctx *cli.Context) error {
 	task := diff.NewTableDiffTask()
 	task.ClusterName = clusterName
 	task.QualifiedTableName = positional[0]
-	task.DBName = ctx.String("dbname")
+	task.DBName = cmd.String("dbname")
 	task.BlockSize = int(blockSizeInt)
-	task.ConcurrencyFactor = ctx.Float64("concurrency-factor")
-	task.CompareUnitSize = ctx.Int("compare-unit-size")
-	task.Output = strings.ToLower(ctx.String("output"))
-	task.Nodes = ctx.String("nodes")
-	task.EnsurePgcrypto = ctx.Bool("ensure-pgcrypto")
-	scheduleEnabled := ctx.Bool("schedule")
-	scheduleEvery := ctx.String("every")
-	task.TableFilter = ctx.String("table-filter")
-	task.AgainstOrigin = ctx.String("against-origin")
-	task.Until = ctx.String("until")
-	task.QuietMode = ctx.Bool("quiet")
-	task.OverrideBlockSize = ctx.Bool("override-block-size")
+	task.ConcurrencyFactor = cmd.Float64("concurrency-factor")
+	task.CompareUnitSize = cmd.Int("compare-unit-size")
+	task.Output = strings.ToLower(cmd.String("output"))
+	task.Nodes = cmd.String("nodes")
+	task.EnsurePgcrypto = cmd.Bool("ensure-pgcrypto")
+	scheduleEnabled := cmd.Bool("schedule")
+	scheduleEvery := cmd.String("every")
+	task.TableFilter = cmd.String("table-filter")
+	task.AgainstOrigin = cmd.String("against-origin")
+	task.Until = cmd.String("until")
+	task.QuietMode = cmd.Bool("quiet")
+	task.OverrideBlockSize = cmd.Bool("override-block-size")
 	task.Ctx = context.Background()
 
 	if err := task.Validate(); err != nil {
@@ -936,17 +936,17 @@ func TableDiffCLI(ctx *cli.Context) error {
 	return scheduler.RunSingleJob(runCtx, job)
 }
 
-func MtreeInitCLI(ctx *cli.Context) error {
-	args := ctx.Args().Slice()
+func MtreeInitCLI(cmd *cli.Command) error {
+	args := cmd.Args().Slice()
 	clusterName, _, err := resolveClusterArg("mtree init", "", "[cluster]", 0, args)
 	if err != nil {
 		return err
 	}
 	task := mtree.NewMerkleTreeTask()
 	task.ClusterName = clusterName
-	task.DBName = ctx.String("dbname")
-	task.Nodes = ctx.String("nodes")
-	task.QuietMode = ctx.Bool("quiet")
+	task.DBName = cmd.String("dbname")
+	task.Nodes = cmd.String("nodes")
+	task.QuietMode = cmd.Bool("quiet")
 	task.Mode = "init"
 	task.Ctx = context.Background()
 
@@ -957,17 +957,17 @@ func MtreeInitCLI(ctx *cli.Context) error {
 	return nil
 }
 
-func MtreeListenCLI(ctx *cli.Context) error {
-	args := ctx.Args().Slice()
+func MtreeListenCLI(cmd *cli.Command) error {
+	args := cmd.Args().Slice()
 	clusterName, _, err := resolveClusterArg("mtree listen", "", "[cluster]", 0, args)
 	if err != nil {
 		return err
 	}
 	task := mtree.NewMerkleTreeTask()
 	task.ClusterName = clusterName
-	task.DBName = ctx.String("dbname")
-	task.Nodes = ctx.String("nodes")
-	task.QuietMode = ctx.Bool("quiet")
+	task.DBName = cmd.String("dbname")
+	task.Nodes = cmd.String("nodes")
+	task.QuietMode = cmd.Bool("quiet")
 	task.Mode = "listen"
 	task.Ctx = context.Background()
 
@@ -1005,17 +1005,17 @@ func MtreeListenCLI(ctx *cli.Context) error {
 	return nil
 }
 
-func MtreeTeardownCLI(ctx *cli.Context) error {
-	args := ctx.Args().Slice()
+func MtreeTeardownCLI(cmd *cli.Command) error {
+	args := cmd.Args().Slice()
 	clusterName, _, err := resolveClusterArg("mtree teardown", "", "[cluster]", 0, args)
 	if err != nil {
 		return err
 	}
 	task := mtree.NewMerkleTreeTask()
 	task.ClusterName = clusterName
-	task.DBName = ctx.String("dbname")
-	task.Nodes = ctx.String("nodes")
-	task.QuietMode = ctx.Bool("quiet")
+	task.DBName = cmd.String("dbname")
+	task.Nodes = cmd.String("nodes")
+	task.QuietMode = cmd.Bool("quiet")
 	task.Mode = "teardown"
 	task.Ctx = context.Background()
 
@@ -1026,8 +1026,8 @@ func MtreeTeardownCLI(ctx *cli.Context) error {
 	return nil
 }
 
-func MtreeTeardownTableCLI(ctx *cli.Context) error {
-	args := ctx.Args().Slice()
+func MtreeTeardownTableCLI(cmd *cli.Command) error {
+	args := cmd.Args().Slice()
 	clusterName, positional, err := resolveClusterArg("mtree teardown-table", "<table>", "[cluster] <table>", 1, args)
 	if err != nil {
 		return err
@@ -1035,9 +1035,9 @@ func MtreeTeardownTableCLI(ctx *cli.Context) error {
 	task := mtree.NewMerkleTreeTask()
 	task.ClusterName = clusterName
 	task.QualifiedTableName = positional[0]
-	task.DBName = ctx.String("dbname")
-	task.Nodes = ctx.String("nodes")
-	task.QuietMode = ctx.Bool("quiet")
+	task.DBName = cmd.String("dbname")
+	task.Nodes = cmd.String("nodes")
+	task.QuietMode = cmd.Bool("quiet")
 	task.Mode = "teardown-table"
 	task.Ctx = context.Background()
 
@@ -1048,13 +1048,13 @@ func MtreeTeardownTableCLI(ctx *cli.Context) error {
 	return nil
 }
 
-func MtreeBuildCLI(ctx *cli.Context) error {
-	args := ctx.Args().Slice()
+func MtreeBuildCLI(cmd *cli.Command) error {
+	args := cmd.Args().Slice()
 	clusterName, positional, err := resolveClusterArg("mtree build", "<table>", "[cluster] <table>", 1, args)
 	if err != nil {
 		return err
 	}
-	blockSizeStr := ctx.String("block-size")
+	blockSizeStr := cmd.String("block-size")
 	blockSizeInt, err := strconv.ParseInt(blockSizeStr, 10, 64)
 	if err != nil {
 		return fmt.Errorf("invalid block size '%s': %w", blockSizeStr, err)
@@ -1063,16 +1063,16 @@ func MtreeBuildCLI(ctx *cli.Context) error {
 	task := mtree.NewMerkleTreeTask()
 	task.ClusterName = clusterName
 	task.QualifiedTableName = positional[0]
-	task.DBName = ctx.String("dbname")
-	task.Nodes = ctx.String("nodes")
-	task.QuietMode = ctx.Bool("quiet")
+	task.DBName = cmd.String("dbname")
+	task.Nodes = cmd.String("nodes")
+	task.QuietMode = cmd.Bool("quiet")
 	task.BlockSize = int(blockSizeInt)
-	task.MaxCpuRatio = ctx.Float64("max-cpu-ratio")
-	task.OverrideBlockSize = ctx.Bool("override-block-size")
-	task.Analyse = ctx.Bool("analyse")
-	task.RecreateObjects = ctx.Bool("recreate-objects")
-	task.WriteRanges = ctx.Bool("write-ranges")
-	task.RangesFile = ctx.String("ranges-file")
+	task.MaxCpuRatio = cmd.Float64("max-cpu-ratio")
+	task.OverrideBlockSize = cmd.Bool("override-block-size")
+	task.Analyse = cmd.Bool("analyse")
+	task.RecreateObjects = cmd.Bool("recreate-objects")
+	task.WriteRanges = cmd.Bool("write-ranges")
+	task.RangesFile = cmd.String("ranges-file")
 	task.Mode = "build"
 	task.Ctx = context.Background()
 
@@ -1091,8 +1091,8 @@ func MtreeBuildCLI(ctx *cli.Context) error {
 	return nil
 }
 
-func MtreeUpdateCLI(ctx *cli.Context) error {
-	args := ctx.Args().Slice()
+func MtreeUpdateCLI(cmd *cli.Command) error {
+	args := cmd.Args().Slice()
 	clusterName, positional, err := resolveClusterArg("mtree update", "<table>", "[cluster] <table>", 1, args)
 	if err != nil {
 		return err
@@ -1100,12 +1100,12 @@ func MtreeUpdateCLI(ctx *cli.Context) error {
 	task := mtree.NewMerkleTreeTask()
 	task.ClusterName = clusterName
 	task.QualifiedTableName = positional[0]
-	task.DBName = ctx.String("dbname")
-	task.Nodes = ctx.String("nodes")
-	task.QuietMode = ctx.Bool("quiet")
-	task.MaxCpuRatio = ctx.Float64("max-cpu-ratio")
-	task.Rebalance = ctx.Bool("rebalance")
-	task.NoCDC = ctx.Bool("skip-cdc")
+	task.DBName = cmd.String("dbname")
+	task.Nodes = cmd.String("nodes")
+	task.QuietMode = cmd.Bool("quiet")
+	task.MaxCpuRatio = cmd.Float64("max-cpu-ratio")
+	task.Rebalance = cmd.Bool("rebalance")
+	task.NoCDC = cmd.Bool("skip-cdc")
 	task.Mode = "update"
 	task.Ctx = context.Background()
 
@@ -1123,8 +1123,8 @@ func MtreeUpdateCLI(ctx *cli.Context) error {
 	return nil
 }
 
-func MtreeDiffCLI(ctx *cli.Context) error {
-	args := ctx.Args().Slice()
+func MtreeDiffCLI(cmd *cli.Command) error {
+	args := cmd.Args().Slice()
 	clusterName, positional, err := resolveClusterArg("mtree diff", "<table>", "[cluster] <table>", 1, args)
 	if err != nil {
 		return err
@@ -1132,12 +1132,12 @@ func MtreeDiffCLI(ctx *cli.Context) error {
 	task := mtree.NewMerkleTreeTask()
 	task.ClusterName = clusterName
 	task.QualifiedTableName = positional[0]
-	task.DBName = ctx.String("dbname")
-	task.Nodes = ctx.String("nodes")
-	task.QuietMode = ctx.Bool("quiet")
-	task.MaxCpuRatio = ctx.Float64("max-cpu-ratio")
-	task.Output = ctx.String("output")
-	task.NoCDC = ctx.Bool("skip-cdc")
+	task.DBName = cmd.String("dbname")
+	task.Nodes = cmd.String("nodes")
+	task.QuietMode = cmd.Bool("quiet")
+	task.MaxCpuRatio = cmd.Float64("max-cpu-ratio")
+	task.Output = cmd.String("output")
+	task.NoCDC = cmd.Bool("skip-cdc")
 	task.Mode = "diff"
 	task.Ctx = context.Background()
 
@@ -1156,8 +1156,8 @@ func MtreeDiffCLI(ctx *cli.Context) error {
 	return nil
 }
 
-func TableRerunCLI(ctx *cli.Context) error {
-	args := ctx.Args().Slice()
+func TableRerunCLI(cmd *cli.Command) error {
+	args := cmd.Args().Slice()
 	clusterName, _, err := resolveClusterArg("table-rerun", "", "[cluster]", 0, args)
 	if err != nil {
 		return err
@@ -1166,10 +1166,10 @@ func TableRerunCLI(ctx *cli.Context) error {
 	task.TaskID = uuid.NewString()
 	task.Mode = "rerun"
 	task.ClusterName = clusterName
-	task.DiffFilePath = ctx.String("diff-file")
-	task.DBName = ctx.String("dbname")
-	task.Nodes = ctx.String("nodes")
-	task.QuietMode = ctx.Bool("quiet")
+	task.DiffFilePath = cmd.String("diff-file")
+	task.DBName = cmd.String("dbname")
+	task.Nodes = cmd.String("nodes")
+	task.QuietMode = cmd.Bool("quiet")
 	task.Ctx = context.Background()
 
 	if err := task.ExecuteTask(); err != nil {
@@ -1179,8 +1179,8 @@ func TableRerunCLI(ctx *cli.Context) error {
 	return nil
 }
 
-func TableRepairCLI(ctx *cli.Context) error {
-	args := ctx.Args().Slice()
+func TableRepairCLI(cmd *cli.Command) error {
+	args := cmd.Args().Slice()
 	clusterName, positional, err := resolveClusterArg("table-repair", "<table>", "[cluster] <table>", 1, args)
 	if err != nil {
 		return err
@@ -1188,23 +1188,23 @@ func TableRepairCLI(ctx *cli.Context) error {
 	task := repair.NewTableRepairTask()
 	task.ClusterName = clusterName
 	task.QualifiedTableName = positional[0]
-	task.DiffFilePath = ctx.String("diff-file")
-	task.RepairPlanPath = ctx.String("repair-plan")
-	task.DBName = ctx.String("dbname")
-	task.Nodes = ctx.String("nodes")
-	task.SourceOfTruth = ctx.String("source-of-truth")
-	task.QuietMode = ctx.Bool("quiet")
+	task.DiffFilePath = cmd.String("diff-file")
+	task.RepairPlanPath = cmd.String("repair-plan")
+	task.DBName = cmd.String("dbname")
+	task.Nodes = cmd.String("nodes")
+	task.SourceOfTruth = cmd.String("source-of-truth")
+	task.QuietMode = cmd.Bool("quiet")
 	task.Ctx = context.Background()
 
-	task.DryRun = ctx.Bool("dry-run")
-	task.InsertOnly = ctx.Bool("insert-only")
-	task.UpsertOnly = ctx.Bool("upsert-only")
-	task.FireTriggers = ctx.Bool("fire-triggers")
-	task.FixNulls = ctx.Bool("fix-nulls")
-	task.Bidirectional = ctx.Bool("bidirectional")
-	task.GenerateReport = ctx.Bool("generate-report")
-	task.RecoveryMode = ctx.Bool("recovery-mode")
-	task.PreserveOrigin = ctx.Bool("preserve-origin")
+	task.DryRun = cmd.Bool("dry-run")
+	task.InsertOnly = cmd.Bool("insert-only")
+	task.UpsertOnly = cmd.Bool("upsert-only")
+	task.FireTriggers = cmd.Bool("fire-triggers")
+	task.FixNulls = cmd.Bool("fix-nulls")
+	task.Bidirectional = cmd.Bool("bidirectional")
+	task.GenerateReport = cmd.Bool("generate-report")
+	task.RecoveryMode = cmd.Bool("recovery-mode")
+	task.PreserveOrigin = cmd.Bool("preserve-origin")
 
 	if err := task.ValidateAndPrepare(); err != nil {
 		return fmt.Errorf("validation failed: %w", err)
@@ -1217,17 +1217,17 @@ func TableRepairCLI(ctx *cli.Context) error {
 	return nil
 }
 
-func SpockDiffCLI(ctx *cli.Context) error {
-	args := ctx.Args().Slice()
+func SpockDiffCLI(cmd *cli.Command) error {
+	args := cmd.Args().Slice()
 	clusterName, _, err := resolveClusterArg("spock-diff", "", "[cluster]", 0, args)
 	if err != nil {
 		return err
 	}
 	task := diff.NewSpockDiffTask()
 	task.ClusterName = clusterName
-	task.DBName = ctx.String("dbname")
-	task.Nodes = ctx.String("nodes")
-	task.Output = ctx.String("output")
+	task.DBName = cmd.String("dbname")
+	task.Nodes = cmd.String("nodes")
+	task.Output = cmd.String("output")
 	task.Ctx = context.Background()
 
 	if err := task.Validate(); err != nil {
@@ -1244,13 +1244,13 @@ func SpockDiffCLI(ctx *cli.Context) error {
 	return nil
 }
 
-func SchemaDiffCLI(ctx *cli.Context) error {
-	args := ctx.Args().Slice()
+func SchemaDiffCLI(cmd *cli.Command) error {
+	args := cmd.Args().Slice()
 	clusterName, positional, err := resolveClusterArg("schema-diff", "<schema>", "[cluster] <schema>", 1, args)
 	if err != nil {
 		return err
 	}
-	blockSizeStr := ctx.String("block-size")
+	blockSizeStr := cmd.String("block-size")
 	blockSizeInt, err := strconv.ParseInt(blockSizeStr, 10, 64)
 	if err != nil {
 		return fmt.Errorf("invalid block size '%s': %w", blockSizeStr, err)
@@ -1259,14 +1259,14 @@ func SchemaDiffCLI(ctx *cli.Context) error {
 	task := diff.NewSchemaDiffTask()
 	task.ClusterName = clusterName
 	task.SchemaName = positional[0]
-	task.DBName = ctx.String("dbname")
-	task.Nodes = ctx.String("nodes")
-	task.SkipTables = ctx.String("skip-tables")
-	scheduleEnabled := ctx.Bool("schedule")
-	scheduleEvery := ctx.String("every")
-	task.SkipFile = ctx.String("skip-file")
-	task.Quiet = ctx.Bool("quiet")
-	task.DDLOnly = ctx.Bool("ddl-only")
+	task.DBName = cmd.String("dbname")
+	task.Nodes = cmd.String("nodes")
+	task.SkipTables = cmd.String("skip-tables")
+	scheduleEnabled := cmd.Bool("schedule")
+	scheduleEvery := cmd.String("every")
+	task.SkipFile = cmd.String("skip-file")
+	task.Quiet = cmd.Bool("quiet")
+	task.DDLOnly = cmd.Bool("ddl-only")
 	task.Ctx = context.Background()
 
 	if scheduleEnabled && task.DDLOnly {
@@ -1274,10 +1274,10 @@ func SchemaDiffCLI(ctx *cli.Context) error {
 	}
 
 	task.BlockSize = int(blockSizeInt)
-	task.ConcurrencyFactor = ctx.Float64("concurrency-factor")
-	task.CompareUnitSize = ctx.Int("compare-unit-size")
-	task.Output = ctx.String("output")
-	task.OverrideBlockSize = ctx.Bool("override-block-size")
+	task.ConcurrencyFactor = cmd.Float64("concurrency-factor")
+	task.CompareUnitSize = cmd.Int("compare-unit-size")
+	task.Output = cmd.String("output")
+	task.OverrideBlockSize = cmd.Bool("override-block-size")
 
 	if err := task.Validate(); err != nil {
 		return fmt.Errorf("validation failed: %w", err)
@@ -1323,36 +1323,36 @@ func SchemaDiffCLI(ctx *cli.Context) error {
 	return scheduler.RunSingleJob(runCtx, job)
 }
 
-func RepsetDiffCLI(ctx *cli.Context) error {
-	args := ctx.Args().Slice()
+func RepsetDiffCLI(cmd *cli.Command) error {
+	args := cmd.Args().Slice()
 	clusterName, positional, err := resolveClusterArg("repset-diff", "<repset>", "[cluster] <repset>", 1, args)
 	if err != nil {
 		return err
 	}
-	blockSizeStr := ctx.String("block-size")
+	blockSizeStr := cmd.String("block-size")
 	blockSizeInt, err := strconv.ParseInt(blockSizeStr, 10, 64)
 	if err != nil {
 		return fmt.Errorf("invalid block size '%s': %w", blockSizeStr, err)
 	}
 
-	scheduleEnabled := ctx.Bool("schedule")
-	scheduleEvery := ctx.String("every")
+	scheduleEnabled := cmd.Bool("schedule")
+	scheduleEvery := cmd.String("every")
 
 	task := diff.NewRepsetDiffTask()
 	task.ClusterName = clusterName
 	task.RepsetName = positional[0]
-	task.DBName = ctx.String("dbname")
-	task.Nodes = ctx.String("nodes")
-	task.SkipTables = ctx.String("skip-tables")
-	task.SkipFile = ctx.String("skip-file")
-	task.Quiet = ctx.Bool("quiet")
+	task.DBName = cmd.String("dbname")
+	task.Nodes = cmd.String("nodes")
+	task.SkipTables = cmd.String("skip-tables")
+	task.SkipFile = cmd.String("skip-file")
+	task.Quiet = cmd.Bool("quiet")
 	task.Ctx = context.Background()
 
 	task.BlockSize = int(blockSizeInt)
-	task.ConcurrencyFactor = ctx.Float64("concurrency-factor")
-	task.CompareUnitSize = ctx.Int("compare-unit-size")
-	task.Output = ctx.String("output")
-	task.OverrideBlockSize = ctx.Bool("override-block-size")
+	task.ConcurrencyFactor = cmd.Float64("concurrency-factor")
+	task.CompareUnitSize = cmd.Int("compare-unit-size")
+	task.Output = cmd.String("output")
+	task.OverrideBlockSize = cmd.Bool("override-block-size")
 
 	if err := task.Validate(); err != nil {
 		return fmt.Errorf("validation failed: %w", err)
@@ -1398,12 +1398,12 @@ func RepsetDiffCLI(ctx *cli.Context) error {
 	return scheduler.RunSingleJob(runCtx, job)
 }
 
-func StartSchedulerCLI(ctx *cli.Context) error {
+func StartSchedulerCLI(_ context.Context, cmd *cli.Command) error {
 	if config.Cfg == nil {
 		return fmt.Errorf("configuration not loaded; run inside a directory with ace.yaml or set ACE_CONFIG")
 	}
 
-	component := strings.ToLower(strings.TrimSpace(ctx.String("component")))
+	component := strings.ToLower(strings.TrimSpace(cmd.String("component")))
 	runScheduler := false
 	runAPI := false
 	switch component {
@@ -1564,7 +1564,7 @@ func schedulerReloadLoop(
 	}
 }
 
-func StartAPIServerCLI(ctx *cli.Context) error {
+func StartAPIServerCLI(_ context.Context, cmd *cli.Command) error {
 	if config.Cfg == nil {
 		return fmt.Errorf("configuration not loaded; run inside a directory with ace.yaml or set ACE_CONFIG")
 	}
