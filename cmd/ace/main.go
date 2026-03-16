@@ -12,6 +12,7 @@
 package main
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -60,7 +61,7 @@ func main() {
 	}
 
 	app := cli.SetupCLI()
-	err := app.Run(os.Args)
+	err := app.Run(context.Background(), os.Args)
 	if err != nil {
 		logger.Error("%v", err)
 	}
