@@ -1430,9 +1430,11 @@ func StartSchedulerCLI(_ context.Context, cmd *cli.Command) error {
 
 	// Start the API server once.  It does not need to restart on reload because
 	// it handles on-demand requests rather than reading scheduled job config.
+	var apiServer *server.APIServer
 	if runAPI {
 		if ok, apiErr := canStartAPIServer(cfg); ok {
-			apiServer, err := server.New(cfg)
+			var err error
+			apiServer, err = server.New(cfg)
 			if err != nil {
 				return fmt.Errorf("api server init failed: %w", err)
 			}
@@ -1451,14 +1453,14 @@ func StartSchedulerCLI(_ context.Context, cmd *cli.Command) error {
 
 	if !runScheduler {
 		// API-only mode: reload config on SIGHUP, wait for shutdown.
-		go runConfigReloadLoop(sighupCh)
+		go runConfigReloadLoop(runCtx, sighupCh, apiServer)
 		<-runCtx.Done()
 		return nil
 	}
 
 	// schedulerReloadLoop runs the scheduler and restarts it on each valid
 	// SIGHUP.  It returns only when runCtx is canceled (SIGINT/SIGTERM).
-	return schedulerReloadLoop(runCtx, sighupCh)
+	return schedulerReloadLoop(runCtx, sighupCh, apiServer)
 }
 
 // schedulerReloadLoop is the heart of the SIGHUP feature.
@@ -1476,6 +1478,7 @@ func StartSchedulerCLI(_ context.Context, cmd *cli.Command) error {
 func schedulerReloadLoop(
 	runCtx context.Context,
 	sighupCh <-chan os.Signal,
+	apiServer *server.APIServer,
 ) error {
 	for {
 		currentCfg := config.Get()
@@ -1556,6 +1559,11 @@ func schedulerReloadLoop(
 
 				// Atomic config swap.
 				config.Set(newCfg)
+				if apiServer != nil {
+					if err := apiServer.ReloadSecurityConfig(newCfg); err != nil {
+						logger.Warn("scheduler: security config reload failed (mTLS config unchanged): %v", err)
+					}
+				}
 				logger.Info("scheduler: configuration reloaded successfully")
 				reloaded = true // break inner loop → outer loop restarts scheduler
 			}
@@ -1587,23 +1595,33 @@ func StartAPIServerCLI(_ context.Context, cmd *cli.Command) error {
 	sighupCh := make(chan os.Signal, 1)
 	signal.Notify(sighupCh, syscall.SIGHUP)
 	defer signal.Stop(sighupCh)
-	go runConfigReloadLoop(sighupCh)
+	go runConfigReloadLoop(runCtx, sighupCh, apiServer)
 
 	return apiServer.Run(runCtx)
 }
 
 // runConfigReloadLoop reloads config on each SIGHUP until the channel
-// is closed.  Used by both the API-only and standalone-API code paths.
-func runConfigReloadLoop(ch <-chan os.Signal) {
-	for range ch {
-		logger.Info("api: received SIGHUP – reloading configuration")
-		newCfg, err := config.Reload()
-		if err != nil {
-			logger.Error("api: config reload failed (keeping current config): %v", err)
-			continue
+// is closed or ctx is canceled.  Used by API-only and standalone-API code paths.
+func runConfigReloadLoop(ctx context.Context, ch <-chan os.Signal, apiServer *server.APIServer) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ch:
+			logger.Info("api: received SIGHUP – reloading configuration")
+			newCfg, err := config.Reload()
+			if err != nil {
+				logger.Error("api: config reload failed (keeping current config): %v", err)
+				continue
+			}
+			config.Set(newCfg)
+			if apiServer != nil {
+				if err := apiServer.ReloadSecurityConfig(newCfg); err != nil {
+					logger.Warn("api: security config reload failed (mTLS config unchanged): %v", err)
+				}
+			}
+			logger.Info("api: configuration reloaded successfully")
 		}
-		config.Set(newCfg)
-		logger.Info("api: configuration reloaded successfully")
 	}
 }
 

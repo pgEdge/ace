@@ -79,6 +79,91 @@ func TestCertValidatorRejectsRevokedCertificate(t *testing.T) {
 	}
 }
 
+func TestAPIServerRejectsCertRevokedAfterConfigReload(t *testing.T) {
+	caCert, caKey, caPEM := newTestCA(t)
+	tempDir := t.TempDir()
+	caPath := filepath.Join(tempDir, "ca.pem")
+	if err := os.WriteFile(caPath, caPEM, 0o600); err != nil {
+		t.Fatalf("failed to write CA file: %v", err)
+	}
+
+	aliceCert := newTestClientCert(t, caCert, caKey, "alice", 10)
+
+	// Build server as at startup – no CRL, alice passes.
+	s := &APIServer{}
+	v, err := newCertValidator(&config.Config{
+		CertAuth: config.CertAuthConfig{CACertFile: caPath},
+		Server:   config.ServerConfig{AllowedCNs: []string{"alice"}},
+	})
+	if err != nil {
+		t.Fatalf("failed to create initial validator: %v", err)
+	}
+	s.validator.Store(v)
+
+	if _, err := s.validator.Load().Validate(aliceCert); err != nil {
+		t.Fatalf("alice should pass before reload: %v", err)
+	}
+
+	// Write a CRL that revokes alice.
+	crlData := newTestCRL(t, caCert, caKey, aliceCert)
+	crlPath := filepath.Join(tempDir, "clients.crl")
+	if err := os.WriteFile(crlPath, crlData, 0o600); err != nil {
+		t.Fatalf("failed to write CRL file: %v", err)
+	}
+
+	// Simulate SIGHUP: reload security config with CRL.
+	if err := s.ReloadSecurityConfig(&config.Config{
+		CertAuth: config.CertAuthConfig{CACertFile: caPath},
+		Server:   config.ServerConfig{AllowedCNs: []string{"alice"}, ClientCRLFile: crlPath},
+	}); err != nil {
+		t.Fatalf("ReloadSecurityConfig failed: %v", err)
+	}
+
+	// After reload, alice must be rejected.
+	if _, err := s.validator.Load().Validate(aliceCert); err == nil {
+		t.Error("server should reject alice after CRL config reload")
+	}
+}
+
+func TestAPIServerAcceptsNewCNAfterConfigReload(t *testing.T) {
+	caCert, caKey, caPEM := newTestCA(t)
+	tempDir := t.TempDir()
+	caPath := filepath.Join(tempDir, "ca.pem")
+	if err := os.WriteFile(caPath, caPEM, 0o600); err != nil {
+		t.Fatalf("failed to write CA file: %v", err)
+	}
+
+	bobCert := newTestClientCert(t, caCert, caKey, "bob", 3)
+
+	// Build server as at startup – only alice allowed, bob rejected.
+	s := &APIServer{}
+	v, err := newCertValidator(&config.Config{
+		CertAuth: config.CertAuthConfig{CACertFile: caPath},
+		Server:   config.ServerConfig{AllowedCNs: []string{"alice"}},
+	})
+	if err != nil {
+		t.Fatalf("failed to create initial validator: %v", err)
+	}
+	s.validator.Store(v)
+
+	if _, err := s.validator.Load().Validate(bobCert); err == nil {
+		t.Fatalf("bob should be rejected before reload")
+	}
+
+	// Simulate SIGHUP: reload security config to also allow bob.
+	if err := s.ReloadSecurityConfig(&config.Config{
+		CertAuth: config.CertAuthConfig{CACertFile: caPath},
+		Server:   config.ServerConfig{AllowedCNs: []string{"alice", "bob"}},
+	}); err != nil {
+		t.Fatalf("ReloadSecurityConfig failed: %v", err)
+	}
+
+	// After reload, bob must be accepted.
+	if _, err := s.validator.Load().Validate(bobCert); err != nil {
+		t.Errorf("server should accept bob after allowedCNs config reload: %v", err)
+	}
+}
+
 func newTestCA(t *testing.T) (*x509.Certificate, *rsa.PrivateKey, []byte) {
 	t.Helper()
 	key, err := rsa.GenerateKey(rand.Reader, 2048)
