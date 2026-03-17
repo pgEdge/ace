@@ -142,7 +142,10 @@ func (c *SchemaDiffCmd) parseSkipList() error {
 				return fmt.Errorf("skip table %q: schema %q does not match target schema %q",
 					entry, parts[0], c.SchemaName)
 			}
-			entry = parts[1]
+			entry = strings.TrimSpace(parts[1])
+			if entry == "" {
+				return fmt.Errorf("skip table %q: missing table name after schema qualifier", parts[0]+".")
+			}
 		}
 		tables = append(tables, entry)
 	}

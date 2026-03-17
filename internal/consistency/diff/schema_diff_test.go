@@ -243,3 +243,19 @@ func TestParseSkipList_TrailingComma(t *testing.T) {
 		t.Errorf("skipTablesList[0] = %q, want %q", cmd.skipTablesList[0], "orders")
 	}
 }
+
+// TestParseSkipList_EmptyTableAfterSchema verifies that a schema-qualified
+// entry with an empty table name (e.g. "public.") returns an error.
+func TestParseSkipList_EmptyTableAfterSchema(t *testing.T) {
+	cmd := &SchemaDiffCmd{
+		SchemaName: "public",
+		SkipTables: "public.",
+	}
+	err := cmd.parseSkipList()
+	if err == nil {
+		t.Fatal("expected error for empty table name after schema qualifier, got nil")
+	}
+	if !strings.Contains(err.Error(), "missing table name") {
+		t.Errorf("error = %q, want it to mention missing table name", err.Error())
+	}
+}

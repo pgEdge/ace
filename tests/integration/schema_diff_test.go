@@ -100,6 +100,10 @@ func TestSchemaDiff_SkipTablesFlag(t *testing.T) {
 	nodes := fmt.Sprintf("%s,%s", serviceN1, serviceN2)
 
 	t.Run("SkippedTableProducesNoDiffFile", func(t *testing.T) {
+		for _, f := range diffFilesForTable(t, skipTableName) {
+			_ = os.Remove(f)
+		}
+
 		task := newTestSchemaDiffTask(testSchema, nodes)
 		task.SkipTables = skipTableName
 
@@ -112,6 +116,10 @@ func TestSchemaDiff_SkipTablesFlag(t *testing.T) {
 	})
 
 	t.Run("NotSkippedTableProducesDiffFile", func(t *testing.T) {
+		for _, f := range diffFilesForTable(t, skipTableName) {
+			_ = os.Remove(f)
+		}
+
 		t.Cleanup(func() {
 			for _, f := range diffFilesForTable(t, skipTableName) {
 				os.Remove(f)
