@@ -110,9 +110,9 @@ func NewSchemaDiffTask() *SchemaDiffCmd {
 }
 
 func (c *SchemaDiffCmd) parseSkipList() error {
-	var tables []string
+	var raw []string
 	if c.SkipTables != "" {
-		tables = append(tables, strings.Split(c.SkipTables, ",")...)
+		raw = append(raw, strings.Split(c.SkipTables, ",")...)
 	}
 	if c.SkipFile != "" {
 		file, err := os.Open(c.SkipFile)
@@ -122,11 +122,29 @@ func (c *SchemaDiffCmd) parseSkipList() error {
 		defer file.Close()
 		scanner := bufio.NewScanner(file)
 		for scanner.Scan() {
-			tables = append(tables, scanner.Text())
+			raw = append(raw, scanner.Text())
 		}
 		if err := scanner.Err(); err != nil {
 			return fmt.Errorf("error reading skip file: %w", err)
 		}
+	}
+
+	// Normalize entries: accept both "table" and "schema.table" forms.
+	// If schema-qualified, the schema must match c.SchemaName.
+	tables := make([]string, 0, len(raw))
+	for _, entry := range raw {
+		entry = strings.TrimSpace(entry)
+		if entry == "" {
+			continue
+		}
+		if parts := strings.SplitN(entry, ".", 2); len(parts) == 2 {
+			if parts[0] != c.SchemaName {
+				return fmt.Errorf("skip table %q: schema %q does not match target schema %q",
+					entry, parts[0], c.SchemaName)
+			}
+			entry = parts[1]
+		}
+		tables = append(tables, entry)
 	}
 	c.skipTablesList = tables
 	return nil
@@ -428,7 +446,7 @@ func (task *SchemaDiffCmd) SchemaTableDiff() (err error) {
 	for _, tableName := range task.tableList {
 		var skipped bool
 		for _, skip := range task.skipTablesList {
-			if strings.TrimSpace(skip) == tableName {
+			if skip == tableName {
 				if !task.Quiet {
 					logger.Info("Skipping table: %s", tableName)
 				}
