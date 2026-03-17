@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/pgedge/ace/pkg/config"
@@ -19,7 +20,7 @@ import (
 
 type APIServer struct {
 	server     *http.Server
-	validator  *certValidator
+	validator  atomic.Pointer[certValidator]
 	taskStore  *taskstore.Store
 	listenAddr string
 	jobCtx     context.Context
@@ -61,11 +62,11 @@ func New(cfg *config.Config) (*APIServer, error) {
 	mux := http.NewServeMux()
 
 	apiServer := &APIServer{
-		validator:  validator,
 		taskStore:  taskStore,
 		listenAddr: fmt.Sprintf("%s:%d", srvCfg.ListenAddress, srvCfg.ListenPort),
 		jobCtx:     context.Background(),
 	}
+	apiServer.validator.Store(validator)
 
 	mux.Handle("/api/v1/table-diff", apiServer.authenticated(http.HandlerFunc(apiServer.handleTableDiff)))
 	mux.Handle("/api/v1/table-rerun", apiServer.authenticated(http.HandlerFunc(apiServer.handleTableRerun)))
@@ -173,6 +174,19 @@ type clientInfo struct {
 
 type clientContextKey struct{}
 
+// ReloadSecurityConfig rebuilds the certValidator from cfg and atomically
+// swaps it in so that subsequent requests use the updated allowedCNs and CRL.
+// Note: the TLS CA pool used for handshake verification requires a restart to
+// change; only allowedCNs and CRL changes take effect without a restart.
+func (s *APIServer) ReloadSecurityConfig(cfg *config.Config) error {
+	v, err := newCertValidator(cfg)
+	if err != nil {
+		return err
+	}
+	s.validator.Store(v)
+	return nil
+}
+
 func (s *APIServer) authenticated(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.TLS == nil || len(r.TLS.PeerCertificates) == 0 {
@@ -180,7 +194,7 @@ func (s *APIServer) authenticated(next http.Handler) http.Handler {
 			return
 		}
 		clientCert := r.TLS.PeerCertificates[0]
-		role, err := s.validator.Validate(clientCert)
+		role, err := s.validator.Load().Validate(clientCert)
 		if err != nil {
 			logger.Warn("client certificate validation failed: %v", err)
 			writeError(w, http.StatusUnauthorized, err.Error())
