@@ -33,6 +33,9 @@ func newTestSchemaDiffTask(schemaName, nodes string) *diff.SchemaDiffCmd {
 	task.Output = "json"
 	task.Quiet = true
 	task.SkipDBUpdate = true
+	task.BlockSize = 10000
+	task.CompareUnitSize = 100
+	task.ConcurrencyFactor = 1
 	return task
 }
 
@@ -65,7 +68,7 @@ func createDivergentTable(t *testing.T, tableName string) {
 			pool.Exec(ctx, dropSQL) //nolint:errcheck – best-effort cleanup
 		}
 		// Remove any diff files left by this table.
-		files, _ := filepath.Glob(fmt.Sprintf("%s_diffs-*.json", tableName))
+		files, _ := filepath.Glob(fmt.Sprintf("%s_%s_diffs-*.json", testSchema, tableName))
 		for _, f := range files {
 			os.Remove(f)
 		}
@@ -75,7 +78,7 @@ func createDivergentTable(t *testing.T, tableName string) {
 // diffFilesForTable returns all json diff files whose name starts with tableName.
 func diffFilesForTable(t *testing.T, tableName string) []string {
 	t.Helper()
-	files, err := filepath.Glob(fmt.Sprintf("%s_diffs-*.json", tableName))
+	files, err := filepath.Glob(fmt.Sprintf("%s_%s_diffs-*.json", testSchema, tableName))
 	require.NoError(t, err)
 	return files
 }
