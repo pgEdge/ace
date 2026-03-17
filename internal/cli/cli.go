@@ -1614,6 +1614,10 @@ func runConfigReloadLoop(ctx context.Context, ch <-chan os.Signal, apiServer *se
 				logger.Error("api: config reload failed (keeping current config): %v", err)
 				continue
 			}
+			if ok, valErr := canStartAPIServer(newCfg); !ok {
+				logger.Error("api: new config rejected (keeping current config): %v", valErr)
+				continue
+			}
 			config.Set(newCfg)
 			if apiServer != nil {
 				if err := apiServer.ReloadSecurityConfig(newCfg); err != nil {

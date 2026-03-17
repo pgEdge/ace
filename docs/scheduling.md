@@ -41,9 +41,13 @@ For long-lived automation, define jobs in `ace.yaml` and let `./ace start` orche
 - `schedule_jobs`: describes each job (what to run and with which arguments).
 - `schedule_config`: pairs a job name with either a frequency or a cron expression and marks it enabled/disabled.
 
-### Signaling the Scheduler to Reload the Configuration
+### Reloading the Configuration at Runtime
 
-If you have a running scheduler and change the configuration but do not wish to restart it, you can signal the scheduler to reload its configuration with SIGHUP (1). It will wait for currently executing jobs to complete and then swap in the new configuration to take effect.
+If you change the configuration and do not wish to restart the process, you can send SIGHUP (1) to reload it. This works for all long-running ACE modes:
+
+- **`ace start` / `ace start --component=scheduler`** — waits for in-flight jobs to complete, then swaps in the new configuration.
+- **`ace start --component=api` / `ace server`** — applies the new configuration immediately and reloads the mTLS security config (certificate revocation list and allowed CN list).
+- **`ace start --component=all`** — both of the above.
 
 ### Sample Configuration
 
