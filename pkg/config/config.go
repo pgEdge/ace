@@ -153,15 +153,12 @@ func Init(path string) error {
 	return nil
 }
 
-// Reload loads a new Config from path and returns it for validation.
-// The caller is responsible for calling Set to apply the new config.
-// Reload does NOT modify the active Cfg; use it as a dry-run / validation step.
-func Reload(path string) (*Config, error) {
-	if path == "" {
-		cfgMu.RLock()
-		path = CfgPath
-		cfgMu.RUnlock()
-	}
+// Reload re-reads the configuration file and returns the parsed result
+// without replacing the active config.
+func Reload() (*Config, error) {
+	cfgMu.RLock()
+	path := CfgPath
+	cfgMu.RUnlock()
 	return Load(path)
 }
 
