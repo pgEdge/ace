@@ -1399,7 +1399,8 @@ func RepsetDiffCLI(cmd *cli.Command) error {
 }
 
 func StartSchedulerCLI(_ context.Context, cmd *cli.Command) error {
-	if config.Cfg == nil {
+	cfg := config.Get()
+	if cfg == nil {
 		return fmt.Errorf("configuration not loaded; run inside a directory with ace.yaml or set ACE_CONFIG")
 	}
 
@@ -1430,8 +1431,8 @@ func StartSchedulerCLI(_ context.Context, cmd *cli.Command) error {
 	// Start the API server once.  It does not need to restart on reload because
 	// it handles on-demand requests rather than reading scheduled job config.
 	if runAPI {
-		if ok, apiErr := canStartAPIServer(config.Cfg); ok {
-			apiServer, err := server.New(config.Cfg)
+		if ok, apiErr := canStartAPIServer(cfg); ok {
+			apiServer, err := server.New(cfg)
 			if err != nil {
 				return fmt.Errorf("api server init failed: %w", err)
 			}
@@ -1530,9 +1531,9 @@ func schedulerReloadLoop(
 				return nil
 
 			case <-sighupCh:
-				logger.Info("scheduler: received SIGHUP – reloading configuration from %s", config.CfgPath)
+				logger.Info("scheduler: received SIGHUP – reloading configuration")
 
-				newCfg, loadErr := config.Reload(config.CfgPath)
+				newCfg, loadErr := config.Reload()
 				if loadErr != nil {
 					logger.Error("scheduler: config reload failed (keeping current config): %v", loadErr)
 					continue // wait for next signal
@@ -1566,15 +1567,16 @@ func schedulerReloadLoop(
 }
 
 func StartAPIServerCLI(_ context.Context, cmd *cli.Command) error {
-	if config.Cfg == nil {
+	cfg := config.Get()
+	if cfg == nil {
 		return fmt.Errorf("configuration not loaded; run inside a directory with ace.yaml or set ACE_CONFIG")
 	}
 
-	if ok, err := canStartAPIServer(config.Cfg); !ok {
+	if ok, err := canStartAPIServer(cfg); !ok {
 		return err
 	}
 
-	apiServer, err := server.New(config.Cfg)
+	apiServer, err := server.New(cfg)
 	if err != nil {
 		return err
 	}
@@ -1595,7 +1597,7 @@ func StartAPIServerCLI(_ context.Context, cmd *cli.Command) error {
 func runConfigReloadLoop(ch <-chan os.Signal) {
 	for range ch {
 		logger.Info("api: received SIGHUP – reloading configuration")
-		newCfg, err := config.Reload(config.CfgPath)
+		newCfg, err := config.Reload()
 		if err != nil {
 			logger.Error("api: config reload failed (keeping current config): %v", err)
 			continue
