@@ -202,14 +202,16 @@ func (s *APIServer) handleTableDiff(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	cfg := config.Get()
+
 	task := diff.NewTableDiffTask()
 	task.ClusterName = cluster
 	task.QualifiedTableName = tableName
 	task.DBName = strings.TrimSpace(req.DBName)
-	task.BlockSize = s.resolveBlockSize(req.BlockSize)
-	task.ConcurrencyFactor = s.resolveConcurrency(req.Concurrency)
-	task.CompareUnitSize = s.resolveCompareUnitSize(req.CompareUnitSize)
-	task.MaxDiffRows = s.resolveMaxDiffRows(req.MaxDiffRows)
+	task.BlockSize = s.resolveBlockSize(cfg, req.BlockSize)
+	task.ConcurrencyFactor = s.resolveConcurrency(cfg, req.Concurrency)
+	task.CompareUnitSize = s.resolveCompareUnitSize(cfg, req.CompareUnitSize)
+	task.MaxDiffRows = s.resolveMaxDiffRows(cfg, req.MaxDiffRows)
 	task.Output = "json"
 	task.Nodes = s.resolveNodes(req.Nodes)
 	task.TableFilter = strings.TrimSpace(req.TableFilter)
@@ -220,7 +222,7 @@ func (s *APIServer) handleTableDiff(w http.ResponseWriter, r *http.Request) {
 	task.QuietMode = req.Quiet
 	task.SkipDBUpdate = false
 	task.TaskStore = s.taskStore
-	task.TaskStorePath = config.Get().Server.TaskStorePath
+	task.TaskStorePath = cfg.Server.TaskStorePath
 
 	if err := task.Validate(); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
@@ -249,41 +251,41 @@ func (s *APIServer) handleTableDiff(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusAccepted, resp)
 }
 
-func (s *APIServer) resolveBlockSize(requested int) int {
+func (s *APIServer) resolveBlockSize(cfg *config.Config, requested int) int {
 	if requested > 0 {
 		return requested
 	}
-	if cfg := config.Get(); cfg != nil && cfg.TableDiff.DiffBlockSize > 0 {
+	if cfg != nil && cfg.TableDiff.DiffBlockSize > 0 {
 		return cfg.TableDiff.DiffBlockSize
 	}
 	return 100000
 }
 
-func (s *APIServer) resolveConcurrency(requested float64) float64 {
+func (s *APIServer) resolveConcurrency(cfg *config.Config, requested float64) float64 {
 	if requested > 0 {
 		return requested
 	}
-	if cfg := config.Get(); cfg != nil && cfg.TableDiff.ConcurrencyFactor > 0 {
+	if cfg != nil && cfg.TableDiff.ConcurrencyFactor > 0 {
 		return cfg.TableDiff.ConcurrencyFactor
 	}
 	return 0.5
 }
 
-func (s *APIServer) resolveCompareUnitSize(requested int) int {
+func (s *APIServer) resolveCompareUnitSize(cfg *config.Config, requested int) int {
 	if requested > 0 {
 		return requested
 	}
-	if cfg := config.Get(); cfg != nil && cfg.TableDiff.CompareUnitSize > 0 {
+	if cfg != nil && cfg.TableDiff.CompareUnitSize > 0 {
 		return cfg.TableDiff.CompareUnitSize
 	}
 	return 10000
 }
 
-func (s *APIServer) resolveMaxDiffRows(requested int64) int64 {
+func (s *APIServer) resolveMaxDiffRows(cfg *config.Config, requested int64) int64 {
 	if requested > 0 {
 		return requested
 	}
-	if cfg := config.Get(); cfg != nil && cfg.TableDiff.MaxDiffRows > 0 {
+	if cfg != nil && cfg.TableDiff.MaxDiffRows > 0 {
 		return cfg.TableDiff.MaxDiffRows
 	}
 	return 0
@@ -561,6 +563,8 @@ func (s *APIServer) handleSchemaDiff(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	cfg := config.Get()
+
 	task := diff.NewSchemaDiffTask()
 	task.ClusterName = cluster
 	task.SchemaName = schema
@@ -570,9 +574,9 @@ func (s *APIServer) handleSchemaDiff(w http.ResponseWriter, r *http.Request) {
 	task.SkipFile = req.SkipFile
 	task.Quiet = req.Quiet
 	task.DDLOnly = req.DDLOnly
-	task.BlockSize = s.resolveBlockSize(req.BlockSize)
-	task.ConcurrencyFactor = s.resolveConcurrency(req.Concurrency)
-	task.CompareUnitSize = s.resolveCompareUnitSize(req.CompareUnitSize)
+	task.BlockSize = s.resolveBlockSize(cfg, req.BlockSize)
+	task.ConcurrencyFactor = s.resolveConcurrency(cfg, req.Concurrency)
+	task.CompareUnitSize = s.resolveCompareUnitSize(cfg, req.CompareUnitSize)
 	task.Output = strings.TrimSpace(req.Output)
 	if task.Output == "" {
 		task.Output = "json"
@@ -581,7 +585,7 @@ func (s *APIServer) handleSchemaDiff(w http.ResponseWriter, r *http.Request) {
 	task.Ctx = r.Context()
 	task.SkipDBUpdate = false
 	task.TaskStore = s.taskStore
-	task.TaskStorePath = config.Get().Server.TaskStorePath
+	task.TaskStorePath = cfg.Server.TaskStorePath
 
 	if err := task.Validate(); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
@@ -642,6 +646,8 @@ func (s *APIServer) handleRepsetDiff(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	cfg := config.Get()
+
 	task := diff.NewRepsetDiffTask()
 	task.ClusterName = cluster
 	task.RepsetName = repset
@@ -650,9 +656,9 @@ func (s *APIServer) handleRepsetDiff(w http.ResponseWriter, r *http.Request) {
 	task.SkipTables = req.SkipTables
 	task.SkipFile = req.SkipFile
 	task.Quiet = req.Quiet
-	task.BlockSize = s.resolveBlockSize(req.BlockSize)
-	task.ConcurrencyFactor = s.resolveConcurrency(req.Concurrency)
-	task.CompareUnitSize = s.resolveCompareUnitSize(req.CompareUnitSize)
+	task.BlockSize = s.resolveBlockSize(cfg, req.BlockSize)
+	task.ConcurrencyFactor = s.resolveConcurrency(cfg, req.Concurrency)
+	task.CompareUnitSize = s.resolveCompareUnitSize(cfg, req.CompareUnitSize)
 	task.Output = strings.TrimSpace(req.Output)
 	if task.Output == "" {
 		task.Output = "json"
@@ -663,7 +669,7 @@ func (s *APIServer) handleRepsetDiff(w http.ResponseWriter, r *http.Request) {
 	task.InvokeMethod = "api"
 	task.SkipDBUpdate = false
 	task.TaskStore = s.taskStore
-	task.TaskStorePath = config.Get().Server.TaskStorePath
+	task.TaskStorePath = cfg.Server.TaskStorePath
 
 	if err := task.Validate(); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())

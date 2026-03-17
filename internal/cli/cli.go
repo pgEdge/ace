@@ -1450,18 +1450,7 @@ func StartSchedulerCLI(_ context.Context, cmd *cli.Command) error {
 
 	if !runScheduler {
 		// API-only mode: reload config on SIGHUP, wait for shutdown.
-		go func() {
-			for range sighupCh {
-				logger.Info("api: received SIGHUP – reloading configuration")
-				newCfg, err := config.Reload(config.CfgPath)
-				if err != nil {
-					logger.Error("api: config reload failed (keeping current config): %v", err)
-					continue
-				}
-				config.Set(newCfg)
-				logger.Info("api: configuration reloaded successfully")
-			}
-		}()
+		go runConfigReloadLoop(sighupCh)
 		<-runCtx.Done()
 		return nil
 	}
@@ -1596,20 +1585,24 @@ func StartAPIServerCLI(_ context.Context, cmd *cli.Command) error {
 	sighupCh := make(chan os.Signal, 1)
 	signal.Notify(sighupCh, syscall.SIGHUP)
 	defer signal.Stop(sighupCh)
-	go func() {
-		for range sighupCh {
-			logger.Info("api: received SIGHUP – reloading configuration")
-			newCfg, err := config.Reload(config.CfgPath)
-			if err != nil {
-				logger.Error("api: config reload failed (keeping current config): %v", err)
-				continue
-			}
-			config.Set(newCfg)
-			logger.Info("api: configuration reloaded successfully")
-		}
-	}()
+	go runConfigReloadLoop(sighupCh)
 
 	return apiServer.Run(runCtx)
+}
+
+// runConfigReloadLoop reloads config on each SIGHUP until the channel
+// is closed.  Used by both the API-only and standalone-API code paths.
+func runConfigReloadLoop(ch <-chan os.Signal) {
+	for range ch {
+		logger.Info("api: received SIGHUP – reloading configuration")
+		newCfg, err := config.Reload(config.CfgPath)
+		if err != nil {
+			logger.Error("api: config reload failed (keeping current config): %v", err)
+			continue
+		}
+		config.Set(newCfg)
+		logger.Info("api: configuration reloaded successfully")
+	}
 }
 
 func canStartAPIServer(cfg *config.Config) (bool, error) {
