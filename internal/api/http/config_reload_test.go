@@ -7,9 +7,9 @@ import (
 )
 
 // TestResolversPickUpReloadedConfig verifies that the handler resolver
-// functions read from the live global config (via config.Get) rather than
-// a stale snapshot, so that a SIGHUP-triggered config.Set takes effect
-// for subsequent API requests.
+// functions read from the config snapshot passed to them, so that a
+// SIGHUP-triggered config.Set takes effect for subsequent API requests
+// while keeping each request internally consistent.
 func TestResolversPickUpReloadedConfig(t *testing.T) {
 	original := config.Get()
 	t.Cleanup(func() {
@@ -34,21 +34,22 @@ func TestResolversPickUpReloadedConfig(t *testing.T) {
 	})
 
 	s := &APIServer{}
+	cfg := config.Get()
 
 	// Verify resolvers return initial values (0 = "use config default").
-	if got := s.resolveBlockSize(0); got != 5000 {
+	if got := s.resolveBlockSize(cfg, 0); got != 5000 {
 		t.Errorf("resolveBlockSize: got %d, want 5000", got)
 	}
-	if got := s.resolveConcurrency(0); got != 0.25 {
+	if got := s.resolveConcurrency(cfg, 0); got != 0.25 {
 		t.Errorf("resolveConcurrency: got %f, want 0.25", got)
 	}
-	if got := s.resolveCompareUnitSize(0); got != 2000 {
+	if got := s.resolveCompareUnitSize(cfg, 0); got != 2000 {
 		t.Errorf("resolveCompareUnitSize: got %d, want 2000", got)
 	}
-	if got := s.resolveMaxDiffRows(0); got != 100 {
+	if got := s.resolveMaxDiffRows(cfg, 0); got != 100 {
 		t.Errorf("resolveMaxDiffRows: got %d, want 100", got)
 	}
-	if got := config.Get().Server.TaskStorePath; got != "/tmp/old-tasks.db" {
+	if got := cfg.Server.TaskStorePath; got != "/tmp/old-tasks.db" {
 		t.Errorf("TaskStorePath: got %q, want /tmp/old-tasks.db", got)
 	}
 
@@ -65,20 +66,27 @@ func TestResolversPickUpReloadedConfig(t *testing.T) {
 		},
 	})
 
+	newCfg := config.Get()
+
 	// Verify resolvers now return the reloaded values.
-	if got := s.resolveBlockSize(0); got != 9999 {
+	if got := s.resolveBlockSize(newCfg, 0); got != 9999 {
 		t.Errorf("after reload resolveBlockSize: got %d, want 9999", got)
 	}
-	if got := s.resolveConcurrency(0); got != 0.75 {
+	if got := s.resolveConcurrency(newCfg, 0); got != 0.75 {
 		t.Errorf("after reload resolveConcurrency: got %f, want 0.75", got)
 	}
-	if got := s.resolveCompareUnitSize(0); got != 4000 {
+	if got := s.resolveCompareUnitSize(newCfg, 0); got != 4000 {
 		t.Errorf("after reload resolveCompareUnitSize: got %d, want 4000", got)
 	}
-	if got := s.resolveMaxDiffRows(0); got != 500 {
+	if got := s.resolveMaxDiffRows(newCfg, 0); got != 500 {
 		t.Errorf("after reload resolveMaxDiffRows: got %d, want 500", got)
 	}
-	if got := config.Get().Server.TaskStorePath; got != "/tmp/new-tasks.db" {
+	if got := newCfg.Server.TaskStorePath; got != "/tmp/new-tasks.db" {
 		t.Errorf("after reload TaskStorePath: got %q, want /tmp/new-tasks.db", got)
+	}
+
+	// Verify old snapshot still returns old values (per-request consistency).
+	if got := s.resolveBlockSize(cfg, 0); got != 5000 {
+		t.Errorf("old snapshot resolveBlockSize: got %d, want 5000", got)
 	}
 }
