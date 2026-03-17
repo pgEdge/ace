@@ -58,7 +58,9 @@ func processReplicationStream(ctx context.Context, nodeInfo map[string]any, cont
 	}
 	processingCtx := context.WithoutCancel(ctx)
 
-	cfg := config.Get().MTree.CDC
+	mtreeCfg := config.Get().MTree
+	cfg := mtreeCfg.CDC
+	mtreeSchema := mtreeCfg.Schema
 	publication := cfg.PublicationName
 	slotName := cfg.SlotName
 	var startLSNStr string
@@ -123,8 +125,8 @@ func processReplicationStream(ctx context.Context, nodeInfo map[string]any, cont
 	var lastLSNVal atomic.Uint64
 	lastLSNVal.Store(uint64(lastLSN))
 	flushInterval := 10 * time.Second
-	if cdcCfg := config.Get().MTree.CDC; cdcCfg.CDCMetadataFlushSec > 0 {
-		flushInterval = time.Duration(cdcCfg.CDCMetadataFlushSec) * time.Second
+	if cfg.CDCMetadataFlushSec > 0 {
+		flushInterval = time.Duration(cfg.CDCMetadataFlushSec) * time.Second
 	}
 	lastFlushTime := time.Now()
 	var conn *pgconn.PgConn
@@ -321,7 +323,7 @@ func processReplicationStream(ctx context.Context, nodeInfo map[string]any, cont
 								defer wg.Done()
 								workerSem <- struct{}{}
 								defer func() { <-workerSem }()
-								if err := processChanges(processingCtx, pool, c); err != nil {
+								if err := processChanges(processingCtx, pool, c, mtreeSchema); err != nil {
 									select {
 									case errCh <- err:
 									default:
@@ -531,7 +533,7 @@ var quotedOIDs = map[uint32]bool{
 	2950: true, // uuid
 }
 
-func processChanges(ctx context.Context, pool *pgxpool.Pool, changes []cdcMsg) error {
+func processChanges(ctx context.Context, pool *pgxpool.Pool, changes []cdcMsg, mtreeSchema string) error {
 	logger.Debug("processChanges called with %d changes", len(changes))
 	tx, err := pool.Begin(ctx)
 	if err != nil {
@@ -551,7 +553,6 @@ func processChanges(ctx context.Context, pool *pgxpool.Pool, changes []cdcMsg) e
 			firstChange := tableChanges[0]
 			schema := firstChange.schema
 			table := firstChange.table
-			mtreeSchema := config.Get().MTree.Schema
 			mtreeTable := fmt.Sprintf("%s.ace_mtree_%s_%s", mtreeSchema, schema, table)
 
 			logger.Debug("Processing %d changes for table %s.%s (mtree: %s)", len(tableChanges), schema, table, mtreeTable)
