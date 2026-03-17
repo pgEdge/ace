@@ -113,8 +113,11 @@ type CertAuthConfig struct {
 	CACertFile      string `yaml:"ca_cert_file"`
 }
 
-// Cfg holds the loaded config for the whole app.
-// Reads may use Cfg directly; concurrent reloads must go through Set/Get.
+// Cfg holds the loaded config for the whole app. Direct reads of Cfg are
+// only safe during initialization, before the scheduler or SIGHUP reload
+// loop starts. Any code running concurrently with Set() or Init() — such
+// as scheduler goroutines or request handlers — must call Get() instead to
+// obtain a consistent snapshot under the read lock.
 var Cfg *Config
 
 // CfgPath is the path from which the current config was loaded.
