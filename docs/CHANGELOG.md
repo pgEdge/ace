@@ -2,6 +2,23 @@
 
 All notable changes to ACE will be captured in this document. This project follows semantic versioning; the latest changes appear first.
 
+## [v1.7.0] - 2026-03-20
+
+### Added
+- `table-repair --preserve-origin` flag to preserve replication origin node ID, LSN, and per-row commit timestamps during repair operations. Repaired rows retain the original source node's origin metadata instead of being stamped with the local node's identity, preventing replication conflicts when a failed node rejoins the cluster. Upserts are grouped by (origin, timestamp) into separate transactions to satisfy PostgreSQL's per-transaction replication origin session constraint; deletes commit in a preceding transaction.
+- Runtime configuration reload via SIGHUP for all long-running ACE modes. The scheduler waits for in-flight jobs to complete before swapping config; the API server reloads immediately, including mTLS security config (CRL and allowed CN list). Works for `ace start`, `ace server`, and `ace start --component=all`.
+
+### Changed
+- CLI migrated from urfave/cli v2 to v3 for native interspersed flag support, allowing flags to be placed before or after subcommands.
+- Config reads are now thread-safe and snapshotted per HTTP request, per Merkle-tree task, and per CDC replication stream to prevent mid-operation drift during concurrent SIGHUP reloads.
+- mTLS certificate validator is swapped atomically on SIGHUP using `atomic.Pointer` for lock-free reads on the request path.
+
+### Fixed
+- `schema-diff --skip-tables` now actually filters tables. Schema-qualified names (e.g. `myschema.mytable`) are also accepted; the schema prefix is validated against the target schema and stripped for matching.
+- Replication origin LSN lookup rewritten to join through `spock.subscription` and `spock.node` instead of a broken LIKE pattern that never matched.
+- `executeUpserts` no longer calls `resetReplicationOriginSession` before `tx.Commit()`, which was clearing the origin from WAL commit records.
+- Unexpected scheduler exit in the SIGHUP reload loop is now handled gracefully.
+
 ## [v1.6.0] 2026-02-25
 
 ### Changed
