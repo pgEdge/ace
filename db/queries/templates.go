@@ -612,7 +612,7 @@ var SQLTemplates = Templates{
 		`SELECT indexname FROM pg_indexes WHERE schemaname = $1;`,
 	)),
 	CheckRepSetExists: template.Must(template.New("checkRepSetExists").Parse(
-		`SELECT set_name FROM spock.replication_set WHERE set_name = $1;`,
+		`SELECT EXISTS(SELECT 1 FROM spock.replication_set WHERE set_name = $1);`,
 	)),
 	GetTablesInRepSet: template.Must(template.New("getTablesInRepSet").Parse(
 		`SELECT concat_ws('.', nspname, relname) FROM spock.tables where set_name = $1;`,
