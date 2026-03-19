@@ -50,7 +50,7 @@ type Templates struct {
 	MtreeLeafHashSQL                 *template.Template
 	UpdateLeafHashes                 *template.Template
 	UpdateLeafHashesBatch            *template.Template
-	GetBlockRanges                   *template.Template
+
 	GetDirtyAndNewBlocks             *template.Template
 	ClearDirtyFlags                  *template.Template
 	BuildParentNodes                 *template.Template
@@ -64,8 +64,7 @@ type Templates struct {
 	GetMaxValSimple                  *template.Template
 	GetCountComposite                *template.Template
 	GetCountSimple                   *template.Template
-	GetSplitPointComposite           *template.Template
-	GetSplitPointSimple              *template.Template
+
 	DeleteParentNodes                *template.Template
 	GetMaxNodePosition               *template.Template
 	UpdateBlockRangeEnd              *template.Template
@@ -79,7 +78,7 @@ type Templates struct {
 	GetBlockCountSimple              *template.Template
 	GetBlockSizeFromMetadata         *template.Template
 	GetMaxNodeLevel                  *template.Template
-	CompareBlocksSQL                 *template.Template
+
 	DropXORFunction                  *template.Template
 	DropMetadataTable                *template.Template
 	DropMtreeTable                   *template.Template
@@ -937,18 +936,6 @@ var SQLTemplates = Templates{
 			node_position = $2
 			AND mt.node_level = 0
 	`)),
-	GetBlockRanges: template.Must(template.New("getBlockRanges").Parse(`
-		SELECT
-			node_position,
-			range_start,
-			range_end
-		FROM
-			{{.MtreeTable}}
-		WHERE
-			node_level = 0
-		ORDER BY
-			node_position
-	`)),
 	GetDirtyAndNewBlocks: template.Must(template.New("getDirtyAndNewBlocks").Parse(`
 		SELECT
 			node_position,
@@ -1134,38 +1121,6 @@ var SQLTemplates = Templates{
 		SELECT count(*)
 		FROM {{.SchemaIdent}}.{{.TableIdent}}
 		WHERE {{.WhereClause}}
-	`)),
-	GetSplitPointComposite: template.Must(template.New("getSplitPointComposite").Parse(`
-		SELECT
-			{{.PkeyCols}}
-		FROM
-			{{.SchemaIdent}}.{{.TableIdent}}
-		WHERE
-			{{.WhereClause}}
-		ORDER BY
-			{{.OrderCols}}
-		OFFSET
-			{{.OffsetPlaceholder}}
-		LIMIT
-			1
-	`)),
-	GetSplitPointSimple: template.Must(template.New("getSplitPointSimple").Parse(`
-		SELECT
-			{{.Key}}
-		FROM
-			{{.SchemaIdent}}.{{.TableIdent}}
-		WHERE
-			{{.Key}} >= $1
-			AND (
-				{{.Key}} < $2
-				OR $3::{{.PkeyType}} IS NULL
-			)
-		ORDER BY
-			{{.Key}}
-		OFFSET
-			$4
-		LIMIT
-			1
 	`)),
 	DeleteParentNodes: template.Must(template.New("deleteParentNodes").Parse(`
 		DELETE FROM
@@ -1353,14 +1308,6 @@ var SQLTemplates = Templates{
 			MAX(node_level)
 		FROM
 			{{.MtreeTable}}
-	`)),
-	CompareBlocksSQL: template.Must(template.New("compareBlocksSQL").Parse(`
-		SELECT
-			*
-		FROM
-			{{.TableName}}
-		WHERE
-			{{.WhereClause}}
 	`)),
 	DropXORFunction: template.Must(template.New("dropXORFunction").Parse(`
 		DROP FUNCTION IF EXISTS spock.bytea_xor(bytea, bytea) CASCADE

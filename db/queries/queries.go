@@ -1294,37 +1294,6 @@ func UpdateLeafHashesBatch(ctx context.Context, db DBQuerier, mtreeTable string,
 	return nil
 }
 
-func GetBlockRanges(ctx context.Context, db DBQuerier, mtreeTable string) ([]types.BlockRange, error) {
-	data := map[string]interface{}{
-		"MtreeTable": mtreeTable,
-	}
-
-	sql, err := RenderSQL(SQLTemplates.GetBlockRanges, data)
-	if err != nil {
-		return nil, fmt.Errorf("failed to render GetBlockRanges SQL: %w", err)
-	}
-
-	rows, err := db.Query(ctx, sql)
-	if err != nil {
-		return nil, fmt.Errorf("query to get block ranges for '%s' failed: %w", mtreeTable, err)
-	}
-	defer rows.Close()
-
-	var blockRanges []types.BlockRange
-	for rows.Next() {
-		var blockRange types.BlockRange
-		if err := rows.Scan(&blockRange.NodePosition, &blockRange.RangeStart, &blockRange.RangeEnd); err != nil {
-			return nil, fmt.Errorf("failed to scan block range: %w", err)
-		}
-		blockRanges = append(blockRanges, blockRange)
-	}
-
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("error iterating over block ranges: %w", err)
-	}
-
-	return blockRanges, nil
-}
 
 func ClearDirtyFlags(ctx context.Context, db DBQuerier, mtreeTable string, nodePositions []int64) error {
 	data := map[string]interface{}{
@@ -2013,99 +1982,6 @@ func UpdateBlockRangeStartComposite(ctx context.Context, db DBQuerier, mtreeTabl
 	return nil
 }
 
-func GetSplitPointSimple(ctx context.Context, db DBQuerier, schema, table, key, pkeyType string, rangeStart, rangeEnd interface{}, offset int64) (interface{}, error) {
-	data := map[string]interface{}{
-		"SchemaIdent": pgx.Identifier{schema}.Sanitize(),
-		"TableIdent":  pgx.Identifier{table}.Sanitize(),
-		"Key":         key,
-		"PkeyType":    pkeyType,
-	}
-	sql, err := RenderSQL(SQLTemplates.GetSplitPointSimple, data)
-	if err != nil {
-		return nil, fmt.Errorf("failed to render GetSplitPointSimple SQL: %w", err)
-	}
-	var splitPoint interface{}
-	if err := db.QueryRow(ctx, sql, rangeStart, rangeEnd, pkeyType, offset).Scan(&splitPoint); err != nil {
-		return nil, fmt.Errorf("query to get split point simple for '%s.%s' failed: %w", schema, table, err)
-	}
-	return splitPoint, nil
-}
-
-func GetSplitPointComposite(ctx context.Context, db DBQuerier, schema, table string, pkeyCols []string, startVals, endVals []any, offset int64) ([]interface{}, error) {
-	cols := make([]string, len(pkeyCols))
-	for i, c := range pkeyCols {
-		cols[i] = pgx.Identifier{c}.Sanitize()
-	}
-	colsStr := strings.Join(cols, ", ")
-	orderCols := fmt.Sprintf("(%s)", colsStr)
-
-	var whereParts []string
-	args := make([]any, 0, len(startVals)+len(endVals)+1)
-	argIdx := 1
-
-	if len(startVals) > 0 {
-		startPh := make([]string, len(startVals))
-		for i := range startVals {
-			startPh[i] = fmt.Sprintf("$%d", argIdx)
-			args = append(args, startVals[i])
-			argIdx++
-		}
-		whereParts = append(whereParts, fmt.Sprintf("(%s) >= (%s)", colsStr, strings.Join(startPh, ", ")))
-	}
-
-	if len(endVals) > 0 {
-		hasNonNil := false
-		for i := range endVals {
-			if endVals[i] != nil {
-				hasNonNil = true
-				break
-			}
-		}
-		if hasNonNil {
-			endPh := make([]string, len(endVals))
-			for i := range endVals {
-				endPh[i] = fmt.Sprintf("$%d", argIdx)
-				args = append(args, endVals[i])
-				argIdx++
-			}
-			whereParts = append(whereParts, fmt.Sprintf("(%s) <= (%s)", colsStr, strings.Join(endPh, ", ")))
-		}
-	}
-	whereClause := "TRUE"
-	if len(whereParts) > 0 {
-		whereClause = strings.Join(whereParts, " AND ")
-	}
-
-	// The next placeholder index is for OFFSET
-	offsetPh := fmt.Sprintf("$%d", argIdx)
-	args = append(args, offset)
-
-	data := map[string]interface{}{
-		"SchemaIdent":       pgx.Identifier{schema}.Sanitize(),
-		"TableIdent":        pgx.Identifier{table}.Sanitize(),
-		"PkeyCols":          colsStr,
-		"WhereClause":       whereClause,
-		"OrderCols":         orderCols,
-		"OffsetPlaceholder": offsetPh,
-	}
-	sql, err := RenderSQL(SQLTemplates.GetSplitPointComposite, data)
-	if err != nil {
-		return nil, fmt.Errorf("failed to render GetSplitPointComposite SQL: %w", err)
-	}
-	sp := make([]interface{}, len(pkeyCols))
-	destPtrs := make([]interface{}, len(pkeyCols))
-	for i := range destPtrs {
-		destPtrs[i] = &sp[i]
-	}
-
-	if err := db.QueryRow(ctx, sql, args...).Scan(destPtrs...); err != nil {
-		if err == pgx.ErrNoRows {
-			return nil, nil
-		}
-		return nil, fmt.Errorf("query to get split point composite for '%s.%s' failed: %w", schema, table, err)
-	}
-	return sp, nil
-}
 
 func GetMinValComposite(ctx context.Context, db DBQuerier, schema, table string, pkeyCols []string) ([]interface{}, error) {
 	cols := make([]string, len(pkeyCols))

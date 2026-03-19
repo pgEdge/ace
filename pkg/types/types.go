@@ -309,8 +309,8 @@ type UserPrivileges struct {
 type SpockNodeAndSubInfo struct {
 	NodeID             int64    `db:"node_id"`
 	NodeName           string   `db:"node_name"`
-	Location           string   `db:"location"`
-	Country            string   `db:"country"`
+	Location           *string  `db:"location"`
+	Country            *string  `db:"country"`
 	SubID              int64    `db:"sub_id"`
 	SubName            string   `db:"sub_name"`
 	SubEnabled         bool     `db:"sub_enabled"`
