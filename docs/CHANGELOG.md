@@ -14,6 +14,7 @@ All notable changes to ACE will be captured in this document. This project follo
 - mTLS certificate validator is swapped atomically on SIGHUP using `atomic.Pointer` for lock-free reads on the request path.
 
 ### Fixed
+- `repset-diff` was not working. Fixed and added tests.
 - `schema-diff --skip-tables` now actually filters tables. Schema-qualified names (e.g. `myschema.mytable`) are also accepted; the schema prefix is validated against the target schema and stripped for matching.
 - Replication origin LSN lookup rewritten to join through `spock.subscription` and `spock.node` instead of a broken LIKE pattern that never matched.
 - `executeUpserts` no longer calls `resetReplicationOriginSession` before `tx.Commit()`, which was clearing the origin from WAL commit records.
