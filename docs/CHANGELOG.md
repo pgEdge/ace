@@ -2,16 +2,19 @@
 
 All notable changes to ACE will be captured in this document. This project follows semantic versioning; the latest changes appear first.
 
-## [v1.7.0] - 2026-03-20
+## [v1.7.0] - 2026-03-23
 
 ### Added
 - `table-repair --preserve-origin` flag to preserve replication origin node ID, LSN, and per-row commit timestamps during repair operations. Repaired rows retain the original source node's origin metadata instead of being stamped with the local node's identity, preventing replication conflicts when a failed node rejoins the cluster. Upserts are grouped by (origin, timestamp) into separate transactions to satisfy PostgreSQL's per-transaction replication origin session constraint; deletes commit in a preceding transaction.
 - Runtime configuration reload via SIGHUP for all long-running ACE modes. The scheduler waits for in-flight jobs to complete before swapping config; the API server reloads immediately, including mTLS security config (CRL and allowed CN list). Works for `ace start`, `ace server`, and `ace start --component=all`.
+- End-of-run summary for `schema-diff` and `repset-diff` listing identical, skipped, differed, missing, and errored tables with error reasons.
 
 ### Changed
 - CLI migrated from urfave/cli v2 to v3 for native interspersed flag support, allowing flags to be placed before or after subcommands.
 - Config reads are now thread-safe and snapshotted per HTTP request, per Merkle-tree task, and per CDC replication stream to prevent mid-operation drift during concurrent SIGHUP reloads.
 - mTLS certificate validator is swapped atomically on SIGHUP using `atomic.Pointer` for lock-free reads on the request path.
+- `schema-diff` and `repset-diff` now query tables from all nodes and report tables not present on every node, instead of silently using only the first node's table list.  still compared across all nodes.
+- `repset-diff` reports asymmetric repset membership when a table is in the repset on some nodes but not others.
 
 ### Fixed
 - `repset-diff` was not working. Fixed and added tests.
@@ -19,6 +22,7 @@ All notable changes to ACE will be captured in this document. This project follo
 - Replication origin LSN lookup rewritten to join through `spock.subscription` and `spock.node` instead of a broken LIKE pattern that never matched.
 - `executeUpserts` no longer calls `resetReplicationOriginSession` before `tx.Commit()`, which was clearing the origin from WAL commit records.
 - Unexpected scheduler exit in the SIGHUP reload loop is now handled gracefully.
+- `schema-diff` and `repset-diff` silently excluded tables that failed during per-table comparison (e.g. missing primary key). Failed tables now appear in the summary with the error reason, and the task status is set to FAILED.
 
 ## [v1.6.0] 2026-02-25
 
