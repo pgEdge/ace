@@ -135,8 +135,8 @@ func (c *RepsetDiffCmd) RunChecks(skipValidation bool) error {
 	// In a uni-directional setup the repset may only exist on the publisher, but
 	// the tables themselves exist on all nodes, so we still diff them across
 	// every node.
-	tableSet := make(map[string]bool)
-	var nodesWithRepset int
+	tablePresence := make(map[string]map[string]bool) // table -> {nodeName: true}
+	var repsetNodeNames []string
 
 	for _, nodeInfo := range c.clusterNodes {
 		nodeName := nodeInfo["Name"].(string)
@@ -165,7 +165,7 @@ func (c *RepsetDiffCmd) RunChecks(skipValidation bool) error {
 			logger.Warn("repset %s not found on node %s, skipping for table discovery", c.RepsetName, nodeName)
 			continue
 		}
-		nodesWithRepset++
+		repsetNodeNames = append(repsetNodeNames, nodeName)
 
 		tables, err := queries.GetTablesInRepSet(c.Ctx, pool, c.RepsetName)
 		pool.Close()
@@ -174,21 +174,47 @@ func (c *RepsetDiffCmd) RunChecks(skipValidation bool) error {
 		}
 
 		for _, t := range tables {
-			tableSet[t] = true
+			if tablePresence[t] == nil {
+				tablePresence[t] = make(map[string]bool)
+			}
+			tablePresence[t][nodeName] = true
 		}
 	}
 
-	if nodesWithRepset == 0 {
+	if len(repsetNodeNames) == 0 {
 		return fmt.Errorf("repset %s not found on any node", c.RepsetName)
 	}
 
+	// Build the full table list (union) and track tables not in the repset
+	// on every node. All tables are still diffed (the data exists on all
+	// nodes), but asymmetric repset membership is reported in the summary.
 	var allTables []string
-	for t := range tableSet {
-		allTables = append(allTables, t)
+	var missingTables []MissingTableInfo
+	for table, presence := range tablePresence {
+		allTables = append(allTables, table)
+		if len(presence) < len(repsetNodeNames) {
+			var presentOn, missingFrom []string
+			for _, n := range repsetNodeNames {
+				if presence[n] {
+					presentOn = append(presentOn, n)
+				} else {
+					missingFrom = append(missingFrom, n)
+				}
+			}
+			missingTables = append(missingTables, MissingTableInfo{
+				Table:       table,
+				PresentOn:   presentOn,
+				MissingFrom: missingFrom,
+			})
+		}
 	}
 	sort.Strings(allTables)
+	sort.Slice(missingTables, func(i, j int) bool {
+		return missingTables[i].Table < missingTables[j].Table
+	})
 
 	c.tableList = allTables
+	c.missingTables = missingTables
 
 	if len(c.tableList) == 0 {
 		return fmt.Errorf("no tables found in repset %s", c.RepsetName)

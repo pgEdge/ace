@@ -88,11 +88,20 @@ func TestRepsetDiff_UniDirectional(t *testing.T) {
 	// still compares data across both nodes.
 	require.NoError(t, diffErr)
 
+	// Extract the summary section for precise assertions.
+	summarySection := extractSummarySection(t, logOutput)
+
 	// The table should have been compared and found identical.
-	assert.Contains(t, logOutput, "table(s) are identical",
-		"summary should show identical tables")
-	assert.Contains(t, logOutput, qualifiedTableName,
-		"the uni-directional table should appear in the summary")
+	identicalSection := extractBetween(summarySection, "table(s) are identical:", "table(s)")
+	assert.Contains(t, identicalSection, qualifiedTableName,
+		"the uni-directional table should be compared and found identical")
+
+	// The asymmetric repset membership should be reported.
+	missingSection := extractBetween(summarySection, "not present on all nodes:", "table(s)")
+	assert.Contains(t, missingSection, qualifiedTableName,
+		"table should be reported as not in repset on all nodes")
+	assert.Contains(t, missingSection, fmt.Sprintf("missing from [%s]", serviceN2),
+		"should indicate which node is missing the table in its repset")
 }
 
 // TestRepsetDiff_Summary verifies that the repset-diff summary correctly
