@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"maps"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -45,6 +46,7 @@ type SchemaDiffCmd struct {
 	DDLOnly           bool
 	skipTablesList    []string
 	tableList         []string
+	missingTables     []MissingTableInfo
 	nodeList          []string
 	clusterNodes      []map[string]any
 	database          types.Database
@@ -196,41 +198,83 @@ func (c *SchemaDiffCmd) RunChecks(skipValidation bool) error {
 		return fmt.Errorf("no nodes found in cluster config")
 	}
 
-	firstNode := c.clusterNodes[0]
+	// Query tables from every node and build a union.
+	nodeNames := make([]string, 0, len(c.clusterNodes))
+	tablePresence := make(map[string]map[string]bool) // table -> {nodeName: true}
 
-	nodeWithDBInfo := make(map[string]any)
-	maps.Copy(nodeWithDBInfo, firstNode)
-	utils.ApplyDatabaseCredentials(nodeWithDBInfo, c.database)
+	for _, nodeInfo := range c.clusterNodes {
+		nodeName := nodeInfo["Name"].(string)
+		nodeNames = append(nodeNames, nodeName)
 
-	if portVal, ok := nodeWithDBInfo["Port"]; ok {
-		if portFloat, isFloat := portVal.(float64); isFloat {
-			nodeWithDBInfo["Port"] = strconv.Itoa(int(portFloat))
+		nodeWithDBInfo := make(map[string]any)
+		maps.Copy(nodeWithDBInfo, nodeInfo)
+		utils.ApplyDatabaseCredentials(nodeWithDBInfo, c.database)
+		if portVal, ok := nodeWithDBInfo["Port"]; ok {
+			if portFloat, isFloat := portVal.(float64); isFloat {
+				nodeWithDBInfo["Port"] = strconv.Itoa(int(portFloat))
+			}
+		}
+
+		pool, err := auth.GetClusterNodeConnection(c.Ctx, nodeWithDBInfo, auth.ConnectionOptions{})
+		if err != nil {
+			return fmt.Errorf("could not connect to node %s: %w", nodeName, err)
+		}
+
+		schemaExists, err := queries.CheckSchemaExists(c.Ctx, pool, c.SchemaName)
+		if err != nil {
+			pool.Close()
+			return fmt.Errorf("could not check if schema exists on node %s: %w", nodeName, err)
+		}
+		if !schemaExists {
+			pool.Close()
+			return fmt.Errorf("schema %s not found on node %s", c.SchemaName, nodeName)
+		}
+
+		tables, err := queries.GetTablesInSchema(c.Ctx, pool, c.SchemaName)
+		pool.Close()
+		if err != nil {
+			return fmt.Errorf("could not get tables in schema on node %s: %w", nodeName, err)
+		}
+
+		for _, t := range tables {
+			if tablePresence[t] == nil {
+				tablePresence[t] = make(map[string]bool)
+			}
+			tablePresence[t][nodeName] = true
 		}
 	}
 
-	pool, err := auth.GetClusterNodeConnection(c.Ctx, nodeWithDBInfo, auth.ConnectionOptions{})
-	if err != nil {
-		return fmt.Errorf("could not connect to database: %w", err)
+	// Partition into common (all nodes) vs partial (some nodes).
+	var commonTables []string
+	var missingTables []MissingTableInfo
+	for table, presence := range tablePresence {
+		if len(presence) == len(nodeNames) {
+			commonTables = append(commonTables, table)
+		} else {
+			var presentOn, missingFrom []string
+			for _, n := range nodeNames {
+				if presence[n] {
+					presentOn = append(presentOn, n)
+				} else {
+					missingFrom = append(missingFrom, n)
+				}
+			}
+			missingTables = append(missingTables, MissingTableInfo{
+				Table:       fmt.Sprintf("%s.%s", c.SchemaName, table),
+				PresentOn:   presentOn,
+				MissingFrom: missingFrom,
+			})
+		}
 	}
-	defer pool.Close()
+	sort.Strings(commonTables)
+	sort.Slice(missingTables, func(i, j int) bool {
+		return missingTables[i].Table < missingTables[j].Table
+	})
 
-	schemaExists, err := queries.CheckSchemaExists(c.Ctx, pool, c.SchemaName)
-	if err != nil {
-		return fmt.Errorf("could not check if schema exists: %w", err)
-	}
-	if !schemaExists {
-		return fmt.Errorf("schema %s not found", c.SchemaName)
-	}
+	c.tableList = commonTables
+	c.missingTables = missingTables
 
-	tables, err := queries.GetTablesInSchema(c.Ctx, pool, c.SchemaName)
-	if err != nil {
-		return fmt.Errorf("could not get tables in schema: %w", err)
-	}
-
-	c.tableList = []string{}
-	c.tableList = append(c.tableList, tables...)
-
-	if len(c.tableList) == 0 {
+	if len(c.tableList) == 0 && len(c.missingTables) == 0 {
 		return fmt.Errorf("no tables found in schema %s", c.SchemaName)
 	}
 
@@ -390,8 +434,10 @@ func (task *SchemaDiffCmd) SchemaTableDiff() (err error) {
 		}
 	}
 
-	var tablesProcessed, tablesFailed, tablesSkipped int
-	var failedTables []string
+	var tablesProcessed, tablesFailed int
+	var failedTables []FailedTableInfo
+	var skippedTables []string
+	var summary DiffSummary
 
 	defer func() {
 		finishedAt := time.Now()
@@ -409,11 +455,15 @@ func (task *SchemaDiffCmd) SchemaTableDiff() (err error) {
 				"tables_total":   len(task.tableList),
 				"tables_diffed":  tablesProcessed,
 				"tables_failed":  tablesFailed,
-				"tables_skipped": tablesSkipped,
+				"tables_skipped": len(skippedTables),
 				"ddl_only":       task.DDLOnly,
 			}
 			if len(failedTables) > 0 {
-				ctx["failed_tables"] = failedTables
+				names := make([]string, len(failedTables))
+				for i, ft := range failedTables {
+					names[i] = ft.Table
+				}
+				ctx["failed_tables"] = names
 			}
 			if err != nil {
 				ctx["error"] = err.Error()
@@ -458,7 +508,7 @@ func (task *SchemaDiffCmd) SchemaTableDiff() (err error) {
 			}
 		}
 		if skipped {
-			tablesSkipped++
+			skippedTables = append(skippedTables, fmt.Sprintf("%s.%s", task.SchemaName, tableName))
 			continue
 		}
 
@@ -484,27 +534,35 @@ func (task *SchemaDiffCmd) SchemaTableDiff() (err error) {
 		if err := tdTask.Validate(); err != nil {
 			logger.Warn("validation for table %s failed: %v", qualifiedTableName, err)
 			tablesFailed++
-			failedTables = append(failedTables, qualifiedTableName)
+			failedTables = append(failedTables, FailedTableInfo{Table: qualifiedTableName, Err: err})
 			continue
 		}
 
 		if err := tdTask.RunChecks(true); err != nil {
 			logger.Warn("checks for table %s failed: %v", qualifiedTableName, err)
 			tablesFailed++
-			failedTables = append(failedTables, qualifiedTableName)
+			failedTables = append(failedTables, FailedTableInfo{Table: qualifiedTableName, Err: err})
 			continue
 		}
 		if err := tdTask.ExecuteTask(); err != nil {
 			logger.Warn("error during comparison for table %s: %v", qualifiedTableName, err)
 			tablesFailed++
-			failedTables = append(failedTables, qualifiedTableName)
+			failedTables = append(failedTables, FailedTableInfo{Table: qualifiedTableName, Err: err})
 			continue
 		}
 
+		if len(tdTask.DiffResult.NodeDiffs) > 0 {
+			summary.DifferedTables = append(summary.DifferedTables, qualifiedTableName)
+		} else {
+			summary.MatchedTables = append(summary.MatchedTables, qualifiedTableName)
+		}
 		tablesProcessed++
 	}
 
-	return nil
+	summary.FailedTables = failedTables
+	summary.SkippedTables = skippedTables
+	summary.MissingTables = task.missingTables
+	return summary.PrintAndFinalize("Schema diff", "schema "+task.SchemaName)
 }
 
 func (task *SchemaDiffCmd) CloneForSchedule(ctx context.Context) *SchemaDiffCmd {
