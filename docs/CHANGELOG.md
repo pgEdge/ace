@@ -2,7 +2,19 @@
 
 All notable changes to ACE will be captured in this document. This project follows semantic versioning; the latest changes appear first.
 
-## [v1.7.0] - 2026-03-20
+## [v1.7.1] - 2026-03-23
+
+### Added
+- End-of-run summary for `schema-diff` and `repset-diff` listing identical, skipped, differed, missing, and errored tables with error reasons.
+
+### Changed
+- `schema-diff` and `repset-diff` now query tables from all nodes and report tables not present on every node, instead of silently using only the first node's table list.  still compared across all nodes.
+- `repset-diff` reports asymmetric repset membership when a table is in the repset on some nodes but not others.
+
+### Fixed
+- `schema-diff` and `repset-diff` silently excluded tables that failed during per-table comparison (e.g. missing primary key). Failed tables now appear in the summary with the error reason, and the task status is set to FAILED.
+
+## [v1.7.0] - 2026-03-18
 
 ### Added
 - `table-repair --preserve-origin` flag to preserve replication origin node ID, LSN, and per-row commit timestamps during repair operations. Repaired rows retain the original source node's origin metadata instead of being stamped with the local node's identity, preventing replication conflicts when a failed node rejoins the cluster. Upserts are grouped by (origin, timestamp) into separate transactions to satisfy PostgreSQL's per-transaction replication origin session constraint; deletes commit in a preceding transaction.
