@@ -274,12 +274,13 @@ func getAllTablesUnion(t *testing.T, pools []*pgxpool.Pool, schema string) []str
 			 WHERE table_schema = $1 AND table_type = 'BASE TABLE'
 			 ORDER BY table_name`, schema)
 		require.NoError(t, err)
+		defer rows.Close()
 		for rows.Next() {
 			var name string
 			require.NoError(t, rows.Scan(&name))
 			seen[name] = true
 		}
-		rows.Close()
+		require.NoError(t, rows.Err())
 	}
 	tables := make([]string, 0, len(seen))
 	for name := range seen {
