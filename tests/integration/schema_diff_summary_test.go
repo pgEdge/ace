@@ -45,6 +45,7 @@ func TestSchemaDiff_Summary(t *testing.T) {
 		divergentTable = "summary_divergent_tbl"
 		noPKTable      = "summary_nopk_tbl"
 		n1OnlyTable    = "summary_n1only_tbl"
+		skippedTable   = "summary_skipped_tbl"
 	)
 
 	ourTables := map[string]bool{
@@ -52,6 +53,7 @@ func TestSchemaDiff_Summary(t *testing.T) {
 		divergentTable: true,
 		noPKTable:      true,
 		n1OnlyTable:    true,
+		skippedTable:   true,
 	}
 
 	// --- Create matching table (identical on both nodes) ---
@@ -113,6 +115,22 @@ func TestSchemaDiff_Summary(t *testing.T) {
 		}
 	})
 
+	// --- Create table that will be explicitly skipped ---
+	createSkippedSQL := fmt.Sprintf(`
+		CREATE TABLE IF NOT EXISTS %s.%s (
+			id  INT PRIMARY KEY,
+			val TEXT
+		)`, testSchema, skippedTable)
+	for _, pool := range []*pgxpool.Pool{pgCluster.Node1Pool, pgCluster.Node2Pool} {
+		_, err := pool.Exec(ctx, createSkippedSQL)
+		require.NoError(t, err)
+	}
+	t.Cleanup(func() {
+		for _, pool := range []*pgxpool.Pool{pgCluster.Node1Pool, pgCluster.Node2Pool} {
+			pool.Exec(ctx, fmt.Sprintf(`DROP TABLE IF EXISTS %s.%s CASCADE`, testSchema, skippedTable))
+		}
+	})
+
 	// --- Create table on node1 only (missing from node2) ---
 	createN1OnlySQL := fmt.Sprintf(`
 		CREATE TABLE IF NOT EXISTS %s.%s (
@@ -137,17 +155,13 @@ func TestSchemaDiff_Summary(t *testing.T) {
 	task := newTestSchemaDiffTask(testSchema, nodes)
 	task.SkipDBUpdate = true
 
-	// Skip tables that belong to other tests so only our tables are diffed.
-	// Query both nodes for the union (since RunChecks now does that).
-	skipList := ""
+	// Skip our dedicated skipped table plus any ambient tables from other tests.
+	skipList := skippedTable
 	allTables := getAllTablesUnion(t,
 		[]*pgxpool.Pool{pgCluster.Node1Pool, pgCluster.Node2Pool}, testSchema)
 	for _, tbl := range allTables {
 		if !ourTables[tbl] {
-			if skipList != "" {
-				skipList += ","
-			}
-			skipList += tbl
+			skipList += "," + tbl
 		}
 	}
 	task.SkipTables = skipList
@@ -180,7 +194,8 @@ func TestSchemaDiff_Summary(t *testing.T) {
 		"matching table should appear in the identical section")
 
 	skippedSection := extractBetween(summarySection, "table(s) were skipped:", "table(s)")
-	assert.NotEmpty(t, skippedSection, "should have a skipped section")
+	assert.Contains(t, skippedSection, skippedTable,
+		"skipped table should appear in the skipped section")
 
 	diffSection := extractBetween(summarySection, "table(s) have differences:", "table(s)")
 	assert.Contains(t, diffSection, divergentTable,
