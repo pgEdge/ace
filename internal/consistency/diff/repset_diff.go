@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"maps"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -43,6 +44,7 @@ type RepsetDiffCmd struct {
 	SkipFile          string
 	skipTablesList    []string
 	tableList         []string
+	missingTables     []MissingTableInfo
 	nodeList          []string
 	clusterNodes      []map[string]any
 	database          types.Database
@@ -129,38 +131,64 @@ func (c *RepsetDiffCmd) RunChecks(skipValidation bool) error {
 		return fmt.Errorf("no nodes found in cluster config")
 	}
 
-	firstNode := c.clusterNodes[0]
+	// Query repset tables from every node that has the repset and build a union.
+	// In a uni-directional setup the repset may only exist on the publisher, but
+	// the tables themselves exist on all nodes, so we still diff them across
+	// every node.
+	tableSet := make(map[string]bool)
+	var nodesWithRepset int
 
-	nodeWithDBInfo := make(map[string]any)
-	maps.Copy(nodeWithDBInfo, firstNode)
-	utils.ApplyDatabaseCredentials(nodeWithDBInfo, c.database)
+	for _, nodeInfo := range c.clusterNodes {
+		nodeName := nodeInfo["Name"].(string)
 
-	if portVal, ok := nodeWithDBInfo["Port"]; ok {
-		if portFloat, isFloat := portVal.(float64); isFloat {
-			nodeWithDBInfo["Port"] = strconv.Itoa(int(portFloat))
+		nodeWithDBInfo := make(map[string]any)
+		maps.Copy(nodeWithDBInfo, nodeInfo)
+		utils.ApplyDatabaseCredentials(nodeWithDBInfo, c.database)
+		if portVal, ok := nodeWithDBInfo["Port"]; ok {
+			if portFloat, isFloat := portVal.(float64); isFloat {
+				nodeWithDBInfo["Port"] = strconv.Itoa(int(portFloat))
+			}
+		}
+
+		pool, err := auth.GetClusterNodeConnection(c.Ctx, nodeWithDBInfo, c.connOpts())
+		if err != nil {
+			return fmt.Errorf("could not connect to node %s: %w", nodeName, err)
+		}
+
+		repsetExists, err := queries.CheckRepSetExists(c.Ctx, pool, c.RepsetName)
+		if err != nil {
+			pool.Close()
+			return fmt.Errorf("could not check if repset exists on node %s: %w", nodeName, err)
+		}
+		if !repsetExists {
+			pool.Close()
+			logger.Warn("repset %s not found on node %s, skipping for table discovery", c.RepsetName, nodeName)
+			continue
+		}
+		nodesWithRepset++
+
+		tables, err := queries.GetTablesInRepSet(c.Ctx, pool, c.RepsetName)
+		pool.Close()
+		if err != nil {
+			return fmt.Errorf("could not get tables in repset on node %s: %w", nodeName, err)
+		}
+
+		for _, t := range tables {
+			tableSet[t] = true
 		}
 	}
 
-	pool, err := auth.GetClusterNodeConnection(c.Ctx, nodeWithDBInfo, c.connOpts())
-	if err != nil {
-		return fmt.Errorf("could not connect to database: %w", err)
-	}
-	defer pool.Close()
-
-	repsetExists, err := queries.CheckRepSetExists(c.Ctx, pool, c.RepsetName)
-	if err != nil {
-		return fmt.Errorf("could not check if repset exists: %w", err)
-	}
-	if !repsetExists {
-		return fmt.Errorf("repset %s not found", c.RepsetName)
+	if nodesWithRepset == 0 {
+		return fmt.Errorf("repset %s not found on any node", c.RepsetName)
 	}
 
-	tables, err := queries.GetTablesInRepSet(c.Ctx, pool, c.RepsetName)
-	if err != nil {
-		return fmt.Errorf("could not get tables in repset: %w", err)
+	var allTables []string
+	for t := range tableSet {
+		allTables = append(allTables, t)
 	}
+	sort.Strings(allTables)
 
-	c.tableList = tables
+	c.tableList = allTables
 
 	if len(c.tableList) == 0 {
 		return fmt.Errorf("no tables found in repset %s", c.RepsetName)
@@ -230,8 +258,10 @@ func RepsetDiff(task *RepsetDiffCmd) (err error) {
 		}
 	}
 
-	var tablesProcessed, tablesFailed, tablesSkipped int
-	var failedTables []string
+	var tablesProcessed, tablesFailed int
+	var failedTables []FailedTableInfo
+	var skippedTables []string
+	var summary DiffSummary
 
 	defer func() {
 		finishedAt := time.Now()
@@ -249,10 +279,14 @@ func RepsetDiff(task *RepsetDiffCmd) (err error) {
 				"tables_total":   len(task.tableList),
 				"tables_diffed":  tablesProcessed,
 				"tables_failed":  tablesFailed,
-				"tables_skipped": tablesSkipped,
+				"tables_skipped": len(skippedTables),
 			}
 			if len(failedTables) > 0 {
-				ctx["failed_tables"] = failedTables
+				names := make([]string, len(failedTables))
+				for i, ft := range failedTables {
+					names[i] = ft.Table
+				}
+				ctx["failed_tables"] = names
 			}
 			if err != nil {
 				ctx["error"] = err.Error()
@@ -293,7 +327,7 @@ func RepsetDiff(task *RepsetDiffCmd) (err error) {
 			}
 		}
 		if skipped {
-			tablesSkipped++
+			skippedTables = append(skippedTables, tableName)
 			continue
 		}
 
@@ -320,27 +354,35 @@ func RepsetDiff(task *RepsetDiffCmd) (err error) {
 		if err := tdTask.Validate(); err != nil {
 			logger.Warn("validation for table %s failed: %v", tableName, err)
 			tablesFailed++
-			failedTables = append(failedTables, tableName)
+			failedTables = append(failedTables, FailedTableInfo{Table: tableName, Err: err})
 			continue
 		}
 
 		if err := tdTask.RunChecks(true); err != nil {
 			logger.Warn("checks for table %s failed: %v", tableName, err)
 			tablesFailed++
-			failedTables = append(failedTables, tableName)
+			failedTables = append(failedTables, FailedTableInfo{Table: tableName, Err: err})
 			continue
 		}
 		if err := tdTask.ExecuteTask(); err != nil {
 			logger.Warn("error during comparison for table %s: %v", tableName, err)
 			tablesFailed++
-			failedTables = append(failedTables, tableName)
+			failedTables = append(failedTables, FailedTableInfo{Table: tableName, Err: err})
 			continue
 		}
 
+		if len(tdTask.DiffResult.NodeDiffs) > 0 {
+			summary.DifferedTables = append(summary.DifferedTables, tableName)
+		} else {
+			summary.MatchedTables = append(summary.MatchedTables, tableName)
+		}
 		tablesProcessed++
 	}
 
-	return nil
+	summary.FailedTables = failedTables
+	summary.SkippedTables = skippedTables
+	summary.MissingTables = task.missingTables
+	return summary.PrintAndFinalize("Repset diff", "repset "+task.RepsetName)
 }
 
 func (task *RepsetDiffCmd) CloneForSchedule(ctx context.Context) *RepsetDiffCmd {
