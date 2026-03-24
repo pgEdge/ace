@@ -42,14 +42,20 @@ type htmlPairCount struct {
 	Count string
 }
 
-func writeHTMLDiffReport(diffResult types.DiffOutput, jsonFilePath string) (string, error) {
+func writeHTMLDiffReport(jsonFilePath string) (string, error) {
 	if jsonFilePath == "" {
 		return "", nil
 	}
 
-	rawJSON, err := json.Marshal(diffResult)
+	// Read the already-written JSON file instead of re-marshaling the struct.
+	rawJSON, err := os.ReadFile(jsonFilePath)
 	if err != nil {
-		return "", fmt.Errorf("failed to marshal diff result for HTML embedding: %w", err)
+		return "", fmt.Errorf("failed to read diff JSON for HTML embedding: %w", err)
+	}
+
+	var diffResult types.DiffOutput
+	if err := json.Unmarshal(rawJSON, &diffResult); err != nil {
+		return "", fmt.Errorf("failed to parse diff JSON for HTML report: %w", err)
 	}
 
 	htmlPath := strings.TrimSuffix(jsonFilePath, filepath.Ext(jsonFilePath)) + ".html"

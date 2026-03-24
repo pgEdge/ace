@@ -22,6 +22,7 @@ postgres:
 table_diff:
   concurrency_factor: 0.5
   max_diff_rows: 1000000
+  diff_spill_threshold: 10000
   min_diff_block_size: 1
   max_diff_block_size: 1000000
   diff_block_size: 1000

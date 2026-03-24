@@ -1192,20 +1192,23 @@ func MapToOrderedMap(m map[string]any, cols []string) types.OrderedMap {
 	return om
 }
 
-func WriteDiffReport(diffResult types.DiffOutput, schema, table, format string) (string, string, error) {
-	if len(diffResult.NodeDiffs) == 0 {
+func WriteDiffReport(diffResult types.DiffOutput, sinks DiffSinks, schema, table, format string) (string, string, error) {
+	if len(diffResult.NodeDiffs) == 0 && len(sinks) == 0 {
 		logger.Info("%s TABLES MATCH", CheckMark)
 		return "", "", nil
 	}
 
-	for _, nodePairDiff := range diffResult.NodeDiffs {
-		for nodeName, rows := range nodePairDiff.Rows {
-			sort.SliceStable(rows, func(i, j int) bool {
-				pkValuesI := getPKValues(rows[i], diffResult.Summary.PrimaryKey)
-				pkValuesJ := getPKValues(rows[j], diffResult.Summary.PrimaryKey)
-				return comparePKValues(pkValuesI, pkValuesJ) < 0
-			})
-			nodePairDiff.Rows[nodeName] = rows
+	// When sinks are nil (e.g. rerun path), sort the in-memory Rows as before.
+	if sinks == nil {
+		for _, nodePairDiff := range diffResult.NodeDiffs {
+			for nodeName, rows := range nodePairDiff.Rows {
+				sort.SliceStable(rows, func(i, j int) bool {
+					pkValuesI := getPKValues(rows[i], diffResult.Summary.PrimaryKey)
+					pkValuesJ := getPKValues(rows[j], diffResult.Summary.PrimaryKey)
+					return comparePKValues(pkValuesI, pkValuesJ) < 0
+				})
+				nodePairDiff.Rows[nodeName] = rows
+			}
 		}
 	}
 
@@ -1216,22 +1219,9 @@ func WriteDiffReport(diffResult types.DiffOutput, schema, table, format string) 
 	)
 	jsonFileName := outputPrefix + ".json"
 
-	// Stream JSON directly to file — avoids holding a second full copy in memory
-	f, err := os.Create(jsonFileName)
-	if err != nil {
-		logger.Error("ERROR creating diff output file %s: %v", jsonFileName, err)
-		return "", "", fmt.Errorf("failed to create diffs file: %w", err)
-	}
-	enc := json.NewEncoder(f)
-	enc.SetIndent("", "  ")
-	if err := enc.Encode(diffResult); err != nil {
-		logger.Error("ERROR writing diff output to JSON: %v", err)
-		f.Close()
-		return "", "", fmt.Errorf("failed to write diffs: %w", err)
-	}
-	if err := f.Close(); err != nil {
-		logger.Error("ERROR closing diff output file %s: %v", jsonFileName, err)
-		return "", "", fmt.Errorf("failed to close diffs file: %w", err)
+	// Stream JSON to file one row at a time so we never buffer the full report.
+	if err := streamDiffJSON(jsonFileName, diffResult, sinks); err != nil {
+		return "", "", err
 	}
 
 	logger.Warn("%s TABLES DO NOT MATCH", CrossMark)
@@ -1242,7 +1232,7 @@ func WriteDiffReport(diffResult types.DiffOutput, schema, table, format string) 
 
 	var htmlPath string
 	if strings.EqualFold(format, "html") {
-		htmlPath, err = writeHTMLDiffReport(diffResult, jsonFileName)
+		htmlPath, err := writeHTMLDiffReport(jsonFileName)
 		if err != nil {
 			return "", "", err
 		}
@@ -1252,6 +1242,161 @@ func WriteDiffReport(diffResult types.DiffOutput, schema, table, format string) 
 	}
 
 	return jsonFileName, htmlPath, nil
+}
+
+// streamDiffJSON writes the DiffOutput as JSON to the given file, streaming
+// one row at a time so that the entire serialised report is never in memory.
+// When sinks is non-nil, rows are read from sinks (sorted by PK) instead of
+// diff.NodeDiffs[...].Rows.
+func streamDiffJSON(path string, diff types.DiffOutput, sinks DiffSinks) error {
+	f, err := os.Create(path)
+	if err != nil {
+		logger.Error("ERROR creating diff output file %s: %v", path, err)
+		return fmt.Errorf("failed to create diffs file: %w", err)
+	}
+	defer func() {
+		if f != nil {
+			f.Close()
+		}
+	}()
+
+	w := bufio.NewWriterSize(f, 256*1024)
+
+	// Helper: write a literal string.
+	ws := func(s string) error { _, err := w.WriteString(s); return err }
+
+	// writeRow writes a single JSON-encoded row preceded by a comma if needed.
+	writeRow := func(row types.OrderedMap, first *bool) error {
+		if !*first {
+			if err := ws(","); err != nil {
+				return err
+			}
+		}
+		*first = false
+		rowJSON, err := json.Marshal(row)
+		if err != nil {
+			return fmt.Errorf("failed to marshal row: %w", err)
+		}
+		if err := ws("\n        "); err != nil {
+			return err
+		}
+		_, err = w.Write(rowJSON)
+		return err
+	}
+
+	// Collect pair keys from both NodeDiffs and sinks for deterministic output.
+	pairKeySet := make(map[string]struct{})
+	for k := range diff.NodeDiffs {
+		pairKeySet[k] = struct{}{}
+	}
+	for k := range sinks {
+		pairKeySet[k] = struct{}{}
+	}
+	pairKeys := make([]string, 0, len(pairKeySet))
+	for k := range pairKeySet {
+		pairKeys = append(pairKeys, k)
+	}
+	sort.Strings(pairKeys)
+
+	// --- open root object and "diffs" key ---
+	if err := ws("{\n  \"diffs\": {"); err != nil {
+		return err
+	}
+
+	for pairIdx, pairKey := range pairKeys {
+		if pairIdx > 0 {
+			if err := ws(","); err != nil {
+				return err
+			}
+		}
+
+		keyJSON, _ := json.Marshal(pairKey)
+		if err := ws("\n    " + string(keyJSON) + ": {\"rows\": {"); err != nil {
+			return err
+		}
+
+		// Collect node keys from Rows and/or sinks for this pair.
+		nodeKeySet := make(map[string]struct{})
+		if pair, ok := diff.NodeDiffs[pairKey]; ok {
+			for k := range pair.Rows {
+				nodeKeySet[k] = struct{}{}
+			}
+		}
+		if sinkNodes, ok := sinks[pairKey]; ok {
+			for k := range sinkNodes {
+				nodeKeySet[k] = struct{}{}
+			}
+		}
+		nodeKeys := make([]string, 0, len(nodeKeySet))
+		for k := range nodeKeySet {
+			nodeKeys = append(nodeKeys, k)
+		}
+		sort.Strings(nodeKeys)
+
+		for nodeIdx, nodeKey := range nodeKeys {
+			if nodeIdx > 0 {
+				if err := ws(","); err != nil {
+					return err
+				}
+			}
+
+			nkJSON, _ := json.Marshal(nodeKey)
+			if err := ws("\n      " + string(nkJSON) + ": ["); err != nil {
+				return err
+			}
+
+			first := true
+			if sink := sinks.getSink(pairKey, nodeKey); sink != nil && sink.Len() > 0 {
+				// Write from sink, sorted by PK.
+				if err := sink.SortedIterate(diff.Summary.PrimaryKey, func(row types.OrderedMap) error {
+					return writeRow(row, &first)
+				}); err != nil {
+					return err
+				}
+			} else if pair, ok := diff.NodeDiffs[pairKey]; ok {
+				// Fallback: write from in-memory Rows (already sorted by caller).
+				for _, row := range pair.Rows[nodeKey] {
+					if err := writeRow(row, &first); err != nil {
+						return err
+					}
+				}
+			}
+
+			if err := ws("\n      ]"); err != nil {
+				return err
+			}
+		}
+
+		if err := ws("\n    }}"); err != nil {
+			return err
+		}
+	}
+
+	// --- close "diffs", write "summary" ---
+	if err := ws("\n  },\n  \"summary\": "); err != nil {
+		return err
+	}
+	summaryJSON, err := json.MarshalIndent(diff.Summary, "  ", "  ")
+	if err != nil {
+		return fmt.Errorf("failed to marshal summary: %w", err)
+	}
+	if _, err := w.Write(summaryJSON); err != nil {
+		return err
+	}
+	if err := ws("\n}\n"); err != nil {
+		return err
+	}
+
+	if err := w.Flush(); err != nil {
+		return fmt.Errorf("failed to flush diffs file: %w", err)
+	}
+	err = f.Close()
+	f = nil // prevent double close in defer
+	if err != nil {
+		logger.Error("ERROR closing diff output file %s: %v", path, err)
+		return fmt.Errorf("failed to close diffs file: %w", err)
+	}
+	return nil
 }
 
 func getPKValues(row types.OrderedMap, pkey []string) []any {

@@ -54,6 +54,7 @@ type DiffConfig struct {
 	BatchSize         int     `yaml:"diff_batch_size"`
 	MaxBatchSize      int     `yaml:"max_diff_batch_size"`
 	CompareUnitSize   int     `yaml:"compare_unit_size"`
+	DiffSpillThreshold int    `yaml:"diff_spill_threshold"`
 }
 
 type MTreeConfig struct {

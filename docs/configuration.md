@@ -31,7 +31,9 @@ The [`ace.yaml` file](https://github.com/pgEdge/ace/blob/main/ace.yaml) defines 
 | table_diff --> concurrency_factor | CPU ratio for diff concurrency (0.0–4.0, e.g. 0.5 uses half of available CPUs). **Default: 0.5** |
 | table_diff --> min_diff_block_size | Minimum diff block (row chunk) size. **Default: 1** |
 | table_diff --> max_diff_block_size | Maximum diff block size. **Default: 1000000** |
+| table_diff --> max_diff_rows | Stop diffing after this many mismatched rows are found. `0` = no limit. **Default: 1000000** |
 | table_diff --> compare_unit_size | Unit size for smallest comparison chunk. **Default: 10000** |
+| table_diff --> diff_spill_threshold | Number of diff rows to hold in memory per node-pair/node before spilling to a temporary file on disk. Prevents OOM on very large diffs. `0` uses the built-in default. **Default: 10000** |
 | mtree → cdc --> slot_name | Logical decoding slot name for mtree CDC. **Default: "ace_mtree_slot"** |
 | mtree → cdc --> publication_name | Publication used for mtree CDC. **Default: "ace_mtree_pub"** |
 | mtree → cdc --> cdc_processing_timeout | CDC processing timeout (s). **Default: 30** |

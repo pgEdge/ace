@@ -165,6 +165,7 @@ flowchart LR
 - **concurrency_factor**: CPU ratio (0.0–4.0) that scales workers relative to `NumCPU` (e.g. 0.5 on a 16-CPU host spawns 8 workers). Higher = faster hashing but more load on DB backends, network, and local CPU; can contend with other workloads and connection limits.
 - **compare_unit_size**: Lower values push recursion deeper (more queries, smaller fetches); higher values stop earlier (fewer queries, larger fetches on mismatched ranges).
 - **max_diff_rows**: Early-exit guardrail. Lower caps keep runs short and reports small on divergent tables; raising/removing can grow memory and report size when drift is large.
+- **diff_spill_threshold**: Max diff rows held in memory per (node-pair, node) before spilling to a temp file. When a large number of rows differ (e.g. 250K+ with JSONB columns), keeping them all in memory can cause OOM. The spill mechanism writes overflow rows to a temporary NDJSON file during accumulation and reads them back at report time. Higher values reduce disk I/O overhead; lower values reduce peak memory. **Default: 10000**.
 - **table_filter**: Narrows scope and cost; enables accurate `COUNT(*)` on the filtered view. Must be identical across nodes to avoid false positives.
 - **override_block_size**: Skips safety rails from `ace.yaml`. Oversized blocks can spike memory and slow hashes, especially on wide rows.
 - **output (json/html)**: HTML adds minor post-processing; DB load is unaffected.

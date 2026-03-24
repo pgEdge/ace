@@ -92,8 +92,10 @@ type MerkleTreeTask struct {
 
 	mtreeSchema string
 
-	DiffResult  types.DiffOutput
-	diffMutex   sync.Mutex
+	DiffResult         types.DiffOutput
+	diffSinks          utils.DiffSinks
+	DiffSpillThreshold int
+	diffMutex          sync.Mutex
 	diffRowKeySets map[string]map[string]map[string]struct{}
 	StartTime      time.Time
 	SpockNodeNames map[string]string
@@ -622,7 +624,9 @@ func (m *MerkleTreeTask) addRowToDiff(nodePairKey, nodeName string, row types.Or
 	}
 
 	nodeSet[key] = struct{}{}
-	m.DiffResult.NodeDiffs[nodePairKey].Rows[nodeName] = append(m.DiffResult.NodeDiffs[nodePairKey].Rows[nodeName], orderedRow)
+	if err := m.diffSinks.GetSink(nodePairKey, nodeName, m.DiffSpillThreshold).Append(orderedRow); err != nil {
+		return false, err
+	}
 	return true, nil
 }
 
@@ -1913,6 +1917,7 @@ func (m *MerkleTreeTask) DiffMtree() (err error) {
 		},
 	}
 	m.diffRowKeySets = make(map[string]map[string]map[string]struct{})
+	m.diffSinks = make(utils.DiffSinks)
 
 	for _, pair := range nodePairs {
 		node1 := pair[0]
@@ -2010,9 +2015,12 @@ func (m *MerkleTreeTask) DiffMtree() (err error) {
 		m.DiffResult.Summary.EndTime = endTime.Format(time.RFC3339)
 		m.DiffResult.Summary.TimeTaken = endTime.Sub(m.StartTime).String()
 		m.DiffResult.Summary.PrimaryKey = m.Key
-		if diffPath, _, writeErr := utils.WriteDiffReport(m.DiffResult, m.Schema, m.Table, m.Output); writeErr != nil {
+		diffPath, _, writeErr := utils.WriteDiffReport(m.DiffResult, m.diffSinks, m.Schema, m.Table, m.Output)
+		m.diffSinks.CloseAll()
+		if writeErr != nil {
 			return writeErr
-		} else if diffPath != "" {
+		}
+		if diffPath != "" {
 			resultCtx["diff_file"] = diffPath
 		}
 	}

@@ -103,10 +103,12 @@ type TableDiffTask struct {
 
 	SpockNodeNames map[string]string
 
-	CompareUnitSize int
-	MaxDiffRows     int64
+	CompareUnitSize    int
+	MaxDiffRows        int64
+	DiffSpillThreshold int
 
 	DiffResult types.DiffOutput
+	diffSinks  utils.DiffSinks
 	diffMutex  sync.Mutex
 
 	firstError   error
@@ -742,6 +744,10 @@ func (t *TableDiffTask) Validate() error {
 		t.MaxDiffRows = cfg.TableDiff.MaxDiffRows
 	}
 
+	if t.DiffSpillThreshold == 0 && cfg.TableDiff.DiffSpillThreshold > 0 {
+		t.DiffSpillThreshold = cfg.TableDiff.DiffSpillThreshold
+	}
+
 	if t.ConcurrencyFactor > 4.0 || t.ConcurrencyFactor <= 0 {
 		return fmt.Errorf("invalid value range for concurrency_factor, must be > 0 and <= 4.0")
 	}
@@ -1039,6 +1045,7 @@ func (t *TableDiffTask) CloneForSchedule(ctx context.Context) *TableDiffTask {
 	cloned.InvokeMethod = t.InvokeMethod
 	cloned.CompareUnitSize = t.CompareUnitSize
 	cloned.MaxDiffRows = t.MaxDiffRows
+	cloned.DiffSpillThreshold = t.DiffSpillThreshold
 	cloned.EnsurePgcrypto = t.EnsurePgcrypto
 	cloned.AgainstOrigin = t.AgainstOrigin
 	cloned.Until = t.Until
@@ -1334,6 +1341,7 @@ func (t *TableDiffTask) ExecuteTask() (err error) {
 			OriginOnly: t.resolvedAgainstOrigin != "",
 		},
 	}
+	t.diffSinks = make(utils.DiffSinks)
 
 	sampleMethod := "BERNOULLI"
 	samplePercent := 0.0
@@ -1602,7 +1610,8 @@ func (t *TableDiffTask) ExecuteTask() (err error) {
 
 	t.AddPrimaryKeyToDiffSummary()
 
-	jsonPath, _, err := utils.WriteDiffReport(t.DiffResult, t.Schema, t.BaseTable, t.Output)
+	jsonPath, _, err := utils.WriteDiffReport(t.DiffResult, t.diffSinks, t.Schema, t.BaseTable, t.Output)
+	t.diffSinks.CloseAll()
 	if err != nil {
 		return err
 	}
@@ -1921,12 +1930,8 @@ func (t *TableDiffTask) recursiveDiff(
 				}
 			}
 
-			if _, ok := t.DiffResult.NodeDiffs[pairKey].Rows[node1Name]; !ok {
-				t.DiffResult.NodeDiffs[pairKey].Rows[node1Name] = []types.OrderedMap{}
-			}
-			if _, ok := t.DiffResult.NodeDiffs[pairKey].Rows[node2Name]; !ok {
-				t.DiffResult.NodeDiffs[pairKey].Rows[node2Name] = []types.OrderedMap{}
-			}
+			sink1 := t.diffSinks.GetSink(pairKey, node1Name, t.DiffSpillThreshold)
+			sink2 := t.diffSinks.GetSink(pairKey, node2Name, t.DiffSpillThreshold)
 
 			for _, row := range diffInfo.Node1OnlyRows {
 				if t.shouldStopDueToLimit() {
@@ -1936,7 +1941,11 @@ func (t *TableDiffTask) recursiveDiff(
 				rowAsMap := utils.OrderedMapToMap(row)
 				rowWithMeta := t.withSpockMetadata(rowAsMap)
 				rowAsOrderedMap := utils.MapToOrderedMap(rowWithMeta, t.Cols)
-				t.DiffResult.NodeDiffs[pairKey].Rows[node1Name] = append(t.DiffResult.NodeDiffs[pairKey].Rows[node1Name], rowAsOrderedMap)
+				if err := sink1.Append(rowAsOrderedMap); err != nil {
+					t.diffMutex.Unlock()
+					t.recordError(err)
+					return
+				}
 				currentDiffRowsForPair++
 				if t.incrementDiffRowsLocked(1) {
 					limitReached = true
@@ -1953,7 +1962,11 @@ func (t *TableDiffTask) recursiveDiff(
 					rowAsMap := utils.OrderedMapToMap(row)
 					rowWithMeta := t.withSpockMetadata(rowAsMap)
 					rowAsOrderedMap := utils.MapToOrderedMap(rowWithMeta, t.Cols)
-					t.DiffResult.NodeDiffs[pairKey].Rows[node2Name] = append(t.DiffResult.NodeDiffs[pairKey].Rows[node2Name], rowAsOrderedMap)
+					if err := sink2.Append(rowAsOrderedMap); err != nil {
+						t.diffMutex.Unlock()
+						t.recordError(err)
+						return
+					}
 					currentDiffRowsForPair++
 					if t.incrementDiffRowsLocked(1) {
 						limitReached = true
@@ -1971,12 +1984,20 @@ func (t *TableDiffTask) recursiveDiff(
 					node1DataAsMap := utils.OrderedMapToMap(modRow.Node1Data)
 					node1DataWithMeta := t.withSpockMetadata(node1DataAsMap)
 					node1DataAsOrderedMap := utils.MapToOrderedMap(node1DataWithMeta, t.Cols)
-					t.DiffResult.NodeDiffs[pairKey].Rows[node1Name] = append(t.DiffResult.NodeDiffs[pairKey].Rows[node1Name], node1DataAsOrderedMap)
+					if err := sink1.Append(node1DataAsOrderedMap); err != nil {
+						t.diffMutex.Unlock()
+						t.recordError(err)
+						return
+					}
 
 					node2DataAsMap := utils.OrderedMapToMap(modRow.Node2Data)
 					node2DataWithMeta := t.withSpockMetadata(node2DataAsMap)
 					node2DataAsOrderedMap := utils.MapToOrderedMap(node2DataWithMeta, t.Cols)
-					t.DiffResult.NodeDiffs[pairKey].Rows[node2Name] = append(t.DiffResult.NodeDiffs[pairKey].Rows[node2Name], node2DataAsOrderedMap)
+					if err := sink2.Append(node2DataAsOrderedMap); err != nil {
+						t.diffMutex.Unlock()
+						t.recordError(err)
+						return
+					}
 					currentDiffRowsForPair++
 					if t.incrementDiffRowsLocked(1) {
 						limitReached = true
