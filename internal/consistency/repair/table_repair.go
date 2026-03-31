@@ -2258,6 +2258,13 @@ func extractOriginInfoFromRow(row types.OrderedMap) *rowOriginInfo {
 			ts = parseNumericTimestamp(int64(v))
 		case float64:
 			ts = parseNumericTimestamp(int64(v))
+		case json.Number:
+			if i64, err := v.Int64(); err == nil {
+				ts = parseNumericTimestamp(i64)
+			} else {
+				logger.Warn("extractOriginInfoFromRow: failed to parse json.Number commit_ts %q: %v", v.String(), err)
+				return nil
+			}
 		default:
 			logger.Warn("extractOriginInfoFromRow: unhandled commit_ts type %T, skipping origin preservation", tsVal)
 			return nil

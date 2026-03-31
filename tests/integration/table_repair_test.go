@@ -2168,3 +2168,166 @@ func TestTableRepair_MixedOps_PreserveOrigin(t *testing.T) {
 	log.Println("  - INSERT: 2 missing rows restored with preserved origin/timestamp")
 	log.Println("  - UPDATE: 2 modified rows corrected with preserved origin/timestamp")
 }
+
+// TestTableRepair_LargeBigintPK verifies that table repair correctly handles
+// bigint primary keys whose values exceed float64's exact integer range (2^53).
+// Before the fix, JSON deserialization converted these to float64, silently
+// truncating the PK values and causing:
+//   - PK collisions (distinct PKs mapping to the same float64)
+//   - Wrong rows being upserted/deleted
+//   - Data corruption on both the repaired and source-of-truth nodes
+//
+// The test uses PKs that are adjacent integers above 2^53, which all collapse
+// to the same float64 value without the json.Number fix.
+func TestTableRepair_LargeBigintPK(t *testing.T) {
+	ctx := context.Background()
+	tableName := "bigint_pk_repair"
+	qualifiedTableName := fmt.Sprintf("%s.%s", testSchema, tableName)
+
+	// PKs chosen to collide under float64: all map to the same float64 value.
+	// 415588913294348288 is the nearest float64-representable integer.
+	// 415588913294348289, ...290, ...291 all round to ...288 as float64.
+	collisionPKs := []int64{
+		415588913294348288,
+		415588913294348289,
+		415588913294348290,
+		415588913294348291,
+	}
+
+	createTableSQL := fmt.Sprintf(`
+CREATE SCHEMA IF NOT EXISTS "%s";
+CREATE TABLE IF NOT EXISTS %s.%s (
+    id BIGINT PRIMARY KEY,
+    data TEXT,
+    amount NUMERIC(20, 4)
+);`, testSchema, testSchema, tableName)
+
+	for i, pool := range []*pgxpool.Pool{pgCluster.Node1Pool, pgCluster.Node2Pool} {
+		nodeName := pgCluster.ClusterNodes[i]["Name"].(string)
+		_, err := pool.Exec(ctx, createTableSQL)
+		require.NoErrorf(t, err, "Failed to create table on %s", nodeName)
+		_, err = pool.Exec(ctx, fmt.Sprintf("TRUNCATE TABLE %s CASCADE", qualifiedTableName))
+		require.NoErrorf(t, err, "Failed to truncate table on %s", nodeName)
+		_, err = pool.Exec(ctx, fmt.Sprintf(`SELECT spock.repset_add_table('default', '%s');`, qualifiedTableName))
+		require.NoErrorf(t, err, "Failed to add table to repset on %s", nodeName)
+	}
+
+	t.Cleanup(func() {
+		_, _ = pgCluster.Node1Pool.Exec(ctx, fmt.Sprintf(`SELECT spock.repset_remove_table('default', '%s');`, qualifiedTableName))
+		for _, pool := range []*pgxpool.Pool{pgCluster.Node1Pool, pgCluster.Node2Pool} {
+			_, _ = pool.Exec(ctx, fmt.Sprintf("DROP TABLE IF EXISTS %s CASCADE", qualifiedTableName))
+		}
+		files, _ := filepath.Glob("*_diffs-*.json")
+		for _, f := range files {
+			_ = os.Remove(f)
+		}
+	})
+
+	insertRow := func(pool *pgxpool.Pool, id int64, data string, amount string) {
+		tx, err := pool.Begin(ctx)
+		require.NoError(t, err)
+		defer func() { _ = tx.Rollback(ctx) }()
+
+		_, err = tx.Exec(ctx, "SELECT spock.repair_mode(true)")
+		require.NoError(t, err)
+
+		_, err = tx.Exec(ctx,
+			fmt.Sprintf("INSERT INTO %s (id, data, amount) VALUES ($1, $2, $3::numeric)", qualifiedTableName),
+			id, data, amount)
+		require.NoError(t, err)
+
+		_, err = tx.Exec(ctx, "SELECT spock.repair_mode(false)")
+		require.NoError(t, err)
+		require.NoError(t, tx.Commit(ctx))
+	}
+
+	// ---- Set up divergence ----
+	// Common row on both nodes (same data)
+	insertRow(pgCluster.Node1Pool, collisionPKs[0], "common_row", "1000000.1234")
+	insertRow(pgCluster.Node2Pool, collisionPKs[0], "common_row", "1000000.1234")
+
+	// Rows only on node1 (should be deleted when node2 is source of truth)
+	insertRow(pgCluster.Node1Pool, collisionPKs[1], "n1_only_289", "2000000.5678")
+
+	// Rows only on node2 (should be inserted into node1)
+	insertRow(pgCluster.Node2Pool, collisionPKs[2], "n2_only_290", "3000000.9012")
+
+	// Modified row: same PK on both nodes, different data
+	insertRow(pgCluster.Node1Pool, collisionPKs[3], "old_data_291", "4000000.0001")
+	insertRow(pgCluster.Node2Pool, collisionPKs[3], "new_data_291", "4000000.9999")
+
+	// ---- Run diff ----
+	diffFile := runTableDiff(t, qualifiedTableName, []string{serviceN1, serviceN2})
+
+	// Verify diff found the expected number of differences:
+	// - collisionPKs[1]: node1-only → 1 diff
+	// - collisionPKs[2]: node2-only → 1 diff
+	// - collisionPKs[3]: modified   → 1 diff
+	// Total: 3 diffs
+	diffData, err := os.ReadFile(diffFile)
+	require.NoError(t, err)
+	var diffOutput struct {
+		Summary struct {
+			DiffRowsCount map[string]int `json:"diff_rows_count"`
+		} `json:"summary"`
+	}
+	require.NoError(t, json.Unmarshal(diffData, &diffOutput))
+	totalDiffs := 0
+	for _, count := range diffOutput.Summary.DiffRowsCount {
+		totalDiffs += count
+	}
+	assert.Equal(t, 3, totalDiffs, "Expected exactly 3 differences before repair")
+
+	// ---- Run repair (node2 is source of truth) ----
+	repairTask := newTestTableRepairTask(serviceN2, qualifiedTableName, diffFile)
+	err = repairTask.Run(false)
+	require.NoError(t, err, "Table repair failed")
+
+	// ---- Verify repair ----
+
+	// 1. Tables should now match (zero diffs)
+	assertNoTableDiff(t, qualifiedTableName)
+
+	// 2. Row counts should match: 3 rows (common + n2_only_290 + modified_291)
+	//    collisionPKs[1] (n1_only_289) should have been deleted from node1
+	count1 := getTableCount(t, ctx, pgCluster.Node1Pool, qualifiedTableName)
+	count2 := getTableCount(t, ctx, pgCluster.Node2Pool, qualifiedTableName)
+	assert.Equal(t, count1, count2, "Row counts should match after repair")
+	assert.Equal(t, 3, count1, "Expected 3 rows after repair")
+
+	// 3. Verify each PK has the correct data on the repaired node (node1)
+	verifyRow := func(pool *pgxpool.Pool, id int64, expectedData string, expectedAmount string) {
+		var data string
+		var amount string
+		err := pool.QueryRow(ctx,
+			fmt.Sprintf("SELECT data, amount::text FROM %s WHERE id = $1", qualifiedTableName), id).
+			Scan(&data, &amount)
+		require.NoError(t, err, "Row with PK %d should exist", id)
+		assert.Equal(t, expectedData, data, "Wrong data for PK %d", id)
+		assert.Equal(t, expectedAmount, amount, "Wrong amount for PK %d", id)
+	}
+
+	// Common row should be unchanged
+	verifyRow(pgCluster.Node1Pool, collisionPKs[0], "common_row", "1000000.1234")
+
+	// Node1-only row should have been deleted
+	var deletedCount int
+	err = pgCluster.Node1Pool.QueryRow(ctx,
+		fmt.Sprintf("SELECT count(*) FROM %s WHERE id = $1", qualifiedTableName), collisionPKs[1]).
+		Scan(&deletedCount)
+	require.NoError(t, err)
+	assert.Equal(t, 0, deletedCount, "Node1-only row (PK %d) should have been deleted", collisionPKs[1])
+
+	// Node2-only row should have been inserted into node1
+	verifyRow(pgCluster.Node1Pool, collisionPKs[2], "n2_only_290", "3000000.9012")
+
+	// Modified row should have node2's version on node1
+	verifyRow(pgCluster.Node1Pool, collisionPKs[3], "new_data_291", "4000000.9999")
+
+	log.Println("TestTableRepair_LargeBigintPK PASSED")
+	log.Println("  - 4 adjacent PKs above 2^53 that collide under float64")
+	log.Println("  - DELETE: node1-only row correctly removed")
+	log.Println("  - INSERT: node2-only row correctly added to node1")
+	log.Println("  - UPDATE: modified row correctly updated on node1")
+	log.Println("  - All PKs preserved with exact precision (no float64 truncation)")
+}

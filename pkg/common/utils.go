@@ -20,9 +20,10 @@ import (
 	"fmt"
 	"log"
 	"maps"
+	"math"
+	"math/big"
 	"os"
 	"path/filepath"
-	"reflect"
 	"slices"
 	"sort"
 	"strconv"
@@ -544,8 +545,36 @@ func ConvertToPgxType(val any, pgType string) (any, error) {
 		return nil, fmt.Errorf("expected bool for %s, got %T", pgType, val)
 
 	case "smallint", "int2", "integer", "int", "int4", "bigint", "int8", "serial2", "serial4", "serial8":
-		// JSON numbers might unmarshal to float64. Need to handle this.
+		if n, ok := val.(json.Number); ok {
+			if i64, err := n.Int64(); err == nil {
+				return i64, nil
+			}
+			// Fallback for JSON strings like "42.0" (not produced by normal
+			// diff writes, but possible with manually edited files). Only
+			// accept values in float64's exact integer range (<=2^53) that
+			// are truly integral; reject fractional values like "42.5".
+			f, err := n.Float64()
+			if err != nil {
+				return nil, fmt.Errorf("failed to parse json.Number %q as integer for %s: %w", n.String(), pgType, err)
+			}
+			const maxSafeInt = 1 << 53
+			if f > maxSafeInt || f < -maxSafeInt {
+				return nil, fmt.Errorf("json.Number %q exceeds safe integer range for float64-to-int64 conversion (%s)", n.String(), pgType)
+			}
+			if math.Trunc(f) != f {
+				return nil, fmt.Errorf("json.Number %q is not an integer for %s", n.String(), pgType)
+			}
+			return int64(f), nil
+		}
+
 		if f, ok := val.(float64); ok {
+			const maxSafeInt = 1 << 53
+			if f > maxSafeInt || f < -maxSafeInt {
+				return nil, fmt.Errorf("float64 %v exceeds safe integer range for %s", f, pgType)
+			}
+			if math.Trunc(f) != f {
+				return nil, fmt.Errorf("float64 %v is not an integer for %s", f, pgType)
+			}
 			return int64(f), nil
 		}
 
@@ -559,13 +588,46 @@ func ConvertToPgxType(val any, pgType string) (any, error) {
 
 		return nil, fmt.Errorf("expected integer type for %s, got %T", pgType, val)
 
-	case "real", "float4", "double precision", "float8", "numeric", "decimal":
+	case "real", "float4", "double precision", "float8":
+		if n, ok := val.(json.Number); ok {
+			f, err := n.Float64()
+			if err != nil {
+				return nil, fmt.Errorf("failed to parse json.Number %q as float64 for %s: %w", n.String(), pgType, err)
+			}
+			return f, nil
+		}
+
 		if f, ok := val.(float64); ok {
 			return f, nil
 		}
 
-		// If we could not convert to float64, try to convert to string
-		// and use pgtype.Numeric
+		if s, ok := val.(string); ok {
+			f, err := strconv.ParseFloat(s, 64)
+			if err == nil {
+				return f, nil
+			}
+		}
+
+		return nil, fmt.Errorf("expected float type for %s, got %T", pgType, val)
+
+	case "numeric", "decimal":
+		if n, ok := val.(json.Number); ok {
+			num := pgtype.Numeric{}
+			if err := num.Set(n.String()); err == nil {
+				return &num, nil
+			}
+			// Fall back to float64 for simple values
+			f, err := n.Float64()
+			if err != nil {
+				return nil, fmt.Errorf("failed to parse json.Number %q for %s: %w", n.String(), pgType, err)
+			}
+			return f, nil
+		}
+
+		if f, ok := val.(float64); ok {
+			return f, nil
+		}
+
 		if s, ok := val.(string); ok {
 			num := pgtype.Numeric{}
 			if err := num.Set(s); err == nil {
@@ -573,7 +635,7 @@ func ConvertToPgxType(val any, pgType string) (any, error) {
 			}
 		}
 
-		return nil, fmt.Errorf("expected float/numeric type for %s, got %T", pgType, val)
+		return nil, fmt.Errorf("expected numeric type for %s, got %T", pgType, val)
 
 	case "text", "varchar", "character varying", "char", "character", "bpchar", "name", "citext":
 		if s, ok := val.(string); ok {
@@ -1282,22 +1344,11 @@ func comparePKValues(valuesA, valuesB []any) int {
 			return 1
 		}
 
-		valAKind := reflect.TypeOf(valA).Kind()
-		valBKind := reflect.TypeOf(valB).Kind()
-
-		if isNumeric(valAKind) && isNumeric(valBKind) {
-			floatA, errA := toFloat64(valA)
-			floatB, errB := toFloat64(valB)
-
-			if errA == nil && errB == nil {
-				if floatA < floatB {
-					return -1
-				}
-				if floatA > floatB {
-					return 1
-				}
-				continue
+		if cmp, ok := CompareNumeric(valA, valB); ok {
+			if cmp != 0 {
+				return cmp
 			}
+			continue
 		}
 
 		switch vA := valA.(type) {
@@ -1334,27 +1385,133 @@ func comparePKValues(valuesA, valuesB []any) int {
 	return 0
 }
 
-func isNumeric(kind reflect.Kind) bool {
-	switch kind {
-	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
-		reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64,
-		reflect.Float32, reflect.Float64:
-		return true
+
+// CompareNumeric compares two numeric values with full precision.
+// Returns -1 if a < b, 0 if a == b, 1 if a > b, and ok=true if both
+// values are numeric. Returns (0, false) if either value is not numeric.
+//
+// Uses an int64 fast path for integral values and falls back to
+// math/big.Float for json.Number decimals, large uint64, and floats.
+func CompareNumeric(a, b any) (int, bool) {
+	ai, aOk := asInt64(a)
+	bi, bOk := asInt64(b)
+	if aOk && bOk {
+		switch {
+		case ai < bi:
+			return -1, true
+		case ai > bi:
+			return 1, true
+		default:
+			return 0, true
+		}
+	}
+
+	af, aOk := toBigFloat(a)
+	bf, bOk := toBigFloat(b)
+	if aOk && bOk {
+		return af.Cmp(bf), true
+	}
+	return 0, false
+}
+
+// asInt64 attempts a lossless conversion to int64.
+// Returns false for floats, fractional json.Numbers, and uint64 values
+// that overflow int64.
+func asInt64(v any) (int64, bool) {
+	switch n := v.(type) {
+	case json.Number:
+		i, err := n.Int64()
+		return i, err == nil
+	case int:
+		return int64(n), true
+	case int8:
+		return int64(n), true
+	case int16:
+		return int64(n), true
+	case int32:
+		return int64(n), true
+	case int64:
+		return n, true
+	case uint:
+		if n <= math.MaxInt64 {
+			return int64(n), true
+		}
+		return 0, false
+	case uint8:
+		return int64(n), true
+	case uint16:
+		return int64(n), true
+	case uint32:
+		return int64(n), true
+	case uint64:
+		if n <= math.MaxInt64 {
+			return int64(n), true
+		}
+		return 0, false
 	default:
-		return false
+		return 0, false
 	}
 }
 
-func toFloat64(v any) (float64, error) {
-	val := reflect.ValueOf(v)
-	switch val.Kind() {
-	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
-		return float64(val.Int()), nil
-	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
-		return float64(val.Uint()), nil
-	case reflect.Float32, reflect.Float64:
-		return val.Float(), nil
+// bigFloatPrec is the precision used for big.Float comparisons.
+// 256 bits handles ~77 decimal digits, covering PostgreSQL NUMERIC
+// precision for all practical cases.
+const bigFloatPrec = 256
+
+// toBigFloat converts any numeric value to a *big.Float for precise comparison.
+func toBigFloat(v any) (*big.Float, bool) {
+	switch n := v.(type) {
+	case json.Number:
+		f, _, err := big.ParseFloat(n.String(), 10, bigFloatPrec, big.ToNearestEven)
+		return f, err == nil
+	case int:
+		return new(big.Float).SetPrec(bigFloatPrec).SetInt64(int64(n)), true
+	case int8:
+		return new(big.Float).SetPrec(bigFloatPrec).SetInt64(int64(n)), true
+	case int16:
+		return new(big.Float).SetPrec(bigFloatPrec).SetInt64(int64(n)), true
+	case int32:
+		return new(big.Float).SetPrec(bigFloatPrec).SetInt64(int64(n)), true
+	case int64:
+		return new(big.Float).SetPrec(bigFloatPrec).SetInt64(n), true
+	case uint:
+		return new(big.Float).SetPrec(bigFloatPrec).SetUint64(uint64(n)), true
+	case uint8:
+		return new(big.Float).SetPrec(bigFloatPrec).SetUint64(uint64(n)), true
+	case uint16:
+		return new(big.Float).SetPrec(bigFloatPrec).SetUint64(uint64(n)), true
+	case uint32:
+		return new(big.Float).SetPrec(bigFloatPrec).SetUint64(uint64(n)), true
+	case uint64:
+		return new(big.Float).SetPrec(bigFloatPrec).SetUint64(n), true
+	case float32:
+		f64 := float64(n)
+		if math.IsNaN(f64) || math.IsInf(f64, 0) {
+			return nil, false
+		}
+		return new(big.Float).SetPrec(bigFloatPrec).SetFloat64(f64), true
+	case float64:
+		if math.IsNaN(n) || math.IsInf(n, 0) {
+			return nil, false
+		}
+		return new(big.Float).SetPrec(bigFloatPrec).SetFloat64(n), true
+	case pgtype.Numeric:
+		if n.Status == pgtype.Present {
+			if text, err := n.EncodeText(nil, nil); err == nil {
+				f, _, err := big.ParseFloat(string(text), 10, bigFloatPrec, big.ToNearestEven)
+				return f, err == nil
+			}
+		}
+		return nil, false
+	case pgxv5type.Numeric:
+		if n.Valid {
+			if text, err := n.MarshalJSON(); err == nil {
+				f, _, err := big.ParseFloat(string(text), 10, bigFloatPrec, big.ToNearestEven)
+				return f, err == nil
+			}
+		}
+		return nil, false
 	default:
-		return 0, fmt.Errorf("unsupported type for numeric conversion: %T", v)
+		return nil, false
 	}
 }

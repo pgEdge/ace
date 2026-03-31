@@ -286,10 +286,8 @@ func pkMatchesOverride(pkOrder []string, rowPk map[string]any, overridePk map[st
 	}
 
 	equal := func(a, b any) bool {
-		if af, ok := asFloat(a); ok {
-			if bf, ok2 := asFloat(b); ok2 {
-				return af == bf
-			}
+		if cmp, ok := utils.CompareNumeric(a, b); ok {
+			return cmp == 0
 		}
 		return reflect.DeepEqual(a, b)
 	}
@@ -308,10 +306,8 @@ func matchPKIn(matchers []planner.RepairPKMatcher, rowPk map[string]any, pkOrder
 	}
 
 	equal := func(a, b any) bool {
-		if af, ok := asFloat(a); ok {
-			if bf, ok2 := asFloat(b); ok2 {
-				return af == bf
-			}
+		if cmp, ok := utils.CompareNumeric(a, b); ok {
+			return cmp == 0
 		}
 		return reflect.DeepEqual(a, b)
 	}
@@ -353,11 +349,10 @@ func matchPKIn(matchers []planner.RepairPKMatcher, rowPk map[string]any, pkOrder
 }
 
 func compareRange(val, from, to any) bool {
-	ln, lok := asFloat(val)
-	fn, fok := asFloat(from)
-	tn, tok := asFloat(to)
-	if lok && fok && tok {
-		return ln >= fn && ln <= tn
+	cmpFrom, okFrom := utils.CompareNumeric(val, from)
+	cmpTo, okTo := utils.CompareNumeric(val, to)
+	if okFrom && okTo {
+		return cmpFrom >= 0 && cmpTo <= 0
 	}
 
 	ls, lsok := val.(string)
@@ -367,37 +362,6 @@ func compareRange(val, from, to any) bool {
 		return ls >= fs && ls <= ts
 	}
 	return false
-}
-
-func asFloat(v any) (float64, bool) {
-	switch n := v.(type) {
-	case int:
-		return float64(n), true
-	case int8:
-		return float64(n), true
-	case int16:
-		return float64(n), true
-	case int32:
-		return float64(n), true
-	case int64:
-		return float64(n), true
-	case uint:
-		return float64(n), true
-	case uint8:
-		return float64(n), true
-	case uint16:
-		return float64(n), true
-	case uint32:
-		return float64(n), true
-	case uint64:
-		return float64(n), true
-	case float32:
-		return float64(n), true
-	case float64:
-		return n, true
-	default:
-		return 0, false
-	}
 }
 
 func columnsIntersect(a, b []string) bool {
@@ -780,15 +744,13 @@ func freshestSide(key string, tie string, row planDiffRow) string {
 		return strings.TrimSpace(strings.ToLower(tie))
 	}
 
-	if f1, ok := asFloat(k1); ok {
-		if f2, ok2 := asFloat(k2); ok2 {
-			if f1 > f2 {
-				return "n1"
-			} else if f2 > f1 {
-				return "n2"
-			}
-			return strings.TrimSpace(strings.ToLower(tie))
+	if cmp, ok := utils.CompareNumeric(k1, k2); ok {
+		if cmp > 0 {
+			return "n1"
+		} else if cmp < 0 {
+			return "n2"
 		}
+		return strings.TrimSpace(strings.ToLower(tie))
 	}
 
 	if s1, ok := k1.(string); ok {

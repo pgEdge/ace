@@ -2,10 +2,13 @@ package common
 
 import (
 	"encoding/base64"
+	"encoding/json"
+	"fmt"
 	"testing"
 	"time"
 
 	pgxv5type "github.com/jackc/pgx/v5/pgtype"
+	"github.com/pgedge/ace/pkg/types"
 	"github.com/stretchr/testify/require"
 )
 
@@ -284,4 +287,83 @@ func TestConvertToPgxType_TimetzReturnsString(t *testing.T) {
 			require.Equal(t, input, s)
 		})
 	}
+}
+
+func TestConvertToPgxType_JsonNumberBigint(t *testing.T) {
+	// json.Number must preserve full precision for bigint values that exceed
+	// float64's 2^53 exact integer range. This is the root cause of the repair
+	// corruption bug for tables with large bigint primary keys.
+	tests := []struct {
+		name     string
+		input    json.Number
+		pgType   string
+		expected int64
+	}{
+		{"customer PK", json.Number("415588913294348289"), "bigint", 415588913294348289},
+		{"near max int64", json.Number("9223372036854775806"), "int8", 9223372036854775806},
+		{"small value", json.Number("42"), "integer", 42},
+		{"negative", json.Number("-1234567890123456789"), "bigint", -1234567890123456789},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			val, err := ConvertToPgxType(tt.input, tt.pgType)
+			require.NoError(t, err)
+			i64, ok := val.(int64)
+			require.True(t, ok, "expected int64, got %T", val)
+			require.Equal(t, tt.expected, i64)
+		})
+	}
+}
+
+func TestConvertToPgxType_JsonNumberNumeric(t *testing.T) {
+	// json.Number for numeric/decimal should preserve full precision via
+	// pgtype.Numeric (not lossy float64 conversion).
+	n := json.Number("12345678901234567.89012345")
+	val, err := ConvertToPgxType(n, "numeric")
+	require.NoError(t, err)
+	require.NotNil(t, val)
+
+	// Must NOT be float64 — that would lose precision
+	_, isFloat := val.(float64)
+	require.False(t, isFloat, "numeric json.Number must not convert to float64")
+
+	// Verify it's a *pgtype.Numeric by checking the type name
+	typeName := fmt.Sprintf("%T", val)
+	require.Contains(t, typeName, "Numeric", "expected pgtype.Numeric, got %s", typeName)
+}
+
+func TestConvertToPgxType_JsonNumberFloat(t *testing.T) {
+	n := json.Number("3.14")
+	val, err := ConvertToPgxType(n, "double precision")
+	require.NoError(t, err)
+
+	f, ok := val.(float64)
+	require.True(t, ok, "expected float64, got %T", val)
+	require.InDelta(t, 3.14, f, 1e-10)
+}
+
+func TestStringifyOrderedMapKey_JsonNumber(t *testing.T) {
+	// json.Number values from UseNumber() must stringify to the exact original
+	// string, not scientific notation.
+	row := types.OrderedMap{
+		{Key: "id", Value: json.Number("415588913294348289")},
+		{Key: "name", Value: "test"},
+	}
+
+	key, err := StringifyOrderedMapKey(row, []string{"id"})
+	require.NoError(t, err)
+	require.Equal(t, "415588913294348289", key, "PK must stringify to exact decimal, not scientific notation")
+}
+
+func TestStringifyOrderedMapKey_JsonNumberNoPKCollision(t *testing.T) {
+	// Two adjacent large bigint PKs must NOT collide after stringification.
+	row1 := types.OrderedMap{{Key: "id", Value: json.Number("415588913294348289")}}
+	row2 := types.OrderedMap{{Key: "id", Value: json.Number("415588913294348290")}}
+
+	key1, err := StringifyOrderedMapKey(row1, []string{"id"})
+	require.NoError(t, err)
+	key2, err := StringifyOrderedMapKey(row2, []string{"id"})
+	require.NoError(t, err)
+	require.NotEqual(t, key1, key2, "adjacent bigint PKs must not collide")
 }
