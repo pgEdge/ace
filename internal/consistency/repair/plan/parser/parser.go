@@ -231,11 +231,8 @@ func (l *lexer) scanNumber() (token, error) {
 	text := l.input[start:l.pos]
 	// Store as json.Number to preserve full precision for large integers
 	// and high-precision decimals. CompareNumeric handles json.Number natively.
-	n := json.Number(text)
-	if _, err := n.Float64(); err != nil {
-		return token{}, fmt.Errorf("invalid number %q at pos %d", text, start)
-	}
-	return token{typ: tokNumber, lit: text, pos: start, value: n}, nil
+	// Syntax is already validated by the character-by-character scan above.
+	return token{typ: tokNumber, lit: text, pos: start, value: json.Number(text)}, nil
 }
 
 func (l *lexer) scanIdent() (token, error) {
