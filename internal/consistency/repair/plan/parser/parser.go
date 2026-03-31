@@ -12,10 +12,12 @@
 package parser
 
 import (
+	"encoding/json"
 	"fmt"
-	"strconv"
 	"strings"
 	"unicode"
+
+	utils "github.com/pgedge/ace/pkg/common"
 )
 
 // WhenExpr represents a compiled predicate over diff row values (n1./n2.).
@@ -227,11 +229,13 @@ func (l *lexer) scanNumber() (token, error) {
 		l.pos++
 	}
 	text := l.input[start:l.pos]
-	num, err := strconv.ParseFloat(text, 64)
-	if err != nil {
+	// Store as json.Number to preserve full precision for large integers
+	// and high-precision decimals. CompareNumeric handles json.Number natively.
+	n := json.Number(text)
+	if _, err := n.Float64(); err != nil {
 		return token{}, fmt.Errorf("invalid number %q at pos %d", text, start)
 	}
-	return token{typ: tokNumber, lit: text, pos: start, value: num}, nil
+	return token{typ: tokNumber, lit: text, pos: start, value: n}, nil
 }
 
 func (l *lexer) scanIdent() (token, error) {
@@ -612,22 +616,20 @@ func compareValues(op tokenType, left any, right any) (bool, error) {
 		}
 	}
 
-	ln, lok := asNumber(left)
-	rn, rok := asNumber(right)
-	if lok && rok {
+	if cmp, ok := utils.CompareNumeric(left, right); ok {
 		switch op {
 		case tokEq:
-			return ln == rn, nil
+			return cmp == 0, nil
 		case tokNeq:
-			return ln != rn, nil
+			return cmp != 0, nil
 		case tokLt:
-			return ln < rn, nil
+			return cmp < 0, nil
 		case tokLte:
-			return ln <= rn, nil
+			return cmp <= 0, nil
 		case tokGt:
-			return ln > rn, nil
+			return cmp > 0, nil
 		case tokGte:
-			return ln >= rn, nil
+			return cmp >= 0, nil
 		default:
 			return false, fmt.Errorf("unsupported numeric operator %v", op)
 		}
@@ -670,33 +672,3 @@ func compareValues(op tokenType, left any, right any) (bool, error) {
 	return false, fmt.Errorf("cannot compare values of different or unsupported types (%T vs %T)", left, right)
 }
 
-func asNumber(v any) (float64, bool) {
-	switch n := v.(type) {
-	case int:
-		return float64(n), true
-	case int8:
-		return float64(n), true
-	case int16:
-		return float64(n), true
-	case int32:
-		return float64(n), true
-	case int64:
-		return float64(n), true
-	case uint:
-		return float64(n), true
-	case uint8:
-		return float64(n), true
-	case uint16:
-		return float64(n), true
-	case uint32:
-		return float64(n), true
-	case uint64:
-		return float64(n), true
-	case float32:
-		return float64(n), true
-	case float64:
-		return n, true
-	default:
-		return 0, false
-	}
-}

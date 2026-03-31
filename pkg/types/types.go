@@ -163,6 +163,7 @@ func (om *OrderedMap) UnmarshalJSON(data []byte) error {
 		return nil
 	}
 	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.UseNumber()
 
 	t, err := dec.Token()
 	if err != nil {
