@@ -2,6 +2,11 @@
 
 All notable changes to ACE will be captured in this document. This project follows semantic versioning; the latest changes appear first.
 
+## [v1.7.2] - 2026-04-01
+
+### Fixed
+- Fix precision loss for large bigint and numeric primary keys during table repair. Previously it was possible that type conversions may cause the incorrect key to be used.
+
 ## [v1.7.1] - 2026-03-23
 
 ### Added
