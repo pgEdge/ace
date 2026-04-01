@@ -57,7 +57,7 @@ import (
 // the failed origin node).  The file is removed in t.Cleanup.
 func writeN2N3ClusterJSON(t *testing.T) string {
 	t.Helper()
-	clusterName := "test_cluster_n2_n3"
+	clusterName := fmt.Sprintf("test_cluster_n2_n3_%d", time.Now().UnixNano())
 	cfg := types.ClusterConfig{
 		JSONVersion: "1.0",
 		ClusterName: clusterName,
@@ -112,7 +112,7 @@ func writeN2N3ClusterJSON(t *testing.T) string {
 	require.NoError(t, err)
 	path := clusterName + ".json"
 	require.NoError(t, os.WriteFile(path, data, 0644))
-	t.Cleanup(func() { os.Remove(path) })
+	t.Cleanup(func() { _ = os.Remove(path) })
 	return clusterName
 }
 
@@ -222,6 +222,10 @@ func TestCatastrophicSingleNodeFailure(t *testing.T) {
 		fmt.Sprintf("SELECT spock.sub_disable('%s', true)", subName),
 	)
 	require.NoError(t, err, "disable n2 subscription to n1 (%s)", subName)
+	t.Cleanup(func() {
+		_, _ = pgCluster.Node2Pool.Exec(ctx,
+			fmt.Sprintf("SELECT spock.sub_enable('%s')", subName))
+	})
 	log.Printf("Disabled n2 subscription %q to n1 – real lag begins", subName)
 
 	// -----------------------------------------------------------------------
@@ -382,12 +386,12 @@ func TestCatastrophicSingleNodeFailure(t *testing.T) {
 
 	// Verify _spock_metadata_ is populated in the diff rows.
 	for _, row := range n3Rows {
-		if metaRaw, ok := row.Get("_spock_metadata_"); ok {
-			if meta, ok := metaRaw.(map[string]any); ok {
-				require.Contains(t, meta, "node_origin", "_spock_metadata_ must include node_origin")
-				require.Contains(t, meta, "commit_ts", "_spock_metadata_ must include commit_ts")
-			}
-		}
+		metaRaw, ok := row.Get("_spock_metadata_")
+		require.True(t, ok, "_spock_metadata_ must be present in every diff row")
+		meta, ok := metaRaw.(map[string]any)
+		require.True(t, ok, "_spock_metadata_ must be a map, got %T", metaRaw)
+		require.Contains(t, meta, "node_origin", "_spock_metadata_ must include node_origin")
+		require.Contains(t, meta, "commit_ts", "_spock_metadata_ must include commit_ts")
 	}
 	log.Printf("Phase 3 complete: diff found %d diffs on n3 vs n2 for origin n1", len(n3Rows))
 
