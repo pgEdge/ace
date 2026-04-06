@@ -34,6 +34,9 @@ When invoking [ACE commands](commands/index.md), review the available command op
 - **`--compare-unit-size`**
     Sets the minimum block size used when ACE recursively drills into mismatched blocks. Smaller values provide more granular comparisons at the cost of additional round-trips. Default is `10000`.
 
+- **`--max-connections`**
+    Caps the number of database connections ACE opens per node. By default, the pool size is derived from `--concurrency-factor` and the number of CPUs. On machines with many cores, this can result in a large number of connections. Use `--max-connections` to set a hard upper limit, or set `table_diff.max_connections` in `ace.yaml` to apply it globally. This is especially useful when running ACE against databases with limited `max_connections` or when sharing the database with other applications.
+
 - **`--override-block-size` (`-B`)**
     Override the safety limits defined in `ace.yaml`. Use cautiously: extremely large blocks can lead to `array_agg` memory pressure.
 

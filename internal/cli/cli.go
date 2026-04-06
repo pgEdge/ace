@@ -102,6 +102,12 @@ func SetupCLI() *cli.Command {
 			Usage:   "Override block size",
 			Value:   false,
 		},
+		&cli.IntFlag{
+			Name:    "max-connections",
+			Aliases: []string{"m"},
+			Usage:   "Maximum number of database connections per node (default: derived from concurrency factor)",
+			Value:   0,
+		},
 	}
 
 	rerunOnlyFlags := []cli.Flag{
@@ -879,6 +885,7 @@ func TableDiffCLI(cmd *cli.Command) error {
 	task.DBName = cmd.String("dbname")
 	task.BlockSize = int(blockSizeInt)
 	task.ConcurrencyFactor = cmd.Float64("concurrency-factor")
+	task.MaxConnections = cmd.Int("max-connections")
 	task.CompareUnitSize = cmd.Int("compare-unit-size")
 	task.Output = strings.ToLower(cmd.String("output"))
 	task.Nodes = cmd.String("nodes")
@@ -1350,6 +1357,7 @@ func RepsetDiffCLI(cmd *cli.Command) error {
 
 	task.BlockSize = int(blockSizeInt)
 	task.ConcurrencyFactor = cmd.Float64("concurrency-factor")
+	task.MaxConnections = cmd.Int("max-connections")
 	task.CompareUnitSize = cmd.Int("compare-unit-size")
 	task.Output = cmd.String("output")
 	task.OverrideBlockSize = cmd.Bool("override-block-size")

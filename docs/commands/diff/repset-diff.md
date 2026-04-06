@@ -25,6 +25,7 @@ Runs `table-diff` on every table in a replication set and reports differences.
 | `--concurrency-factor <float>` | `-c` | CPU ratio for concurrency (0.0–4.0). Default `0.5`. |
 | `--compare-unit-size <int>` | `-u` | Recursive split size for mismatched blocks. Default `10000`. |
 | `--output <json\|html>` | `-o` | Per-table diff report format. Default `json`. |
+| `--max-connections <int>` | `-m` | Maximum database connections per node. Caps the pool regardless of concurrency factor. | derived |
 | `--override-block-size` | `-B` | Allow block sizes outside `ace.yaml` guardrails. |
 | `--quiet` | `-q` | Suppress output | `false` |
 | `--debug` | `-v` | Debug logging | `false` |
