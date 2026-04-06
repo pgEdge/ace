@@ -178,6 +178,10 @@ func (c *SchemaDiffCmd) Validate() error {
 		return fmt.Errorf("schema-diff needs at least two nodes to compare")
 	}
 
+	if c.MaxConnections < 0 {
+		return fmt.Errorf("max_connections must be >= 1 (or 0 to derive from concurrency factor)")
+	}
+
 	return nil
 }
 

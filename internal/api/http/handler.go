@@ -299,6 +299,9 @@ func (s *APIServer) resolveMaxConnections(cfg *config.Config, requested int) int
 	if requested > 0 {
 		return requested
 	}
+	if requested < 0 {
+		return requested // rejected by Validate()
+	}
 	if cfg != nil && cfg.TableDiff.MaxConnections > 0 {
 		return cfg.TableDiff.MaxConnections
 	}
