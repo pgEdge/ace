@@ -231,6 +231,9 @@ func (c *RepsetDiffCmd) Validate() error {
 	if c.RepsetName == "" {
 		return fmt.Errorf("repset name is required")
 	}
+	if c.MaxConnections < 0 {
+		return fmt.Errorf("max_connections must be >= 1 (or 0 to derive from concurrency factor)")
+	}
 	return nil
 }
 

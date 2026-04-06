@@ -729,7 +729,7 @@ func (t *TableDiffTask) Validate() error {
 	}
 
 	cfg := config.Get()
-	if t.MaxConnections == 0 && cfg.TableDiff.MaxConnections > 0 {
+	if t.MaxConnections == 0 {
 		t.MaxConnections = cfg.TableDiff.MaxConnections
 	}
 	if t.MaxConnections < 0 {
