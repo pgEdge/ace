@@ -40,7 +40,7 @@ jobs:
     - name: Run crash recovery origin-filter test
       run: go test -count=1 -v ./tests/integration -run 'TestTableDiffAgainstOriginWithUntil'
 
-    - name: Run crash recovery origin-filter test
+    - name: Run advanced repair plan tests
       run: go test -count=1 -v ./tests/integration -run 'TestAdvancedRepairPlan'
 
     - name: Run repset-diff tests
