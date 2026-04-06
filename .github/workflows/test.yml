@@ -43,5 +43,17 @@ jobs:
     - name: Run crash recovery origin-filter test
       run: go test -count=1 -v ./tests/integration -run 'TestAdvancedRepairPlan'
 
-    - name: Run connection pool cap test
-      run: go test -count=1 -v ./tests/integration -run 'TestRepsetDiff_MaxConnectionsCap'
+    - name: Run repset-diff tests
+      run: go test -count=1 -v ./tests/integration -run 'TestRepsetDiff_'
+
+    - name: Run schema-diff tests
+      run: go test -count=1 -v ./tests/integration -run 'TestSchemaDiff_'
+
+    - name: Run Merkle tree numeric scale invariance test
+      run: go test -count=1 -v ./tests/integration -run 'TestMerkleTreeNumericScaleInvariance'
+
+    - name: Run catastrophic single-node failure recovery test
+      run: go test -count=1 -v ./tests/integration -run 'TestCatastrophicSingleNodeFailure'
+
+    - name: Run timestamp comparison tests
+      run: go test -count=1 -v ./tests/integration -run 'TestCompareTimestampsExact|TestPostgreSQLMicrosecondPrecision|TestOldVsNewComparison'

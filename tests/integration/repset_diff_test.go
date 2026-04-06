@@ -177,7 +177,7 @@ func TestRepsetDiff_DivergentTable(t *testing.T) {
 		assert.Len(t, n1Rows, 1, "n1 should have 1 extra row")
 		if len(n1Rows) > 0 {
 			id, _ := n1Rows[0].Get("id")
-			assert.Equal(t, float64(99), id, "divergent row should be id=99")
+			assert.Equal(t, json.Number("99"), id, "divergent row should be id=99")
 			val, _ := n1Rows[0].Get("val")
 			assert.Equal(t, "only_on_n1", val)
 		}
@@ -298,6 +298,6 @@ func TestRepsetDiff_MultipleTables(t *testing.T) {
 		n1Rows := pair.Rows[serviceN1]
 		require.Len(t, n1Rows, 1)
 		id, _ := n1Rows[0].Get("id")
-		assert.Equal(t, float64(99), id)
+		assert.Equal(t, json.Number("99"), id)
 	}
 }
