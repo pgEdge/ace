@@ -33,7 +33,7 @@ Compares a table between nodes and generates a diff report.
 | `--output`             | `-o`  | Output format (`json` or `html`)                                    | json    |
 | `--nodes`              | `-n`  | Nodes to include in the diff (comma-separated, or "all")            | all     |
 | `--table-filter`       | `-F`  | `WHERE` clause expression to use while diffing tables               |         |
-| `--max-connections`    | `-m`  | Maximum database connections per node                               | derived |
+| `--max-connections`    | `-M`  | Maximum database connections per node                               | derived |
 | `--override-block-size`| `-B`  | Allow block sizes outside `ace.yaml` guardrails                     | false   |
 | `--quiet`              | `-q`  | Suppress progress output                                            | false   |
 | `--debug`              | `-v`  | Enable debug logging                                                | false   |

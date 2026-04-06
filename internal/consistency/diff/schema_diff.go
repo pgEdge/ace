@@ -52,6 +52,7 @@ type SchemaDiffCmd struct {
 	database          types.Database
 	ConnectionPool    *pgxpool.Pool
 	ConcurrencyFactor float64
+	MaxConnections    int
 	BlockSize         int
 	CompareUnitSize   int
 	Output            string
@@ -523,6 +524,7 @@ func (task *SchemaDiffCmd) SchemaTableDiff() (err error) {
 		tdTask.Nodes = task.Nodes
 		tdTask.QualifiedTableName = qualifiedTableName
 		tdTask.ConcurrencyFactor = task.ConcurrencyFactor
+		tdTask.MaxConnections = task.MaxConnections
 		tdTask.BlockSize = task.BlockSize
 		tdTask.CompareUnitSize = task.CompareUnitSize
 		tdTask.Output = task.Output
@@ -577,6 +579,7 @@ func (task *SchemaDiffCmd) CloneForSchedule(ctx context.Context) *SchemaDiffCmd 
 	clone.DDLOnly = task.DDLOnly
 	clone.BlockSize = task.BlockSize
 	clone.ConcurrencyFactor = task.ConcurrencyFactor
+	clone.MaxConnections = task.MaxConnections
 	clone.CompareUnitSize = task.CompareUnitSize
 	clone.Output = task.Output
 	clone.TableFilter = task.TableFilter
