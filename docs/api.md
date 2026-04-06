@@ -33,6 +33,7 @@ Compares a table between nodes and generates a diff report.
 | `--output`             | `-o`  | Output format (`json` or `html`)                                    | json    |
 | `--nodes`              | `-n`  | Nodes to include in the diff (comma-separated, or "all")            | all     |
 | `--table-filter`       | `-F`  | `WHERE` clause expression to use while diffing tables               |         |
+| `--max-connections`    | `-M`  | Maximum database connections per node                               | derived |
 | `--override-block-size`| `-B`  | Allow block sizes outside `ace.yaml` guardrails                     | false   |
 | `--quiet`              | `-q`  | Suppress progress output                                            | false   |
 | `--debug`              | `-v`  | Enable debug logging                                                | false   |
@@ -147,6 +148,7 @@ Compares schemas across nodes in a pgEdge cluster. By default, `schema-diff` per
 | `--output`             | `-o`  | Output format (`json` or `html`)                                        | json    |
 | `--nodes`              | `-n`  | Nodes to include in the diff (comma-separated, or "all")                | all     |
 | `--table-filter`       | `-F`  | `WHERE` clause expression to use while diffing tables                   |         |
+| `--max-connections`    | `-m`  | Maximum database connections per node                                   | derived |
 | `--override-block-size`| `-B`  | Allow block sizes outside `ace.yaml` guardrails                         | false   |
 | `--quiet`              | `-q`  | Suppress progress output                                                | false   |
 | `--debug`              | `-v`  | Enable debug logging                                                    | false   |
@@ -189,6 +191,7 @@ Performs a `table-diff` on every table in a replication set and reports differen
 | `--concurrency-factor`  | `-c`  | CPU ratio for concurrency (0.0–4.0)                                          | 0.5     |
 | `--compare-unit-size`   | `-u`  | Recursive split size for mismatched blocks                                  | 10000   |
 | `--output`              | `-o`  | Per-table diff output format (`json` or `html`)                             | json    |
+| `--max-connections`     | `-m`  | Maximum database connections per node                                       | derived |
 | `--override-block-size` | `-B`  | Allow block sizes outside `ace.yaml` guardrails                             | false   |
 | `--quiet`               | `-q`  | Suppress output                                                             | false   |
 | `--debug`               | `-v`  | Enable debug logging                                                        | false   |

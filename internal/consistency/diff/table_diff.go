@@ -70,6 +70,7 @@ type TableDiffTask struct {
 
 	BlockSize         int
 	ConcurrencyFactor float64
+	MaxConnections    int
 	Output            string
 	TableFilter       string
 	QuietMode         bool
@@ -728,6 +729,12 @@ func (t *TableDiffTask) Validate() error {
 	}
 
 	cfg := config.Get()
+	if t.MaxConnections == 0 {
+		t.MaxConnections = cfg.TableDiff.MaxConnections
+	}
+	if t.MaxConnections < 0 {
+		return fmt.Errorf("max_connections must be >= 1 (or 0 to derive from concurrency factor)")
+	}
 	if t.BlockSize > cfg.TableDiff.MaxBlockSize && !t.OverrideBlockSize {
 		return fmt.Errorf("block row size should be <= %d", cfg.TableDiff.MaxBlockSize)
 	}
@@ -1027,6 +1034,7 @@ func (t *TableDiffTask) CloneForSchedule(ctx context.Context) *TableDiffTask {
 	cloned.Nodes = t.Nodes
 	cloned.BlockSize = t.BlockSize
 	cloned.ConcurrencyFactor = t.ConcurrencyFactor
+	cloned.MaxConnections = t.MaxConnections
 	cloned.Output = t.Output
 	cloned.TableFilter = t.TableFilter
 	cloned.QuietMode = t.QuietMode
@@ -1046,8 +1054,19 @@ func (t *TableDiffTask) CloneForSchedule(ctx context.Context) *TableDiffTask {
 	return cloned
 }
 
+func (t *TableDiffTask) maxPoolSize() int {
+	poolSize := int(math.Round(float64(runtime.NumCPU()) * t.ConcurrencyFactor))
+	if poolSize < 4 {
+		poolSize = 4
+	}
+	if t.MaxConnections > 0 && t.MaxConnections < poolSize {
+		poolSize = t.MaxConnections
+	}
+	return poolSize
+}
+
 func (t *TableDiffTask) connOpts() auth.ConnectionOptions {
-	return auth.ConnectionOptions{}
+	return auth.ConnectionOptions{PoolSize: t.maxPoolSize()}
 }
 
 func (t *TableDiffTask) CheckColumnSize() error {

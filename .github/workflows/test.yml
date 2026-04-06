@@ -42,3 +42,6 @@ jobs:
 
     - name: Run crash recovery origin-filter test
       run: go test -count=1 -v ./tests/integration -run 'TestAdvancedRepairPlan'
+
+    - name: Run connection pool cap test
+      run: go test -count=1 -v ./tests/integration -run 'TestRepsetDiff_MaxConnectionsCap'

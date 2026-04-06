@@ -162,7 +162,8 @@ flowchart LR
 ### Resource Utilisation and Tuning
 
 - **block_size**: Larger blocks reduce hash tasks and recursion but increase memory/IO per hash and slow mismatch localisation; smaller blocks do the opposite (more queries, finer locality).
-- **concurrency_factor**: CPU ratio (0.0–4.0) that scales workers relative to `NumCPU` (e.g. 0.5 on a 16-CPU host spawns 8 workers). Higher = faster hashing but more load on DB backends, network, and local CPU; can contend with other workloads and connection limits.
+- **concurrency_factor**: CPU ratio (0.0–4.0) that scales workers relative to `NumCPU` (e.g. 0.5 on a 16-CPU host spawns 8 workers). Higher = faster hashing but more load on DB backends, network, and local CPU; can contend with other workloads and connection limits. The connection pool per node is sized to match the worker count (minimum 4).
+- **max_connections**: Hard cap on the connection pool size per node. When set, overrides the concurrency-derived pool size. Useful for environments with limited `max_connections` on the database server. Workers that exceed the pool size will queue for a connection rather than fail.
 - **compare_unit_size**: Lower values push recursion deeper (more queries, smaller fetches); higher values stop earlier (fewer queries, larger fetches on mismatched ranges).
 - **max_diff_rows**: Early-exit guardrail. Lower caps keep runs short and reports small on divergent tables; raising/removing can grow memory and report size when drift is large.
 - **table_filter**: Narrows scope and cost; enables accurate `COUNT(*)` on the filtered view. Must be identical across nodes to avoid false positives.

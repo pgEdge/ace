@@ -26,6 +26,7 @@ type tableDiffRequest struct {
 	Concurrency       float64  `json:"concurrency_factor"`
 	CompareUnitSize   int      `json:"compare_unit_size"`
 	MaxDiffRows       int64    `json:"max_diff_rows"`
+	MaxConnections    int      `json:"max_connections"`
 	TableFilter       string   `json:"table_filter"`
 	OverrideBlockSize bool     `json:"override_block_size"`
 	Quiet             bool     `json:"quiet"`
@@ -76,6 +77,7 @@ type schemaDiffRequest struct {
 	BlockSize         int      `json:"block_size"`
 	Concurrency       float64  `json:"concurrency_factor"`
 	CompareUnitSize   int      `json:"compare_unit_size"`
+	MaxConnections    int      `json:"max_connections"`
 	Output            string   `json:"output"`
 	OverrideBlockSize bool     `json:"override_block_size"`
 	Quiet             bool     `json:"quiet"`
@@ -91,6 +93,7 @@ type repsetDiffRequest struct {
 	BlockSize         int      `json:"block_size"`
 	Concurrency       float64  `json:"concurrency_factor"`
 	CompareUnitSize   int      `json:"compare_unit_size"`
+	MaxConnections    int      `json:"max_connections"`
 	Output            string   `json:"output"`
 	OverrideBlockSize bool     `json:"override_block_size"`
 	Quiet             bool     `json:"quiet"`
@@ -212,6 +215,7 @@ func (s *APIServer) handleTableDiff(w http.ResponseWriter, r *http.Request) {
 	task.ConcurrencyFactor = s.resolveConcurrency(cfg, req.Concurrency)
 	task.CompareUnitSize = s.resolveCompareUnitSize(cfg, req.CompareUnitSize)
 	task.MaxDiffRows = s.resolveMaxDiffRows(cfg, req.MaxDiffRows)
+	task.MaxConnections = s.resolveMaxConnections(cfg, req.MaxConnections)
 	task.Output = "json"
 	task.Nodes = s.resolveNodes(req.Nodes)
 	task.TableFilter = strings.TrimSpace(req.TableFilter)
@@ -287,6 +291,19 @@ func (s *APIServer) resolveMaxDiffRows(cfg *config.Config, requested int64) int6
 	}
 	if cfg != nil && cfg.TableDiff.MaxDiffRows > 0 {
 		return cfg.TableDiff.MaxDiffRows
+	}
+	return 0
+}
+
+func (s *APIServer) resolveMaxConnections(cfg *config.Config, requested int) int {
+	if requested > 0 {
+		return requested
+	}
+	if requested < 0 {
+		return requested // rejected by Validate()
+	}
+	if cfg != nil && cfg.TableDiff.MaxConnections > 0 {
+		return cfg.TableDiff.MaxConnections
 	}
 	return 0
 }
@@ -577,6 +594,7 @@ func (s *APIServer) handleSchemaDiff(w http.ResponseWriter, r *http.Request) {
 	task.BlockSize = s.resolveBlockSize(cfg, req.BlockSize)
 	task.ConcurrencyFactor = s.resolveConcurrency(cfg, req.Concurrency)
 	task.CompareUnitSize = s.resolveCompareUnitSize(cfg, req.CompareUnitSize)
+	task.MaxConnections = s.resolveMaxConnections(cfg, req.MaxConnections)
 	task.Output = strings.TrimSpace(req.Output)
 	if task.Output == "" {
 		task.Output = "json"
@@ -659,6 +677,7 @@ func (s *APIServer) handleRepsetDiff(w http.ResponseWriter, r *http.Request) {
 	task.BlockSize = s.resolveBlockSize(cfg, req.BlockSize)
 	task.ConcurrencyFactor = s.resolveConcurrency(cfg, req.Concurrency)
 	task.CompareUnitSize = s.resolveCompareUnitSize(cfg, req.CompareUnitSize)
+	task.MaxConnections = s.resolveMaxConnections(cfg, req.MaxConnections)
 	task.Output = strings.TrimSpace(req.Output)
 	if task.Output == "" {
 		task.Output = "json"
