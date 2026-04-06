@@ -104,7 +104,7 @@ func SetupCLI() *cli.Command {
 		},
 		&cli.IntFlag{
 			Name:    "max-connections",
-			Aliases: []string{"m"},
+			Aliases: []string{"M"},
 			Usage:   "Maximum number of database connections per node (default: derived from concurrency factor)",
 			Value:   0,
 		},
@@ -1282,6 +1282,7 @@ func SchemaDiffCLI(cmd *cli.Command) error {
 
 	task.BlockSize = int(blockSizeInt)
 	task.ConcurrencyFactor = cmd.Float64("concurrency-factor")
+	task.MaxConnections = cmd.Int("max-connections")
 	task.CompareUnitSize = cmd.Int("compare-unit-size")
 	task.Output = cmd.String("output")
 	task.OverrideBlockSize = cmd.Bool("override-block-size")

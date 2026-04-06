@@ -187,6 +187,9 @@ func buildSchemaDiffJob(cfg *config.Config, def config.JobDef, spec scheduleSpec
 	if v := intArg(def.Args, "compare_unit_size", 0); v > 0 {
 		base.CompareUnitSize = v
 	}
+	if v := intArg(def.Args, "max_connections", 0); v > 0 {
+		base.MaxConnections = v
+	}
 	if out := stringArg(def.Args, "output"); out != "" {
 		base.Output = out
 	}
@@ -209,6 +212,9 @@ func buildSchemaDiffJob(cfg *config.Config, def config.JobDef, spec scheduleSpec
 	}
 	if base.CompareUnitSize == 0 && cfg.TableDiff.CompareUnitSize > 0 {
 		base.CompareUnitSize = cfg.TableDiff.CompareUnitSize
+	}
+	if base.MaxConnections == 0 && cfg.TableDiff.MaxConnections > 0 {
+		base.MaxConnections = cfg.TableDiff.MaxConnections
 	}
 
 	return Job{

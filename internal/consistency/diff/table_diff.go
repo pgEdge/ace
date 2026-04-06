@@ -729,6 +729,12 @@ func (t *TableDiffTask) Validate() error {
 	}
 
 	cfg := config.Get()
+	if t.MaxConnections == 0 && cfg.TableDiff.MaxConnections > 0 {
+		t.MaxConnections = cfg.TableDiff.MaxConnections
+	}
+	if t.MaxConnections < 0 {
+		return fmt.Errorf("max_connections must be >= 1 (or 0 to derive from concurrency factor)")
+	}
 	if t.BlockSize > cfg.TableDiff.MaxBlockSize && !t.OverrideBlockSize {
 		return fmt.Errorf("block row size should be <= %d", cfg.TableDiff.MaxBlockSize)
 	}
