@@ -50,6 +50,7 @@ type RepsetDiffCmd struct {
 	database          types.Database
 	ConnectionPool    *pgxpool.Pool
 	ConcurrencyFactor float64
+	MaxConnections    int
 	BlockSize         int
 	CompareUnitSize   int
 	Output            string
@@ -367,6 +368,7 @@ func RepsetDiff(task *RepsetDiffCmd) (err error) {
 		tdTask.Nodes = task.Nodes
 		tdTask.QualifiedTableName = tableName
 		tdTask.ConcurrencyFactor = task.ConcurrencyFactor
+		tdTask.MaxConnections = task.MaxConnections
 		tdTask.BlockSize = task.BlockSize
 		tdTask.CompareUnitSize = task.CompareUnitSize
 		tdTask.Output = task.Output
@@ -422,6 +424,7 @@ func (task *RepsetDiffCmd) CloneForSchedule(ctx context.Context) *RepsetDiffCmd 
 	clone.Quiet = task.Quiet
 	clone.BlockSize = task.BlockSize
 	clone.ConcurrencyFactor = task.ConcurrencyFactor
+	clone.MaxConnections = task.MaxConnections
 	clone.CompareUnitSize = task.CompareUnitSize
 	clone.Output = task.Output
 	clone.TableFilter = task.TableFilter

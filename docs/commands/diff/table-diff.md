@@ -24,6 +24,7 @@ This command compares the data in the specified table across nodes in a cluster 
 | `--table-filter <WHERE>` | `-F` | Optional SQL `WHERE` clause applied on every node before hashing. |
 | `--against-origin <node>` |  | Limit the diff to rows whose `node_origin` matches this Spock node id or name (useful for failed-node recovery). |
 | `--until <timestamp>` |  | Optional commit timestamp fence (RFC3339) applied with `--against-origin` and `--table-filter`; excludes newer rows. |
+| `--max-connections <int>` | `-m` | Maximum database connections per node. When set, caps the connection pool regardless of concurrency factor. Default: derived from `--concurrency-factor`. |
 | `--override-block-size` | `-B` | Skip block-size safety checks defined in `ace.yaml`. |
 | `--quiet` | `-q` | Suppress progress output. Results still write to the diff file. |
 | `--debug` | `-v` | Enable verbose logging. |

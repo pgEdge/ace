@@ -109,6 +109,9 @@ func buildTableDiffJob(cfg *config.Config, def config.JobDef, spec scheduleSpec)
 	if v := intArg(def.Args, "max_diff_rows", 0); v > 0 {
 		base.MaxDiffRows = int64(v)
 	}
+	if v := intArg(def.Args, "max_connections", 0); v > 0 {
+		base.MaxConnections = v
+	}
 	if out := stringArg(def.Args, "output"); out != "" {
 		base.Output = out
 	}
@@ -132,6 +135,9 @@ func buildTableDiffJob(cfg *config.Config, def config.JobDef, spec scheduleSpec)
 	}
 	if base.CompareUnitSize == 0 && cfg.TableDiff.CompareUnitSize > 0 {
 		base.CompareUnitSize = cfg.TableDiff.CompareUnitSize
+	}
+	if base.MaxConnections == 0 && cfg.TableDiff.MaxConnections > 0 {
+		base.MaxConnections = cfg.TableDiff.MaxConnections
 	}
 
 	return Job{
@@ -252,6 +258,9 @@ func buildRepsetDiffJob(cfg *config.Config, def config.JobDef, spec scheduleSpec
 	if out := stringArg(def.Args, "output"); out != "" {
 		base.Output = out
 	}
+	if v := intArg(def.Args, "max_connections", 0); v > 0 {
+		base.MaxConnections = v
+	}
 	base.TableFilter = stringArg(def.Args, "table_filter")
 	base.OverrideBlockSize = boolArg(def.Args, "override_block_size", base.OverrideBlockSize)
 	base.SkipDBUpdate = boolArg(def.Args, "skip_db_update", base.SkipDBUpdate)
@@ -271,6 +280,9 @@ func buildRepsetDiffJob(cfg *config.Config, def config.JobDef, spec scheduleSpec
 	}
 	if base.CompareUnitSize == 0 && cfg.TableDiff.CompareUnitSize > 0 {
 		base.CompareUnitSize = cfg.TableDiff.CompareUnitSize
+	}
+	if base.MaxConnections == 0 && cfg.TableDiff.MaxConnections > 0 {
+		base.MaxConnections = cfg.TableDiff.MaxConnections
 	}
 
 	return Job{

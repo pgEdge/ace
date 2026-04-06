@@ -32,6 +32,7 @@ The [`ace.yaml` file](https://github.com/pgEdge/ace/blob/main/ace.yaml) defines 
 | table_diff --> min_diff_block_size | Minimum diff block (row chunk) size. **Default: 1** |
 | table_diff --> max_diff_block_size | Maximum diff block size. **Default: 1000000** |
 | table_diff --> compare_unit_size | Unit size for smallest comparison chunk. **Default: 10000** |
+| table_diff --> max_connections | Maximum database connections per node during diff operations. When set, caps the connection pool regardless of concurrency factor. **Default: 0** (derive from concurrency factor) |
 | mtree → cdc --> slot_name | Logical decoding slot name for mtree CDC. **Default: "ace_mtree_slot"** |
 | mtree → cdc --> publication_name | Publication used for mtree CDC. **Default: "ace_mtree_pub"** |
 | mtree → cdc --> cdc_processing_timeout | CDC processing timeout (s). **Default: 30** |

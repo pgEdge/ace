@@ -465,6 +465,9 @@ components:
         max_diff_rows:
           type: integer
           description: Defaults to table_diff.max_diff_rows or 0 (no limit).
+        max_connections:
+          type: integer
+          description: Maximum database connections per node. Defaults to table_diff.max_connections or derived from concurrency factor.
         table_filter:
           type: string
           description: SQL WHERE predicate (without WHERE).
@@ -567,6 +570,9 @@ components:
         compare_unit_size:
           type: integer
           description: Defaults to table_diff.compare_unit_size or 10000.
+        max_connections:
+          type: integer
+          description: Maximum database connections per node. Defaults to table_diff.max_connections or derived from concurrency factor.
         output:
           type: string
           enum: [json, html]
@@ -601,6 +607,9 @@ components:
         compare_unit_size:
           type: integer
           description: Defaults to table_diff.compare_unit_size or 10000.
+        max_connections:
+          type: integer
+          description: Maximum database connections per node. Defaults to table_diff.max_connections or derived from concurrency factor.
         output:
           type: string
           enum: [json, html]

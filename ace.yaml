@@ -28,6 +28,7 @@ table_diff:
   diff_batch_size: 1
   max_diff_batch_size: 1000
   compare_unit_size: 10000
+  max_connections: 0            # max DB connections per node (0 = derive from concurrency factor)
 
 mtree:
   cdc:
