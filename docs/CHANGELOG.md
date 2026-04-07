@@ -2,6 +2,17 @@
 
 All notable changes to ACE will be captured in this document. This project follows semantic versioning; the latest changes appear first.
 
+## [v1.8.0] - 2026-04-08
+
+### Added
+- `--max-connections` / `-M` flag for `table-diff`, `repset-diff`, and `schema-diff` to cap the number of database connections per node. Also configurable via `table_diff.max_connections` in `ace.yaml` and the HTTP API. Workers queue for connections when the pool is full rather than failing.
+
+### Fixed
+- Connection pool size for `table-diff` (and by extension `repset-diff` and `schema-diff`) was unbounded — defaulting to `max(4, NumCPU)` per node regardless of the concurrency factor. On high-core machines this could exhaust database connections. Pool size is now derived from the concurrency factor (`NumCPU × ConcurrencyFactor`, minimum 4).
+
+### Changed
+- Added missing integration tests to CI: repset-diff, schema-diff, Merkle numeric scale invariance, catastrophic single-node failure recovery, and timestamp comparison tests.
+
 ## [v1.7.2] - 2026-04-01
 
 ### Fixed
