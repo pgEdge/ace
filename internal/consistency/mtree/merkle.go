@@ -99,7 +99,7 @@ type MerkleTreeTask struct {
 	diffMutex   sync.Mutex
 	diffRowKeySets map[string]map[string]map[string]struct{}
 	StartTime      time.Time
-	SpockNodeNames map[string]string
+	NodeOriginNames map[string]string
 
 	Ctx context.Context
 }
@@ -505,8 +505,8 @@ func (m *MerkleTreeTask) processWorkItem(work CompareRangesWorkItem, pool1, pool
 	return nil
 }
 
-func (m *MerkleTreeTask) loadSpockNodeNames() error {
-	if m.SpockNodeNames != nil {
+func (m *MerkleTreeTask) loadNodeOriginNames() error {
+	if m.NodeOriginNames != nil {
 		return nil
 	}
 
@@ -523,15 +523,15 @@ func (m *MerkleTreeTask) loadSpockNodeNames() error {
 			lastErr = err
 			continue
 		}
-		m.SpockNodeNames = names
+		m.NodeOriginNames = names
 		return nil
 	}
 
-	m.SpockNodeNames = make(map[string]string)
+	m.NodeOriginNames = make(map[string]string)
 	if lastErr != nil {
 		return lastErr
 	}
-	return fmt.Errorf("no nodes available to load spock node names")
+	return fmt.Errorf("no nodes available to load node origin names")
 }
 
 func (m *MerkleTreeTask) appendDiffs(nodePairKey string, work CompareRangesWorkItem, pr1, pr2 []types.OrderedMap) error {
@@ -603,7 +603,7 @@ func (m *MerkleTreeTask) addRowToDiff(nodePairKey, nodeName string, row types.Or
 	}
 
 	rowMap := utils.OrderedMapToMap(row)
-	rowMap["node_origin"] = utils.TranslateNodeOrigin(rowMap["node_origin"], m.SpockNodeNames)
+	rowMap["node_origin"] = utils.TranslateNodeOrigin(rowMap["node_origin"], m.NodeOriginNames)
 	rowWithMeta := utils.AddSpockMetadata(rowMap)
 	orderedRow := utils.MapToOrderedMap(rowWithMeta, m.Cols)
 
@@ -1908,8 +1908,8 @@ func (m *MerkleTreeTask) DiffMtree() (err error) {
 	if err = m.UpdateMtree(true); err != nil {
 		return fmt.Errorf("failed to update merkle tree before diff: %w", err)
 	}
-	if err := m.loadSpockNodeNames(); err != nil {
-		logger.Warn("mtree diff: unable to load spock node names; using raw node_origin values: %v", err)
+	if err := m.loadNodeOriginNames(); err != nil {
+		logger.Warn("mtree diff: unable to load node origin names; using raw node_origin values: %v", err)
 	}
 	nodePairs := getNodePairs(m.ClusterNodes)
 	mtreeTableIdentifier := pgx.Identifier{m.aceSchema(), fmt.Sprintf("ace_mtree_%s_%s", m.Schema, m.Table)}

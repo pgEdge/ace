@@ -102,7 +102,7 @@ type TableDiffTask struct {
 	blockHashSQLCache map[hashBoundsKey]string
 	blockHashSQLMu    sync.Mutex
 
-	SpockNodeNames map[string]string
+	NodeOriginNames map[string]string
 
 	CompareUnitSize int
 	MaxDiffRows     int64
@@ -199,8 +199,8 @@ func (t *TableDiffTask) incrementDiffRowsLocked(delta int) bool {
 	return false
 }
 
-func (t *TableDiffTask) loadSpockNodeNames() error {
-	if t.SpockNodeNames != nil {
+func (t *TableDiffTask) loadNodeOriginNames() error {
+	if t.NodeOriginNames != nil {
 		return nil
 	}
 
@@ -211,17 +211,17 @@ func (t *TableDiffTask) loadSpockNodeNames() error {
 	}
 
 	if firstPool == nil {
-		t.SpockNodeNames = make(map[string]string)
-		return fmt.Errorf("no connection pool available to load spock node names")
+		t.NodeOriginNames = make(map[string]string)
+		return fmt.Errorf("no connection pool available to load node origin names")
 	}
 
 	names, err := queries.GetNodeOriginNames(t.Ctx, firstPool)
 	if err != nil {
-		t.SpockNodeNames = make(map[string]string)
+		t.NodeOriginNames = make(map[string]string)
 		return err
 	}
 
-	t.SpockNodeNames = names
+	t.NodeOriginNames = names
 	return nil
 }
 
@@ -229,26 +229,36 @@ func (t *TableDiffTask) resolveAgainstOrigin() error {
 	if strings.TrimSpace(t.AgainstOrigin) == "" {
 		return nil
 	}
-	if len(t.SpockNodeNames) == 0 {
-		return fmt.Errorf("unable to resolve --against-origin: spock node names not available")
+	if len(t.NodeOriginNames) == 0 {
+		return fmt.Errorf("unable to resolve --against-origin: no node origin names available")
 	}
 
 	orig := strings.TrimSpace(t.AgainstOrigin)
-	// direct match on id
-	if _, ok := t.SpockNodeNames[orig]; ok {
+	// direct match on origin id
+	if _, ok := t.NodeOriginNames[orig]; ok {
 		t.resolvedAgainstOrigin = orig
 		return nil
 	}
 
-	// match on name
-	for id, name := range t.SpockNodeNames {
+	// match on origin name
+	for id, name := range t.NodeOriginNames {
 		if name == orig {
 			t.resolvedAgainstOrigin = id
 			return nil
 		}
 	}
 
-	return fmt.Errorf("unable to resolve against-origin %q to a spock node id", t.AgainstOrigin)
+	// build a list of available origins for the error message
+	available := make([]string, 0, len(t.NodeOriginNames))
+	for id, name := range t.NodeOriginNames {
+		if id != name {
+			available = append(available, fmt.Sprintf("%s (%s)", id, name))
+		} else {
+			available = append(available, id)
+		}
+	}
+
+	return fmt.Errorf("unable to resolve --against-origin %q; available origins: %s", t.AgainstOrigin, strings.Join(available, ", "))
 }
 
 func (t *TableDiffTask) buildEffectiveFilter() (string, error) {
@@ -285,7 +295,7 @@ func (t *TableDiffTask) buildEffectiveFilter() (string, error) {
 }
 
 func (t *TableDiffTask) withSpockMetadata(row map[string]any) map[string]any {
-	row["node_origin"] = utils.TranslateNodeOrigin(row["node_origin"], t.SpockNodeNames)
+	row["node_origin"] = utils.TranslateNodeOrigin(row["node_origin"], t.NodeOriginNames)
 	return utils.AddSpockMetadata(row)
 }
 
@@ -1308,8 +1318,8 @@ func (t *TableDiffTask) ExecuteTask() (err error) {
 		}
 	}
 
-	if err := t.loadSpockNodeNames(); err != nil {
-		logger.Warn("table-diff: unable to load spock node names; using raw node_origin values: %v", err)
+	if err := t.loadNodeOriginNames(); err != nil {
+		logger.Warn("table-diff: unable to load node origin names; using raw node_origin values: %v", err)
 	}
 
 	if err := t.resolveAgainstOrigin(); err != nil {
@@ -1365,8 +1375,8 @@ func (t *TableDiffTask) ExecuteTask() (err error) {
 			DiffRowsCount:     make(map[string]int),
 			AgainstOrigin:     t.AgainstOrigin,
 			AgainstOriginResolved: func() string {
-				if t.resolvedAgainstOrigin != "" && t.SpockNodeNames != nil {
-					if name, ok := t.SpockNodeNames[t.resolvedAgainstOrigin]; ok {
+				if t.resolvedAgainstOrigin != "" && t.NodeOriginNames != nil {
+					if name, ok := t.NodeOriginNames[t.resolvedAgainstOrigin]; ok {
 						return name
 					}
 				}
