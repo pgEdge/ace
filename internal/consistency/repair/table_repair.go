@@ -98,7 +98,7 @@ type TableRepairTask struct {
 	autoSelectionFailedNode   string
 	autoSelectionDetails      map[string]map[string]string
 
-	spockAvailable bool
+	spockPerNode map[string]bool
 
 	Ctx context.Context
 }
@@ -162,21 +162,26 @@ func (t *TableRepairTask) setRole(tx pgx.Tx, nodeName string) error {
 	return nil
 }
 
-// detectSpock checks whether the spock extension is installed on any available
-// node and stores the result in t.spockAvailable.
-func (t *TableRepairTask) detectSpock() {
-	for nodeName, pool := range t.Pools {
+// isSpockAvailable returns whether spock is installed on the given node,
+// detecting lazily on first check per node.
+func (t *TableRepairTask) isSpockAvailable(nodeName string) bool {
+	if t.spockPerNode == nil {
+		t.spockPerNode = make(map[string]bool)
+	}
+	if _, checked := t.spockPerNode[nodeName]; !checked {
+		pool := t.Pools[nodeName]
+		if pool == nil {
+			return false
+		}
 		spockInstalled, err := queries.CheckSpockInstalled(t.Ctx, pool)
 		if err != nil {
 			logger.Warn("failed to detect spock extension on %s: %v", nodeName, err)
-			continue
+			return false
 		}
-		t.spockAvailable = spockInstalled
-		logger.Info("spock extension detected: %v (checked on %s)", spockInstalled, nodeName)
-		return
+		t.spockPerNode[nodeName] = spockInstalled
+		logger.Info("spock extension on %s: %v", nodeName, spockInstalled)
 	}
-	logger.Warn("could not detect spock extension on any node; assuming not available")
-	t.spockAvailable = false
+	return t.spockPerNode[nodeName]
 }
 
 // setupTransactionMode enables spock repair mode (when available), sets the session replication
@@ -184,7 +189,7 @@ func (t *TableRepairTask) detectSpock() {
 // Returns true if spock repair mode was activated, false otherwise.
 func (t *TableRepairTask) setupTransactionMode(tx pgx.Tx, nodeName string) (bool, error) {
 	spockRepairModeActive := false
-	if t.spockAvailable {
+	if t.isSpockAvailable(nodeName) {
 		if _, err := tx.Exec(t.Ctx, "SELECT spock.repair_mode(true)"); err != nil {
 			return false, fmt.Errorf("enabling spock.repair_mode(true) on %s: %w", nodeName, err)
 		}
@@ -212,7 +217,7 @@ func (t *TableRepairTask) setupTransactionMode(tx pgx.Tx, nodeName string) (bool
 // disableSpockRepairMode disables spock repair mode on the given transaction.
 // When spock is not available, this is a no-op.
 func (t *TableRepairTask) disableSpockRepairMode(tx pgx.Tx, nodeName string) error {
-	if !t.spockAvailable {
+	if !t.isSpockAvailable(nodeName) {
 		return nil
 	}
 	_, err := tx.Exec(t.Ctx, "SELECT spock.repair_mode(false)")
@@ -752,11 +757,6 @@ func (t *TableRepairTask) Run(skipValidation bool) (err error) {
 			}
 		}
 	}()
-
-	// Detect whether spock extension is available before any repair path
-	if !t.DryRun {
-		t.detectSpock()
-	}
 
 	if t.FixNulls {
 		return t.runFixNulls(startTime)
@@ -2918,14 +2918,15 @@ func calculateRepairSetsWithSourceOfTruth(task *TableRepairTask) (map[string]map
 }
 
 func (t *TableRepairTask) fetchLSNsForNode(pool *pgxpool.Pool, failedNode, survivor string) (originLSN *uint64, slotLSN *uint64, err error) {
+	spock := t.isSpockAvailable(survivor)
 	var originStr *string
-	if t.spockAvailable {
+	if spock {
 		originStr, err = queries.GetSpockOriginLSNForNode(t.Ctx, pool, failedNode)
 	} else {
 		originStr, err = queries.GetNativeOriginLSNForNode(t.Ctx, pool, failedNode)
 	}
 	if err != nil {
-		if !t.spockAvailable {
+		if !spock {
 			// Native PG queries may fail if subscription naming doesn't match; treat as no data
 			logger.Warn("failed to fetch native origin lsn on %s: %v", survivor, err)
 			return nil, nil, nil
@@ -2940,13 +2941,13 @@ func (t *TableRepairTask) fetchLSNsForNode(pool *pgxpool.Pool, failedNode, survi
 	}
 
 	var slotStr *string
-	if t.spockAvailable {
+	if spock {
 		slotStr, err = queries.GetSpockSlotLSNForNode(t.Ctx, pool, failedNode)
 	} else {
 		slotStr, err = queries.GetNativeSlotLSNForNode(t.Ctx, pool, failedNode)
 	}
 	if err != nil {
-		if !t.spockAvailable {
+		if !spock {
 			// Native PG queries may fail if subscription naming doesn't match; treat as no data
 			logger.Warn("failed to fetch native slot lsn on %s: %v", survivor, err)
 			return originLSN, nil, nil

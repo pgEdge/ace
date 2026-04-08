@@ -307,16 +307,15 @@ func (t *SpockDiffTask) ExecuteTask() (err error) {
 	}
 	t.Pools = pools
 
-	// Check if spock extension is installed
-	for _, pool := range t.Pools {
+	// Check that spock is installed on every selected node
+	for name, pool := range t.Pools {
 		spockInstalled, err := queries.CheckSpockInstalled(t.Ctx, pool)
 		if err != nil {
-			return fmt.Errorf("failed to check for spock extension: %w", err)
+			return fmt.Errorf("failed to check for spock extension on node %s: %w", name, err)
 		}
 		if !spockInstalled {
-			return fmt.Errorf("spock-diff requires the spock extension, which is not installed on this cluster")
+			return fmt.Errorf("spock-diff requires the spock extension, which is not installed on node %s", name)
 		}
-		break
 	}
 
 	allNodeConfigs := make(map[string]SpockNodeConfig)
