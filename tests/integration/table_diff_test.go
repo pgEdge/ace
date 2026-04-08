@@ -111,13 +111,13 @@ func TestTableDiffSimplePK(t *testing.T) {
 		testTableDiff_MixedCaseIdentifiers(t, env, false)
 	})
 	t.Run("VariousDataTypes", func(t *testing.T) {
-		testTableDiff_VariousDataTypes(t, false)
+		testTableDiff_VariousDataTypes(t, newSpockEnv(), false)
 	})
 	t.Run("UUIDColumn", func(t *testing.T) {
-		testTableDiff_UUIDColumn(t, false)
+		testTableDiff_UUIDColumn(t, newSpockEnv(), false)
 	})
 	t.Run("ByteaColumnSizeCheck", func(t *testing.T) {
-		testTableDiff_ByteaColumnSizeCheck(t, false)
+		testTableDiff_ByteaColumnSizeCheck(t, newSpockEnv(), false)
 	})
 	t.Run("WithSpockMetadata", func(t *testing.T) {
 		testTableDiff_WithSpockMetadata(t, false)
@@ -145,13 +145,13 @@ func TestTableDiffCompositePK(t *testing.T) {
 		testTableDiff_MixedCaseIdentifiers(t, env, true)
 	})
 	t.Run("VariousDataTypes", func(t *testing.T) {
-		testTableDiff_VariousDataTypes(t, true)
+		testTableDiff_VariousDataTypes(t, newSpockEnv(), true)
 	})
 	t.Run("UUIDColumn", func(t *testing.T) {
-		testTableDiff_UUIDColumn(t, true)
+		testTableDiff_UUIDColumn(t, newSpockEnv(), true)
 	})
 	t.Run("ByteaColumnSizeCheck", func(t *testing.T) {
-		testTableDiff_ByteaColumnSizeCheck(t, true)
+		testTableDiff_ByteaColumnSizeCheck(t, newSpockEnv(), true)
 	})
 	t.Run("WithSpockMetadata", func(t *testing.T) {
 		testTableDiff_WithSpockMetadata(t, true)
@@ -674,10 +674,10 @@ func testTableDiff_MixedCaseIdentifiers(t *testing.T, env *testEnv, compositeKey
 	log.Println("TestTableDiff_MixedCaseIdentifiers completed.")
 }
 
-func testTableDiff_VariousDataTypes(t *testing.T, compositeKey bool) {
+func testTableDiff_VariousDataTypes(t *testing.T, env *testEnv, compositeKey bool) {
 	ctx := context.Background()
 	tableName := "data_type_test_table"
-	qualifiedTableName := fmt.Sprintf("%s.%s", testSchema, tableName)
+	qualifiedTableName := fmt.Sprintf("%s.%s", env.Schema, tableName)
 
 	compositeKeyPart := ""
 	if compositeKey {
@@ -706,33 +706,38 @@ CREATE TABLE IF NOT EXISTS %s.%s (
     col_bytea BYTEA,
     col_int_array INT[],
 	PRIMARY KEY(id%s)
-);`, testSchema, testSchema, tableName, compositeKeyPart)
+);`, env.Schema, env.Schema, tableName, compositeKeyPart)
 
-	for i, pool := range []*pgxpool.Pool{pgCluster.Node1Pool, pgCluster.Node2Pool} {
-		nodeName := pgCluster.ClusterNodes[i]["Name"].(string)
+	nodeNames := []string{env.ServiceN1, env.ServiceN2}
+	for i, pool := range []*pgxpool.Pool{env.N1Pool, env.N2Pool} {
+		nodeName := nodeNames[i]
 		_, err := pool.Exec(ctx, createDataTypeTableSQL)
 		if err != nil {
 			t.Fatalf("Failed to create data_type_test_table on node %s: %v", nodeName, err)
 		}
-		_, err = pool.Exec(ctx, fmt.Sprintf("TRUNCATE TABLE %s.%s CASCADE", testSchema, tableName))
+		_, err = pool.Exec(ctx, fmt.Sprintf("TRUNCATE TABLE %s.%s CASCADE", env.Schema, tableName))
 		if err != nil {
 			t.Fatalf("Failed to truncate data_type_test_table on node %s: %v", nodeName, err)
 		}
-		addToRepSetSQL := fmt.Sprintf(`SELECT spock.repset_add_table('default', '%s');`, qualifiedTableName)
-		_, err = pool.Exec(ctx, addToRepSetSQL)
-		if err != nil {
-			t.Fatalf("Failed to add table to replication set on n1: %v", err)
+		if env.HasSpock {
+			addToRepSetSQL := fmt.Sprintf(`SELECT spock.repset_add_table('default', '%s');`, qualifiedTableName)
+			_, err = pool.Exec(ctx, addToRepSetSQL)
+			if err != nil {
+				t.Fatalf("Failed to add table to replication set on %s: %v", nodeName, err)
+			}
 		}
 	}
 	log.Printf("Table %s created on both nodes", qualifiedTableName)
 
 	t.Cleanup(func() {
-		removeFromRepSetSQL := fmt.Sprintf(`SELECT spock.repset_remove_table('default', '%s');`, qualifiedTableName)
-		_, err := pgCluster.Node1Pool.Exec(ctx, removeFromRepSetSQL)
-		if err != nil {
-			t.Logf("cleanup: failed to remove table from replication set: %v", err)
+		if env.HasSpock {
+			removeFromRepSetSQL := fmt.Sprintf(`SELECT spock.repset_remove_table('default', '%s');`, qualifiedTableName)
+			_, err := env.N1Pool.Exec(ctx, removeFromRepSetSQL)
+			if err != nil {
+				t.Logf("cleanup: failed to remove table from replication set: %v", err)
+			}
 		}
-		for _, pool := range []*pgxpool.Pool{pgCluster.Node1Pool, pgCluster.Node2Pool} {
+		for _, pool := range []*pgxpool.Pool{env.N1Pool, env.N2Pool} {
 			_, err := pool.Exec(ctx, fmt.Sprintf("DROP TABLE IF EXISTS %s CASCADE", qualifiedTableName))
 			if err != nil {
 				t.Logf("Failed to drop test table %s: %v", qualifiedTableName, err)
@@ -787,55 +792,49 @@ CREATE TABLE IF NOT EXISTS %s.%s (
 		}
 		defer tx.Rollback(ctx)
 
-		_, err = tx.Exec(ctx, "SELECT spock.repair_mode(true)")
-		if err != nil {
-			t.Fatalf("Failed to enable spock repair mode: %v", err)
-		}
-		_, err = tx.Exec(
-			ctx,
-			fmt.Sprintf(insertSQLTemplate, testSchema, tableName),
-			data["id"],
-			data["col_smallint"],
-			data["col_integer"],
-			data["col_bigint"],
-			data["col_numeric"],
-			data["col_real"],
-			data["col_double"],
-			data["col_varchar"],
-			data["col_text"],
-			data["col_char"],
-			data["col_boolean"],
-			data["col_date"],
-			data["col_timestamp"],
-			data["col_timestamptz"],
-			data["col_jsonb"],
-			data["col_json"],
-			data["col_bytea"],
-			data["col_int_array"],
-		)
-		if err != nil {
-			t.Fatalf("Failed to insert row id %v: %v", data["id"], err)
-		}
-		_, err = tx.Exec(ctx, "SELECT spock.repair_mode(false)")
-		if err != nil {
-			t.Fatalf("Failed to disable spock repair mode: %v", err)
-		}
+		env.withRepairModeTx(t, ctx, tx, func() {
+			_, err = tx.Exec(
+				ctx,
+				fmt.Sprintf(insertSQLTemplate, env.Schema, tableName),
+				data["id"],
+				data["col_smallint"],
+				data["col_integer"],
+				data["col_bigint"],
+				data["col_numeric"],
+				data["col_real"],
+				data["col_double"],
+				data["col_varchar"],
+				data["col_text"],
+				data["col_char"],
+				data["col_boolean"],
+				data["col_date"],
+				data["col_timestamp"],
+				data["col_timestamptz"],
+				data["col_jsonb"],
+				data["col_json"],
+				data["col_bytea"],
+				data["col_int_array"],
+			)
+			if err != nil {
+				t.Fatalf("Failed to insert row id %v: %v", data["id"], err)
+			}
+		})
 		if err = tx.Commit(ctx); err != nil {
 			t.Fatalf("Failed to commit transaction: %v", err)
 		}
 	}
 
-	insertRow(pgCluster.Node1Pool, row1)
-	insertRow(pgCluster.Node2Pool, row1)
-	insertRow(pgCluster.Node1Pool, row2Node1Only)
-	insertRow(pgCluster.Node2Pool, row3Node2Only)
-	insertRow(pgCluster.Node1Pool, row4Base)
-	insertRow(pgCluster.Node2Pool, row4Node2Modified)
+	insertRow(env.N1Pool, row1)
+	insertRow(env.N2Pool, row1)
+	insertRow(env.N1Pool, row2Node1Only)
+	insertRow(env.N2Pool, row3Node2Only)
+	insertRow(env.N1Pool, row4Base)
+	insertRow(env.N2Pool, row4Node2Modified)
 
 	log.Printf("Data loaded into %s with variations", qualifiedTableName)
 
-	nodesToCompare := []string{serviceN1, serviceN2}
-	tdTask := newTestTableDiffTask(t, qualifiedTableName, nodesToCompare)
+	nodesToCompare := []string{env.ServiceN1, env.ServiceN2}
+	tdTask := env.newTableDiffTask(t, qualifiedTableName, nodesToCompare)
 
 	err := tdTask.RunChecks(false)
 	if err != nil {
@@ -846,10 +845,7 @@ CREATE TABLE IF NOT EXISTS %s.%s (
 		t.Fatalf("ExecuteTask failed for data type table: %v", err)
 	}
 
-	pairKey := serviceN1 + "/" + serviceN2
-	if strings.Compare(serviceN1, serviceN2) > 0 {
-		pairKey = serviceN2 + "/" + serviceN1
-	}
+	pairKey := env.pairKey()
 
 	nodeDiffs, ok := tdTask.DiffResult.NodeDiffs[pairKey]
 	if !ok {
@@ -860,20 +856,20 @@ CREATE TABLE IF NOT EXISTS %s.%s (
 		)
 	}
 
-	if len(nodeDiffs.Rows[serviceN1]) != 2 {
+	if len(nodeDiffs.Rows[env.ServiceN1]) != 2 {
 		t.Errorf(
 			"Expected 2 rows in diffs for %s, got %d. Rows: %+v",
-			serviceN1,
-			len(nodeDiffs.Rows[serviceN1]),
-			nodeDiffs.Rows[serviceN1],
+			env.ServiceN1,
+			len(nodeDiffs.Rows[env.ServiceN1]),
+			nodeDiffs.Rows[env.ServiceN1],
 		)
 	}
-	if len(nodeDiffs.Rows[serviceN2]) != 2 {
+	if len(nodeDiffs.Rows[env.ServiceN2]) != 2 {
 		t.Errorf(
 			"Expected 2 rows in diffs for %s, got %d. Rows: %+v",
-			serviceN2,
-			len(nodeDiffs.Rows[serviceN2]),
-			nodeDiffs.Rows[serviceN2],
+			env.ServiceN2,
+			len(nodeDiffs.Rows[env.ServiceN2]),
+			nodeDiffs.Rows[env.ServiceN2],
 		)
 	}
 
@@ -889,37 +885,37 @@ CREATE TABLE IF NOT EXISTS %s.%s (
 	}
 
 	foundRow2N1Only := false
-	for _, r := range nodeDiffs.Rows[serviceN1] {
+	for _, r := range nodeDiffs.Rows[env.ServiceN1] {
 		if id, ok := r.Get("id"); ok && id == int32(2) {
 			foundRow2N1Only = true
 			break
 		}
 	}
 	if !foundRow2N1Only {
-		t.Errorf("Row with id=2 (N1 only) not found in %s diffs", serviceN1)
+		t.Errorf("Row with id=2 (N1 only) not found in %s diffs", env.ServiceN1)
 	}
 
 	foundRow3N2Only := false
-	for _, r := range nodeDiffs.Rows[serviceN2] {
+	for _, r := range nodeDiffs.Rows[env.ServiceN2] {
 		if id, ok := r.Get("id"); ok && id == int32(3) {
 			foundRow3N2Only = true
 			break
 		}
 	}
 	if !foundRow3N2Only {
-		t.Errorf("Row with id=3 (N2 only) not found in %s diffs", serviceN2)
+		t.Errorf("Row with id=3 (N2 only) not found in %s diffs", env.ServiceN2)
 	}
 
 	foundRow4OriginalN1 := false
 	foundRow4ModifiedN2 := false
-	for _, r := range nodeDiffs.Rows[serviceN1] {
+	for _, r := range nodeDiffs.Rows[env.ServiceN1] {
 		id, _ := r.Get("id")
 		varchar, _ := r.Get("col_varchar")
 		if id == int32(4) && varchar == "original_varchar_row4" {
 			foundRow4OriginalN1 = true
 		}
 	}
-	for _, r := range nodeDiffs.Rows[serviceN2] {
+	for _, r := range nodeDiffs.Rows[env.ServiceN2] {
 		id, _ := r.Get("id")
 		varchar, _ := r.Get("col_varchar")
 		if id == int32(4) && varchar == "MODIFIED_varchar_row4" {
@@ -927,19 +923,19 @@ CREATE TABLE IF NOT EXISTS %s.%s (
 		}
 	}
 	if !foundRow4OriginalN1 {
-		t.Errorf("Original version of row id=4 not found in %s diffs", serviceN1)
+		t.Errorf("Original version of row id=4 not found in %s diffs", env.ServiceN1)
 	}
 	if !foundRow4ModifiedN2 {
-		t.Errorf("Modified version of row id=4 not found in %s diffs", serviceN2)
+		t.Errorf("Modified version of row id=4 not found in %s diffs", env.ServiceN2)
 	}
 
 	log.Println("TestTableDiff_VariousDataTypes completed.")
 }
 
-func testTableDiff_UUIDColumn(t *testing.T, compositeKey bool) {
+func testTableDiff_UUIDColumn(t *testing.T, env *testEnv, compositeKey bool) {
 	ctx := context.Background()
 	tableName := "uuid_test_table"
-	qualifiedTableName := fmt.Sprintf("%s.%s", testSchema, tableName)
+	qualifiedTableName := fmt.Sprintf("%s.%s", env.Schema, tableName)
 
 	compositeKeyPart := ""
 	if compositeKey {
@@ -953,33 +949,38 @@ CREATE TABLE IF NOT EXISTS %s.%s (
     name TEXT,
     col_uuid UUID,
     PRIMARY KEY(id%s)
-);`, testSchema, testSchema, tableName, compositeKeyPart)
+);`, env.Schema, env.Schema, tableName, compositeKeyPart)
 
-	for i, pool := range []*pgxpool.Pool{pgCluster.Node1Pool, pgCluster.Node2Pool} {
-		nodeName := pgCluster.ClusterNodes[i]["Name"].(string)
+	nodeNames := []string{env.ServiceN1, env.ServiceN2}
+	for i, pool := range []*pgxpool.Pool{env.N1Pool, env.N2Pool} {
+		nodeName := nodeNames[i]
 		_, err := pool.Exec(ctx, createTableSQL)
 		if err != nil {
 			t.Fatalf("Failed to create uuid_test_table on node %s: %v", nodeName, err)
 		}
-		_, err = pool.Exec(ctx, fmt.Sprintf("TRUNCATE TABLE %s.%s CASCADE", testSchema, tableName))
+		_, err = pool.Exec(ctx, fmt.Sprintf("TRUNCATE TABLE %s.%s CASCADE", env.Schema, tableName))
 		if err != nil {
 			t.Fatalf("Failed to truncate uuid_test_table on node %s: %v", nodeName, err)
 		}
-		addToRepSetSQL := fmt.Sprintf(`SELECT spock.repset_add_table('default', '%s');`, qualifiedTableName)
-		_, err = pool.Exec(ctx, addToRepSetSQL)
-		if err != nil {
-			t.Fatalf("Failed to add table to replication set on %s: %v", nodeName, err)
+		if env.HasSpock {
+			addToRepSetSQL := fmt.Sprintf(`SELECT spock.repset_add_table('default', '%s');`, qualifiedTableName)
+			_, err = pool.Exec(ctx, addToRepSetSQL)
+			if err != nil {
+				t.Fatalf("Failed to add table to replication set on %s: %v", nodeName, err)
+			}
 		}
 	}
 	log.Printf("Table %s created on both nodes", qualifiedTableName)
 
 	t.Cleanup(func() {
-		removeFromRepSetSQL := fmt.Sprintf(`SELECT spock.repset_remove_table('default', '%s');`, qualifiedTableName)
-		_, err := pgCluster.Node1Pool.Exec(ctx, removeFromRepSetSQL)
-		if err != nil {
-			t.Logf("cleanup: failed to remove table from replication set: %v", err)
+		if env.HasSpock {
+			removeFromRepSetSQL := fmt.Sprintf(`SELECT spock.repset_remove_table('default', '%s');`, qualifiedTableName)
+			_, err := env.N1Pool.Exec(ctx, removeFromRepSetSQL)
+			if err != nil {
+				t.Logf("cleanup: failed to remove table from replication set: %v", err)
+			}
 		}
-		for _, pool := range []*pgxpool.Pool{pgCluster.Node1Pool, pgCluster.Node2Pool} {
+		for _, pool := range []*pgxpool.Pool{env.N1Pool, env.N2Pool} {
 			_, err := pool.Exec(ctx, fmt.Sprintf("DROP TABLE IF EXISTS %s CASCADE", qualifiedTableName))
 			if err != nil {
 				t.Logf("Failed to drop test table %s: %v", qualifiedTableName, err)
@@ -997,7 +998,7 @@ CREATE TABLE IF NOT EXISTS %s.%s (
 	row2UUIDNode1 := "550e8400-e29b-41d4-a716-446655440002"
 	row2UUIDNode2 := "660e8400-e29b-41d4-a716-446655440002"
 
-	insertSQL := fmt.Sprintf("INSERT INTO %s.%s (id, name, col_uuid) VALUES ($1, $2, $3)", testSchema, tableName)
+	insertSQL := fmt.Sprintf("INSERT INTO %s.%s (id, name, col_uuid) VALUES ($1, $2, $3)", env.Schema, tableName)
 
 	insertRow := func(pool *pgxpool.Pool, id int, name string, uuid string) {
 		tx, err := pool.Begin(ctx)
@@ -1006,35 +1007,29 @@ CREATE TABLE IF NOT EXISTS %s.%s (
 		}
 		defer tx.Rollback(ctx)
 
-		_, err = tx.Exec(ctx, "SELECT spock.repair_mode(true)")
-		if err != nil {
-			t.Fatalf("Failed to enable spock repair mode: %v", err)
-		}
-		_, err = tx.Exec(ctx, insertSQL, id, name, uuid)
-		if err != nil {
-			t.Fatalf("Failed to insert row id %d: %v", id, err)
-		}
-		_, err = tx.Exec(ctx, "SELECT spock.repair_mode(false)")
-		if err != nil {
-			t.Fatalf("Failed to disable spock repair mode: %v", err)
-		}
+		env.withRepairModeTx(t, ctx, tx, func() {
+			_, err = tx.Exec(ctx, insertSQL, id, name, uuid)
+			if err != nil {
+				t.Fatalf("Failed to insert row id %d: %v", id, err)
+			}
+		})
 		if err = tx.Commit(ctx); err != nil {
 			t.Fatalf("Failed to commit transaction: %v", err)
 		}
 	}
 
 	// Insert same row on both nodes
-	insertRow(pgCluster.Node1Pool, 1, "same", row1UUID)
-	insertRow(pgCluster.Node2Pool, 1, "same", row1UUID)
+	insertRow(env.N1Pool, 1, "same", row1UUID)
+	insertRow(env.N2Pool, 1, "same", row1UUID)
 
 	// Insert row with different UUID on each node
-	insertRow(pgCluster.Node1Pool, 2, "different", row2UUIDNode1)
-	insertRow(pgCluster.Node2Pool, 2, "different", row2UUIDNode2)
+	insertRow(env.N1Pool, 2, "different", row2UUIDNode1)
+	insertRow(env.N2Pool, 2, "different", row2UUIDNode2)
 
 	log.Printf("Data loaded into %s with UUID variations", qualifiedTableName)
 
-	nodesToCompare := []string{serviceN1, serviceN2}
-	tdTask := newTestTableDiffTask(t, qualifiedTableName, nodesToCompare)
+	nodesToCompare := []string{env.ServiceN1, env.ServiceN2}
+	tdTask := env.newTableDiffTask(t, qualifiedTableName, nodesToCompare)
 
 	err := tdTask.RunChecks(false)
 	if err != nil {
@@ -1045,10 +1040,7 @@ CREATE TABLE IF NOT EXISTS %s.%s (
 		t.Fatalf("ExecuteTask failed for UUID table: %v", err)
 	}
 
-	pairKey := serviceN1 + "/" + serviceN2
-	if strings.Compare(serviceN1, serviceN2) > 0 {
-		pairKey = serviceN2 + "/" + serviceN1
-	}
+	pairKey := env.pairKey()
 
 	nodeDiffs, ok := tdTask.DiffResult.NodeDiffs[pairKey]
 	if !ok {
@@ -1056,17 +1048,17 @@ CREATE TABLE IF NOT EXISTS %s.%s (
 	}
 
 	// Should have 1 diff (row 2 with different UUIDs)
-	if len(nodeDiffs.Rows[serviceN1]) != 1 {
+	if len(nodeDiffs.Rows[env.ServiceN1]) != 1 {
 		t.Errorf("Expected 1 row in diffs for %s, got %d. Rows: %+v",
-			serviceN1, len(nodeDiffs.Rows[serviceN1]), nodeDiffs.Rows[serviceN1])
+			env.ServiceN1, len(nodeDiffs.Rows[env.ServiceN1]), nodeDiffs.Rows[env.ServiceN1])
 	}
-	if len(nodeDiffs.Rows[serviceN2]) != 1 {
+	if len(nodeDiffs.Rows[env.ServiceN2]) != 1 {
 		t.Errorf("Expected 1 row in diffs for %s, got %d. Rows: %+v",
-			serviceN2, len(nodeDiffs.Rows[serviceN2]), nodeDiffs.Rows[serviceN2])
+			env.ServiceN2, len(nodeDiffs.Rows[env.ServiceN2]), nodeDiffs.Rows[env.ServiceN2])
 	}
 
 	// Verify the UUID is formatted correctly (as a string in standard UUID format)
-	for _, row := range nodeDiffs.Rows[serviceN1] {
+	for _, row := range nodeDiffs.Rows[env.ServiceN1] {
 		uuid, ok := row.Get("col_uuid")
 		if !ok {
 			t.Errorf("col_uuid not found in diff row")
@@ -1082,7 +1074,7 @@ CREATE TABLE IF NOT EXISTS %s.%s (
 		}
 	}
 
-	for _, row := range nodeDiffs.Rows[serviceN2] {
+	for _, row := range nodeDiffs.Rows[env.ServiceN2] {
 		uuid, ok := row.Get("col_uuid")
 		if !ok {
 			t.Errorf("col_uuid not found in diff row")
@@ -1343,10 +1335,10 @@ func testTableDiff_MaxDiffRowsLimit(t *testing.T, env *testEnv) {
 	log.Println("TestTableDiff_MaxDiffRowsLimit completed.")
 }
 
-func testTableDiff_ByteaColumnSizeCheck(t *testing.T, compositeKey bool) {
+func testTableDiff_ByteaColumnSizeCheck(t *testing.T, env *testEnv, compositeKey bool) {
 	ctx := context.Background()
 	tableName := "bytea_size_test"
-	qualifiedTableName := fmt.Sprintf("%s.%s", testSchema, tableName)
+	qualifiedTableName := fmt.Sprintf("%s.%s", env.Schema, tableName)
 
 	compositeKeyPart := ""
 	if compositeKey {
@@ -1362,24 +1354,28 @@ CREATE TABLE IF NOT EXISTS %s (
 );`, qualifiedTableName, compositeKeyPart)
 
 	// Create table on both nodes and add cleanup to drop it
-	for _, pool := range []*pgxpool.Pool{pgCluster.Node1Pool, pgCluster.Node2Pool} {
+	for _, pool := range []*pgxpool.Pool{env.N1Pool, env.N2Pool} {
 		_, err := pool.Exec(ctx, createTableSQL)
 		if err != nil {
 			t.Fatalf("Failed to create test table %s: %v", qualifiedTableName, err)
 		}
-		addToRepSetSQL := fmt.Sprintf(`SELECT spock.repset_add_table('default', '%s');`, qualifiedTableName)
-		_, err = pool.Exec(ctx, addToRepSetSQL)
-		if err != nil {
-			t.Fatalf("Failed to add table to replication set on n1: %v", err)
+		if env.HasSpock {
+			addToRepSetSQL := fmt.Sprintf(`SELECT spock.repset_add_table('default', '%s');`, qualifiedTableName)
+			_, err = pool.Exec(ctx, addToRepSetSQL)
+			if err != nil {
+				t.Fatalf("Failed to add table to replication set: %v", err)
+			}
 		}
 	}
 	t.Cleanup(func() {
-		removeFromRepSetSQL := fmt.Sprintf(`SELECT spock.repset_remove_table('default', '%s');`, qualifiedTableName)
-		_, err := pgCluster.Node1Pool.Exec(ctx, removeFromRepSetSQL)
-		if err != nil {
-			t.Logf("cleanup: failed to remove table from replication set: %v", err)
+		if env.HasSpock {
+			removeFromRepSetSQL := fmt.Sprintf(`SELECT spock.repset_remove_table('default', '%s');`, qualifiedTableName)
+			_, err := env.N1Pool.Exec(ctx, removeFromRepSetSQL)
+			if err != nil {
+				t.Logf("cleanup: failed to remove table from replication set: %v", err)
+			}
 		}
-		for _, pool := range []*pgxpool.Pool{pgCluster.Node1Pool, pgCluster.Node2Pool} {
+		for _, pool := range []*pgxpool.Pool{env.N1Pool, env.N2Pool} {
 			_, err := pool.Exec(ctx, fmt.Sprintf("DROP TABLE IF EXISTS %s CASCADE", qualifiedTableName))
 			if err != nil {
 				t.Logf("Failed to drop test table %s: %v", qualifiedTableName, err)
@@ -1394,7 +1390,7 @@ CREATE TABLE IF NOT EXISTS %s (
 	// --- Test Case 1: Data < 1MB (should pass) ---
 	t.Run("DataUnder1MB", func(t *testing.T) {
 		// Truncate before run
-		for _, pool := range []*pgxpool.Pool{pgCluster.Node1Pool, pgCluster.Node2Pool} {
+		for _, pool := range []*pgxpool.Pool{env.N1Pool, env.N2Pool} {
 			_, err := pool.Exec(ctx, fmt.Sprintf("TRUNCATE TABLE %s", qualifiedTableName))
 			if err != nil {
 				t.Fatalf("Failed to truncate table %s: %v", qualifiedTableName, err)
@@ -1402,15 +1398,24 @@ CREATE TABLE IF NOT EXISTS %s (
 		}
 
 		smallData := make([]byte, 500*1024) // 500 KB
-		_, err := pgCluster.Node1Pool.Exec(ctx, fmt.Sprintf("INSERT INTO %s (id, name, data) VALUES (1, 'small', $1)", qualifiedTableName), smallData)
+		_, err := env.N1Pool.Exec(ctx, fmt.Sprintf("INSERT INTO %s (id, name, data) VALUES (1, 'small', $1)", qualifiedTableName), smallData)
 		if err != nil {
 			t.Fatalf("Failed to insert small data: %v", err)
 		}
 
-		time.Sleep(5 * time.Second)
+		if env.HasSpock {
+			// Wait for replication to propagate
+			time.Sleep(5 * time.Second)
+		} else {
+			// On native PG there is no replication; insert on n2 directly
+			_, err = env.N2Pool.Exec(ctx, fmt.Sprintf("INSERT INTO %s (id, name, data) VALUES (1, 'small', $1)", qualifiedTableName), smallData)
+			if err != nil {
+				t.Fatalf("Failed to insert small data on n2: %v", err)
+			}
+		}
 
-		nodesToCompare := []string{serviceN1, serviceN2}
-		tdTask := newTestTableDiffTask(t, qualifiedTableName, nodesToCompare)
+		nodesToCompare := []string{env.ServiceN1, env.ServiceN2}
+		tdTask := env.newTableDiffTask(t, qualifiedTableName, nodesToCompare)
 
 		err = tdTask.RunChecks(false)
 		if err != nil {
@@ -1421,22 +1426,31 @@ CREATE TABLE IF NOT EXISTS %s (
 	// --- Test Case 2: Data > 1MB (should fail) ---
 	t.Run("DataOver1MB", func(t *testing.T) {
 		// Truncate before run
-		for _, pool := range []*pgxpool.Pool{pgCluster.Node1Pool, pgCluster.Node2Pool} {
+		for _, pool := range []*pgxpool.Pool{env.N1Pool, env.N2Pool} {
 			_, err := pool.Exec(ctx, fmt.Sprintf("TRUNCATE TABLE %s", qualifiedTableName))
 			if err != nil {
 				t.Fatalf("Failed to truncate table %s: %v", qualifiedTableName, err)
 			}
 		}
 		largeData := make([]byte, 1024*1024+1) // > 1 MB
-		_, err := pgCluster.Node1Pool.Exec(ctx, fmt.Sprintf("INSERT INTO %s (id, name, data) VALUES (1, 'large', $1)", qualifiedTableName), largeData)
+		_, err := env.N1Pool.Exec(ctx, fmt.Sprintf("INSERT INTO %s (id, name, data) VALUES (1, 'large', $1)", qualifiedTableName), largeData)
 		if err != nil {
 			t.Fatalf("Failed to insert large data: %v", err)
 		}
 
-		time.Sleep(5 * time.Second)
+		if env.HasSpock {
+			// Wait for replication to propagate
+			time.Sleep(5 * time.Second)
+		} else {
+			// On native PG there is no replication; insert on n2 directly
+			_, err = env.N2Pool.Exec(ctx, fmt.Sprintf("INSERT INTO %s (id, name, data) VALUES (1, 'large', $1)", qualifiedTableName), largeData)
+			if err != nil {
+				t.Fatalf("Failed to insert large data on n2: %v", err)
+			}
+		}
 
-		nodesToCompare := []string{serviceN1, serviceN2}
-		tdTask := newTestTableDiffTask(t, qualifiedTableName, nodesToCompare)
+		nodesToCompare := []string{env.ServiceN1, env.ServiceN2}
+		tdTask := env.newTableDiffTask(t, qualifiedTableName, nodesToCompare)
 
 		err = tdTask.RunChecks(false)
 		if err == nil {
