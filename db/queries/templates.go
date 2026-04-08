@@ -20,7 +20,7 @@ import (
 // aceTemplateFuncs provides the {{aceSchema}} function to SQL templates.
 // The function is evaluated at render time (after config is loaded), not at parse time.
 var aceTemplateFuncs = template.FuncMap{
-	"aceSchema": func() string { return config.Cfg.MTree.Schema },
+	"aceSchema": func() string { return config.Get().MTree.Schema },
 }
 
 type Templates struct {
