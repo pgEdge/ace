@@ -2995,17 +2995,19 @@ func (t *TableRepairTask) autoSelectSourceOfTruth(failedNode string, involved ma
 			logger.Warn("recovery-mode: failed to connect to %s for LSN probe: %v", nodeName, err)
 			continue
 		}
-		originLSN, slotLSN, err := t.fetchLSNsForNode(pool, failedNode, nodeName)
-		if err != nil {
-			logger.Warn("recovery-mode: failed to fetch LSNs on %s: %v", nodeName, err)
-			pool.Close()
-			continue
-		}
 
+		// Store pool before fetchLSNsForNode so isSpockAvailable can find it
 		if t.Pools[nodeName] == nil {
 			t.Pools[nodeName] = pool
 		} else {
 			pool.Close()
+			pool = t.Pools[nodeName]
+		}
+
+		originLSN, slotLSN, err := t.fetchLSNsForNode(pool, failedNode, nodeName)
+		if err != nil {
+			logger.Warn("recovery-mode: failed to fetch LSNs on %s: %v", nodeName, err)
+			continue
 		}
 
 		lsnDetails[nodeName] = map[string]string{
