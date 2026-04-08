@@ -79,8 +79,8 @@ func (t *TableDiffTask) ExecuteRerunTask() error {
 		}
 	}()
 
-	if err := t.loadSpockNodeNames(); err != nil {
-		logger.Warn("table-diff rerun: unable to load spock node names; using raw node_origin values: %v", err)
+	if err := t.loadNodeOriginNames(); err != nil {
+		logger.Warn("table-diff rerun: unable to load node origin names; using raw node_origin values: %v", err)
 	}
 
 	// Collect all unique primary keys from the original diff report
