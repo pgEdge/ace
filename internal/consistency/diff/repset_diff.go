@@ -396,6 +396,7 @@ func RepsetDiff(task *RepsetDiffCmd) (err error) {
 		tdTask.QuietMode = task.Quiet
 		tdTask.Ctx = task.Ctx
 		tdTask.SkipDBUpdate = task.SkipDBUpdate
+		tdTask.TaskStore = task.TaskStore
 		tdTask.TaskStorePath = task.TaskStorePath
 
 		if err := tdTask.Validate(); err != nil {
