@@ -61,5 +61,8 @@ jobs:
     - name: Run Merkle Tree --until filter tests
       run: go test -count=1 -v ./tests/integration -run 'TestMerkleTreeUntilFilter'
 
+    - name: Run native PG (no spock) tests
+      run: go test -count=1 -v ./tests/integration -run 'TestNativePG'
+
     - name: Run timestamp comparison tests
       run: go test -count=1 -v ./tests/integration -run 'TestCompareTimestampsExact|TestPostgreSQLMicrosecondPrecision|TestOldVsNewComparison'

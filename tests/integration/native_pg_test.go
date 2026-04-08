@@ -278,6 +278,15 @@ func TestNativePG(t *testing.T) {
 		t.Run("MixedCaseIdentifiers", func(t *testing.T) {
 			testTableDiff_MixedCaseIdentifiers(t, env, false)
 		})
+		t.Run("VariousDataTypes", func(t *testing.T) {
+			testTableDiff_VariousDataTypes(t, env, false)
+		})
+		t.Run("UUIDColumn", func(t *testing.T) {
+			testTableDiff_UUIDColumn(t, env, false)
+		})
+		t.Run("ByteaColumnSizeCheck", func(t *testing.T) {
+			testTableDiff_ByteaColumnSizeCheck(t, env, false)
+		})
 	})
 
 	// ── Shared table-diff tests (composite PK) ───────────────────────────
@@ -298,6 +307,15 @@ func TestNativePG(t *testing.T) {
 		})
 		t.Run("MixedCaseIdentifiers", func(t *testing.T) {
 			testTableDiff_MixedCaseIdentifiers(t, env, true)
+		})
+		t.Run("VariousDataTypes", func(t *testing.T) {
+			testTableDiff_VariousDataTypes(t, env, true)
+		})
+		t.Run("UUIDColumn", func(t *testing.T) {
+			testTableDiff_UUIDColumn(t, env, true)
+		})
+		t.Run("ByteaColumnSizeCheck", func(t *testing.T) {
+			testTableDiff_ByteaColumnSizeCheck(t, env, true)
 		})
 	})
 
@@ -329,6 +347,15 @@ func TestNativePG(t *testing.T) {
 	})
 	t.Run("TableRepair_FixNulls_BidirectionalUpdate", func(t *testing.T) {
 		testTableRepair_FixNulls_BidirectionalUpdate(t, env)
+	})
+	t.Run("TableRepair_VariousDataTypes", func(t *testing.T) {
+		testTableRepair_VariousDataTypes(t, env)
+	})
+	t.Run("TableRepair_TimestampAndTimeTypes", func(t *testing.T) {
+		testTableRepair_TimestampAndTimeTypes(t, env)
+	})
+	t.Run("TableRepair_LargeBigintPK", func(t *testing.T) {
+		testTableRepair_LargeBigintPK(t, env)
 	})
 
 	// ── Merkle tree tests ────────────────────────────────────────────────

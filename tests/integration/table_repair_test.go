@@ -570,7 +570,7 @@ func TestTableRepair_GenerateReport(t *testing.T) {
 	testTableRepair_GenerateReport(t, newSpockEnv())
 }
 
-func TestTableRepair_VariousDataTypes(t *testing.T) {
+func testTableRepair_VariousDataTypes(t *testing.T, env *testEnv) {
 	ctx := context.Background()
 	tableName := "data_type_repair"
 	qualifiedTableName := fmt.Sprintf("%s.%s", testSchema, tableName)
@@ -601,19 +601,23 @@ CREATE TABLE IF NOT EXISTS %s.%s (
 	col_text_array TEXT[]
 );`, testSchema, testSchema, tableName)
 
-	for i, pool := range []*pgxpool.Pool{pgCluster.Node1Pool, pgCluster.Node2Pool} {
-		nodeName := pgCluster.ClusterNodes[i]["Name"].(string)
+	for i, pool := range []*pgxpool.Pool{env.N1Pool, env.N2Pool} {
+		nodeName := env.ClusterNodes[i]["Name"].(string)
 		_, err := pool.Exec(ctx, createDataTypeTableSQL)
 		require.NoErrorf(t, err, "Failed to create data type table on %s", nodeName)
 		_, err = pool.Exec(ctx, fmt.Sprintf("TRUNCATE TABLE %s CASCADE", qualifiedTableName))
 		require.NoErrorf(t, err, "Failed to truncate data type table on %s", nodeName)
-		_, err = pool.Exec(ctx, fmt.Sprintf(`SELECT spock.repset_add_table('default', '%s');`, qualifiedTableName))
-		require.NoErrorf(t, err, "Failed to add table to repset on %s", nodeName)
+		if env.HasSpock {
+			_, err = pool.Exec(ctx, fmt.Sprintf(`SELECT spock.repset_add_table('default', '%s');`, qualifiedTableName))
+			require.NoErrorf(t, err, "Failed to add table to repset on %s", nodeName)
+		}
 	}
 
 	t.Cleanup(func() {
-		_, _ = pgCluster.Node1Pool.Exec(ctx, fmt.Sprintf(`SELECT spock.repset_remove_table('default', '%s');`, qualifiedTableName))
-		for _, pool := range []*pgxpool.Pool{pgCluster.Node1Pool, pgCluster.Node2Pool} {
+		if env.HasSpock {
+			_, _ = env.N1Pool.Exec(ctx, fmt.Sprintf(`SELECT spock.repset_remove_table('default', '%s');`, qualifiedTableName))
+		}
+		for _, pool := range []*pgxpool.Pool{env.N1Pool, env.N2Pool} {
 			_, _ = pool.Exec(ctx, fmt.Sprintf("DROP TABLE IF EXISTS %s CASCADE", qualifiedTableName))
 		}
 		files, _ := filepath.Glob("*_diffs-*.json")
@@ -627,23 +631,20 @@ CREATE TABLE IF NOT EXISTS %s.%s (
 		require.NoError(t, err)
 		defer func() { _ = tx.Rollback(ctx) }()
 
-		_, err = tx.Exec(ctx, "SELECT spock.repair_mode(true)")
-		require.NoError(t, err)
-
-		_, err = tx.Exec(
-			ctx,
-			fmt.Sprintf(`INSERT INTO %s (id, col_smallint, col_integer, col_bigint, col_numeric, col_real, col_double, col_varchar, col_text, col_char, col_boolean, col_date, col_timestamp, col_timestamptz, col_interval, col_jsonb, col_json, col_bytea, col_int_array, col_text_array)
+		env.withRepairModeTx(t, ctx, tx, func() {
+			_, err = tx.Exec(
+				ctx,
+				fmt.Sprintf(`INSERT INTO %s (id, col_smallint, col_integer, col_bigint, col_numeric, col_real, col_double, col_varchar, col_text, col_char, col_boolean, col_date, col_timestamp, col_timestamptz, col_interval, col_jsonb, col_json, col_bytea, col_int_array, col_text_array)
 				VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)`, qualifiedTableName),
-			data["id"], data["col_smallint"], data["col_integer"], data["col_bigint"],
-			data["col_numeric"], data["col_real"], data["col_double"], data["col_varchar"],
-			data["col_text"], data["col_char"], data["col_boolean"], data["col_date"],
-			data["col_timestamp"], data["col_timestamptz"], data["col_interval"], data["col_jsonb"], data["col_json"],
-			data["col_bytea"], data["col_int_array"], data["col_text_array"],
-		)
-		require.NoError(t, err)
+				data["id"], data["col_smallint"], data["col_integer"], data["col_bigint"],
+				data["col_numeric"], data["col_real"], data["col_double"], data["col_varchar"],
+				data["col_text"], data["col_char"], data["col_boolean"], data["col_date"],
+				data["col_timestamp"], data["col_timestamptz"], data["col_interval"], data["col_jsonb"], data["col_json"],
+				data["col_bytea"], data["col_int_array"], data["col_text_array"],
+			)
+			require.NoError(t, err)
+		})
 
-		_, err = tx.Exec(ctx, "SELECT spock.repair_mode(false)")
-		require.NoError(t, err)
 		require.NoError(t, tx.Commit(ctx))
 	}
 
@@ -692,20 +693,20 @@ CREATE TABLE IF NOT EXISTS %s.%s (
 		"col_numeric": "444.44", "col_varchar": "only_on_n2",
 	}
 
-	insertRow(pgCluster.Node1Pool, row1)
-	insertRow(pgCluster.Node2Pool, row1)
-	insertRow(pgCluster.Node1Pool, row2OnlyN1)
-	insertRow(pgCluster.Node1Pool, row3Base)
-	insertRow(pgCluster.Node2Pool, row3ModifiedN2)
-	insertRow(pgCluster.Node2Pool, row4OnlyN2)
+	insertRow(env.N1Pool, row1)
+	insertRow(env.N2Pool, row1)
+	insertRow(env.N1Pool, row2OnlyN1)
+	insertRow(env.N1Pool, row3Base)
+	insertRow(env.N2Pool, row3ModifiedN2)
+	insertRow(env.N2Pool, row4OnlyN2)
 
-	diffFile := runTableDiff(t, qualifiedTableName, []string{serviceN1, serviceN2})
+	diffFile := env.runTableDiff(t, qualifiedTableName, []string{env.ServiceN1, env.ServiceN2})
 
-	repairTask := newTestTableRepairTask(serviceN1, qualifiedTableName, diffFile)
+	repairTask := env.newTableRepairTask(env.ServiceN1, qualifiedTableName, diffFile)
 	err := repairTask.Run(false)
 	require.NoError(t, err, "Table repair for various data types failed")
 
-	assertNoTableDiff(t, qualifiedTableName)
+	env.assertNoTableDiff(t, qualifiedTableName)
 
 	checkRow3 := func(pool *pgxpool.Pool) map[string]any {
 		var (
@@ -733,8 +734,8 @@ CREATE TABLE IF NOT EXISTS %s.%s (
 		}
 	}
 
-	row3N1 := checkRow3(pgCluster.Node1Pool)
-	row3N2 := checkRow3(pgCluster.Node2Pool)
+	row3N1 := checkRow3(env.N1Pool)
+	row3N2 := checkRow3(env.N2Pool)
 
 	assert.Equal(t, row3N1["col_numeric"], row3N2["col_numeric"])
 	assert.Equal(t, row3N1["col_jsonb"], row3N2["col_jsonb"])
@@ -744,9 +745,13 @@ CREATE TABLE IF NOT EXISTS %s.%s (
 	assert.True(t, bytes.Equal(row3N1["col_bytea"].([]byte), row3N2["col_bytea"].([]byte)))
 
 	var row4Count int
-	err = pgCluster.Node2Pool.QueryRow(ctx, fmt.Sprintf("SELECT count(*) FROM %s WHERE id = 4", qualifiedTableName)).Scan(&row4Count)
+	err = env.N2Pool.QueryRow(ctx, fmt.Sprintf("SELECT count(*) FROM %s WHERE id = 4", qualifiedTableName)).Scan(&row4Count)
 	require.NoError(t, err)
 	assert.Equal(t, 0, row4Count, "Row present only on node2 should be deleted")
+}
+
+func TestTableRepair_VariousDataTypes(t *testing.T) {
+	testTableRepair_VariousDataTypes(t, newSpockEnv())
 }
 
 func testTableRepair_FixNulls(t *testing.T, env *testEnv) {
@@ -895,12 +900,12 @@ func TestTableRepair_FixNulls_DryRun(t *testing.T) {
 	testTableRepair_FixNulls_DryRun(t, newSpockEnv())
 }
 
-// TestTableRepair_TimestampAndTimeTypes verifies that the full diff→repair
+// testTableRepair_TimestampAndTimeTypes verifies that the full diff→repair
 // pipeline works correctly for timestamp, timestamptz, time, and timetz columns.
 // This guards against pgx sending the wrong OID for timestamp-without-tz
 // (which would cause PostgreSQL to apply a session-timezone shift) and ensures
 // that pgtype.Time values round-trip through diff JSON and back correctly.
-func TestTableRepair_TimestampAndTimeTypes(t *testing.T) {
+func testTableRepair_TimestampAndTimeTypes(t *testing.T, env *testEnv) {
 	ctx := context.Background()
 	tableName := "temporal_type_repair"
 	qualifiedTableName := fmt.Sprintf("%s.%s", testSchema, tableName)
@@ -915,19 +920,23 @@ CREATE TABLE IF NOT EXISTS %s.%s (
     col_timetz  TIME WITH TIME ZONE
 );`, testSchema, testSchema, tableName)
 
-	for i, pool := range []*pgxpool.Pool{pgCluster.Node1Pool, pgCluster.Node2Pool} {
-		nodeName := pgCluster.ClusterNodes[i]["Name"].(string)
+	for i, pool := range []*pgxpool.Pool{env.N1Pool, env.N2Pool} {
+		nodeName := env.ClusterNodes[i]["Name"].(string)
 		_, err := pool.Exec(ctx, createSQL)
 		require.NoErrorf(t, err, "Failed to create temporal table on %s", nodeName)
 		_, err = pool.Exec(ctx, fmt.Sprintf("TRUNCATE TABLE %s CASCADE", qualifiedTableName))
 		require.NoErrorf(t, err, "Failed to truncate temporal table on %s", nodeName)
-		_, err = pool.Exec(ctx, fmt.Sprintf(`SELECT spock.repset_add_table('default', '%s');`, qualifiedTableName))
-		require.NoErrorf(t, err, "Failed to add temporal table to repset on %s", nodeName)
+		if env.HasSpock {
+			_, err = pool.Exec(ctx, fmt.Sprintf(`SELECT spock.repset_add_table('default', '%s');`, qualifiedTableName))
+			require.NoErrorf(t, err, "Failed to add temporal table to repset on %s", nodeName)
+		}
 	}
 
 	t.Cleanup(func() {
-		_, _ = pgCluster.Node1Pool.Exec(ctx, fmt.Sprintf(`SELECT spock.repset_remove_table('default', '%s');`, qualifiedTableName))
-		for _, pool := range []*pgxpool.Pool{pgCluster.Node1Pool, pgCluster.Node2Pool} {
+		if env.HasSpock {
+			_, _ = env.N1Pool.Exec(ctx, fmt.Sprintf(`SELECT spock.repset_remove_table('default', '%s');`, qualifiedTableName))
+		}
+		for _, pool := range []*pgxpool.Pool{env.N1Pool, env.N2Pool} {
 			_, _ = pool.Exec(ctx, fmt.Sprintf("DROP TABLE IF EXISTS %s CASCADE", qualifiedTableName))
 		}
 		files, _ := filepath.Glob("*_diffs-*.json")
@@ -941,18 +950,15 @@ CREATE TABLE IF NOT EXISTS %s.%s (
 		require.NoError(t, err)
 		defer func() { _ = tx.Rollback(ctx) }()
 
-		_, err = tx.Exec(ctx, "SELECT spock.repair_mode(true)")
-		require.NoError(t, err)
+		env.withRepairModeTx(t, ctx, tx, func() {
+			_, err = tx.Exec(ctx, fmt.Sprintf(
+				`INSERT INTO %s (id, col_ts, col_tstz, col_time, col_timetz) VALUES ($1, $2, $3, $4::time, $5::timetz)`,
+				qualifiedTableName),
+				id, ts, tstz, timeStr, timetzStr,
+			)
+			require.NoError(t, err)
+		})
 
-		_, err = tx.Exec(ctx, fmt.Sprintf(
-			`INSERT INTO %s (id, col_ts, col_tstz, col_time, col_timetz) VALUES ($1, $2, $3, $4::time, $5::timetz)`,
-			qualifiedTableName),
-			id, ts, tstz, timeStr, timetzStr,
-		)
-		require.NoError(t, err)
-
-		_, err = tx.Exec(ctx, "SELECT spock.repair_mode(false)")
-		require.NoError(t, err)
 		require.NoError(t, tx.Commit(ctx))
 	}
 
@@ -960,11 +966,11 @@ CREATE TABLE IF NOT EXISTS %s.%s (
 	refTSTZ := time.Date(2024, 6, 15, 18, 45, 30, 0, time.UTC)
 
 	// Row 1: identical on both nodes (baseline)
-	insertRow(pgCluster.Node1Pool, 1, refTS, refTSTZ, "08:15:30.123456", "14:30:00-05")
-	insertRow(pgCluster.Node2Pool, 1, refTS, refTSTZ, "08:15:30.123456", "14:30:00-05")
+	insertRow(env.N1Pool, 1, refTS, refTSTZ, "08:15:30.123456", "14:30:00-05")
+	insertRow(env.N2Pool, 1, refTS, refTSTZ, "08:15:30.123456", "14:30:00-05")
 
 	// Row 2: only on node1 (missing on node2)
-	insertRow(pgCluster.Node1Pool, 2,
+	insertRow(env.N1Pool, 2,
 		refTS.Add(1*time.Hour),
 		refTSTZ.Add(1*time.Hour),
 		"12:00:00",
@@ -972,7 +978,7 @@ CREATE TABLE IF NOT EXISTS %s.%s (
 	)
 
 	// Row 3: only on node2 (should be deleted when n1 is source of truth)
-	insertRow(pgCluster.Node2Pool, 3,
+	insertRow(env.N2Pool, 3,
 		refTS.Add(2*time.Hour),
 		refTSTZ.Add(2*time.Hour),
 		"23:59:59.999999",
@@ -980,13 +986,13 @@ CREATE TABLE IF NOT EXISTS %s.%s (
 	)
 
 	// Row 4: different values on each node (row mismatch)
-	insertRow(pgCluster.Node1Pool, 4,
+	insertRow(env.N1Pool, 4,
 		refTS.Add(3*time.Hour),
 		refTSTZ.Add(3*time.Hour),
 		"06:30:00",
 		"16:45:00-07",
 	)
-	insertRow(pgCluster.Node2Pool, 4,
+	insertRow(env.N2Pool, 4,
 		refTS.Add(99*time.Hour), // deliberately different
 		refTSTZ.Add(99*time.Hour),
 		"22:00:00.500000",
@@ -994,24 +1000,24 @@ CREATE TABLE IF NOT EXISTS %s.%s (
 	)
 
 	// ----- Diff -----
-	diffFile := runTableDiff(t, qualifiedTableName, []string{serviceN1, serviceN2})
+	diffFile := env.runTableDiff(t, qualifiedTableName, []string{env.ServiceN1, env.ServiceN2})
 
 	// ----- Repair (node1 = source of truth) -----
-	repairTask := newTestTableRepairTask(serviceN1, qualifiedTableName, diffFile)
+	repairTask := env.newTableRepairTask(env.ServiceN1, qualifiedTableName, diffFile)
 	err := repairTask.Run(false)
 	require.NoError(t, err, "Repair for temporal types failed")
 
 	// ----- Verify: no diffs remain -----
-	assertNoTableDiff(t, qualifiedTableName)
+	env.assertNoTableDiff(t, qualifiedTableName)
 
 	// ----- Verify: row counts match -----
-	countN1 := getTableCount(t, ctx, pgCluster.Node1Pool, qualifiedTableName)
-	countN2 := getTableCount(t, ctx, pgCluster.Node2Pool, qualifiedTableName)
+	countN1 := getTableCount(t, ctx, env.N1Pool, qualifiedTableName)
+	countN2 := getTableCount(t, ctx, env.N2Pool, qualifiedTableName)
 	assert.Equal(t, countN1, countN2, "Row counts should match after repair")
 
 	// ----- Verify: row 3 was deleted from node2 -----
 	var row3Count int
-	err = pgCluster.Node2Pool.QueryRow(ctx, fmt.Sprintf("SELECT count(*) FROM %s WHERE id = 3", qualifiedTableName)).Scan(&row3Count)
+	err = env.N2Pool.QueryRow(ctx, fmt.Sprintf("SELECT count(*) FROM %s WHERE id = 3", qualifiedTableName)).Scan(&row3Count)
 	require.NoError(t, err)
 	assert.Equal(t, 0, row3Count, "Row 3 (only on node2) should be deleted")
 
@@ -1031,28 +1037,32 @@ CREATE TABLE IF NOT EXISTS %s.%s (
 		return r
 	}
 
-	r2n1 := readRow(pgCluster.Node1Pool, 2)
-	r2n2 := readRow(pgCluster.Node2Pool, 2)
+	r2n1 := readRow(env.N1Pool, 2)
+	r2n2 := readRow(env.N2Pool, 2)
 	assert.True(t, r2n1.ts.Equal(r2n2.ts), "row 2 col_ts: n1=%v n2=%v", r2n1.ts, r2n2.ts)
 	assert.True(t, r2n1.tstz.Equal(r2n2.tstz), "row 2 col_tstz: n1=%v n2=%v", r2n1.tstz, r2n2.tstz)
 	assert.Equal(t, r2n1.timeV, r2n2.timeV, "row 2 col_time mismatch")
 	assert.Equal(t, r2n1.timetz, r2n2.timetz, "row 2 col_timetz mismatch")
 
 	// ----- Verify: row 4 was repaired to match node1 -----
-	r4n1 := readRow(pgCluster.Node1Pool, 4)
-	r4n2 := readRow(pgCluster.Node2Pool, 4)
+	r4n1 := readRow(env.N1Pool, 4)
+	r4n2 := readRow(env.N2Pool, 4)
 	assert.True(t, r4n1.ts.Equal(r4n2.ts), "row 4 col_ts: n1=%v n2=%v", r4n1.ts, r4n2.ts)
 	assert.True(t, r4n1.tstz.Equal(r4n2.tstz), "row 4 col_tstz: n1=%v n2=%v", r4n1.tstz, r4n2.tstz)
 	assert.Equal(t, r4n1.timeV, r4n2.timeV, "row 4 col_time mismatch")
 	assert.Equal(t, r4n1.timetz, r4n2.timetz, "row 4 col_timetz mismatch")
 
 	// ----- Verify: row 1 (baseline) is still identical -----
-	r1n1 := readRow(pgCluster.Node1Pool, 1)
-	r1n2 := readRow(pgCluster.Node2Pool, 1)
+	r1n1 := readRow(env.N1Pool, 1)
+	r1n2 := readRow(env.N2Pool, 1)
 	assert.True(t, r1n1.ts.Equal(r1n2.ts), "row 1 col_ts: n1=%v n2=%v", r1n1.ts, r1n2.ts)
 	assert.True(t, r1n1.tstz.Equal(r1n2.tstz), "row 1 col_tstz: n1=%v n2=%v", r1n1.tstz, r1n2.tstz)
 	assert.Equal(t, r1n1.timeV, r1n2.timeV, "row 1 col_time mismatch")
 	assert.Equal(t, r1n1.timetz, r1n2.timetz, "row 1 col_timetz mismatch")
+}
+
+func TestTableRepair_TimestampAndTimeTypes(t *testing.T) {
+	testTableRepair_TimestampAndTimeTypes(t, newSpockEnv())
 }
 
 // testTableRepair_FixNulls_BidirectionalUpdate tests that when both nodes have NULLs
@@ -2070,7 +2080,7 @@ func TestTableRepair_MixedOps_PreserveOrigin(t *testing.T) {
 	log.Println("  - UPDATE: 2 modified rows corrected with preserved origin/timestamp")
 }
 
-// TestTableRepair_LargeBigintPK verifies that table repair correctly handles
+// testTableRepair_LargeBigintPK verifies that table repair correctly handles
 // bigint primary keys whose values exceed float64's exact integer range (2^53).
 // Before the fix, JSON deserialization converted these to float64, silently
 // truncating the PK values and causing:
@@ -2080,7 +2090,7 @@ func TestTableRepair_MixedOps_PreserveOrigin(t *testing.T) {
 //
 // The test uses PKs that are adjacent integers above 2^53, which all collapse
 // to the same float64 value without the json.Number fix.
-func TestTableRepair_LargeBigintPK(t *testing.T) {
+func testTableRepair_LargeBigintPK(t *testing.T, env *testEnv) {
 	ctx := context.Background()
 	tableName := "bigint_pk_repair"
 	qualifiedTableName := fmt.Sprintf("%s.%s", testSchema, tableName)
@@ -2103,19 +2113,23 @@ CREATE TABLE IF NOT EXISTS %s.%s (
     amount NUMERIC(20, 4)
 );`, testSchema, testSchema, tableName)
 
-	for i, pool := range []*pgxpool.Pool{pgCluster.Node1Pool, pgCluster.Node2Pool} {
-		nodeName := pgCluster.ClusterNodes[i]["Name"].(string)
+	for i, pool := range []*pgxpool.Pool{env.N1Pool, env.N2Pool} {
+		nodeName := env.ClusterNodes[i]["Name"].(string)
 		_, err := pool.Exec(ctx, createTableSQL)
 		require.NoErrorf(t, err, "Failed to create table on %s", nodeName)
 		_, err = pool.Exec(ctx, fmt.Sprintf("TRUNCATE TABLE %s CASCADE", qualifiedTableName))
 		require.NoErrorf(t, err, "Failed to truncate table on %s", nodeName)
-		_, err = pool.Exec(ctx, fmt.Sprintf(`SELECT spock.repset_add_table('default', '%s');`, qualifiedTableName))
-		require.NoErrorf(t, err, "Failed to add table to repset on %s", nodeName)
+		if env.HasSpock {
+			_, err = pool.Exec(ctx, fmt.Sprintf(`SELECT spock.repset_add_table('default', '%s');`, qualifiedTableName))
+			require.NoErrorf(t, err, "Failed to add table to repset on %s", nodeName)
+		}
 	}
 
 	t.Cleanup(func() {
-		_, _ = pgCluster.Node1Pool.Exec(ctx, fmt.Sprintf(`SELECT spock.repset_remove_table('default', '%s');`, qualifiedTableName))
-		for _, pool := range []*pgxpool.Pool{pgCluster.Node1Pool, pgCluster.Node2Pool} {
+		if env.HasSpock {
+			_, _ = env.N1Pool.Exec(ctx, fmt.Sprintf(`SELECT spock.repset_remove_table('default', '%s');`, qualifiedTableName))
+		}
+		for _, pool := range []*pgxpool.Pool{env.N1Pool, env.N2Pool} {
 			_, _ = pool.Exec(ctx, fmt.Sprintf("DROP TABLE IF EXISTS %s CASCADE", qualifiedTableName))
 		}
 		files, _ := filepath.Glob("*_diffs-*.json")
@@ -2129,36 +2143,33 @@ CREATE TABLE IF NOT EXISTS %s.%s (
 		require.NoError(t, err)
 		defer func() { _ = tx.Rollback(ctx) }()
 
-		_, err = tx.Exec(ctx, "SELECT spock.repair_mode(true)")
-		require.NoError(t, err)
+		env.withRepairModeTx(t, ctx, tx, func() {
+			_, err = tx.Exec(ctx,
+				fmt.Sprintf("INSERT INTO %s (id, data, amount) VALUES ($1, $2, $3::numeric)", qualifiedTableName),
+				id, data, amount)
+			require.NoError(t, err)
+		})
 
-		_, err = tx.Exec(ctx,
-			fmt.Sprintf("INSERT INTO %s (id, data, amount) VALUES ($1, $2, $3::numeric)", qualifiedTableName),
-			id, data, amount)
-		require.NoError(t, err)
-
-		_, err = tx.Exec(ctx, "SELECT spock.repair_mode(false)")
-		require.NoError(t, err)
 		require.NoError(t, tx.Commit(ctx))
 	}
 
 	// ---- Set up divergence ----
 	// Common row on both nodes (same data)
-	insertRow(pgCluster.Node1Pool, collisionPKs[0], "common_row", "1000000.1234")
-	insertRow(pgCluster.Node2Pool, collisionPKs[0], "common_row", "1000000.1234")
+	insertRow(env.N1Pool, collisionPKs[0], "common_row", "1000000.1234")
+	insertRow(env.N2Pool, collisionPKs[0], "common_row", "1000000.1234")
 
 	// Rows only on node1 (should be deleted when node2 is source of truth)
-	insertRow(pgCluster.Node1Pool, collisionPKs[1], "n1_only_289", "2000000.5678")
+	insertRow(env.N1Pool, collisionPKs[1], "n1_only_289", "2000000.5678")
 
 	// Rows only on node2 (should be inserted into node1)
-	insertRow(pgCluster.Node2Pool, collisionPKs[2], "n2_only_290", "3000000.9012")
+	insertRow(env.N2Pool, collisionPKs[2], "n2_only_290", "3000000.9012")
 
 	// Modified row: same PK on both nodes, different data
-	insertRow(pgCluster.Node1Pool, collisionPKs[3], "old_data_291", "4000000.0001")
-	insertRow(pgCluster.Node2Pool, collisionPKs[3], "new_data_291", "4000000.9999")
+	insertRow(env.N1Pool, collisionPKs[3], "old_data_291", "4000000.0001")
+	insertRow(env.N2Pool, collisionPKs[3], "new_data_291", "4000000.9999")
 
 	// ---- Run diff ----
-	diffFile := runTableDiff(t, qualifiedTableName, []string{serviceN1, serviceN2})
+	diffFile := env.runTableDiff(t, qualifiedTableName, []string{env.ServiceN1, env.ServiceN2})
 
 	// Verify diff found the expected number of differences:
 	// - collisionPKs[1]: node1-only → 1 diff
@@ -2180,19 +2191,19 @@ CREATE TABLE IF NOT EXISTS %s.%s (
 	assert.Equal(t, 3, totalDiffs, "Expected exactly 3 differences before repair")
 
 	// ---- Run repair (node2 is source of truth) ----
-	repairTask := newTestTableRepairTask(serviceN2, qualifiedTableName, diffFile)
+	repairTask := env.newTableRepairTask(env.ServiceN2, qualifiedTableName, diffFile)
 	err = repairTask.Run(false)
 	require.NoError(t, err, "Table repair failed")
 
 	// ---- Verify repair ----
 
 	// 1. Tables should now match (zero diffs)
-	assertNoTableDiff(t, qualifiedTableName)
+	env.assertNoTableDiff(t, qualifiedTableName)
 
 	// 2. Row counts should match: 3 rows (common + n2_only_290 + modified_291)
 	//    collisionPKs[1] (n1_only_289) should have been deleted from node1
-	count1 := getTableCount(t, ctx, pgCluster.Node1Pool, qualifiedTableName)
-	count2 := getTableCount(t, ctx, pgCluster.Node2Pool, qualifiedTableName)
+	count1 := getTableCount(t, ctx, env.N1Pool, qualifiedTableName)
+	count2 := getTableCount(t, ctx, env.N2Pool, qualifiedTableName)
 	assert.Equal(t, count1, count2, "Row counts should match after repair")
 	assert.Equal(t, 3, count1, "Expected 3 rows after repair")
 
@@ -2209,26 +2220,30 @@ CREATE TABLE IF NOT EXISTS %s.%s (
 	}
 
 	// Common row should be unchanged
-	verifyRow(pgCluster.Node1Pool, collisionPKs[0], "common_row", "1000000.1234")
+	verifyRow(env.N1Pool, collisionPKs[0], "common_row", "1000000.1234")
 
 	// Node1-only row should have been deleted
 	var deletedCount int
-	err = pgCluster.Node1Pool.QueryRow(ctx,
+	err = env.N1Pool.QueryRow(ctx,
 		fmt.Sprintf("SELECT count(*) FROM %s WHERE id = $1", qualifiedTableName), collisionPKs[1]).
 		Scan(&deletedCount)
 	require.NoError(t, err)
 	assert.Equal(t, 0, deletedCount, "Node1-only row (PK %d) should have been deleted", collisionPKs[1])
 
 	// Node2-only row should have been inserted into node1
-	verifyRow(pgCluster.Node1Pool, collisionPKs[2], "n2_only_290", "3000000.9012")
+	verifyRow(env.N1Pool, collisionPKs[2], "n2_only_290", "3000000.9012")
 
 	// Modified row should have node2's version on node1
-	verifyRow(pgCluster.Node1Pool, collisionPKs[3], "new_data_291", "4000000.9999")
+	verifyRow(env.N1Pool, collisionPKs[3], "new_data_291", "4000000.9999")
 
-	log.Println("TestTableRepair_LargeBigintPK PASSED")
+	log.Println("testTableRepair_LargeBigintPK PASSED")
 	log.Println("  - 4 adjacent PKs above 2^53 that collide under float64")
 	log.Println("  - DELETE: node1-only row correctly removed")
 	log.Println("  - INSERT: node2-only row correctly added to node1")
 	log.Println("  - UPDATE: modified row correctly updated on node1")
 	log.Println("  - All PKs preserved with exact precision (no float64 truncation)")
+}
+
+func TestTableRepair_LargeBigintPK(t *testing.T) {
+	testTableRepair_LargeBigintPK(t, newSpockEnv())
 }
