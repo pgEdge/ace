@@ -1554,7 +1554,7 @@ var SQLTemplates = Templates{
 		FROM pg_catalog.pg_replication_origin_status ros
 		JOIN pg_catalog.pg_replication_origin ro ON ro.roident = ros.local_id
 		JOIN pg_catalog.pg_subscription s ON ro.roname LIKE 'pg_%' || s.oid::text
-		WHERE s.subname LIKE '%' || $1 || '%'
+		WHERE s.subname ~ ('\m' || $1 || '\M')
 			AND ros.remote_lsn IS NOT NULL
 		LIMIT 1
 	`)),
@@ -1562,7 +1562,7 @@ var SQLTemplates = Templates{
 		SELECT rs.confirmed_flush_lsn::text
 		FROM pg_catalog.pg_replication_slots rs
 		JOIN pg_catalog.pg_subscription s ON rs.slot_name = s.subslotname
-		WHERE s.subname LIKE '%' || $1 || '%'
+		WHERE s.subname ~ ('\m' || $1 || '\M')
 			AND rs.confirmed_flush_lsn IS NOT NULL
 		ORDER BY rs.confirmed_flush_lsn DESC
 		LIMIT 1
