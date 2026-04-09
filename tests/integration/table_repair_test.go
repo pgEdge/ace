@@ -37,9 +37,9 @@ import (
 // - 2 rows only on node1 (IDs 1001, 1002)
 // - 2 rows only on node2 (IDs 2001, 2002)
 // - 2 common rows modified on node2 (IDs 1, 2)
-func setupDivergence(t *testing.T, ctx context.Context, qualifiedTableName string, composite bool) {
+func setupDivergence(t *testing.T, ctx context.Context, qualifiedTableName string) {
 	t.Helper()
-	newSpockEnv().setupDivergence(t, ctx, qualifiedTableName, composite)
+	newSpockEnv().setupDivergence(t, ctx, qualifiedTableName)
 }
 
 // runTableDiff executes a table-diff task and returns the path to the latest diff file.
@@ -169,7 +169,7 @@ func testTableRepair_UnidirectionalDefault(t *testing.T, env *testEnv) {
 			tc.setup()
 			t.Cleanup(tc.teardown)
 
-			env.setupDivergence(t, ctx, qualifiedTableName, tc.composite)
+			env.setupDivergence(t, ctx, qualifiedTableName)
 			t.Cleanup(func() {
 				env.repairTable(t, qualifiedTableName, env.ServiceN1)
 			})
@@ -235,7 +235,7 @@ func testTableRepair_InsertOnly(t *testing.T, env *testEnv) {
 			tc.setup()
 			t.Cleanup(tc.teardown)
 
-			env.setupDivergence(t, ctx, qualifiedTableName, tc.composite)
+			env.setupDivergence(t, ctx, qualifiedTableName)
 			t.Cleanup(func() {
 				env.repairTable(t, qualifiedTableName, env.ServiceN1)
 			})
@@ -311,7 +311,7 @@ func testTableRepair_UpsertOnly(t *testing.T, env *testEnv) {
 			tc.setup()
 			t.Cleanup(tc.teardown)
 
-			env.setupDivergence(t, ctx, qualifiedTableName, tc.composite)
+			env.setupDivergence(t, ctx, qualifiedTableName)
 			t.Cleanup(func() {
 				env.repairTable(t, qualifiedTableName, env.ServiceN1)
 			})
@@ -461,7 +461,7 @@ func testTableRepair_DryRun(t *testing.T, env *testEnv) {
 			tc.setup()
 			t.Cleanup(tc.teardown)
 
-			env.setupDivergence(t, ctx, qualifiedTableName, tc.composite)
+			env.setupDivergence(t, ctx, qualifiedTableName)
 			t.Cleanup(func() {
 				env.repairTable(t, qualifiedTableName, env.ServiceN1)
 			})
@@ -532,7 +532,7 @@ func testTableRepair_GenerateReport(t *testing.T, env *testEnv) {
 			})
 			os.RemoveAll(reportDir)
 
-			env.setupDivergence(t, ctx, qualifiedTableName, tc.composite)
+			env.setupDivergence(t, ctx, qualifiedTableName)
 
 			diffFile := env.runTableDiff(t, qualifiedTableName, []string{env.ServiceN1, env.ServiceN2})
 			repairTask := env.newTableRepairTask(env.ServiceN1, qualifiedTableName, diffFile)

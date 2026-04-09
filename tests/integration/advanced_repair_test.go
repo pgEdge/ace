@@ -30,7 +30,7 @@ func TestAdvancedRepairPlan_MixedSelectorsAndActions(t *testing.T) {
 	ctx := context.Background()
 	qualifiedTableName := "public.customers"
 
-	setupDivergence(t, ctx, qualifiedTableName, false)
+	setupDivergence(t, ctx, qualifiedTableName)
 	diffFile := runTableDiff(t, qualifiedTableName, []string{serviceN1, serviceN2})
 
 	plan := `
@@ -87,7 +87,7 @@ func TestAdvancedRepairPlan_DeleteAndWhenPredicate(t *testing.T) {
 	ctx := context.Background()
 	qualifiedTableName := "public.customers"
 
-	setupDivergence(t, ctx, qualifiedTableName, false)
+	setupDivergence(t, ctx, qualifiedTableName)
 	diffFile := runTableDiff(t, qualifiedTableName, []string{serviceN1, serviceN2})
 
 	plan := `
@@ -140,7 +140,7 @@ func TestAdvancedRepairPlan_StaleRepairsSkipped(t *testing.T) {
 	ctx := context.Background()
 	qualifiedTableName := "public.customers"
 
-	setupDivergence(t, ctx, qualifiedTableName, false)
+	setupDivergence(t, ctx, qualifiedTableName)
 	diffFile := runTableDiff(t, qualifiedTableName, []string{serviceN1, serviceN2})
 
 	beforeLogs := listStaleSkipLogs(t)
