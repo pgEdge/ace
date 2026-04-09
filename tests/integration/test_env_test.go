@@ -199,7 +199,7 @@ func (e *testEnv) newTableRepairTask(sourceOfTruthNode, qualifiedTableName, diff
 // - 2 rows only on n1 (index 1001, 1002)
 // - 2 rows only on n2 (index 2001, 2002)
 // - 2 common rows modified on n2 (index 1, 2)
-func (e *testEnv) setupDivergence(t *testing.T, ctx context.Context, qualifiedTableName string, composite bool) {
+func (e *testEnv) setupDivergence(t *testing.T, ctx context.Context, qualifiedTableName string) {
 	t.Helper()
 	log.Println("Setting up data divergence for", qualifiedTableName)
 

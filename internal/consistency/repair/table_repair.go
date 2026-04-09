@@ -163,25 +163,25 @@ func (t *TableRepairTask) setRole(tx pgx.Tx, nodeName string) error {
 }
 
 // isSpockAvailable returns whether spock is installed on the given node,
-// detecting lazily on first check per node.
-func (t *TableRepairTask) isSpockAvailable(nodeName string) bool {
+// detecting lazily on first check per node. Returns an error if detection
+// fails so callers don't silently fall back to the wrong repair mode.
+func (t *TableRepairTask) isSpockAvailable(nodeName string) (bool, error) {
 	if t.spockPerNode == nil {
 		t.spockPerNode = make(map[string]bool)
 	}
 	if _, checked := t.spockPerNode[nodeName]; !checked {
 		pool := t.Pools[nodeName]
 		if pool == nil {
-			return false
+			return false, fmt.Errorf("no connection pool for node %s", nodeName)
 		}
 		spockInstalled, err := queries.CheckSpockInstalled(t.Ctx, pool)
 		if err != nil {
-			logger.Warn("failed to detect spock extension on %s: %v", nodeName, err)
-			return false
+			return false, fmt.Errorf("failed to detect spock extension on %s: %w", nodeName, err)
 		}
 		t.spockPerNode[nodeName] = spockInstalled
 		logger.Info("spock extension on %s: %v", nodeName, spockInstalled)
 	}
-	return t.spockPerNode[nodeName]
+	return t.spockPerNode[nodeName], nil
 }
 
 // setupTransactionMode enables spock repair mode (when available), sets the session replication
@@ -189,7 +189,11 @@ func (t *TableRepairTask) isSpockAvailable(nodeName string) bool {
 // Returns true if spock repair mode was activated, false otherwise.
 func (t *TableRepairTask) setupTransactionMode(tx pgx.Tx, nodeName string) (bool, error) {
 	spockRepairModeActive := false
-	if t.isSpockAvailable(nodeName) {
+	spock, err := t.isSpockAvailable(nodeName)
+	if err != nil {
+		return false, err
+	}
+	if spock {
 		if _, err := tx.Exec(t.Ctx, "SELECT spock.repair_mode(true)"); err != nil {
 			return false, fmt.Errorf("enabling spock.repair_mode(true) on %s: %w", nodeName, err)
 		}
@@ -197,7 +201,6 @@ func (t *TableRepairTask) setupTransactionMode(tx pgx.Tx, nodeName string) (bool
 		spockRepairModeActive = true
 	}
 
-	var err error
 	if t.FireTriggers {
 		_, err = tx.Exec(t.Ctx, "SET session_replication_role = 'local'")
 	} else {
@@ -217,10 +220,14 @@ func (t *TableRepairTask) setupTransactionMode(tx pgx.Tx, nodeName string) (bool
 // disableSpockRepairMode disables spock repair mode on the given transaction.
 // When spock is not available, this is a no-op.
 func (t *TableRepairTask) disableSpockRepairMode(tx pgx.Tx, nodeName string) error {
-	if !t.isSpockAvailable(nodeName) {
+	spock, err := t.isSpockAvailable(nodeName)
+	if err != nil {
+		return err
+	}
+	if !spock {
 		return nil
 	}
-	_, err := tx.Exec(t.Ctx, "SELECT spock.repair_mode(false)")
+	_, err = tx.Exec(t.Ctx, "SELECT spock.repair_mode(false)")
 	if err != nil {
 		return fmt.Errorf("disabling spock.repair_mode(false) on %s: %w", nodeName, err)
 	}
@@ -2918,7 +2925,10 @@ func calculateRepairSetsWithSourceOfTruth(task *TableRepairTask) (map[string]map
 }
 
 func (t *TableRepairTask) fetchLSNsForNode(pool *pgxpool.Pool, failedNode, survivor string) (originLSN *uint64, slotLSN *uint64, err error) {
-	spock := t.isSpockAvailable(survivor)
+	spock, err := t.isSpockAvailable(survivor)
+	if err != nil {
+		return nil, nil, fmt.Errorf("detecting spock on %s: %w", survivor, err)
+	}
 	var originStr *string
 	if spock {
 		originStr, err = queries.GetSpockOriginLSNForNode(t.Ctx, pool, failedNode)
