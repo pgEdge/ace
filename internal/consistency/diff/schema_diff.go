@@ -28,6 +28,7 @@ import (
 	"github.com/pgedge/ace/db/queries"
 	"github.com/pgedge/ace/internal/infra/db"
 	utils "github.com/pgedge/ace/pkg/common"
+	"github.com/pgedge/ace/pkg/config"
 	"github.com/pgedge/ace/pkg/logger"
 	"github.com/pgedge/ace/pkg/taskstore"
 	"github.com/pgedge/ace/pkg/types"
@@ -178,6 +179,10 @@ func (c *SchemaDiffCmd) Validate() error {
 		return fmt.Errorf("schema-diff needs at least two nodes to compare")
 	}
 
+	cfg := config.Get()
+	if c.MaxConnections == 0 && cfg != nil {
+		c.MaxConnections = cfg.TableDiff.MaxConnections
+	}
 	if c.MaxConnections < 0 {
 		return fmt.Errorf("max_connections must be >= 1 (or 0 to derive from concurrency factor)")
 	}
@@ -220,7 +225,7 @@ func (c *SchemaDiffCmd) RunChecks(skipValidation bool) error {
 			}
 		}
 
-		pool, err := auth.GetClusterNodeConnection(c.Ctx, nodeWithDBInfo, auth.ConnectionOptions{})
+		pool, err := auth.GetClusterNodeConnection(c.Ctx, nodeWithDBInfo, auth.ConnectionOptions{PoolSize: c.MaxConnections})
 		if err != nil {
 			return fmt.Errorf("could not connect to node %s: %w", nodeName, err)
 		}
@@ -300,7 +305,7 @@ func (task *SchemaDiffCmd) schemaObjectDiff() error {
 			}
 		}
 
-		pool, err := auth.GetClusterNodeConnection(task.Ctx, nodeWithDBInfo, auth.ConnectionOptions{})
+		pool, err := auth.GetClusterNodeConnection(task.Ctx, nodeWithDBInfo, auth.ConnectionOptions{PoolSize: task.MaxConnections})
 		if err != nil {
 			logger.Warn("could not connect to node %s: %v. Skipping.", nodeName, err)
 			continue

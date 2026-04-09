@@ -27,6 +27,7 @@ import (
 	"github.com/pgedge/ace/db/queries"
 	"github.com/pgedge/ace/internal/infra/db"
 	utils "github.com/pgedge/ace/pkg/common"
+	"github.com/pgedge/ace/pkg/config"
 	"github.com/pgedge/ace/pkg/logger"
 	"github.com/pgedge/ace/pkg/taskstore"
 	"github.com/pgedge/ace/pkg/types"
@@ -88,7 +89,7 @@ func NewRepsetDiffTask() *RepsetDiffCmd {
 }
 
 func (c *RepsetDiffCmd) connOpts() auth.ConnectionOptions {
-	return auth.ConnectionOptions{}
+	return auth.ConnectionOptions{PoolSize: c.MaxConnections}
 }
 
 func (c *RepsetDiffCmd) parseSkipList() error {
@@ -230,6 +231,10 @@ func (c *RepsetDiffCmd) Validate() error {
 	}
 	if c.RepsetName == "" {
 		return fmt.Errorf("repset name is required")
+	}
+	cfg := config.Get()
+	if c.MaxConnections == 0 && cfg != nil {
+		c.MaxConnections = cfg.TableDiff.MaxConnections
 	}
 	if c.MaxConnections < 0 {
 		return fmt.Errorf("max_connections must be >= 1 (or 0 to derive from concurrency factor)")
