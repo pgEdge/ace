@@ -69,9 +69,17 @@ func (m *Manager) Run(ctx context.Context) error {
 
 		switch {
 		case job.Cron != "":
-			gJob, err = m.scheduler.NewJob(gocron.CronJob(job.Cron, false), gocron.NewTask(runFn))
+			gJob, err = m.scheduler.NewJob(
+				gocron.CronJob(job.Cron, false),
+				gocron.NewTask(runFn),
+				gocron.WithSingletonMode(gocron.LimitModeReschedule),
+			)
 		case job.Frequency > 0:
-			gJob, err = m.scheduler.NewJob(gocron.DurationJob(job.Frequency), gocron.NewTask(runFn))
+			gJob, err = m.scheduler.NewJob(
+				gocron.DurationJob(job.Frequency),
+				gocron.NewTask(runFn),
+				gocron.WithSingletonMode(gocron.LimitModeReschedule),
+			)
 		default:
 			return fmt.Errorf("scheduler: job %q requires either frequency or cron", job.Name)
 		}
