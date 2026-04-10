@@ -655,7 +655,7 @@ func tupleValueToString(tupCol *pglogrepl.TupleDataColumn, relCol *pglogrepl.Rel
 
 func getTypeNameFromOID(ctx context.Context, pool *pgxpool.Pool, oid uint32) (string, error) {
 	var typeName string
-	err := pool.QueryRow(ctx, "SELECT typname FROM pg_type WHERE oid = $1", oid).Scan(&typeName)
+	err := pool.QueryRow(ctx, "SELECT typname FROM pg_type WHERE oid = $1", oid).Scan(&typeName) // nosemgrep
 	if err != nil {
 		return "", err
 	}

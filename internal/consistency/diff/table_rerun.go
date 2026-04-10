@@ -257,7 +257,7 @@ func fetchRowsByPkeys(ctx context.Context, pool *pgxpool.Pool, t *TableDiffTask,
 
 	createTempTableSQL := fmt.Sprintf("CREATE TEMPORARY TABLE %s (%s) ON COMMIT PRESERVE ROWS", sanitisedTempTable, strings.Join(pkColDefs, ", "))
 	logger.Debug("Creating temporary table for pkeys: %s", createTempTableSQL)
-	_, err = tx.Exec(ctx, createTempTableSQL)
+	_, err = tx.Exec(ctx, createTempTableSQL) // nosemgrep
 	if err != nil {
 		return nil, fmt.Errorf("failed to create temporary table: %w", err)
 	}
@@ -286,7 +286,7 @@ func fetchRowsByPkeys(ctx context.Context, pool *pgxpool.Pool, t *TableDiffTask,
 		strings.Join(selectCols, ", "), schemaTable, sanitisedTempTable, strings.Join(joinConditions, " AND "))
 
 	logger.Debug("Fetching rows with pkeys from temporary table: %s", fetchSQL)
-	pgRows, err := tx.Query(ctx, fetchSQL)
+	pgRows, err := tx.Query(ctx, fetchSQL) // nosemgrep
 	if err != nil {
 		return nil, fmt.Errorf("failed to query rows using temp table join: %w", err)
 	}

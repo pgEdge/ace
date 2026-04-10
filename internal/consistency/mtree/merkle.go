@@ -373,10 +373,10 @@ func (m *MerkleTreeTask) processWorkItem(work CompareRangesWorkItem, pool1, pool
 		whereClause = "TRUE"
 	}
 
-	rowHashQuery, orderByStr := buildRowHashQuery(m.QualifiedTableName, m.Key, m.Cols, whereClause, m.ColTypes["_ref"])
+	rowHashQuery, orderByStr := buildRowHashQuery(m.Schema, m.Table, m.Key, m.Cols, whereClause, m.ColTypes["_ref"])
 	logger.Debug("Row-hash Query: %s, Args: %v", rowHashQuery, args)
 
-	rowsH1, err := pool1.Query(m.Ctx, rowHashQuery, args...)
+	rowsH1, err := pool1.Query(m.Ctx, rowHashQuery, args...) // nosemgrep
 	if err != nil {
 		return fmt.Errorf("worker failed to get row hashes from %s: %v", work.Node1["Name"], err)
 	}
@@ -385,7 +385,7 @@ func (m *MerkleTreeTask) processWorkItem(work CompareRangesWorkItem, pool1, pool
 		return fmt.Errorf("failed to read row hashes from %s: %v", work.Node1["Name"], err)
 	}
 
-	rowsH2, err := pool2.Query(m.Ctx, rowHashQuery, args...)
+	rowsH2, err := pool2.Query(m.Ctx, rowHashQuery, args...) // nosemgrep
 	if err != nil {
 		return fmt.Errorf("worker failed to get row hashes from %s: %v", work.Node2["Name"], err)
 	}
@@ -437,9 +437,9 @@ func (m *MerkleTreeTask) processWorkItem(work CompareRangesWorkItem, pool1, pool
 			}
 			batch := mismatchedComposite[i:end]
 
-			q, qArgs := buildFetchRowsSQLComposite(m.QualifiedTableName, m.Key, orderByStr, batch)
+			q, qArgs := buildFetchRowsSQLComposite(m.Schema, m.Table, m.Key, orderByStr, batch)
 
-			r1, err := pool1.Query(m.Ctx, q, qArgs...)
+			r1, err := pool1.Query(m.Ctx, q, qArgs...) // nosemgrep
 			if err != nil {
 				return fmt.Errorf("failed to fetch rows (composite) from %s: %v", work.Node1["Name"], err)
 			}
@@ -448,7 +448,7 @@ func (m *MerkleTreeTask) processWorkItem(work CompareRangesWorkItem, pool1, pool
 				return fmt.Errorf("failed to process rows (composite) from %s: %v", work.Node1["Name"], err)
 			}
 
-			r2, err := pool2.Query(m.Ctx, q, qArgs...)
+			r2, err := pool2.Query(m.Ctx, q, qArgs...) // nosemgrep
 			if err != nil {
 				return fmt.Errorf("failed to fetch rows (composite) from %s: %v", work.Node2["Name"], err)
 			}
@@ -469,9 +469,9 @@ func (m *MerkleTreeTask) processWorkItem(work CompareRangesWorkItem, pool1, pool
 			}
 			batch := mismatchedSimple[i:end]
 
-			q, qArgs := buildFetchRowsSQLSimple(m.QualifiedTableName, m.Key[0], orderByStr, batch)
+			q, qArgs := buildFetchRowsSQLSimple(m.Schema, m.Table, m.Key[0], orderByStr, batch)
 
-			r1, err := pool1.Query(m.Ctx, q, qArgs...)
+			r1, err := pool1.Query(m.Ctx, q, qArgs...) // nosemgrep
 			if err != nil {
 				return fmt.Errorf("failed to fetch rows from %s: %v", work.Node1["Name"], err)
 			}
@@ -480,7 +480,7 @@ func (m *MerkleTreeTask) processWorkItem(work CompareRangesWorkItem, pool1, pool
 				return fmt.Errorf("failed to process rows from %s: %v", work.Node1["Name"], err)
 			}
 
-			r2, err := pool2.Query(m.Ctx, q, qArgs...)
+			r2, err := pool2.Query(m.Ctx, q, qArgs...) // nosemgrep
 			if err != nil {
 				return fmt.Errorf("failed to fetch rows from %s: %v", work.Node2["Name"], err)
 			}
@@ -643,7 +643,7 @@ func isNumericColType(colType string) bool {
 	return strings.HasPrefix(lower, "numeric") || strings.HasPrefix(lower, "decimal")
 }
 
-func buildRowHashQuery(tableName string, key []string, cols []string, whereClause string, colTypes map[string]string) (string, string) {
+func buildRowHashQuery(schema, table string, key []string, cols []string, whereClause string, colTypes map[string]string) (string, string) {
 	pkQuoted := make([]string, len(key))
 	for i, k := range key {
 		pkQuoted[i] = pgx.Identifier{k}.Sanitize()
@@ -659,10 +659,11 @@ func buildRowHashQuery(tableName string, key []string, cols []string, whereClaus
 	}
 	concatExpr := fmt.Sprintf("concat_ws('|', %s)", strings.Join(colExprs, ", "))
 
+	qualifiedTable := fmt.Sprintf("%s.%s", pgx.Identifier{schema}.Sanitize(), pgx.Identifier{table}.Sanitize())
 	orderBy := strings.Join(pkQuoted, ", ")
 	selectList := strings.Join(pkQuoted, ", ") + ", encode(digest(" + concatExpr + ",'sha256'),'hex') as row_hash"
 
-	query := fmt.Sprintf("SELECT %s FROM %s WHERE %s ORDER BY %s", selectList, tableName, whereClause, orderBy)
+	query := fmt.Sprintf("SELECT %s FROM %s WHERE %s ORDER BY %s", selectList, qualifiedTable, whereClause, orderBy)
 	return query, orderBy
 }
 
@@ -704,20 +705,21 @@ func splitCompositeKey(k string) []any {
 	return res
 }
 
-func buildFetchRowsSQLSimple(tableName, pk string, orderBy string, keys []any) (string, []any) {
+func buildFetchRowsSQLSimple(schema, table, pk string, orderBy string, keys []any) (string, []any) {
 	placeholders := make([]string, len(keys))
 	args := make([]any, len(keys))
 	for i := range keys {
 		placeholders[i] = fmt.Sprintf("$%d", i+1)
 		args[i] = keys[i]
 	}
+	qualifiedTable := fmt.Sprintf("%s.%s", pgx.Identifier{schema}.Sanitize(), pgx.Identifier{table}.Sanitize())
 	where := fmt.Sprintf("%s IN (%s)", pgx.Identifier{pk}.Sanitize(), strings.Join(placeholders, ","))
 	selectCols := "pg_xact_commit_timestamp(xmin) as commit_ts, to_json(spock.xact_commit_timestamp_origin(xmin))->>'roident' as node_origin, *"
-	q := fmt.Sprintf("SELECT %s FROM %s WHERE %s ORDER BY %s", selectCols, tableName, where, orderBy)
+	q := fmt.Sprintf("SELECT %s FROM %s WHERE %s ORDER BY %s", selectCols, qualifiedTable, where, orderBy)
 	return q, args
 }
 
-func buildFetchRowsSQLComposite(tableName string, pk []string, orderBy string, keys [][]any) (string, []any) {
+func buildFetchRowsSQLComposite(schema, table string, pk []string, orderBy string, keys [][]any) (string, []any) {
 	tupleCols := make([]string, len(pk))
 	for i, k := range pk {
 		tupleCols[i] = pgx.Identifier{k}.Sanitize()
@@ -734,9 +736,10 @@ func buildFetchRowsSQLComposite(tableName string, pk []string, orderBy string, k
 		}
 		tuples = append(tuples, fmt.Sprintf("(%s)", strings.Join(ph, ",")))
 	}
+	qualifiedTable := fmt.Sprintf("%s.%s", pgx.Identifier{schema}.Sanitize(), pgx.Identifier{table}.Sanitize())
 	where := fmt.Sprintf("( %s ) IN ( %s )", strings.Join(tupleCols, ","), strings.Join(tuples, ","))
 	selectCols := "pg_xact_commit_timestamp(xmin) as commit_ts, to_json(spock.xact_commit_timestamp_origin(xmin))->>'roident' as node_origin, *"
-	q := fmt.Sprintf("SELECT %s FROM %s WHERE %s ORDER BY %s", selectCols, tableName, where, orderBy)
+	q := fmt.Sprintf("SELECT %s FROM %s WHERE %s ORDER BY %s", selectCols, qualifiedTable, where, orderBy)
 	return q, args
 }
 

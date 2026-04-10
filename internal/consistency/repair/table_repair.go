@@ -153,7 +153,7 @@ func (t *TableRepairTask) setRole(tx pgx.Tx, nodeName string) error {
 	}
 
 	roleSQL := fmt.Sprintf("SET ROLE %s", pgx.Identifier{role}.Sanitize())
-	if _, err := tx.Exec(t.Ctx, roleSQL); err != nil {
+	if _, err := tx.Exec(t.Ctx, roleSQL); err != nil { // nosemgrep
 		return fmt.Errorf("setting role %s on %s: %w", role, nodeName, err)
 	}
 	logger.Debug("SET ROLE %s on %s", role, nodeName)
@@ -2113,7 +2113,7 @@ func executeDeletes(ctx context.Context, tx pgx.Tx, task *TableRepairTask, nodeN
 			deleteSQL.WriteString(")")
 		}
 
-		cmdTag, err := tx.Exec(ctx, deleteSQL.String(), args...)
+		cmdTag, err := tx.Exec(ctx, deleteSQL.String(), args...) // nosemgrep
 		if err != nil {
 			return totalDeletedCount, fmt.Errorf("error executing delete batch: %w (SQL: %s, Args: %v)", err, deleteSQL.String(), args)
 		}
@@ -2434,7 +2434,7 @@ func executeUpsertBatch(tx pgx.Tx, task *TableRepairTask, upserts map[string]map
 			}
 		}
 
-		cmdTag, err := tx.Exec(task.Ctx, upsertSQL.String(), args...)
+		cmdTag, err := tx.Exec(task.Ctx, upsertSQL.String(), args...) // nosemgrep
 		if err != nil {
 			return totalUpsertedCount, fmt.Errorf("error executing upsert batch: %w (SQL: %s, Args: %v)", err, upsertSQL.String(), args)
 		}

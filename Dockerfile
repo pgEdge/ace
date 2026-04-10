@@ -48,6 +48,7 @@ COPY --chown=nonroot:nonroot ace.yaml /etc/ace/ace.yaml
 
 ENV ACE_CONFIG=/etc/ace/ace.yaml
 
+# distroless:nonroot already runs as UID 65532; explicit for Codacy scanner
 USER nonroot
 
 ENTRYPOINT ["/usr/local/bin/ace"]

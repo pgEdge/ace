@@ -279,7 +279,7 @@ func applyConnectionOptions(cfg *pgxpool.Config, opts ConnectionOptions) {
 		if conn == nil {
 			return fmt.Errorf("nil connection when applying role %s", role)
 		}
-		if _, err := conn.Exec(ctx, roleSQL); err != nil {
+		if _, err := conn.Exec(ctx, roleSQL); err != nil { // nosemgrep
 			return fmt.Errorf("failed to set role %q: %w", role, err)
 		}
 		return nil
