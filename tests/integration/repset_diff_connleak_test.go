@@ -384,7 +384,10 @@ func TestConnLeak_RunChecksLeakAccumulation(t *testing.T) {
 		task.Quiet = true
 		task.SkipDBUpdate = true
 
-		_ = diff.RepsetDiff(task) // errors expected from bad tables
+		err := diff.RepsetDiff(task)
+		require.Error(t, err, "run %d: expected failures from bad tables", run)
+		require.Contains(t, err.Error(), "table(s) failed",
+			"run %d: bad tables should fail RunChecks", run)
 
 		// Give pg_stat_activity a moment to settle.
 		time.Sleep(200 * time.Millisecond)
