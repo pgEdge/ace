@@ -877,68 +877,72 @@ func (t *TableDiffTask) RunChecks(skipValidation bool) (err error) {
 			continue
 		}
 
-		conn, err := auth.GetClusterNodeConnection(t.Ctx, nodeInfo, t.connOpts())
-		if err != nil {
-			return fmt.Errorf("failed to connect to node %s: %w", hostname, err)
-		}
+		if err := func() error {
+			conn, err := auth.GetClusterNodeConnection(t.Ctx, nodeInfo, t.connOpts())
+			if err != nil {
+				return fmt.Errorf("failed to connect to node %s: %w", hostname, err)
+			}
+			defer conn.Close()
 
-		currCols, err := queries.GetColumns(t.Ctx, conn, schema, table)
-		if err != nil {
-			return fmt.Errorf("failed to get columns for table %s.%s on node %s: %w", schema, table, hostname, err)
-		}
-		if len(currCols) == 0 {
-			return fmt.Errorf("table '%s.%s' not found on %s, or the current user does not have adequate privileges", schema, table, hostname)
-		}
+			currCols, err := queries.GetColumns(t.Ctx, conn, schema, table)
+			if err != nil {
+				return fmt.Errorf("failed to get columns for table %s.%s on node %s: %w", schema, table, hostname, err)
+			}
+			if len(currCols) == 0 {
+				return fmt.Errorf("table '%s.%s' not found on %s, or the current user does not have adequate privileges", schema, table, hostname)
+			}
 
-		currKey, err := queries.GetPrimaryKey(t.Ctx, conn, schema, table)
-		if err != nil {
-			return fmt.Errorf("failed to get primary key for table %s.%s on node %s: %w", schema, table, hostname, err)
-		}
-		if len(currKey) == 0 {
-			return fmt.Errorf("no primary key found for '%s.%s'", schema, table)
-		}
+			currKey, err := queries.GetPrimaryKey(t.Ctx, conn, schema, table)
+			if err != nil {
+				return fmt.Errorf("failed to get primary key for table %s.%s on node %s: %w", schema, table, hostname, err)
+			}
+			if len(currKey) == 0 {
+				return fmt.Errorf("no primary key found for '%s.%s'", schema, table)
+			}
 
-		if len(cols) == 0 && len(key) == 0 {
+			if len(cols) == 0 && len(key) == 0 {
+				cols = currCols
+				key = currKey
+			}
+
+			if !reflect.DeepEqual(currCols, cols) || !reflect.DeepEqual(currKey, key) {
+				return fmt.Errorf("table schemas don't match between nodes")
+			}
+
 			cols = currCols
 			key = currKey
+
+			colTypes, err := queries.GetColumnTypes(t.Ctx, conn, schema, table)
+			if err != nil {
+				return fmt.Errorf("failed to get column types for table %s on node %s: %w", table, hostname, err)
+			}
+
+			colTypesKey := fmt.Sprintf("%s:%s", hostIP, port)
+
+			if t.ColTypes == nil {
+				t.ColTypes = make(map[string]map[string]string)
+			}
+			t.ColTypes[colTypesKey] = colTypes
+
+			actualPrivs, err := queries.CheckUserPrivileges(t.Ctx, conn, user, schema, table)
+			if err != nil {
+				return fmt.Errorf("failed to check user privileges on node %s: %w", hostname, err)
+			}
+
+			if !actualPrivs.TableSelect {
+				return fmt.Errorf("user \"%s\" does not have the necessary privileges to run table-diff on table \"%s.%s\" on node \"%s\"",
+					user, schema, table, hostname)
+			}
+
+			hostMap[hostIP+":"+port] = hostname
+
+			if t.TableFilter != "" {
+				logger.Info("Applying table filter for diff: %s", t.TableFilter)
+			}
+			return nil
+		}(); err != nil {
+			return err
 		}
-
-		if !reflect.DeepEqual(currCols, cols) || !reflect.DeepEqual(currKey, key) {
-			return fmt.Errorf("table schemas don't match between nodes")
-		}
-
-		cols = currCols
-		key = currKey
-
-		colTypes, err := queries.GetColumnTypes(t.Ctx, conn, schema, table)
-		if err != nil {
-			return fmt.Errorf("failed to get column types for table %s on node %s: %w", table, hostname, err)
-		}
-
-		colTypesKey := fmt.Sprintf("%s:%s", hostIP, port)
-
-		if t.ColTypes == nil {
-			t.ColTypes = make(map[string]map[string]string)
-		}
-		t.ColTypes[colTypesKey] = colTypes
-
-		actualPrivs, err := queries.CheckUserPrivileges(t.Ctx, conn, user, schema, table)
-		if err != nil {
-			return fmt.Errorf("failed to check user privileges on node %s: %w", hostname, err)
-		}
-
-		if !actualPrivs.TableSelect {
-			return fmt.Errorf("user \"%s\" does not have the necessary privileges to run table-diff on table \"%s.%s\" on node \"%s\"",
-				user, schema, table, hostname)
-		}
-
-		hostMap[hostIP+":"+port] = hostname
-
-		if t.TableFilter != "" {
-			logger.Info("Applying table filter for diff: %s", t.TableFilter)
-		}
-
-		conn.Close()
 	}
 
 	logger.Info("Connections successful to nodes in cluster")
