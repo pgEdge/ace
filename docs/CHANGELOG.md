@@ -2,6 +2,23 @@
 
 All notable changes to ACE will be captured in this document. This project follows semantic versioning; the latest changes appear first.
 
+## [v1.8.1] - 2026-04-10
+
+### Changed
+- Prevent overlapping scheduled job runs.
+  The scheduler now uses singleton mode so a job that exceeds its
+  `run_frequency` will not start a second concurrent instance.
+
+### Fixed
+- Fix connection pool leak when table validation fails.
+  `RunChecks()` did not close its connection pool on error paths. Leaked
+  connections accumulated across scheduled runs — one per failing table
+  per tick — and could exhaust database connection limits over time.
+
+- Apply max_connections cap to discovery pools.
+  Repset-diff and schema-diff metadata queries now respect the configured
+  `max_connections` limit instead of using the pgxpool default.
+
 ## [v1.8.0] - 2026-04-08
 
 ### Added
