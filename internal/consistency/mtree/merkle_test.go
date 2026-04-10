@@ -37,7 +37,8 @@ func TestIsNumericColType(t *testing.T) {
 func TestBuildRowHashQuery(t *testing.T) {
 	tests := []struct {
 		name          string
-		tableName     string
+		schema        string
+		table         string
 		key           []string
 		cols          []string
 		whereClause   string
@@ -48,7 +49,8 @@ func TestBuildRowHashQuery(t *testing.T) {
 	}{
 		{
 			name:        "nil colTypes - no trim_scale",
-			tableName:   `"public"."orders"`,
+			schema:      "public",
+			table:       "orders",
 			key:         []string{"id"},
 			cols:        []string{"id", "name", "amount"},
 			whereClause: "TRUE",
@@ -70,7 +72,8 @@ func TestBuildRowHashQuery(t *testing.T) {
 		},
 		{
 			name:        "numeric column gets trim_scale",
-			tableName:   `"public"."orders"`,
+			schema:      "public",
+			table:       "orders",
 			key:         []string{"id"},
 			cols:        []string{"id", "name", "price"},
 			whereClause: "TRUE",
@@ -85,7 +88,8 @@ func TestBuildRowHashQuery(t *testing.T) {
 		},
 		{
 			name:        "decimal column gets trim_scale",
-			tableName:   `"public"."ledger"`,
+			schema:      "public",
+			table:       "ledger",
 			key:         []string{"txn_id"},
 			cols:        []string{"txn_id", "debit", "credit"},
 			whereClause: `"txn_id" >= $1`,
@@ -100,7 +104,8 @@ func TestBuildRowHashQuery(t *testing.T) {
 		},
 		{
 			name:        "composite primary key",
-			tableName:   `"sales"."line_items"`,
+			schema:      "sales",
+			table:       "line_items",
 			key:         []string{"order_id", "line_num"},
 			cols:        []string{"order_id", "line_num", "qty", "unit_price"},
 			whereClause: "TRUE",
@@ -114,7 +119,8 @@ func TestBuildRowHashQuery(t *testing.T) {
 		},
 		{
 			name:        "no numeric columns - no trim_scale even with colTypes",
-			tableName:   `"public"."users"`,
+			schema:      "public",
+			table:       "users",
 			key:         []string{"user_id"},
 			cols:        []string{"user_id", "email", "created_at"},
 			whereClause: "TRUE",
@@ -133,7 +139,7 @@ func TestBuildRowHashQuery(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			query, orderBy := buildRowHashQuery(tt.tableName, tt.key, tt.cols, tt.whereClause, tt.colTypes)
+			query, orderBy := buildRowHashQuery(tt.schema, tt.table, tt.key, tt.cols, tt.whereClause, tt.colTypes)
 
 			if orderBy != tt.wantOrderBy {
 				t.Errorf("orderBy = %q, want %q", orderBy, tt.wantOrderBy)

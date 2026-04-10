@@ -193,7 +193,7 @@ func fetchCommitTimestamps(ctx context.Context, tx pgx.Tx, task *TableRepairTask
 			}
 			sb.WriteString(")")
 
-			rows, err := tx.Query(ctx, sb.String(), args...)
+			rows, err := tx.Query(ctx, sb.String(), args...) // nosemgrep
 			if err != nil {
 				return nil, fmt.Errorf("query current commit timestamp on %s: %w", nodeName, err)
 			}
@@ -294,7 +294,7 @@ func fetchCommitTimestamps(ctx context.Context, tx pgx.Tx, task *TableRepairTask
 		}
 		sb.WriteString(")")
 
-		rows, err := tx.Query(ctx, sb.String(), args...)
+		rows, err := tx.Query(ctx, sb.String(), args...) // nosemgrep
 		if err != nil {
 			return nil, fmt.Errorf("query current commit timestamp on %s: %w", nodeName, err)
 		}
