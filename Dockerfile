@@ -43,7 +43,6 @@ WORKDIR /workspace
 COPY --from=downloader --chown=nonroot:nonroot /opt/ace/ace /usr/local/bin/ace
 COPY --from=downloader /opt/ace/LICENSE /licenses/LICENSE
 COPY --from=downloader /opt/ace/README.md /licenses/README.md
-COPY --from=downloader /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 
 COPY --chown=nonroot:nonroot ace.yaml /etc/ace/ace.yaml
 

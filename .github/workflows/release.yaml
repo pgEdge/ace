@@ -30,7 +30,7 @@ jobs:
             -v "$PWD":/workspace \
             -w /workspace \
             -e GITHUB_TOKEN \
-            goreleaser/goreleaser:latest \
+            goreleaser/goreleaser:v2.15.2 \
             release --clean
 
   docker:
