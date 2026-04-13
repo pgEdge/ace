@@ -6,43 +6,13 @@ before:
     - go generate ./...
 
 builds:
-  # Linux amd64 (native, with cgo + sqlite)
-  - id: ace-linux-amd64
-    main: ./cmd/ace
-    binary: ace
-    env:
-      - CGO_ENABLED=1
-    goos:
-      - linux
-    goarch:
-      - amd64
-    ldflags:
-      - -s -w -X main.version={{ .Version }}
-
-  # Linux arm64 (cgo, using cross-compiler)
-  - id: ace-linux-arm64
-    main: ./cmd/ace
-    binary: ace
-    env:
-      - CGO_ENABLED=1
-      - CC=aarch64-linux-gnu-gcc
-      - CXX=aarch64-linux-gnu-g++
-    goos:
-      - linux
-    goarch:
-      - arm64
-    ldflags:
-      - -s -w -X main.version={{ .Version }}
-
-  # Darwin + Windows (no cgo, to avoid needing extra cross toolchains)
-  # NOTE: This only works if your code can compile with CGO_DISABLED=0
-  # on these platforms (e.g. sqlite bits are behind //go:build cgo).
-  - id: ace-darwin-windows
+  - id: ace
     main: ./cmd/ace
     binary: ace
     env:
       - CGO_ENABLED=0
     goos:
+      - linux
       - darwin
       - windows
     goarch:

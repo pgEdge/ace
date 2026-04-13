@@ -21,7 +21,7 @@ import (
 	"strings"
 	"time"
 
-	_ "github.com/mattn/go-sqlite3"
+	_ "modernc.org/sqlite"
 )
 
 const (
@@ -157,7 +157,7 @@ func New(path string) (*Store, error) {
 		return nil, fmt.Errorf("create sqlite directory: %w", err)
 	}
 
-	db, err := sql.Open("sqlite3", sqlitePath)
+	db, err := sql.Open("sqlite", sqlitePath)
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite database: %w", err)
 	}

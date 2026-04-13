@@ -34,7 +34,7 @@ RUN set -eux; \
     chmod +x /opt/ace/ace; \
     install -d -m 0775 /workspace && chown 65532:65532 /workspace
 
-FROM gcr.io/distroless/base-debian12:nonroot AS runtime
+FROM gcr.io/distroless/static-debian12:nonroot AS runtime
 
 COPY --from=downloader --chown=nonroot:nonroot /workspace /workspace
 
