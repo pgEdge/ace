@@ -49,5 +49,7 @@ COPY --chown=nonroot:nonroot ace.yaml /etc/ace/ace.yaml
 
 ENV ACE_CONFIG=/etc/ace/ace.yaml
 
+USER nonroot
+
 ENTRYPOINT ["/usr/local/bin/ace"]
 CMD ["--help"]
