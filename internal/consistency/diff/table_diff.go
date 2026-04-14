@@ -252,10 +252,11 @@ func (t *TableDiffTask) buildEffectiveFilter() (string, error) {
 	}
 
 	if t.resolvedAgainstOrigin != "" {
-		if _, err := strconv.Atoi(t.resolvedAgainstOrigin); err != nil {
+		nodeID, err := strconv.Atoi(t.resolvedAgainstOrigin)
+		if err != nil {
 			return "", fmt.Errorf("resolved against-origin %q is not a valid numeric node ID", t.resolvedAgainstOrigin)
 		}
-		parts = append(parts, fmt.Sprintf("(to_json(spock.xact_commit_timestamp_origin(xmin))->>'roident' = '%s')", t.resolvedAgainstOrigin))
+		parts = append(parts, fmt.Sprintf("(to_json(spock.xact_commit_timestamp_origin(xmin))->>'roident' = '%d')", nodeID))
 	}
 
 	if t.untilTime != nil {
