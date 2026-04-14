@@ -14,13 +14,14 @@ package queries
 import (
 	"text/template"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/pgedge/ace/pkg/config"
 )
 
 // aceTemplateFuncs provides the {{aceSchema}} function to SQL templates.
 // The function is evaluated at render time (after config is loaded), not at parse time.
 var aceTemplateFuncs = template.FuncMap{
-	"aceSchema": func() string { return config.Get().MTree.Schema },
+	"aceSchema": func() string { return pgx.Identifier{config.Get().MTree.Schema}.Sanitize() },
 }
 
 type Templates struct {
