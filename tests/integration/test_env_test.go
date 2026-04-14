@@ -121,19 +121,26 @@ func newNativeEnv(state *nativeClusterState) *testEnv {
 	}
 }
 
-// withRepairMode wraps a function with spock.repair_mode(true/false) when spock
-// is available. On native PG (no replication), this is a no-op.
-func (e *testEnv) withRepairMode(t *testing.T, ctx context.Context, pool *pgxpool.Pool, fn func()) {
+// withRepairMode acquires a single connection from the pool, enables
+// spock.repair_mode on it (when available), runs fn, then disables repair mode
+// and releases the connection. On native PG this simply pins a connection for
+// the duration of fn. All work inside fn must use the provided conn so that
+// repair_mode is in effect.
+func (e *testEnv) withRepairMode(t *testing.T, ctx context.Context, pool *pgxpool.Pool, fn func(conn *pgxpool.Conn)) {
 	t.Helper()
+	conn, err := pool.Acquire(ctx)
+	require.NoError(t, err, "acquire connection for repair mode")
+	defer conn.Release()
+
 	if e.HasSpock {
-		_, err := pool.Exec(ctx, "SELECT spock.repair_mode(true)")
+		_, err := conn.Exec(ctx, "SELECT spock.repair_mode(true)")
 		require.NoError(t, err, "enable spock.repair_mode")
 		defer func() {
-			_, err := pool.Exec(ctx, "SELECT spock.repair_mode(false)")
+			_, err := conn.Exec(ctx, "SELECT spock.repair_mode(false)")
 			require.NoError(t, err, "disable spock.repair_mode")
 		}()
 	}
-	fn()
+	fn(conn)
 }
 
 // withRepairModeTx is like withRepairMode but operates on a transaction.
@@ -205,8 +212,8 @@ func (e *testEnv) setupDivergence(t *testing.T, ctx context.Context, qualifiedTa
 
 	// Truncate on both nodes
 	for _, pool := range e.pools() {
-		e.withRepairMode(t, ctx, pool, func() {
-			_, err := pool.Exec(ctx, fmt.Sprintf("TRUNCATE TABLE %s CASCADE", qualifiedTableName))
+		e.withRepairMode(t, ctx, pool, func(conn *pgxpool.Conn) {
+			_, err := conn.Exec(ctx, fmt.Sprintf("TRUNCATE TABLE %s CASCADE", qualifiedTableName))
 			require.NoError(t, err, "truncate table")
 		})
 	}
@@ -214,8 +221,8 @@ func (e *testEnv) setupDivergence(t *testing.T, ctx context.Context, qualifiedTa
 	// Insert common rows
 	for i := 1; i <= 5; i++ {
 		for _, pool := range e.pools() {
-			e.withRepairMode(t, ctx, pool, func() {
-				_, err := pool.Exec(ctx,
+			e.withRepairMode(t, ctx, pool, func(conn *pgxpool.Conn) {
+				_, err := conn.Exec(ctx,
 					fmt.Sprintf("INSERT INTO %s (index, customer_id, first_name, last_name, email) VALUES ($1, $2, $3, $4, $5)", qualifiedTableName),
 					i, fmt.Sprintf("CUST-%d", i), fmt.Sprintf("FirstName%d", i), fmt.Sprintf("LastName%d", i), fmt.Sprintf("email%d@example.com", i))
 				require.NoError(t, err)
@@ -224,9 +231,9 @@ func (e *testEnv) setupDivergence(t *testing.T, ctx context.Context, qualifiedTa
 	}
 
 	// Rows only on n1
-	e.withRepairMode(t, ctx, e.N1Pool, func() {
+	e.withRepairMode(t, ctx, e.N1Pool, func(conn *pgxpool.Conn) {
 		for i := 1001; i <= 1002; i++ {
-			_, err := e.N1Pool.Exec(ctx,
+			_, err := conn.Exec(ctx,
 				fmt.Sprintf("INSERT INTO %s (index, customer_id, first_name, last_name, email) VALUES ($1, $2, $3, $4, $5)", qualifiedTableName),
 				i, fmt.Sprintf("CUST-%d", i), fmt.Sprintf("N1OnlyFirst%d", i), fmt.Sprintf("N1OnlyLast%d", i), fmt.Sprintf("n1.only%d@example.com", i))
 			require.NoError(t, err)
@@ -234,9 +241,9 @@ func (e *testEnv) setupDivergence(t *testing.T, ctx context.Context, qualifiedTa
 	})
 
 	// Rows only on n2
-	e.withRepairMode(t, ctx, e.N2Pool, func() {
+	e.withRepairMode(t, ctx, e.N2Pool, func(conn *pgxpool.Conn) {
 		for i := 2001; i <= 2002; i++ {
-			_, err := e.N2Pool.Exec(ctx,
+			_, err := conn.Exec(ctx,
 				fmt.Sprintf("INSERT INTO %s (index, customer_id, first_name, last_name, email) VALUES ($1, $2, $3, $4, $5)", qualifiedTableName),
 				i, fmt.Sprintf("CUST-%d", i), fmt.Sprintf("N2OnlyFirst%d", i), fmt.Sprintf("N2OnlyLast%d", i), fmt.Sprintf("n2.only%d@example.com", i))
 			require.NoError(t, err)
@@ -244,9 +251,9 @@ func (e *testEnv) setupDivergence(t *testing.T, ctx context.Context, qualifiedTa
 	})
 
 	// Modify rows on n2
-	e.withRepairMode(t, ctx, e.N2Pool, func() {
+	e.withRepairMode(t, ctx, e.N2Pool, func(conn *pgxpool.Conn) {
 		for i := 1; i <= 2; i++ {
-			_, err := e.N2Pool.Exec(ctx,
+			_, err := conn.Exec(ctx,
 				fmt.Sprintf("UPDATE %s SET email = $1 WHERE index = $2", qualifiedTableName),
 				fmt.Sprintf("modified.email%d@example.com", i), i)
 			require.NoError(t, err)
@@ -263,8 +270,8 @@ func (e *testEnv) setupNullDivergence(t *testing.T, ctx context.Context, qualifi
 	log.Println("Setting up null divergence for", qualifiedTableName)
 
 	for _, pool := range e.pools() {
-		e.withRepairMode(t, ctx, pool, func() {
-			_, err := pool.Exec(ctx, fmt.Sprintf("TRUNCATE TABLE %s CASCADE", qualifiedTableName))
+		e.withRepairMode(t, ctx, pool, func(conn *pgxpool.Conn) {
+			_, err := conn.Exec(ctx, fmt.Sprintf("TRUNCATE TABLE %s CASCADE", qualifiedTableName))
 			require.NoError(t, err, "truncate table")
 		})
 	}
@@ -275,18 +282,18 @@ func (e *testEnv) setupNullDivergence(t *testing.T, ctx context.Context, qualifi
 	)
 
 	// Node1: missing city for id 1, missing first_name for id 2
-	e.withRepairMode(t, ctx, e.N1Pool, func() {
-		_, err := e.N1Pool.Exec(ctx, insertSQL, 1, "CUST-1", "Michael", "Schumacher", nil)
+	e.withRepairMode(t, ctx, e.N1Pool, func(conn *pgxpool.Conn) {
+		_, err := conn.Exec(ctx, insertSQL, 1, "CUST-1", "Michael", "Schumacher", nil)
 		require.NoError(t, err)
-		_, err = e.N1Pool.Exec(ctx, insertSQL, 2, "CUST-2", nil, "Alonso", "Oviedo")
+		_, err = conn.Exec(ctx, insertSQL, 2, "CUST-2", nil, "Alonso", "Oviedo")
 		require.NoError(t, err)
 	})
 
 	// Node2: missing last_name for id 1, missing city for id 2
-	e.withRepairMode(t, ctx, e.N2Pool, func() {
-		_, err := e.N2Pool.Exec(ctx, insertSQL, 1, "CUST-1", "Michael", nil, "Austria")
+	e.withRepairMode(t, ctx, e.N2Pool, func(conn *pgxpool.Conn) {
+		_, err := conn.Exec(ctx, insertSQL, 1, "CUST-1", "Michael", nil, "Austria")
 		require.NoError(t, err)
-		_, err = e.N2Pool.Exec(ctx, insertSQL, 2, "CUST-2", "Fernando", "Alonso", nil)
+		_, err = conn.Exec(ctx, insertSQL, 2, "CUST-2", "Fernando", "Alonso", nil)
 		require.NoError(t, err)
 	})
 }
@@ -369,8 +376,8 @@ func (e *testEnv) resetSharedTable(t *testing.T, tableName string) {
 	csvPath, err := filepath.Abs(defaultCsvFilePath + tableName + ".csv")
 	require.NoError(t, err)
 	for _, pool := range e.pools() {
-		e.withRepairMode(t, ctx, pool, func() {
-			_, err := pool.Exec(ctx, fmt.Sprintf("TRUNCATE TABLE %s CASCADE", qualifiedTableName))
+		e.withRepairMode(t, ctx, pool, func(conn *pgxpool.Conn) {
+			_, err := conn.Exec(ctx, fmt.Sprintf("TRUNCATE TABLE %s CASCADE", qualifiedTableName))
 			require.NoError(t, err, "truncate %s", qualifiedTableName)
 		})
 		require.NoError(t, loadDataFromCSV(ctx, pool, e.Schema, tableName, csvPath), "load CSV into %s", qualifiedTableName)
