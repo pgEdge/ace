@@ -387,21 +387,21 @@ func testTableRepair_Bidirectional(t *testing.T, env *testEnv) {
 
 			log.Println("Setting up data for bidirectional test")
 			for _, pool := range []*pgxpool.Pool{env.N1Pool, env.N2Pool} {
-				env.withRepairMode(t, ctx, pool, func() {
-					_, err := pool.Exec(ctx, fmt.Sprintf("TRUNCATE TABLE %s CASCADE", qualifiedTableName))
+				env.withRepairMode(t, ctx, pool, func(conn *pgxpool.Conn) {
+					_, err := conn.Exec(ctx, fmt.Sprintf("TRUNCATE TABLE %s CASCADE", qualifiedTableName))
 					require.NoError(t, err)
 				})
 			}
-			env.withRepairMode(t, ctx, env.N1Pool, func() {
+			env.withRepairMode(t, ctx, env.N1Pool, func(conn *pgxpool.Conn) {
 				for i := 3001; i <= 3003; i++ {
-					_, err := env.N1Pool.Exec(ctx, fmt.Sprintf("INSERT INTO %s (index, customer_id, first_name) VALUES ($1, $2, $3)", qualifiedTableName), i, fmt.Sprintf("CUST-%d", i), fmt.Sprintf("N1-Bi-%d", i))
+					_, err := conn.Exec(ctx, fmt.Sprintf("INSERT INTO %s (index, customer_id, first_name) VALUES ($1, $2, $3)", qualifiedTableName), i, fmt.Sprintf("CUST-%d", i), fmt.Sprintf("N1-Bi-%d", i))
 					require.NoError(t, err)
 				}
 			})
 
-			env.withRepairMode(t, ctx, env.N2Pool, func() {
+			env.withRepairMode(t, ctx, env.N2Pool, func(conn *pgxpool.Conn) {
 				for i := 4001; i <= 4002; i++ {
-					_, err := env.N2Pool.Exec(ctx, fmt.Sprintf("INSERT INTO %s (index, customer_id, first_name) VALUES ($1, $2, $3)", qualifiedTableName), i, fmt.Sprintf("CUST-%d", i), fmt.Sprintf("N2-Bi-%d", i))
+					_, err := conn.Exec(ctx, fmt.Sprintf("INSERT INTO %s (index, customer_id, first_name) VALUES ($1, $2, $3)", qualifiedTableName), i, fmt.Sprintf("CUST-%d", i), fmt.Sprintf("N2-Bi-%d", i))
 					require.NoError(t, err)
 				}
 			})
@@ -1118,8 +1118,8 @@ func testTableRepair_FixNulls_BidirectionalUpdate(t *testing.T, env *testEnv) {
 
 			// Clean table on both nodes
 			for _, pool := range []*pgxpool.Pool{env.N1Pool, env.N2Pool} {
-				env.withRepairMode(t, ctx, pool, func() {
-					_, err := pool.Exec(ctx, fmt.Sprintf("TRUNCATE TABLE %s CASCADE", qualifiedTableName))
+				env.withRepairMode(t, ctx, pool, func(conn *pgxpool.Conn) {
+					_, err := conn.Exec(ctx, fmt.Sprintf("TRUNCATE TABLE %s CASCADE", qualifiedTableName))
 					require.NoError(t, err, "Failed to truncate table")
 				})
 			}
@@ -1133,22 +1133,22 @@ func testTableRepair_FixNulls_BidirectionalUpdate(t *testing.T, env *testEnv) {
 			)
 
 			// Node1 data
-			env.withRepairMode(t, ctx, env.N1Pool, func() {
+			env.withRepairMode(t, ctx, env.N1Pool, func(conn *pgxpool.Conn) {
 				// Row 1 on Node1: NULL first_name and city
-				_, err := env.N1Pool.Exec(ctx, insertSQL, 100, "CUST-100", nil, "LastName100", nil, "email100@example.com")
+				_, err := conn.Exec(ctx, insertSQL, 100, "CUST-100", nil, "LastName100", nil, "email100@example.com")
 				require.NoError(t, err)
 				// Row 2 on Node1: NULL last_name and email
-				_, err = env.N1Pool.Exec(ctx, insertSQL, 200, "CUST-200", "FirstName200", nil, "City200", nil)
+				_, err = conn.Exec(ctx, insertSQL, 200, "CUST-200", "FirstName200", nil, "City200", nil)
 				require.NoError(t, err)
 			})
 
 			// Node2 data
-			env.withRepairMode(t, ctx, env.N2Pool, func() {
+			env.withRepairMode(t, ctx, env.N2Pool, func(conn *pgxpool.Conn) {
 				// Row 1 on Node2: NULL last_name and email
-				_, err := env.N2Pool.Exec(ctx, insertSQL, 100, "CUST-100", "FirstName100", nil, "City100", nil)
+				_, err := conn.Exec(ctx, insertSQL, 100, "CUST-100", "FirstName100", nil, "City100", nil)
 				require.NoError(t, err)
 				// Row 2 on Node2: NULL first_name and city
-				_, err = env.N2Pool.Exec(ctx, insertSQL, 200, "CUST-200", nil, "LastName200", nil, "email200@example.com")
+				_, err = conn.Exec(ctx, insertSQL, 200, "CUST-200", nil, "LastName200", nil, "email200@example.com")
 				require.NoError(t, err)
 			})
 
