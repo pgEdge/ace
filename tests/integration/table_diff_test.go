@@ -58,6 +58,74 @@ func newTestTableDiffTask(
 	return task
 }
 
+func TestTableDiffUntilFilter(t *testing.T) {
+	ctx := context.Background()
+	tableName := "customers"
+	qualifiedTableName := fmt.Sprintf("%s.%s", testSchema, tableName)
+	nodesToCompare := []string{serviceN1, serviceN2}
+
+	resetSharedTable(t, tableName)
+
+	// VACUUM FREEZE the baseline so all existing rows have NULL commit
+	// timestamps. This must happen before the fence so that the post-fence
+	// divergent row keeps its real timestamp and is correctly excluded.
+	for _, pool := range []*pgxpool.Pool{pgCluster.Node1Pool, pgCluster.Node2Pool} {
+		_, err := pool.Exec(ctx, fmt.Sprintf("VACUUM FREEZE %s", qualifiedTableName))
+		require.NoError(t, err, "VACUUM FREEZE should succeed")
+	}
+
+	// Capture a fence timestamp while both nodes are identical and frozen.
+	var fence time.Time
+	err := pgCluster.Node1Pool.QueryRow(ctx, "SELECT now()").Scan(&fence)
+	require.NoError(t, err)
+
+	// Wait briefly so that subsequent writes are strictly after the fence.
+	time.Sleep(100 * time.Millisecond)
+
+	// Create a local-only divergence on node1 by inserting a new row
+	// (repair_mode prevents replication). We INSERT rather than UPDATE so the
+	// existing frozen rows are untouched on both nodes — only the new row has
+	// a post-fence xmin and is excluded by --until.
+	tx, err := pgCluster.Node1Pool.Begin(ctx)
+	require.NoError(t, err)
+	_, err = tx.Exec(ctx, "SELECT spock.repair_mode(true)")
+	require.NoError(t, err)
+	_, err = tx.Exec(ctx, fmt.Sprintf("INSERT INTO %s (index, email) VALUES (99999, 'until_test@example.com')", qualifiedTableName))
+	require.NoError(t, err)
+	_, err = tx.Exec(ctx, "SELECT spock.repair_mode(false)")
+	require.NoError(t, err)
+	require.NoError(t, tx.Commit(ctx))
+
+	t.Cleanup(func() {
+		pgCluster.Node1Pool.Exec(ctx, fmt.Sprintf("DELETE FROM %s WHERE index = 99999", qualifiedTableName))
+		resetSharedTable(t, tableName)
+	})
+
+	// Diff WITH --until set to the fence: frozen baseline rows (NULL timestamps)
+	// are included via IS NULL, the post-fence divergent row is excluded.
+	taskWithUntil := newTestTableDiffTask(t, qualifiedTableName, nodesToCompare)
+	taskWithUntil.Until = fence.Format(time.RFC3339Nano)
+	require.NoError(t, taskWithUntil.RunChecks(false))
+	require.NoError(t, taskWithUntil.ExecuteTask())
+
+	totalWithUntil := 0
+	for _, count := range taskWithUntil.DiffResult.Summary.DiffRowsCount {
+		totalWithUntil += count
+	}
+	require.Equal(t, 0, totalWithUntil, "with --until on frozen baseline, expected 0 diff rows")
+
+	// Diff WITHOUT --until: the divergent write should be visible.
+	taskWithout := newTestTableDiffTask(t, qualifiedTableName, nodesToCompare)
+	require.NoError(t, taskWithout.RunChecks(false))
+	require.NoError(t, taskWithout.ExecuteTask())
+
+	totalWithout := 0
+	for _, count := range taskWithout.DiffResult.Summary.DiffRowsCount {
+		totalWithout += count
+	}
+	require.Greater(t, totalWithout, 0, "without --until, expected at least 1 diff row")
+}
+
 func TestTableDiffSimplePK(t *testing.T) {
 	t.Run("Customers", func(t *testing.T) {
 		runCustomerTableDiffTests(t)

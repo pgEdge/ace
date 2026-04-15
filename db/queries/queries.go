@@ -47,6 +47,17 @@ func SanitiseIdentifier(ident string) error {
 	return nil
 }
 
+// CommitTimestampFilter returns a SQL predicate that restricts rows to those
+// committed at or before the given timestamp. Frozen rows (where
+// pg_xact_commit_timestamp returns NULL after VACUUM FREEZE) are always
+// included. Returns an empty string when t is nil.
+func CommitTimestampFilter(t *time.Time) string {
+	if t == nil {
+		return ""
+	}
+	return fmt.Sprintf("(pg_xact_commit_timestamp(xmin) IS NULL OR pg_xact_commit_timestamp(xmin) <= '%s'::timestamptz)", t.Format(time.RFC3339Nano))
+}
+
 func RenderSQL(t *template.Template, data any) (string, error) {
 	var buf bytes.Buffer
 	if err := t.Execute(&buf, data); err != nil {
