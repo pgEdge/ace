@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 )
 
 type mockRow struct {
@@ -121,6 +122,29 @@ func TestSanitiseIdentifier(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestCommitTimestampFilter(t *testing.T) {
+	t.Run("nil returns empty string", func(t *testing.T) {
+		got := CommitTimestampFilter(nil)
+		if got != "" {
+			t.Errorf("expected empty string, got %q", got)
+		}
+	})
+
+	t.Run("non-nil returns predicate including frozen row handling", func(t *testing.T) {
+		ts := time.Date(2026, 4, 15, 12, 0, 0, 0, time.UTC)
+		got := CommitTimestampFilter(&ts)
+		if !strings.Contains(got, "IS NULL") {
+			t.Errorf("expected frozen-row NULL check, got %q", got)
+		}
+		if !strings.Contains(got, "2026-04-15T12:00:00Z") {
+			t.Errorf("expected formatted timestamp, got %q", got)
+		}
+		if !strings.Contains(got, "pg_xact_commit_timestamp(xmin) <=") {
+			t.Errorf("expected upper-bound comparison, got %q", got)
+		}
+	})
 }
 
 func normalizeSQLWhitespace(s string) string {

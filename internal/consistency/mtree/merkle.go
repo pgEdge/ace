@@ -86,6 +86,9 @@ type MerkleTreeTask struct {
 	Mode              string
 	NoCDC             bool
 	SkipDBUpdate      bool
+	Until             string
+
+	untilTime *time.Time
 
 	TaskStore     *taskstore.Store
 	TaskStorePath string
@@ -371,6 +374,10 @@ func (m *MerkleTreeTask) processWorkItem(work CompareRangesWorkItem, pool1, pool
 	whereClause = strings.Join(orClauses, " OR ")
 	if whereClause == "" {
 		whereClause = "TRUE"
+	}
+
+	if f := queries.CommitTimestampFilter(m.untilTime); f != "" {
+		whereClause = fmt.Sprintf("(%s) AND %s", whereClause, f)
 	}
 
 	rowHashQuery, orderByStr := buildRowHashQuery(m.Schema, m.Table, m.Key, m.Cols, whereClause, m.ColTypes["_ref"])
@@ -1119,6 +1126,16 @@ func (m *MerkleTreeTask) Validate() error {
 
 	if m.MaxCpuRatio > 1.0 || m.MaxCpuRatio < 0.0 {
 		return fmt.Errorf("invalid value range for max_cpu_ratio")
+	}
+
+	if trimmed := strings.TrimSpace(m.Until); trimmed != "" {
+		parsed, err := time.Parse(time.RFC3339Nano, trimmed)
+		if err != nil {
+			return fmt.Errorf("invalid value for --until (expected RFC3339 timestamp): %w", err)
+		}
+		m.untilTime = &parsed
+	} else {
+		m.untilTime = nil
 	}
 
 	if m.RangesFile != "" {

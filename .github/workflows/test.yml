@@ -55,5 +55,11 @@ jobs:
     - name: Run catastrophic single-node failure recovery test
       run: go test -count=1 -v ./tests/integration -run 'TestCatastrophicSingleNodeFailure'
 
+    - name: Run table-diff --until filter tests
+      run: go test -count=1 -v ./tests/integration -run 'TestTableDiffUntilFilter'
+
+    - name: Run Merkle Tree --until filter tests
+      run: go test -count=1 -v ./tests/integration -run 'TestMerkleTreeUntilFilter'
+
     - name: Run timestamp comparison tests
       run: go test -count=1 -v ./tests/integration -run 'TestCompareTimestampsExact|TestPostgreSQLMicrosecondPrecision|TestOldVsNewComparison'

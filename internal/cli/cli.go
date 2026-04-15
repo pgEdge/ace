@@ -365,6 +365,11 @@ func SetupCLI() *cli.Command {
 			Value:   0.5,
 		},
 		&cli.StringFlag{
+			Name:  "until",
+			Usage: "Optional commit timestamp upper bound (RFC3339) for rows to include",
+			Value: "",
+		},
+		&cli.StringFlag{
 			Name:    "output",
 			Aliases: []string{"o"},
 			Usage:   "Output format",
@@ -1145,6 +1150,7 @@ func MtreeDiffCLI(cmd *cli.Command) error {
 	task.MaxCpuRatio = cmd.Float64("max-cpu-ratio")
 	task.Output = cmd.String("output")
 	task.NoCDC = cmd.Bool("skip-cdc")
+	task.Until = cmd.String("until")
 	task.Mode = "diff"
 	task.Ctx = context.Background()
 

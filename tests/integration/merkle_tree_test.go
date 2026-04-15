@@ -55,6 +55,123 @@ func TestMerkleTreeCompositePK(t *testing.T) {
 	runMerkleTreeTests(t, tableName)
 }
 
+func TestMerkleTreeUntilFilter(t *testing.T) {
+	ctx := context.Background()
+	// Use a dedicated small table so we can INSERT within the block range.
+	// The customers table has dense indices 1-10000; inserting outside that
+	// range falls beyond the last block's upper bound and is invisible to
+	// processWorkItem's range-bounded query.
+	untilTable := "mtree_until_test"
+	qualifiedTable := fmt.Sprintf("%s.%s", testSchema, untilTable)
+	nodes := []string{serviceN1, serviceN2}
+
+	// Create the table on both nodes and add to the default repset.
+	for i, pool := range []*pgxpool.Pool{pgCluster.Node1Pool, pgCluster.Node2Pool} {
+		nodeName := pgCluster.ClusterNodes[i]["Name"].(string)
+		_, err := pool.Exec(ctx, fmt.Sprintf(
+			"CREATE TABLE IF NOT EXISTS %s (id INT PRIMARY KEY, payload TEXT)", qualifiedTable))
+		require.NoError(t, err, "create table on %s", nodeName)
+		_, err = pool.Exec(ctx, fmt.Sprintf(
+			"SELECT spock.repset_add_table('default', '%s')", qualifiedTable))
+		require.NoError(t, err, "add to repset on %s", nodeName)
+	}
+	t.Cleanup(func() {
+		for _, pool := range []*pgxpool.Pool{pgCluster.Node1Pool, pgCluster.Node2Pool} {
+			pool.Exec(ctx, fmt.Sprintf("DROP TABLE IF EXISTS %s CASCADE", qualifiedTable))
+		}
+	})
+
+	// Seed identical rows on both nodes with a gap at id=5 (inside one block).
+	// The gap lets us INSERT id=5 later as a genuinely new row (not an update
+	// of an existing frozen tuple) so --until can cleanly exclude it.
+	for _, pool := range []*pgxpool.Pool{pgCluster.Node1Pool, pgCluster.Node2Pool} {
+		tx, err := pool.Begin(ctx)
+		require.NoError(t, err)
+		_, err = tx.Exec(ctx, "SELECT spock.repair_mode(true)")
+		require.NoError(t, err)
+		for id := 1; id <= 10; id++ {
+			if id == 5 {
+				continue // leave a gap
+			}
+			_, err = tx.Exec(ctx, fmt.Sprintf(
+				"INSERT INTO %s (id, payload) VALUES ($1, $2) ON CONFLICT DO NOTHING", qualifiedTable),
+				id, fmt.Sprintf("row-%d", id))
+			require.NoError(t, err)
+		}
+		_, err = tx.Exec(ctx, "SELECT spock.repair_mode(false)")
+		require.NoError(t, err)
+		require.NoError(t, tx.Commit(ctx))
+	}
+
+	// VACUUM FREEZE so baseline rows have NULL commit timestamps.
+	for _, pool := range []*pgxpool.Pool{pgCluster.Node1Pool, pgCluster.Node2Pool} {
+		_, err := pool.Exec(ctx, fmt.Sprintf("VACUUM FREEZE %s", qualifiedTable))
+		require.NoError(t, err)
+	}
+
+	// Init + build the merkle tree.
+	mtreeTask := newTestMerkleTreeTask(t, qualifiedTable, nodes)
+	mtreeTask.BlockSize = 1000 // single block covers all rows
+	require.NoError(t, mtreeTask.RunChecks(false))
+	require.NoError(t, mtreeTask.MtreeInit())
+	t.Cleanup(func() {
+		mtreeTask.MtreeTeardown()
+	})
+	require.NoError(t, mtreeTask.BuildMtree())
+
+	// Capture fence while both nodes are identical and frozen.
+	var fence time.Time
+	err := pgCluster.Node1Pool.QueryRow(ctx, "SELECT now()").Scan(&fence)
+	require.NoError(t, err)
+	time.Sleep(100 * time.Millisecond)
+
+	// INSERT id=5 on node1 only — fills the gap, within block range [1, 10].
+	// This is a new row (not an update), so the frozen baseline on both nodes
+	// is untouched. Node2 simply doesn't have id=5.
+	tx, err := pgCluster.Node1Pool.Begin(ctx)
+	require.NoError(t, err)
+	_, err = tx.Exec(ctx, "SELECT spock.repair_mode(true)")
+	require.NoError(t, err)
+	_, err = tx.Exec(ctx, fmt.Sprintf(
+		"INSERT INTO %s (id, payload) VALUES (5, 'divergent')", qualifiedTable))
+	require.NoError(t, err)
+	_, err = tx.Exec(ctx, "SELECT spock.repair_mode(false)")
+	require.NoError(t, err)
+	require.NoError(t, tx.Commit(ctx))
+
+	// Diff WITHOUT --until first: the divergent write should be visible.
+	// Running this first ensures UpdateMtree processes any CDC events.
+	taskWithout := newTestMerkleTreeTask(t, qualifiedTable, nodes)
+	taskWithout.Mode = "diff"
+	taskWithout.Output = "json"
+	taskWithout.BlockSize = 1000
+	require.NoError(t, taskWithout.RunChecks(false))
+	require.NoError(t, taskWithout.DiffMtree())
+
+	totalWithout := 0
+	for _, count := range taskWithout.DiffResult.Summary.DiffRowsCount {
+		totalWithout += count
+	}
+	require.Greater(t, totalWithout, 0, "without --until, expected at least 1 diff row")
+
+	// Diff WITH --until set to the fence: the divergent row's xmin is
+	// post-fence, so it is excluded. The frozen baseline (NULL timestamps)
+	// is included via IS NULL on both nodes and matches.
+	taskWithUntil := newTestMerkleTreeTask(t, qualifiedTable, nodes)
+	taskWithUntil.Until = fence.Format(time.RFC3339Nano)
+	taskWithUntil.Mode = "diff"
+	taskWithUntil.Output = "json"
+	taskWithUntil.BlockSize = 1000
+	require.NoError(t, taskWithUntil.RunChecks(false))
+	require.NoError(t, taskWithUntil.DiffMtree())
+
+	totalWithUntil := 0
+	for _, count := range taskWithUntil.DiffResult.Summary.DiffRowsCount {
+		totalWithUntil += count
+	}
+	require.Equal(t, 0, totalWithUntil, "with --until on frozen baseline, expected 0 diff rows")
+}
+
 func runMerkleTreeTests(t *testing.T, tableName string) {
 	if tableName == "customers" {
 		resetSharedTable(t, "customers")

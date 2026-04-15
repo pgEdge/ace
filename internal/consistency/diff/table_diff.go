@@ -238,7 +238,7 @@ func (t *TableDiffTask) resolveAgainstOrigin() error {
 
 func (t *TableDiffTask) buildEffectiveFilter() (string, error) {
 	if t.untilTime == nil && strings.TrimSpace(t.Until) != "" {
-		parsed, err := time.Parse(time.RFC3339, strings.TrimSpace(t.Until))
+		parsed, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(t.Until))
 		if err != nil {
 			return "", fmt.Errorf("invalid value for --until (expected RFC3339 timestamp): %w", err)
 		}
@@ -259,8 +259,8 @@ func (t *TableDiffTask) buildEffectiveFilter() (string, error) {
 		parts = append(parts, fmt.Sprintf("(to_json(spock.xact_commit_timestamp_origin(xmin))->>'roident' = '%d')", nodeID))
 	}
 
-	if t.untilTime != nil {
-		parts = append(parts, fmt.Sprintf("(pg_xact_commit_timestamp(xmin) <= '%s'::timestamptz)", t.untilTime.Format(time.RFC3339)))
+	if f := queries.CommitTimestampFilter(t.untilTime); f != "" {
+		parts = append(parts, f)
 	}
 
 	if len(parts) == 0 {
@@ -761,11 +761,13 @@ func (t *TableDiffTask) Validate() error {
 	}
 
 	if trimmed := strings.TrimSpace(t.Until); trimmed != "" {
-		parsed, err := time.Parse(time.RFC3339, trimmed)
+		parsed, err := time.Parse(time.RFC3339Nano, trimmed)
 		if err != nil {
 			return fmt.Errorf("invalid value for --until (expected RFC3339 timestamp): %w", err)
 		}
 		t.untilTime = &parsed
+	} else {
+		t.untilTime = nil
 	}
 
 	nodeList, err := utils.ParseNodes(t.Nodes)
