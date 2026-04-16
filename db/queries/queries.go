@@ -997,6 +997,37 @@ func GetReplicationOriginNames(ctx context.Context, db DBQuerier) (map[string]st
 	return names, nil
 }
 
+// GetNativeNodeOriginNames maps replication origin IDs to subscription names
+// for native PG logical replication (no spock). This is the native PG
+// equivalent of GetSpockNodeNames.
+func GetNativeNodeOriginNames(ctx context.Context, db DBQuerier) (map[string]string, error) {
+	sql, err := RenderSQL(SQLTemplates.GetNativeNodeOriginNames, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	rows, err := db.Query(ctx, sql)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	names := make(map[string]string)
+	for rows.Next() {
+		var id, name string
+		if err := rows.Scan(&id, &name); err != nil {
+			return nil, err
+		}
+		names[id] = name
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	return names, nil
+}
+
 func GetNodeOriginNames(ctx context.Context, db DBQuerier) (map[string]string, error) {
 	var spockAvailable bool
 	err := db.QueryRow(ctx, "SELECT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'spock')").Scan(&spockAvailable)
@@ -1006,7 +1037,7 @@ func GetNodeOriginNames(ctx context.Context, db DBQuerier) (map[string]string, e
 	if spockAvailable {
 		return GetSpockNodeNames(ctx, db)
 	}
-	return GetReplicationOriginNames(ctx, db)
+	return GetNativeNodeOriginNames(ctx, db)
 }
 
 func CheckSpockInstalled(ctx context.Context, db DBQuerier) (bool, error) {

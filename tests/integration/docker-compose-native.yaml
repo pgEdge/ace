@@ -26,8 +26,7 @@ services:
       - "-c"
       - "wal_level=logical"
     ports:
-      - target: 5432
-        published: 7432
+      - "5432"
   native-n2:
     image: postgres:17
     environment:
@@ -41,5 +40,4 @@ services:
       - "-c"
       - "wal_level=logical"
     ports:
-      - target: 5432
-        published: 7433
+      - "5432"

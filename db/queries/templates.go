@@ -134,6 +134,7 @@ type Templates struct {
 	GetNativeOriginLSNForNode        *template.Template
 	GetNativeSlotLSNForNode          *template.Template
 	GetReplicationOriginNames        *template.Template
+	GetNativeNodeOriginNames         *template.Template
 	EnsureHashVersionColumn          *template.Template
 	GetHashVersion                   *template.Template
 	MarkAllLeavesDirty               *template.Template
@@ -1570,6 +1571,15 @@ var SQLTemplates = Templates{
 	`)),
 	GetReplicationOriginNames: template.Must(template.New("getReplicationOriginNames").Parse(`
 		SELECT roident::text, roname FROM pg_replication_origin;
+	`)),
+	// GetNativeNodeOriginNames maps pg_replication_origin entries to their
+	// corresponding pg_subscription names. This provides the native PG
+	// equivalent of GetSpockNodeNames — mapping origin IDs (used by
+	// pg_xact_commit_timestamp_origin) to human-readable node identifiers.
+	GetNativeNodeOriginNames: template.Must(template.New("getNativeNodeOriginNames").Parse(`
+		SELECT ro.roident::text, s.subname
+		FROM pg_catalog.pg_replication_origin ro
+		JOIN pg_catalog.pg_subscription s ON ro.roname = 'pg_' || s.oid::text
 	`)),
 	GetReplicationOriginByName: template.Must(template.New("getReplicationOriginByName").Parse(`
 		SELECT roident FROM pg_replication_origin WHERE roname = $1

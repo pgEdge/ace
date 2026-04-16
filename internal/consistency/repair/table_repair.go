@@ -1753,7 +1753,8 @@ func (t *TableRepairTask) runUnidirectionalRepair(startTime time.Time) error {
 			}
 			logger.Debug("Transaction committed successfully on %s", nodeName)
 		} else if !t.PreserveOrigin || len(t.extractOriginInfoForNode(nodeName, fullUpserts[nodeName])) == 0 {
-			// Non-spock path: still need to commit the transaction
+			// Non-spock path: commit unless the preserve-origin branch (line ~1692)
+			// already committed this tx and ran upserts in separate transactions.
 			err = tx.Commit(t.Ctx)
 			if err != nil {
 				logger.Error("committing transaction on node %s: %v", nodeName, err)
