@@ -56,6 +56,7 @@ func processReplicationStream(ctx context.Context, nodeInfo map[string]any, cont
 		logger.Error("failed to get connection pool: %v", err)
 		return fmt.Errorf("failed to get connection pool: %w", err)
 	}
+	defer pool.Close()
 	processingCtx := context.WithoutCancel(ctx)
 
 	mtreeCfg := config.Get().MTree
