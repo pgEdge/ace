@@ -2,6 +2,28 @@
 
 All notable changes to ACE will be captured in this document. This project follows semantic versioning; the latest changes appear first.
 
+## [v1.9.0] - 2026-04-17
+
+### Added
+- `--until` flag for `mtree` build/diff commands to bound operations by commit timestamp. 
+
+### Changed
+- Switched SQLite driver from cgo `mattn/go-sqlite3` to pure-Go `modernc.org/sqlite`. Enables fully static binaries on every platform and fixes a latent bug where darwin/windows builds silently dropped the sqlite driver at runtime.
+
+### Fixed
+- `table-diff` could OOM when a node became unresponsive mid-run. Workers had no way to stop and would grind through every remaining sub-range (each waiting ~60 s for context deadline), accumulating errors and log output. Added a circuit breaker that short-circuits all workers — including the initial hash phase — as soon as any node error is recorded. Backed by `atomic.Bool` to avoid mutex overhead on the common path.
+- `--until` correctly handles frozen rows (NULL commit timestamps after freeze).
+- Merkle tree row-hash and fetch-rows queries now quote identifiers via `pgx.Identifier.Sanitize()` instead of interpolating raw qualified names.
+- Spock origin filter is validated as an integer via `strconv.Atoi` rather than string-escaped; non-numeric values are rejected.
+
+### Security
+- Go directive bumped 1.25.4 → 1.26.0; release builds use Go 1.26.2, resolving stdlib CVEs including CVE-2025-68121 (CRITICAL).
+- Upgraded `moby/buildkit` v0.27.1 → v0.28.1 (CVE-2026-33747, CVE-2026-33748).
+- Upgraded `go.opentelemetry.io/otel/sdk` + exporters to v1.43.0 (CVE-2026-39882, CVE-2026-39883).
+- Upgraded `google.golang.org/grpc` v1.79.1 → v1.80.0 (CVE-2026-33186).
+- Switching to distroless/static-debian12 removes libc6 and libssl3 from the image entirely, eliminating the class of CVEs reported against those packages (including CVE-2025-27587).
+- GitHub Actions pinned to commit SHAs; `goreleaser` image pinned to v2.15.2.
+
 ## [v1.8.1] - 2026-04-10
 
 ### Changed
