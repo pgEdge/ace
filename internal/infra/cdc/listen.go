@@ -380,6 +380,11 @@ func processReplicationStream(ctx context.Context, nodeInfo map[string]any, cont
 					stopStreaming = true
 				}
 			}
+		case *pgproto3.ErrorResponse:
+			logger.Error("replication stream aborted by server: severity=%s code=%s message=%q detail=%q hint=%q where=%q routine=%q",
+				msg.Severity, msg.Code, msg.Message, msg.Detail, msg.Hint, msg.Where, msg.Routine)
+			processingErr = fmt.Errorf("server aborted replication: %s (SQLSTATE %s)", msg.Message, msg.Code)
+			stopStreaming = true
 		default:
 			logger.Info("Received unexpected message: %T", msg)
 		}
