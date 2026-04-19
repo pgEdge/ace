@@ -41,3 +41,17 @@ services:
       - "wal_level=logical"
     ports:
       - "5432"
+  native-n3:
+    image: postgres:17
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: testdb
+    command:
+      - "postgres"
+      - "-c"
+      - "track_commit_timestamp=on"
+      - "-c"
+      - "wal_level=logical"
+    ports:
+      - "5432"
