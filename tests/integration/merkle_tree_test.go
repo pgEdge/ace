@@ -296,6 +296,7 @@ func testMerkleTreeBuild(t *testing.T, env *testEnv, tableName string) {
 func testMerkleTreeDiffDataOnlyOnNode1(t *testing.T, env *testEnv, tableName string) {
 	ctx := context.Background()
 	qualifiedTableName := fmt.Sprintf("%s.%s", testSchema, tableName)
+	env.awaitDataSync(t, qualifiedTableName)
 	nodes := []string{env.ServiceN1, env.ServiceN2}
 	mtreeTask := env.newMerkleTreeTask(t, qualifiedTableName, nodes)
 
@@ -386,6 +387,7 @@ type compositeBoundaryKey struct {
 func testMerkleTreeDiffBoundaryModifications(t *testing.T, env *testEnv, tableName string) {
 	ctx := context.Background()
 	qualifiedTableName := fmt.Sprintf("%s.%s", testSchema, tableName)
+	env.awaitDataSync(t, qualifiedTableName)
 	nodes := []string{env.ServiceN1, env.ServiceN2}
 	mtreeTask := env.newMerkleTreeTask(t, qualifiedTableName, nodes)
 
@@ -566,6 +568,10 @@ func testMerkleTreeContinuousCDC(t *testing.T, env *testEnv, tableName string) {
 
 	largeTableName := "customers_1M"
 	qualifiedTableName := fmt.Sprintf("%s.%s", testSchema, tableName)
+	// Skip awaitDataSync: the CDC and merkle tree work runs only on n1.
+	// The final n1-vs-n2 diff (line ~721) may pick up bleed from a prior
+	// subtest's cleanup, but waiting here risks 30s+ timeouts after large
+	// merge/split tests whose repair replication hasn't fully settled.
 	nodes := []string{env.ServiceN1}
 	mtreeTask := env.newMerkleTreeTask(t, qualifiedTableName, nodes)
 
@@ -767,6 +773,7 @@ func testMerkleTreeSplitLastRanges(t *testing.T, env *testEnv, tableName string)
 func runMerkleTreeMergeTest(t *testing.T, env *testEnv, tableName string, mc mergeCase) {
 	ctx := context.Background()
 	qualifiedTableName := fmt.Sprintf("%s.%s", testSchema, tableName)
+	env.awaitDataSync(t, qualifiedTableName)
 	nodes := []string{env.ServiceN1, env.ServiceN2}
 	mtreeTask := env.newMerkleTreeTask(t, qualifiedTableName, nodes)
 
@@ -909,6 +916,7 @@ func runMerkleTreeMergeTest(t *testing.T, env *testEnv, tableName string, mc mer
 func runMerkleTreeSplitTest(t *testing.T, env *testEnv, tableName string, sc splitCase) {
 	ctx := context.Background()
 	qualifiedTableName := fmt.Sprintf("%s.%s", testSchema, tableName)
+	env.awaitDataSync(t, qualifiedTableName)
 	largeTableName := "customers_1M"
 	nodes := []string{env.ServiceN1, env.ServiceN2}
 	mtreeTask := env.newMerkleTreeTask(t, qualifiedTableName, nodes)
@@ -1030,6 +1038,7 @@ func runMerkleTreeSplitTest(t *testing.T, env *testEnv, tableName string, sc spl
 func testMerkleTreeDiffModifiedRows(t *testing.T, env *testEnv, tableName string) {
 	ctx := context.Background()
 	qualifiedTableName := fmt.Sprintf("%s.%s", testSchema, tableName)
+	env.awaitDataSync(t, qualifiedTableName)
 	nodes := []string{env.ServiceN1, env.ServiceN2}
 	mtreeTask := env.newMerkleTreeTask(t, qualifiedTableName, nodes)
 
