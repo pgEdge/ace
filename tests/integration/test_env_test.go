@@ -392,6 +392,27 @@ func (e *testEnv) pairKey() string {
 	return e.ServiceN1 + "/" + e.ServiceN2
 }
 
+// awaitDataSync waits until n1 and n2 have the same row count for the given
+// table. This prevents inter-test bleed when a previous subtest's cleanup
+// repair is still replicating.
+func (e *testEnv) awaitDataSync(t *testing.T, qualifiedTableName string) {
+	t.Helper()
+	ctx := context.Background()
+	assertEventually(t, 30*time.Second, func() error {
+		var n1Count, n2Count int
+		if err := e.N1Pool.QueryRow(ctx, fmt.Sprintf("SELECT count(*) FROM %s", qualifiedTableName)).Scan(&n1Count); err != nil {
+			return fmt.Errorf("counting rows on n1: %w", err)
+		}
+		if err := e.N2Pool.QueryRow(ctx, fmt.Sprintf("SELECT count(*) FROM %s", qualifiedTableName)).Scan(&n2Count); err != nil {
+			return fmt.Errorf("counting rows on n2: %w", err)
+		}
+		if n1Count != n2Count {
+			return fmt.Errorf("nodes not in sync for %s: n1=%d n2=%d", qualifiedTableName, n1Count, n2Count)
+		}
+		return nil
+	})
+}
+
 // newMerkleTreeTask creates a MerkleTreeTask configured for this environment.
 func (e *testEnv) newMerkleTreeTask(t *testing.T, qualifiedTableName string, nodes []string) *mtree.MerkleTreeTask {
 	t.Helper()
