@@ -99,7 +99,7 @@ type MerkleTreeTask struct {
 	diffMutex   sync.Mutex
 	diffRowKeySets map[string]map[string]map[string]struct{}
 	StartTime      time.Time
-	NodeOriginNames map[string]string
+	NodeOriginNames map[string]map[string]string
 
 	Ctx context.Context
 }
@@ -510,8 +510,14 @@ func (m *MerkleTreeTask) loadNodeOriginNames() error {
 		return nil
 	}
 
+	m.NodeOriginNames = make(map[string]map[string]string)
+
 	var lastErr error
 	for _, nodeInfo := range m.ClusterNodes {
+		nodeName, _ := nodeInfo["Name"].(string)
+		if nodeName == "" {
+			continue
+		}
 		pool, err := auth.GetClusterNodeConnection(m.Ctx, nodeInfo, m.connOpts())
 		if err != nil {
 			lastErr = err
@@ -523,15 +529,13 @@ func (m *MerkleTreeTask) loadNodeOriginNames() error {
 			lastErr = err
 			continue
 		}
-		m.NodeOriginNames = names
-		return nil
+		m.NodeOriginNames[nodeName] = names
 	}
 
-	m.NodeOriginNames = make(map[string]string)
-	if lastErr != nil {
+	if len(m.NodeOriginNames) == 0 && lastErr != nil {
 		return lastErr
 	}
-	return fmt.Errorf("no nodes available to load node origin names")
+	return nil
 }
 
 func (m *MerkleTreeTask) appendDiffs(nodePairKey string, work CompareRangesWorkItem, pr1, pr2 []types.OrderedMap) error {
@@ -603,7 +607,7 @@ func (m *MerkleTreeTask) addRowToDiff(nodePairKey, nodeName string, row types.Or
 	}
 
 	rowMap := utils.OrderedMapToMap(row)
-	rowMap["node_origin"] = utils.TranslateNodeOrigin(rowMap["node_origin"], m.NodeOriginNames)
+	rowMap["node_origin"] = utils.TranslateNodeOrigin(rowMap["node_origin"], m.NodeOriginNames[nodeName])
 	rowWithMeta := utils.AddSpockMetadata(rowMap)
 	orderedRow := utils.MapToOrderedMap(rowWithMeta, m.Cols)
 

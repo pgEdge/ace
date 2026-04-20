@@ -102,7 +102,7 @@ type TableDiffTask struct {
 	blockHashSQLCache map[hashBoundsKey]string
 	blockHashSQLMu    sync.Mutex
 
-	NodeOriginNames map[string]string
+	NodeOriginNames map[string]map[string]string
 
 	CompareUnitSize int
 	MaxDiffRows     int64
@@ -204,44 +204,57 @@ func (t *TableDiffTask) loadNodeOriginNames() error {
 		return nil
 	}
 
-	var firstPool *pgxpool.Pool
-	for _, pool := range t.Pools {
-		firstPool = pool
-		break
+	t.NodeOriginNames = make(map[string]map[string]string)
+
+	var lastErr error
+	for name, pool := range t.Pools {
+		names, err := queries.GetNodeOriginNames(t.Ctx, pool)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		t.NodeOriginNames[name] = names
 	}
 
-	if firstPool == nil {
-		t.NodeOriginNames = make(map[string]string)
-		return fmt.Errorf("no connection pool available to load node origin names")
+	if len(t.NodeOriginNames) == 0 && lastErr != nil {
+		return lastErr
 	}
-
-	names, err := queries.GetNodeOriginNames(t.Ctx, firstPool)
-	if err != nil {
-		t.NodeOriginNames = make(map[string]string)
-		return err
-	}
-
-	t.NodeOriginNames = names
 	return nil
+}
+
+// flatNodeOriginNames merges all per-node origin maps into a single map for
+// lookup purposes (e.g. resolving --against-origin). If the same roident
+// appears on multiple nodes, the last one wins — this is acceptable because
+// resolveAgainstOrigin is only used with spock (where roidents are global)
+// or for user-facing name resolution where any match suffices.
+func (t *TableDiffTask) flatNodeOriginNames() map[string]string {
+	flat := make(map[string]string)
+	for _, nodeMap := range t.NodeOriginNames {
+		for id, name := range nodeMap {
+			flat[id] = name
+		}
+	}
+	return flat
 }
 
 func (t *TableDiffTask) resolveAgainstOrigin() error {
 	if strings.TrimSpace(t.AgainstOrigin) == "" {
 		return nil
 	}
-	if len(t.NodeOriginNames) == 0 {
+	flat := t.flatNodeOriginNames()
+	if len(flat) == 0 {
 		return fmt.Errorf("unable to resolve --against-origin: no node origin names available")
 	}
 
 	orig := strings.TrimSpace(t.AgainstOrigin)
 	// direct match on origin id
-	if _, ok := t.NodeOriginNames[orig]; ok {
+	if _, ok := flat[orig]; ok {
 		t.resolvedAgainstOrigin = orig
 		return nil
 	}
 
 	// match on origin name
-	for id, name := range t.NodeOriginNames {
+	for id, name := range flat {
 		if name == orig {
 			t.resolvedAgainstOrigin = id
 			return nil
@@ -249,8 +262,8 @@ func (t *TableDiffTask) resolveAgainstOrigin() error {
 	}
 
 	// build a list of available origins for the error message
-	available := make([]string, 0, len(t.NodeOriginNames))
-	for id, name := range t.NodeOriginNames {
+	available := make([]string, 0, len(flat))
+	for id, name := range flat {
 		if id != name {
 			available = append(available, fmt.Sprintf("%s (%s)", id, name))
 		} else {
@@ -294,8 +307,8 @@ func (t *TableDiffTask) buildEffectiveFilter() (string, error) {
 	return strings.Join(parts, " AND "), nil
 }
 
-func (t *TableDiffTask) withSpockMetadata(row map[string]any) map[string]any {
-	row["node_origin"] = utils.TranslateNodeOrigin(row["node_origin"], t.NodeOriginNames)
+func (t *TableDiffTask) withSpockMetadata(row map[string]any, nodeName string) map[string]any {
+	row["node_origin"] = utils.TranslateNodeOrigin(row["node_origin"], t.NodeOriginNames[nodeName])
 	return utils.AddSpockMetadata(row)
 }
 
@@ -1375,8 +1388,9 @@ func (t *TableDiffTask) ExecuteTask() (err error) {
 			DiffRowsCount:     make(map[string]int),
 			AgainstOrigin:     t.AgainstOrigin,
 			AgainstOriginResolved: func() string {
-				if t.resolvedAgainstOrigin != "" && t.NodeOriginNames != nil {
-					if name, ok := t.NodeOriginNames[t.resolvedAgainstOrigin]; ok {
+				if t.resolvedAgainstOrigin != "" {
+					flat := t.flatNodeOriginNames()
+					if name, ok := flat[t.resolvedAgainstOrigin]; ok {
 						return name
 					}
 				}
@@ -1995,7 +2009,7 @@ func (t *TableDiffTask) recursiveDiff(
 					break
 				}
 				rowAsMap := utils.OrderedMapToMap(row)
-				rowWithMeta := t.withSpockMetadata(rowAsMap)
+				rowWithMeta := t.withSpockMetadata(rowAsMap, node1Name)
 				rowAsOrderedMap := utils.MapToOrderedMap(rowWithMeta, t.Cols)
 				t.DiffResult.NodeDiffs[pairKey].Rows[node1Name] = append(t.DiffResult.NodeDiffs[pairKey].Rows[node1Name], rowAsOrderedMap)
 				currentDiffRowsForPair++
@@ -2012,7 +2026,7 @@ func (t *TableDiffTask) recursiveDiff(
 						break
 					}
 					rowAsMap := utils.OrderedMapToMap(row)
-					rowWithMeta := t.withSpockMetadata(rowAsMap)
+					rowWithMeta := t.withSpockMetadata(rowAsMap, node2Name)
 					rowAsOrderedMap := utils.MapToOrderedMap(rowWithMeta, t.Cols)
 					t.DiffResult.NodeDiffs[pairKey].Rows[node2Name] = append(t.DiffResult.NodeDiffs[pairKey].Rows[node2Name], rowAsOrderedMap)
 					currentDiffRowsForPair++
@@ -2030,12 +2044,12 @@ func (t *TableDiffTask) recursiveDiff(
 						break
 					}
 					node1DataAsMap := utils.OrderedMapToMap(modRow.Node1Data)
-					node1DataWithMeta := t.withSpockMetadata(node1DataAsMap)
+					node1DataWithMeta := t.withSpockMetadata(node1DataAsMap, node1Name)
 					node1DataAsOrderedMap := utils.MapToOrderedMap(node1DataWithMeta, t.Cols)
 					t.DiffResult.NodeDiffs[pairKey].Rows[node1Name] = append(t.DiffResult.NodeDiffs[pairKey].Rows[node1Name], node1DataAsOrderedMap)
 
 					node2DataAsMap := utils.OrderedMapToMap(modRow.Node2Data)
-					node2DataWithMeta := t.withSpockMetadata(node2DataAsMap)
+					node2DataWithMeta := t.withSpockMetadata(node2DataAsMap, node2Name)
 					node2DataAsOrderedMap := utils.MapToOrderedMap(node2DataWithMeta, t.Cols)
 					t.DiffResult.NodeDiffs[pairKey].Rows[node2Name] = append(t.DiffResult.NodeDiffs[pairKey].Rows[node2Name], node2DataAsOrderedMap)
 					currentDiffRowsForPair++

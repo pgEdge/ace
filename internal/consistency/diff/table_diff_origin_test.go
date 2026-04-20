@@ -40,7 +40,7 @@ func TestResolveAgainstOrigin_NoNodeOriginNames(t *testing.T) {
 func TestResolveAgainstOrigin_MatchByID(t *testing.T) {
 	task := &TableDiffTask{
 		AgainstOrigin:   "3",
-		NodeOriginNames: map[string]string{"3": "n1", "4": "n2"},
+		NodeOriginNames: map[string]map[string]string{"node1": {"3": "n1", "4": "n2"}},
 	}
 	if err := task.resolveAgainstOrigin(); err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -53,7 +53,7 @@ func TestResolveAgainstOrigin_MatchByID(t *testing.T) {
 func TestResolveAgainstOrigin_MatchByName_SpockNodeName(t *testing.T) {
 	task := &TableDiffTask{
 		AgainstOrigin:   "n1",
-		NodeOriginNames: map[string]string{"3": "n1", "4": "n2"},
+		NodeOriginNames: map[string]map[string]string{"node1": {"3": "n1", "4": "n2"}},
 	}
 	if err := task.resolveAgainstOrigin(); err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -64,10 +64,12 @@ func TestResolveAgainstOrigin_MatchByName_SpockNodeName(t *testing.T) {
 }
 
 func TestResolveAgainstOrigin_MatchByName_SubscriptionName(t *testing.T) {
-	// Native PG: NodeOriginNames maps roident -> subscription name
+	// Native PG: NodeOriginNames maps roident -> subscription name, per node
 	task := &TableDiffTask{
-		AgainstOrigin:   "sub_n1_to_n2",
-		NodeOriginNames: map[string]string{"5": "sub_n1_to_n2", "6": "sub_n3_to_n2"},
+		AgainstOrigin: "sub_n1_to_n2",
+		NodeOriginNames: map[string]map[string]string{
+			"node1": {"5": "sub_n1_to_n2", "6": "sub_n3_to_n2"},
+		},
 	}
 	if err := task.resolveAgainstOrigin(); err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -80,7 +82,7 @@ func TestResolveAgainstOrigin_MatchByName_SubscriptionName(t *testing.T) {
 func TestResolveAgainstOrigin_NoMatch(t *testing.T) {
 	task := &TableDiffTask{
 		AgainstOrigin:   "nonexistent",
-		NodeOriginNames: map[string]string{"3": "n1", "4": "n2"},
+		NodeOriginNames: map[string]map[string]string{"node1": {"3": "n1", "4": "n2"}},
 	}
 	err := task.resolveAgainstOrigin()
 	if err == nil {
@@ -131,5 +133,47 @@ func TestBuildEffectiveFilter_Empty(t *testing.T) {
 	}
 	if filter != "" {
 		t.Fatalf("expected empty filter, got: %s", filter)
+	}
+}
+
+func TestWithSpockMetadata_PerNodeTranslation(t *testing.T) {
+	// Simulate native PG: same roident "1" maps to different names on different nodes
+	task := &TableDiffTask{
+		NodeOriginNames: map[string]map[string]string{
+			"n1": {"1": "sub_n3_to_n1"},
+			"n2": {"1": "sub_n3_to_n2"},
+		},
+	}
+
+	row1 := map[string]any{"node_origin": "1", "id": 1}
+	result1 := task.withSpockMetadata(row1, "n1")
+	meta1 := result1["_spock_metadata_"].(map[string]any)
+	if meta1["node_origin"] != "sub_n3_to_n1" {
+		t.Fatalf("n1 row: expected origin sub_n3_to_n1, got %v", meta1["node_origin"])
+	}
+
+	row2 := map[string]any{"node_origin": "1", "id": 2}
+	result2 := task.withSpockMetadata(row2, "n2")
+	meta2 := result2["_spock_metadata_"].(map[string]any)
+	if meta2["node_origin"] != "sub_n3_to_n2" {
+		t.Fatalf("n2 row: expected origin sub_n3_to_n2, got %v", meta2["node_origin"])
+	}
+}
+
+func TestFlatNodeOriginNames_MergesAllNodes(t *testing.T) {
+	task := &TableDiffTask{
+		NodeOriginNames: map[string]map[string]string{
+			"n1": {"1": "sub_n3_to_n1"},
+			"n2": {"1": "sub_n3_to_n2", "2": "sub_n4_to_n2"},
+		},
+	}
+	flat := task.flatNodeOriginNames()
+	// roident "2" should always be present
+	if flat["2"] != "sub_n4_to_n2" {
+		t.Fatalf("expected flat[2]=sub_n4_to_n2, got %q", flat["2"])
+	}
+	// roident "1" will be one of the two — either is valid for flattened lookup
+	if flat["1"] != "sub_n3_to_n1" && flat["1"] != "sub_n3_to_n2" {
+		t.Fatalf("expected flat[1] to be one of the subscription names, got %q", flat["1"])
 	}
 }
