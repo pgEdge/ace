@@ -12,6 +12,7 @@
 #!/usr/bin/env bash
 # visualise.sh
 # Flags:
+#   -S <ace_schema> (default: pgedge_ace)  -> schema where ACE mtree objects live
 #   -s <schema>    (default: public)
 #   -t <table>     (required)  -> full table: ace_mtree_<schema>_<table>
 #   -H <host>      (optional)  -> psql -h
@@ -21,11 +22,11 @@
 #   -v             vertical
 #
 # Uses PG* env for user and db Example:
-#   PGUSER=admin PGDATABASE=demo ./visualise.sh -s public -t customers_small -H localhost -v
+#   PGUSER=admin PGDATABASE=demo ./visualise.sh -s public -t customers_small -H localhost -v [-S pgedge_ace]
 
 set -euo pipefail
 
-ace_schema="spock"
+ace_schema="pgedge_ace"
 table_schema="public"
 table=""
 host=""
@@ -33,8 +34,9 @@ user="${PGUSER:-admin}"
 dbname="${PGDATABASE:-demo}"
 orientation="vertical"   # default
 
-while getopts ":s:t:H:U:d:hv" opt; do
+while getopts ":S:s:t:H:U:d:hv" opt; do
   case "$opt" in
+    S) ace_schema="$OPTARG" ;;
     s) table_schema="$OPTARG" ;;
     t) table="$OPTARG" ;;
     H) host="$OPTARG" ;;
@@ -48,7 +50,7 @@ while getopts ":s:t:H:U:d:hv" opt; do
 done
 
 if [[ -z "$table" ]]; then
-  echo "Usage: $0 -t <table> [-s <schema=public>] [-H <host>] [-U <user>] [-d <dbname>] [-h|-v]" >&2
+  echo "Usage: $0 -t <table> [-s <schema=public>] [-S <ace_schema=pgedge_ace>] [-H <host>] [-U <user>] [-d <dbname>] [-h|-v]" >&2
   exit 2
 fi
 
