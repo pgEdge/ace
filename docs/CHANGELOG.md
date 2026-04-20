@@ -2,6 +2,49 @@
 
 All notable changes to ACE will be captured in this document. This project follows semantic versioning; the latest changes appear first.
 
+## [v2.0.0] - 2026-04-22
+
+### Added
+- **Native PostgreSQL support.** `table-diff`, `table-repair`, and Merkle tree
+  operations now work on vanilla PostgreSQL (14+) without the spock extension.
+  ACE auto-detects whether spock is installed on each node and branches
+  accordingly; `spock-diff` and `repset-diff` return a clear error when spock
+  is not present.
+- Native PG alternatives for replication origin and slot LSN queries using
+  `pg_subscription` and `pg_replication_origin` catalog tables.
+- `--against-origin` now works on native PG logical replication setups by
+  resolving replication origin IDs to subscription names.
+- Integration test suite for native PostgreSQL covering table-diff, table-repair
+  (unidirectional, bidirectional, fix-nulls, dry-run), Merkle tree operations,
+  and origin-tracked replication with repair.
+
+### Changed
+- ACE schema name in SQL templates is now quoted with `pgx.Identifier.Sanitize()`
+  to prevent SQL breakage with non-simple schema names (e.g., mixed case,
+  hyphens).
+- `spock.xact_commit_timestamp_origin()` replaced with the standard PostgreSQL
+  function `pg_xact_commit_timestamp_origin()` in the `--against-origin` filter.
+  The two are functionally identical (spock's implementation is a thin wrapper
+  around the same PG core function).
+- Spock detection is now per-node and lazy, supporting mixed clusters where some
+  nodes have spock and others do not.
+- `SpockNodeNames` renamed to `NodeOriginNames` throughout the codebase to
+  reflect dual-mode (spock + native PG) usage.
+
+### Fixed
+- Recovery-mode auto-selection (`autoSelectSourceOfTruth`) silently used native
+  PG LSN queries on spock clusters because the connection pool was stored after
+  `fetchLSNsForNode` returned instead of before.
+- `aceSchema` template function used `config.Cfg` (not thread-safe) instead of
+  `config.Get()`, risking data races during concurrent SIGHUP reloads.
+- `repset-diff` child table-diff tasks did not inherit the parent's TaskStore,
+  causing each to open its own SQLite connection.
+- `isSpockAvailable` swallowed errors, causing callers to silently fall back to
+  native PG mode on detection failures.
+- Native PG subscription matching used LIKE substring patterns that could
+  collide on similar node names (e.g., `n1` matching `n10`); now uses regex
+  word boundaries.
+
 ## [v1.9.0] - 2026-04-17
 
 ### Added
