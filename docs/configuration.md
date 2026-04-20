@@ -37,7 +37,7 @@ The [`ace.yaml` file](https://github.com/pgEdge/ace/blob/main/ace.yaml) defines 
 | mtree → cdc --> publication_name | Publication used for mtree CDC. **Default: "ace_mtree_pub"** |
 | mtree → cdc --> cdc_processing_timeout | CDC processing timeout (s). **Default: 30** |
 | mtree → cdc --> cdc_metadata_flush_seconds | How often (s) CDC metadata is flushed to disk. **Default: 10** |
-| mtree --> schema | Schema used for mtree metadata/objects. **Default: "spock"** |
+| mtree --> schema | Schema used for mtree metadata/objects. **Default: "pgedge_ace"** |
 | mtree → diff --> min_block_size | Minimum Merkle diff block size. **Default: 1000** |
 | mtree → diff --> block_size | Target Merkle diff block size. **Default: 100000** |
 | mtree → diff --> max_block_size | Maximum Merkle diff block size. **Default: 1000000** |

@@ -18,6 +18,14 @@ All notable changes to ACE will be captured in this document. This project follo
   (unidirectional, bidirectional, fix-nulls, dry-run), Merkle tree operations,
   and origin-tracked replication with repair.
 
+### ⚠️ Breaking Change
+- **Default `mtree.schema` changed from `"spock"` to `"pgedge_ace"`.** If you have
+  been using Merkle tree operations (`mtree build`, `mtree diff`, continuous CDC)
+  in prior versions, your existing metadata tables live in the `spock` schema. To
+  preserve compatibility, set `schema: "spock"` in the following locations:
+  - `ace.yaml` → `mtree.schema`
+  - `visualise.sh` → `-S spock` flag (or edit the default in the script)
+
 ### Changed
 - ACE schema name in SQL templates is now quoted with `pgx.Identifier.Sanitize()`
   to prevent SQL breakage with non-simple schema names (e.g., mixed case,
