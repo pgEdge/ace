@@ -374,12 +374,12 @@ func (t *TableDiffTask) reCompareDiffs(fetchedRowsByNode map[string]map[string]t
 				persistentDiffCount++
 				if nowOnNode1 {
 					rowAsMap := utils.OrderedMapToMap(newRow1)
-					rowWithMeta := t.withSpockMetadata(rowAsMap)
+					rowWithMeta := t.withSpockMetadata(rowAsMap, node1)
 					newDiffsForPair.Rows[node1] = append(newDiffsForPair.Rows[node1], utils.MapToOrderedMap(rowWithMeta, t.Cols))
 				}
 				if nowOnNode2 {
 					rowAsMap := utils.OrderedMapToMap(newRow2)
-					rowWithMeta := t.withSpockMetadata(rowAsMap)
+					rowWithMeta := t.withSpockMetadata(rowAsMap, node2)
 					newDiffsForPair.Rows[node2] = append(newDiffsForPair.Rows[node2], utils.MapToOrderedMap(rowWithMeta, t.Cols))
 				}
 			}
