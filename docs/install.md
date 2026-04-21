@@ -14,8 +14,8 @@ Requires Go 1.26+. No CGO or system SQLite libraries needed — the project uses
 # Latest release
 go install github.com/pgedge/ace/cmd/ace@latest
 
-# Specific version
-go install github.com/pgedge/ace/cmd/ace@v1.5.3
+# Specific version — update to the latest tag from GitHub Releases
+go install github.com/pgedge/ace/cmd/ace@v1.9.0
 ```
 
 The binary lands in `GOBIN` if set, otherwise `$GOPATH/bin` (defaults to `~/go/bin`). Add that to your `PATH`:
@@ -29,7 +29,7 @@ export PATH="$(go env GOBIN || go env GOPATH)/bin:$PATH"
 Grab the prebuilt archive for your platform from GitHub Releases and unpack the `ace` binary:
 
 ```sh
-ACE_VER=v1.5.3
+ACE_VER=v1.9.0  # update to the latest tag from GitHub Releases
 OS=Linux    # or Darwin or Windows
 ARCH=x86_64 # or arm64
 

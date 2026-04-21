@@ -36,6 +36,7 @@ The [`ace.yaml` file](https://github.com/pgEdge/ace/blob/main/ace.yaml) defines 
 | mtree → cdc --> slot_name | Logical decoding slot name for mtree CDC. **Default: "ace_mtree_slot"** |
 | mtree → cdc --> publication_name | Publication used for mtree CDC. **Default: "ace_mtree_pub"** |
 | mtree → cdc --> cdc_processing_timeout | CDC processing timeout (s). **Default: 30** |
+| mtree → cdc --> cdc_metadata_flush_seconds | How often (s) CDC metadata is flushed to disk. **Default: 10** |
 | mtree --> schema | Schema used for mtree metadata/objects. **Default: "spock"** |
 | mtree → diff --> min_block_size | Minimum Merkle diff block size. **Default: 1000** |
 | mtree → diff --> block_size | Target Merkle diff block size. **Default: 100000** |
@@ -45,8 +46,8 @@ The [`ace.yaml` file](https://github.com/pgEdge/ace/blob/main/ace.yaml) defines 
 | (root) --> schedule_jobs | Array of job definitions consumed by the scheduler (see [Scheduling ACE Runs](scheduling.md)). **Default: []** |
 | (root) --> schedule_config | Array of cadence settings (`run_frequency` or `crontab_schedule`) that reference entries in `schedule_jobs`. **Default: []** |
 | cert_auth --> use_cert_auth | Use client certificate authentication. **Default: true** |
-| cert_auth --> user_cert_file | Path to user/client certificate. **Default: "data/pg16/pki/admin-cert/admin.crt"** |
-| cert_auth --> user_key_file | Path to user/client private key. **Default: "data/pg16/pki/admin-cert/admin.key"** |
+| cert_auth --> ace_user_cert_file | Path to user/client certificate. **Default: "data/pg16/pki/admin-cert/admin.crt"** |
+| cert_auth --> ace_user_key_file | Path to user/client private key. **Default: "data/pg16/pki/admin-cert/admin.key"** |
 | cert_auth --> ca_cert_file | Path to CA certificate. **Default: "data/pg16/pki/ca.crt"** |
 | (root) --> debug_mode | Enable verbose/diagnostic logging. **Default: false** |
 
