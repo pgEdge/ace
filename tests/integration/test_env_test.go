@@ -392,22 +392,32 @@ func (e *testEnv) pairKey() string {
 	return e.ServiceN1 + "/" + e.ServiceN2
 }
 
-// awaitDataSync waits until n1 and n2 have the same row count for the given
-// table. This prevents inter-test bleed when a previous subtest's cleanup
-// repair is still replicating.
+// awaitDataSync waits until n1 and n2 have the same row count AND the same
+// content digest for the given table. Counts alone miss UPDATE-only drift
+// (repair replays after UPDATE-based subtests change field values without
+// changing row counts); the hashtext-sum digest is order-independent and
+// PK-agnostic, so it catches that case.
 func (e *testEnv) awaitDataSync(t *testing.T, qualifiedTableName string) {
 	t.Helper()
 	ctx := context.Background()
+	query := fmt.Sprintf(
+		"SELECT count(*), COALESCE(sum(hashtext(t::text)::bigint), 0) FROM %s t",
+		qualifiedTableName,
+	)
 	assertEventually(t, 30*time.Second, func() error {
 		var n1Count, n2Count int
-		if err := e.N1Pool.QueryRow(ctx, fmt.Sprintf("SELECT count(*) FROM %s", qualifiedTableName)).Scan(&n1Count); err != nil {
-			return fmt.Errorf("counting rows on n1: %w", err)
+		var n1Digest, n2Digest int64
+		if err := e.N1Pool.QueryRow(ctx, query).Scan(&n1Count, &n1Digest); err != nil {
+			return fmt.Errorf("digesting rows on n1: %w", err)
 		}
-		if err := e.N2Pool.QueryRow(ctx, fmt.Sprintf("SELECT count(*) FROM %s", qualifiedTableName)).Scan(&n2Count); err != nil {
-			return fmt.Errorf("counting rows on n2: %w", err)
+		if err := e.N2Pool.QueryRow(ctx, query).Scan(&n2Count, &n2Digest); err != nil {
+			return fmt.Errorf("digesting rows on n2: %w", err)
 		}
 		if n1Count != n2Count {
-			return fmt.Errorf("nodes not in sync for %s: n1=%d n2=%d", qualifiedTableName, n1Count, n2Count)
+			return fmt.Errorf("nodes not in sync for %s: n1 count=%d n2 count=%d", qualifiedTableName, n1Count, n2Count)
+		}
+		if n1Digest != n2Digest {
+			return fmt.Errorf("nodes not in sync for %s: count=%d but digest n1=%d n2=%d", qualifiedTableName, n1Count, n1Digest, n2Digest)
 		}
 		return nil
 	})
