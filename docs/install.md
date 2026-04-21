@@ -8,7 +8,7 @@ Choose the option that fits your environment:
 
 ## Install via Go
 
-Requires Go 1.20+ with CGO enabled (SQLite). Make sure build deps are present (`libsqlite3-dev`/`sqlite-devel` on Linux).
+Requires Go 1.26+. No CGO or system SQLite libraries needed — the project uses a pure-Go SQLite driver.
 
 ```sh
 # Latest release
