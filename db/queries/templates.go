@@ -276,16 +276,25 @@ var SQLTemplates = Templates{
 		DROP TABLE IF EXISTS {{aceSchema}}.ace_cdc_metadata
 	`)),
 
+	// pub_commit_lsn is extracted via to_jsonb(row) ->> 'pub_commit_lsn'
+	// instead of a direct column reference so the query parses and runs
+	// against pre-migration ace_cdc_metadata tables that lack the column.
+	// On legacy 3-column rows the JSON object has no pub_commit_lsn key,
+	// ->> returns NULL, and COALESCE produces the empty string the
+	// listen.go guard treats as "invariant uncheckable, warn and skip".
+	// The additive ALTER TABLE in CreateCDCMetadataTable still backfills
+	// the column on the next MtreeInit so post-init reads use the real
+	// column path.
 	GetCDCMetadata: template.Must(template.New("getCDCMetadata").Funcs(aceTemplateFuncs).Parse(`
 		SELECT
-			slot_name,
-			start_lsn,
-			tables,
-			COALESCE(pub_commit_lsn, '') AS pub_commit_lsn
+			m.slot_name,
+			m.start_lsn,
+			m.tables,
+			COALESCE(to_jsonb(m) ->> 'pub_commit_lsn', '') AS pub_commit_lsn
 		FROM
-			{{aceSchema}}.ace_cdc_metadata
+			{{aceSchema}}.ace_cdc_metadata AS m
 		WHERE
-			publication_name = $1
+			m.publication_name = $1
 	`)),
 
 	UpdateMtreeCounters: template.Must(template.New("updateMtreeCounters").Parse(`
