@@ -1451,83 +1451,88 @@ func (m *MerkleTreeTask) BuildMtree() (err error) {
 	}
 
 	for _, nodeInfo := range m.ClusterNodes {
-		logger.Info("Processing node: %s", nodeInfo["Name"])
-		pool, ok := pools[nodeInfo["Name"].(string)]
-		if !ok {
-			return fmt.Errorf("could not find node %s in pools", nodeInfo["Name"])
-		}
-		publicationName := cfg.PublicationName
-		err := queries.AlterPublicationAddTable(m.Ctx, pool, publicationName, m.QualifiedTableName)
-		if err != nil {
-			var pgErr *pgconn.PgError
-			if errors.As(err, &pgErr) && pgErr.Code == tableAlreadyInPublicationError {
-				logger.Info("Table %s is already in publication %s on node %s", m.QualifiedTableName, publicationName, nodeInfo["Name"])
-			} else {
-				pool.Close()
-				return fmt.Errorf("failed to add table to publication on node %s: %w", nodeInfo["Name"], err)
+		// Per-iteration body in a closure so defer pool.Close and defer
+		// tx.Rollback fire at end-of-iteration in the correct LIFO order.
+		// Without this scoping, hitting any error inside the body called
+		// pool.Close while the tx still held a pooled conn — pool.Close
+		// blocks waiting for that conn to be released, but the deferred
+		// tx.Rollback that would release it cannot run until the function
+		// returns, which cannot happen while pool.Close is blocking. The
+		// process then hangs and the underlying error never surfaces.
+		if err := func() error {
+			logger.Info("Processing node: %s", nodeInfo["Name"])
+			pool, ok := pools[nodeInfo["Name"].(string)]
+			if !ok {
+				return fmt.Errorf("could not find node %s in pools", nodeInfo["Name"])
 			}
-		} else {
-			logger.Info("Added table %s to publication %s on node %s", m.QualifiedTableName, publicationName, nodeInfo["Name"])
-		}
+			defer pool.Close()
 
-		tx, err := pool.Begin(m.Ctx)
-		if err != nil {
-			return fmt.Errorf("failed to begin transaction on node %s: %w", nodeInfo["Name"], err)
-		}
-		defer tx.Rollback(m.Ctx)
+			publicationName := cfg.PublicationName
+			err := queries.AlterPublicationAddTable(m.Ctx, pool, publicationName, m.QualifiedTableName)
+			if err != nil {
+				var pgErr *pgconn.PgError
+				if errors.As(err, &pgErr) && pgErr.Code == tableAlreadyInPublicationError {
+					logger.Info("Table %s is already in publication %s on node %s", m.QualifiedTableName, publicationName, nodeInfo["Name"])
+				} else {
+					return fmt.Errorf("failed to add table to publication on node %s: %w", nodeInfo["Name"], err)
+				}
+			} else {
+				logger.Info("Added table %s to publication %s on node %s", m.QualifiedTableName, publicationName, nodeInfo["Name"])
+			}
 
-		slotName, startLSN, tables, _, err := queries.GetCDCMetadata(m.Ctx, tx, publicationName)
-		if err != nil {
-			pool.Close()
-			return fmt.Errorf("failed to get cdc metadata on node %s: %w", nodeInfo["Name"], err)
-		}
+			tx, err := pool.Begin(m.Ctx)
+			if err != nil {
+				return fmt.Errorf("failed to begin transaction on node %s: %w", nodeInfo["Name"], err)
+			}
+			defer tx.Rollback(m.Ctx)
 
-		if !slices.Contains(tables, m.QualifiedTableName) {
-			tables = append(tables, m.QualifiedTableName)
-		}
+			slotName, startLSN, tables, _, err := queries.GetCDCMetadata(m.Ctx, tx, publicationName)
+			if err != nil {
+				return fmt.Errorf("failed to get cdc metadata on node %s: %w", nodeInfo["Name"], err)
+			}
 
-		err = queries.UpdateCDCMetadata(m.Ctx, tx, publicationName, slotName, startLSN, tables)
-		if err != nil {
-			pool.Close()
-			return fmt.Errorf("failed to update cdc metadata on node %s: %w", nodeInfo["Name"], err)
-		}
-		logger.Info("Updated CDC metadata for table %s on node %s", m.QualifiedTableName, nodeInfo["Name"])
+			if !slices.Contains(tables, m.QualifiedTableName) {
+				tables = append(tables, m.QualifiedTableName)
+			}
 
-		logger.Info("Creating Merkle Tree objects on %s...", nodeInfo["Name"])
-		err = m.createMtreeObjects(tx, maxRows, numBlocks)
-		if err != nil {
-			pool.Close()
-			return fmt.Errorf("failed to create mtree objects on node %s: %w", nodeInfo["Name"], err)
-		}
+			err = queries.UpdateCDCMetadata(m.Ctx, tx, publicationName, slotName, startLSN, tables)
+			if err != nil {
+				return fmt.Errorf("failed to update cdc metadata on node %s: %w", nodeInfo["Name"], err)
+			}
+			logger.Info("Updated CDC metadata for table %s on node %s", m.QualifiedTableName, nodeInfo["Name"])
 
-		logger.Info("Inserting block ranges on %s...", nodeInfo["Name"])
-		err = m.insertBlockRanges(tx, blockRanges)
-		if err != nil {
-			pool.Close()
-			return fmt.Errorf("failed to insert block ranges on node %s: %w", nodeInfo["Name"], err)
-		}
+			logger.Info("Creating Merkle Tree objects on %s...", nodeInfo["Name"])
+			err = m.createMtreeObjects(tx, maxRows, numBlocks)
+			if err != nil {
+				return fmt.Errorf("failed to create mtree objects on node %s: %w", nodeInfo["Name"], err)
+			}
 
-		logger.Info("Computing leaf hashes on %s...", nodeInfo["Name"])
-		err = m.computeLeafHashes(pool, tx, blockRanges, numWorkers, "Computing leaf hashes:")
-		if err != nil {
-			pool.Close()
-			return fmt.Errorf("failed to compute leaf hashes on node %s: %w", nodeInfo["Name"], err)
-		}
+			logger.Info("Inserting block ranges on %s...", nodeInfo["Name"])
+			err = m.insertBlockRanges(tx, blockRanges)
+			if err != nil {
+				return fmt.Errorf("failed to insert block ranges on node %s: %w", nodeInfo["Name"], err)
+			}
 
-		logger.Info("Building parent nodes on %s...", nodeInfo["Name"])
-		err = m.buildParentNodes(tx)
-		if err != nil {
-			pool.Close()
-			return fmt.Errorf("failed to build parent nodes on node %s: %w", nodeInfo["Name"], err)
-		}
+			logger.Info("Computing leaf hashes on %s...", nodeInfo["Name"])
+			err = m.computeLeafHashes(pool, tx, blockRanges, numWorkers, "Computing leaf hashes:")
+			if err != nil {
+				return fmt.Errorf("failed to compute leaf hashes on node %s: %w", nodeInfo["Name"], err)
+			}
 
-		logger.Info("Merkle tree built successfully on %s", nodeInfo["Name"])
-		err = tx.Commit(m.Ctx)
-		if err != nil {
-			pool.Close()
-			return fmt.Errorf("failed to commit transaction on node %s: %w", nodeInfo["Name"], err)
+			logger.Info("Building parent nodes on %s...", nodeInfo["Name"])
+			err = m.buildParentNodes(tx)
+			if err != nil {
+				return fmt.Errorf("failed to build parent nodes on node %s: %w", nodeInfo["Name"], err)
+			}
+
+			logger.Info("Merkle tree built successfully on %s", nodeInfo["Name"])
+			if err := tx.Commit(m.Ctx); err != nil {
+				return fmt.Errorf("failed to commit transaction on node %s: %w", nodeInfo["Name"], err)
+			}
+			return nil
+		}(); err != nil {
+			return err
 		}
-		pool.Close()
 	}
 
 	resultCtx["max_rows"] = maxRows
