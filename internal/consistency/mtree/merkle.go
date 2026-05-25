@@ -2550,17 +2550,17 @@ func (m *MerkleTreeTask) insertBlockRanges(conn queries.DBQuerier, ranges []type
 
 func (m *MerkleTreeTask) createMtreeObjects(tx pgx.Tx, totalRows int64, numBlocks int) error {
 
-	err := queries.CreateSchema(m.Ctx, tx, m.aceSchema())
-	if err != nil {
-		return fmt.Errorf("failed to create schema '%s': %w", m.aceSchema(), err)
-	}
-
-	err = queries.CreateXORFunction(m.Ctx, tx)
-	if err != nil {
-		return fmt.Errorf("failed to create xor function: %w", err)
-	}
-
-	err = queries.CreateMetadataTable(m.Ctx, tx)
+	// Schema and the bytea_xor function are created by MtreeInit's Phase A
+	// and are required for BuildMtree to make sense (build needs the CDC
+	// publication and metadata that init sets up — if init ran, schema and
+	// XOR function exist). Recreating them here is redundant, and on Spock
+	// clusters CREATE OR REPLACE FUNCTION unconditionally writes to
+	// pg_proc, so it races with Spock's DDL apply of the matching
+	// replicated DDL from n1's own build — producing SQLSTATE XX000
+	// "tuple concurrently updated". The CREATE TABLE IF NOT EXISTS below
+	// is race-safe because IF NOT EXISTS short-circuits when the relation
+	// already exists.
+	err := queries.CreateMetadataTable(m.Ctx, tx)
 	if err != nil {
 		return fmt.Errorf("failed to create metadata table: %w", err)
 	}
