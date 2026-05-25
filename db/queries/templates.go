@@ -145,6 +145,9 @@ type Templates struct {
 	ResetReplicationOriginSession    *template.Template
 	SetupReplicationOriginXact       *template.Template
 	ResetReplicationOriginXact       *template.Template
+
+	InitCDCMetadata           *template.Template
+	CurrentWalInsertLSN       *template.Template
 }
 
 var SQLTemplates = Templates{
@@ -221,6 +224,39 @@ var SQLTemplates = Templates{
 			last_updated = EXCLUDED.last_updated
 	`)),
 
+	// On conflict every column including pub_commit_lsn is refreshed:
+	// reaching this query path means a re-init, which created a fresh
+	// publication with a new commit LSN, and listen.go's guard must
+	// compare against that current LSN — not a stale prior one.
+	InitCDCMetadata: template.Must(template.New("initCdcMetadata").Funcs(aceTemplateFuncs).Parse(`
+		INSERT INTO
+			{{aceSchema}}.ace_cdc_metadata (
+				publication_name,
+				slot_name,
+				start_lsn,
+				pub_commit_lsn,
+				tables,
+				last_updated
+			)
+		VALUES
+			(
+				$1,
+				$2,
+				$3,
+				$4,
+				$5,
+				current_timestamp
+			)
+		ON CONFLICT (publication_name) DO
+		UPDATE
+		SET
+			slot_name = EXCLUDED.slot_name,
+			start_lsn = EXCLUDED.start_lsn,
+			pub_commit_lsn = EXCLUDED.pub_commit_lsn,
+			tables = EXCLUDED.tables,
+			last_updated = EXCLUDED.last_updated
+	`)),
+
 	DropPublication: template.Must(template.New("dropPublication").Parse(`
 		DROP PUBLICATION IF EXISTS {{.PublicationName}}
 	`)),
@@ -244,7 +280,8 @@ var SQLTemplates = Templates{
 		SELECT
 			slot_name,
 			start_lsn,
-			tables
+			tables,
+			COALESCE(pub_commit_lsn, '') AS pub_commit_lsn
 		FROM
 			{{aceSchema}}.ace_cdc_metadata
 		WHERE
@@ -338,9 +375,13 @@ var SQLTemplates = Templates{
 			publication_name text PRIMARY KEY,
 			slot_name text,
 			start_lsn text,
+			pub_commit_lsn text,
 			tables text[],
 			last_updated timestamptz
-		)`),
+		);
+		-- Forward-compatible addition for clusters that ran older versions.
+		ALTER TABLE {{aceSchema}}.ace_cdc_metadata
+			ADD COLUMN IF NOT EXISTS pub_commit_lsn text;`),
 	),
 	GetPrimaryKey: template.Must(template.New("getPrimaryKey").Parse(`
 		SELECT
@@ -1598,5 +1639,14 @@ var SQLTemplates = Templates{
 	`)),
 	ResetReplicationOriginXact: template.Must(template.New("resetReplicationOriginXact").Parse(`
 		SELECT pg_replication_origin_xact_reset()
+	`)),
+
+	// CurrentWalInsertLSN returns pg_current_wal_insert_lsn() as text. Used
+	// at MtreeInit time, just after CREATE PUBLICATION, as the lower bound
+	// for any future replication start LSN. The slot's consistent point is
+	// guaranteed to be >= this value because the slot is created after this
+	// transaction commits.
+	CurrentWalInsertLSN: template.Must(template.New("currentWalInsertLSN").Parse(`
+		SELECT pg_current_wal_insert_lsn()::text
 	`)),
 }

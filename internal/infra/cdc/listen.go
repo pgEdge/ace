@@ -65,6 +65,7 @@ func processReplicationStream(ctx context.Context, nodeInfo map[string]any, cont
 	publication := cfg.PublicationName
 	slotName := cfg.SlotName
 	var startLSNStr string
+	var pubCommitLSNStr string
 	var tables []string
 	func() {
 		tx, err := pool.Begin(ctx)
@@ -74,13 +75,14 @@ func processReplicationStream(ctx context.Context, nodeInfo map[string]any, cont
 		}
 		defer tx.Rollback(ctx)
 
-		metaSlot, metaLSN, metaTables, err := queries.GetCDCMetadata(ctx, tx, publication)
+		metaSlot, metaLSN, metaTables, metaPubCommit, err := queries.GetCDCMetadata(ctx, tx, publication)
 		if err != nil {
 			logger.Error("failed to get cdc metadata: %v", err)
 			startLSNStr = ""
 			return
 		}
 		startLSNStr = metaLSN
+		pubCommitLSNStr = metaPubCommit
 		tables = metaTables
 		if metaSlot != "" {
 			slotName = metaSlot
@@ -98,10 +100,33 @@ func processReplicationStream(ctx context.Context, nodeInfo map[string]any, cont
 		return fmt.Errorf("failed to parse lsn: %v", err)
 	}
 
-	slotConfirmedLSN, err := getSlotConfirmedFlushLSN(ctx, pool, slotName)
-	if err != nil {
-		logger.Error("failed to get confirmed_flush_lsn for slot %s: %v", slotName, err)
-		return fmt.Errorf("failed to get confirmed_flush_lsn for slot %s: %w", slotName, err)
+	// Publication-commit guard. If metadata records the LSN at which the
+	// publication was committed during MtreeInit, refuse to start a stream
+	// from any LSN strictly older than that — pgoutput's historical
+	// catalog snapshot would not yet contain the publication and the
+	// stream would abort with "publication does not exist" (SQLSTATE
+	// 42704).
+	//
+	// Empty pubCommitLSNStr means the metadata row was written by a
+	// version of ACE that pre-dates this fix; we cannot check the
+	// invariant and fall through with a warning.
+	if pubCommitLSNStr == "" {
+		logger.Warn("ace_cdc_metadata has no pub_commit_lsn for publication %s; cannot verify slot/publication ordering. If you see SQLSTATE 42704, run 'ace mtree teardown' and 'ace mtree init' to recover", publication)
+	} else {
+		pubCommitLSN, err := pglogrepl.ParseLSN(pubCommitLSNStr)
+		if err != nil {
+			logger.Error("failed to parse pub_commit_lsn %s: %v", pubCommitLSNStr, err)
+			return fmt.Errorf("failed to parse pub_commit_lsn %s: %w", pubCommitLSNStr, err)
+		}
+		if startLSN < pubCommitLSN {
+			return fmt.Errorf(
+				"ace_cdc_metadata.start_lsn (%s) is older than publication commit LSN (%s) "+
+					"for slot %s; this typically indicates ace_cdc_metadata was replicated "+
+					"cross-node by Spock, or the slot/metadata is from a prior init. "+
+					"Run 'ace mtree teardown' and 'ace mtree init' to recover",
+				startLSN, pubCommitLSN, slotName,
+			)
+		}
 	}
 
 	targetFlushLSN := pglogrepl.LSN(0)
@@ -119,9 +144,6 @@ func processReplicationStream(ctx context.Context, nodeInfo map[string]any, cont
 	}
 
 	lastLSN := startLSN
-	if slotConfirmedLSN != 0 && slotConfirmedLSN < lastLSN {
-		lastLSN = slotConfirmedLSN
-	}
 	var lastFlushedLSN pglogrepl.LSN = lastLSN
 	var lastLSNVal atomic.Uint64
 	lastLSNVal.Store(uint64(lastLSN))
@@ -470,22 +492,6 @@ func processReplicationStream(ctx context.Context, nodeInfo map[string]any, cont
 	}
 
 	return nil
-}
-
-func getSlotConfirmedFlushLSN(ctx context.Context, pool *pgxpool.Pool, slotName string) (pglogrepl.LSN, error) {
-	var lsnStr string
-	err := pool.QueryRow(ctx, "SELECT confirmed_flush_lsn FROM pg_replication_slots WHERE slot_name = $1", slotName).Scan(&lsnStr)
-	if err != nil {
-		return 0, fmt.Errorf("failed to fetch confirmed_flush_lsn for slot %s: %w", slotName, err)
-	}
-	if lsnStr == "" {
-		return 0, fmt.Errorf("confirmed_flush_lsn empty for slot %s", slotName)
-	}
-	lsn, err := pglogrepl.ParseLSN(lsnStr)
-	if err != nil {
-		return 0, fmt.Errorf("failed to parse confirmed_flush_lsn %s for slot %s: %w", lsnStr, slotName, err)
-	}
-	return lsn, nil
 }
 
 func getCurrentWalFlushLSN(ctx context.Context, pool *pgxpool.Pool) (pglogrepl.LSN, error) {

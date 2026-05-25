@@ -2913,18 +2913,53 @@ func DropCDCMetadataTable(ctx context.Context, db DBQuerier) error {
 	return nil
 }
 
-func GetCDCMetadata(ctx context.Context, db DBQuerier, publicationName string) (string, string, []string, error) {
+// pubCommitLSN is empty for legacy metadata rows that pre-date the
+// pub_commit_lsn column; callers must treat empty as "invariant
+// uncheckable" and skip the publication-commit guard with a warning.
+func GetCDCMetadata(ctx context.Context, db DBQuerier, publicationName string) (slotName, startLSN string, tables []string, pubCommitLSN string, err error) {
 	sql, err := RenderSQL(SQLTemplates.GetCDCMetadata, nil)
 	if err != nil {
-		return "", "", nil, err
+		return "", "", nil, "", err
 	}
-	var slotName, startLSN string
-	var tables []string
-	err = db.QueryRow(ctx, sql, publicationName).Scan(&slotName, &startLSN, &tables)
+	err = db.QueryRow(ctx, sql, publicationName).Scan(&slotName, &startLSN, &tables, &pubCommitLSN)
 	if err != nil {
-		return "", "", nil, err
+		return "", "", nil, "", err
 	}
-	return slotName, startLSN, tables, nil
+	return slotName, startLSN, tables, pubCommitLSN, nil
+}
+
+// Init path only. Ongoing flushes use UpdateCDCMetadata, which deliberately
+// leaves pub_commit_lsn untouched so the listen.go guard always compares
+// against the LSN captured at the matching init.
+func InitCDCMetadata(ctx context.Context, db DBQuerier, publicationName, slotName, startLSN, pubCommitLSN string, tables []string) error {
+	sql, err := RenderSQL(SQLTemplates.InitCDCMetadata, nil)
+	if err != nil {
+		return fmt.Errorf("failed to render InitCDCMetadata SQL: %w", err)
+	}
+	if tables == nil {
+		tables = []string{}
+	}
+	_, err = db.Exec(ctx, sql, publicationName, slotName, startLSN, pubCommitLSN, tables)
+	if err != nil {
+		return fmt.Errorf("query to init cdc metadata failed: %w", err)
+	}
+	return nil
+}
+
+// Called mid-Phase-A, after CREATE PUBLICATION, so the captured value is
+// strictly less than Phase A's commit LSN. The slot created in Phase B
+// has consistent_point >= that commit LSN, hence consistent_point >
+// captured value: a safe lower bound for any valid replication start LSN.
+func CurrentWalInsertLSN(ctx context.Context, db DBQuerier) (string, error) {
+	sql, err := RenderSQL(SQLTemplates.CurrentWalInsertLSN, nil)
+	if err != nil {
+		return "", fmt.Errorf("failed to render CurrentWalInsertLSN SQL: %w", err)
+	}
+	var lsn string
+	if err := db.QueryRow(ctx, sql).Scan(&lsn); err != nil {
+		return "", fmt.Errorf("failed to fetch current WAL insert LSN: %w", err)
+	}
+	return lsn, nil
 }
 
 func UpdateMtreeCounters(ctx context.Context, db DBQuerier, mtreeTable string, isComposite bool, compositeTypeName string, pkeyType string, inserts, deletes, updates []string) error {
