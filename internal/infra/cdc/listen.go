@@ -111,7 +111,7 @@ func processReplicationStream(ctx context.Context, nodeInfo map[string]any, cont
 	// version of ACE that pre-dates this fix; we cannot check the
 	// invariant and fall through with a warning.
 	if pubCommitLSNStr == "" {
-		logger.Warn("ace_cdc_metadata has no pub_commit_lsn for publication %s; cannot verify slot/publication ordering. If you see SQLSTATE 42704, run 'ace mtree teardown' and 'ace mtree init' to recover", publication)
+		logger.Warn("ace_cdc_metadata has no pub_commit_lsn for publication %s; cannot verify slot/publication ordering. If you see SQLSTATE 42704, run 'ace mtree teardown', 'ace mtree init', and 'ace mtree build' to recover", publication)
 	} else {
 		pubCommitLSN, err := pglogrepl.ParseLSN(pubCommitLSNStr)
 		if err != nil {
@@ -123,7 +123,7 @@ func processReplicationStream(ctx context.Context, nodeInfo map[string]any, cont
 				"ace_cdc_metadata.start_lsn (%s) is older than publication commit LSN (%s) "+
 					"for slot %s; this typically indicates ace_cdc_metadata was replicated "+
 					"cross-node by Spock, or the slot/metadata is from a prior init. "+
-					"Run 'ace mtree teardown' and 'ace mtree init' to recover",
+					"Run 'ace mtree teardown', 'ace mtree init', and 'ace mtree build' to recover",
 				startLSN, pubCommitLSN, slotName,
 			)
 		}
