@@ -807,51 +807,100 @@ func (m *MerkleTreeTask) MtreeInit() (err error) {
 	cfg := config.Get().MTree.CDC
 
 	for _, nodeInfo := range m.ClusterNodes {
-		logger.Info("Initialising Merkle tree objects on node: %s", nodeInfo["Name"])
-
-		lsn, err := cdc.SetupReplicationSlot(m.Ctx, nodeInfo)
-		if err != nil {
-			return fmt.Errorf("failed to set up replication slot on node %s: %w", nodeInfo["Name"], err)
+		if err := m.initOneNode(nodeInfo, cfg.PublicationName, cfg.SlotName); err != nil {
+			return err
 		}
+	}
+	return nil
+}
 
-		pool, err := auth.GetClusterNodeConnection(m.Ctx, nodeInfo, m.connOpts())
-		if err != nil {
-			return fmt.Errorf("failed to get connection pool for node %s: %w", nodeInfo["Name"], err)
-		}
-		defer pool.Close()
+// initOneNode runs MtreeInit on a single node in three phases:
+//
+//  1. Phase A (tx 1): create schema, helpers, the CDC metadata table,
+//     create the publication, and capture the publication's commit LSN.
+//     Commit.
+//  2. Phase B (no tx): create the logical replication slot via a fresh
+//     replication-mode connection. Its consistent point is now
+//     guaranteed to be > the publication's commit LSN, fixing the
+//     "publication does not exist" replay error.
+//  3. Phase C (tx 2): persist slot/start_lsn/pub_commit_lsn into
+//     ace_cdc_metadata.
+//
+// Each iteration runs inside this function so deferred Close/Rollback
+// calls fire per-node rather than at MtreeInit return.
+func (m *MerkleTreeTask) initOneNode(nodeInfo map[string]any, publicationName, slotName string) error {
+	logger.Info("Initialising Merkle tree objects on node: %s", nodeInfo["Name"])
 
-		if err = queries.CreateSchema(m.Ctx, pool, m.aceSchema()); err != nil {
-			return fmt.Errorf("failed to create schema '%s': %w", m.aceSchema(), err)
-		}
+	pool, err := auth.GetClusterNodeConnection(m.Ctx, nodeInfo, m.connOpts())
+	if err != nil {
+		return fmt.Errorf("failed to get connection pool for node %s: %w", nodeInfo["Name"], err)
+	}
+	defer pool.Close()
 
+	if err := queries.CreateSchema(m.Ctx, pool, m.aceSchema()); err != nil {
+		return fmt.Errorf("failed to create schema '%s' on node %s: %w", m.aceSchema(), nodeInfo["Name"], err)
+	}
+
+	var pubCommitLSN string
+	if err := func() (err error) {
 		tx, err := pool.Begin(m.Ctx)
 		if err != nil {
-			return fmt.Errorf("failed to begin transaction on node %s: %w", nodeInfo["Name"], err)
+			return err
 		}
 		defer tx.Rollback(m.Ctx)
 
-		if err = queries.CreateXORFunction(m.Ctx, tx); err != nil {
-			return fmt.Errorf("failed to create xor function: %w", err)
+		if err := queries.CreateXORFunction(m.Ctx, tx); err != nil {
+			return fmt.Errorf("create xor function: %w", err)
 		}
-
-		if err = queries.CreateCDCMetadataTable(m.Ctx, tx); err != nil {
-			return fmt.Errorf("failed to create cdc metadata table: %w", err)
+		if err := queries.CreateCDCMetadataTable(m.Ctx, tx); err != nil {
+			return fmt.Errorf("create cdc metadata table: %w", err)
 		}
-
-		if err := cdc.SetupPublication(m.Ctx, tx, cfg.PublicationName); err != nil {
-			return fmt.Errorf("failed to setup publication on node %s: %w", nodeInfo["Name"], err)
+		if err := cdc.SetupPublication(m.Ctx, tx, publicationName); err != nil {
+			return fmt.Errorf("setup publication: %w", err)
 		}
-
-		if err = queries.UpdateCDCMetadata(m.Ctx, tx, cfg.PublicationName, cfg.SlotName, lsn.String(), []string{}); err != nil {
-			return fmt.Errorf("failed to update cdc metadata: %w", err)
+		// Captured mid-tx after CREATE PUBLICATION, so the value is
+		// strictly less than this tx's commit LSN; Phase B's slot
+		// consistent_point is >= that commit LSN. listen.go's guard
+		// therefore catches any start LSN that predates the publication.
+		pubCommitLSN, err = queries.CurrentWalInsertLSN(m.Ctx, tx)
+		if err != nil {
+			return fmt.Errorf("capture publication commit LSN: %w", err)
 		}
-
-		if err := tx.Commit(m.Ctx); err != nil {
-			return fmt.Errorf("failed to commit transaction on node %s: %w", nodeInfo["Name"], err)
-		}
-
-		logger.Info("Merkle tree objects initialised on node: %s", nodeInfo["Name"])
+		return tx.Commit(m.Ctx)
+	}(); err != nil {
+		return fmt.Errorf("phase A failed on node %s: %w", nodeInfo["Name"], err)
 	}
+
+	slotLSN, err := cdc.SetupReplicationSlot(m.Ctx, nodeInfo)
+	if err != nil {
+		return fmt.Errorf("phase B (replication slot) failed on node %s: %w", nodeInfo["Name"], err)
+	}
+
+	if err := func() (err error) {
+		tx, err := pool.Begin(m.Ctx)
+		if err != nil {
+			return err
+		}
+		defer tx.Rollback(m.Ctx)
+
+		if err := queries.InitCDCMetadata(m.Ctx, tx,
+			publicationName, slotName,
+			slotLSN.String(), pubCommitLSN, []string{}); err != nil {
+			return fmt.Errorf("write cdc metadata: %w", err)
+		}
+		return tx.Commit(m.Ctx)
+	}(); err != nil {
+		// Slot leak mitigation: Phase B created a slot that we failed to
+		// record. A subsequent SetupReplicationSlot will drop any prior
+		// slot of the same name, so a re-run reaps it — but try a best
+		// effort drop here too to keep the cluster tidy.
+		if dropErr := queries.DropReplicationSlot(m.Ctx, pool, slotName); dropErr != nil {
+			logger.Warn("failed to drop orphaned slot %s on node %s: %v", slotName, nodeInfo["Name"], dropErr)
+		}
+		return fmt.Errorf("phase C failed on node %s: %w", nodeInfo["Name"], err)
+	}
+
+	logger.Info("Merkle tree objects initialised on node: %s", nodeInfo["Name"])
 	return nil
 }
 
@@ -1427,7 +1476,7 @@ func (m *MerkleTreeTask) BuildMtree() (err error) {
 		}
 		defer tx.Rollback(m.Ctx)
 
-		slotName, startLSN, tables, err := queries.GetCDCMetadata(m.Ctx, tx, publicationName)
+		slotName, startLSN, tables, _, err := queries.GetCDCMetadata(m.Ctx, tx, publicationName)
 		if err != nil {
 			pool.Close()
 			return fmt.Errorf("failed to get cdc metadata on node %s: %w", nodeInfo["Name"], err)

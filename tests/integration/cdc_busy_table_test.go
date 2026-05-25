@@ -252,7 +252,7 @@ func currentMetadataLSN(t *testing.T, ctx context.Context) pglogrepl.LSN {
 	require.NoError(t, err)
 	defer tx.Rollback(ctx)
 
-	_, lsnStr, _, err := queries.GetCDCMetadata(ctx, tx, config.Cfg.MTree.CDC.PublicationName)
+	_, lsnStr, _, _, err := queries.GetCDCMetadata(ctx, tx, config.Cfg.MTree.CDC.PublicationName)
 	require.NoError(t, err)
 
 	lsn, err := pglogrepl.ParseLSN(lsnStr)

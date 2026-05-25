@@ -38,6 +38,7 @@ func SetupPublication(ctx context.Context, db queries.DBQuerier, publicationName
 	return nil
 }
 
+
 func SetupReplicationSlot(ctx context.Context, nodeInfo map[string]any) (pglogrepl.LSN, error) {
 	cfg := config.Get().MTree.CDC
 	slot := cfg.SlotName
