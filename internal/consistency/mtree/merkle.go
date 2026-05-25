@@ -1330,6 +1330,21 @@ func (m *MerkleTreeTask) BuildMtree() (err error) {
 	cfg := config.Get().MTree.CDC
 	pools := make(map[string]*pgxpool.Pool, len(m.ClusterNodes))
 
+	// Safety net for early returns. The row-estimate loop closes pools
+	// itself on its error path, and the per-node build loop closes each
+	// node's pool via its inner deferred close, but neither covers
+	// pools belonging to nodes the build loop never reaches when an
+	// earlier iteration errors out. pgxpool.Pool.Close is idempotent
+	// (sync.Once internally), so the per-iteration closes still take
+	// effect promptly and this defer is a no-op for pools already closed.
+	defer func() {
+		for _, p := range pools {
+			if p != nil {
+				p.Close()
+			}
+		}
+	}()
+
 	numWorkers := int(math.Ceil(float64(runtime.NumCPU()) * m.MaxCpuRatio * 2))
 	if numWorkers < 1 {
 		numWorkers = 1
