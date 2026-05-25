@@ -252,6 +252,22 @@ func applyRuntimeParams(params map[string]string, pgCfg config.PostgresConfig) {
 	if pgCfg.TCPKeepalivesCount != nil {
 		params["tcp_keepalives_count"] = strconv.Itoa(*pgCfg.TCPKeepalivesCount)
 	}
+
+	// Suppress Spock's DDL replication and auto-repset-add behaviour on
+	// every ACE connection. ACE only issues DDL against its own pgedge_ace
+	// schema and the ace_mtree_pub publication — never against user
+	// objects — and all of that DDL is intentionally per-node. Letting
+	// Spock replicate it produces cross-node races (e.g. CREATE OR REPLACE
+	// FUNCTION racing on pg_proc) and 42704 "publication does not exist"
+	// when one node's DROP PUBLICATION + CREATE PUBLICATION lands in
+	// another node's pgoutput stream mid-replay.
+	//
+	// Both GUCs are PGC_USERSET in Spock, so connection-level options
+	// override any cluster-level default. Both have dotted names, so on
+	// vanilla PG (no Spock loaded) PostgreSQL accepts them as placeholder
+	// custom variables and they have no effect — safe in dual-mode.
+	params["spock.enable_ddl_replication"] = "off"
+	params["spock.include_ddl_repset"] = "off"
 }
 
 func ensureRuntimeParams(params map[string]string) map[string]string {
