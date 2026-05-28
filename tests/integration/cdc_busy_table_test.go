@@ -328,3 +328,73 @@ func dropCDCTestTable(t *testing.T, tableName string) {
 		}
 	}
 }
+
+// TestGetCDCMetadataLegacySchema simulates a cluster that ran an older ACE
+// version: ace_cdc_metadata exists but lacks the pub_commit_lsn column. The
+// query must still parse (no SQLSTATE 42703) and return an empty
+// pub_commit_lsn via the to_jsonb(m) ->> 'pub_commit_lsn' fallback, and
+// cdc.UpdateFromCDC must warn-and-skip rather than fail. Regression guard
+// for b5a7bf7.
+func TestGetCDCMetadataLegacySchema(t *testing.T) {
+	ctx := context.Background()
+	tableName := "customers_cdc_legacy"
+	qualifiedTableName := fmt.Sprintf("%s.%s", testSchema, tableName)
+
+	setupCDCTestTable(t, ctx, tableName)
+
+	mtreeTask := newTestMerkleTreeTask(t, qualifiedTableName, []string{serviceN1})
+	require.NoError(t, mtreeTask.RunChecks(false))
+	require.NoError(t, mtreeTask.MtreeInit())
+	require.NoError(t, mtreeTask.BuildMtree())
+
+	t.Cleanup(func() {
+		if err := mtreeTask.MtreeTeardown(); err != nil {
+			t.Logf("Warning: MtreeTeardown failed during cleanup: %v", err)
+		}
+		dropCDCTestTable(t, tableName)
+	})
+
+	_, _, _, pubCommitBefore, err := getCDCMetadataInTx(ctx, pgCluster.Node1Pool)
+	require.NoError(t, err)
+	require.NotEmpty(t, pubCommitBefore, "fresh mtree init should populate pub_commit_lsn")
+
+	// Real upgrades reach this state when an operator upgrades the binary
+	// against a database initialised by an older ACE that never had the
+	// column.
+	_, err = pgCluster.Node1Pool.Exec(ctx, fmt.Sprintf(
+		"ALTER TABLE %s.ace_cdc_metadata DROP COLUMN pub_commit_lsn",
+		config.Cfg.MTree.Schema))
+	require.NoError(t, err)
+
+	slot, startLSN, tables, pubCommitAfter, err := getCDCMetadataInTx(ctx, pgCluster.Node1Pool)
+	require.NoError(t, err, "GetCDCMetadata must tolerate missing pub_commit_lsn column")
+	require.Equal(t, "", pubCommitAfter, "pub_commit_lsn must be empty on legacy schema")
+	require.NotEmpty(t, slot, "slot_name should still be returned")
+	require.NotEmpty(t, startLSN, "start_lsn should still be returned")
+	require.NotEmpty(t, tables, "tables should still be returned")
+
+	startBefore := metadataStartLSN(t, ctx)
+
+	_, err = pgCluster.Node1Pool.Exec(ctx,
+		fmt.Sprintf("UPDATE %s SET email = email || '.legacy' WHERE index = 1", qualifiedTableName))
+	require.NoError(t, err)
+
+	targetFlush := walFlushLSN(t, ctx, pgCluster.Node1Pool)
+
+	nodeInfo := pgCluster.ClusterNodes[0]
+	require.NoError(t, cdc.UpdateFromCDC(context.Background(), nodeInfo),
+		"UpdateFromCDC must warn-and-skip past the missing pub_commit_lsn column")
+
+	startAfter := metadataStartLSN(t, ctx)
+	require.True(t, startAfter > startBefore, "start_lsn should advance even on legacy schema")
+	require.True(t, startAfter >= targetFlush, "start_lsn should catch up to wal_flush_lsn")
+}
+
+func getCDCMetadataInTx(ctx context.Context, pool *pgxpool.Pool) (string, string, []string, string, error) {
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		return "", "", nil, "", err
+	}
+	defer tx.Rollback(ctx)
+	return queries.GetCDCMetadata(ctx, tx, config.Cfg.MTree.CDC.PublicationName)
+}

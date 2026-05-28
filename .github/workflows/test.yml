@@ -34,6 +34,9 @@ jobs:
     - name: Run Merkle Tree composite pkey tests
       run: go test -count=1 -v ./tests/integration -run 'TestMerkleTreeCompositePK'
 
+    - name: Run mtree regression tests
+      run: go test -count=1 -v ./tests/integration -run 'TestBuildMtree|TestUpdateMtree|TestMtreeInit|TestACEConn'
+
     - name: Run CDC regression tests
       run: go test -count=1 -v ./tests/integration -run 'CDC'
 
