@@ -1487,6 +1487,10 @@ func TestUpdateMtreeReflectsInserts(t *testing.T) {
 	require.Equal(t, 0, dirtyLeafCount(t, ctx, mtreeTable),
 		"no leaves should be dirty immediately after BuildMtree")
 
+	nodesBefore := mtreeNodeHashes(t, ctx, mtreeTable)
+	require.Greater(t, len(nodesBefore), 2,
+		"expected a multi-level tree (>2 nodes); a single-leaf tree means ANALYZE didn't take effect and parent-rollup isn't exercised")
+
 	var maxIndex int64
 	require.NoError(t, pgCluster.Node1Pool.QueryRow(ctx,
 		fmt.Sprintf("SELECT COALESCE(max(index), 0) FROM %s", qualifiedTableName)).
@@ -1507,6 +1511,12 @@ func TestUpdateMtreeReflectsInserts(t *testing.T) {
 		"no leaves should remain dirty after UpdateMtree")
 	require.Equal(t, int64(0), pendingInsertCounter(t, ctx, mtreeTable),
 		"inserts_since_tree_update should reset to 0 after UpdateMtree")
+
+	// Multi-level rollup proof: at least one descendant of root must also
+	// have changed. A single-leaf tree would have only root changing.
+	nodesAfter := mtreeNodeHashes(t, ctx, mtreeTable)
+	require.GreaterOrEqual(t, countChangedNodes(nodesBefore, nodesAfter), 2,
+		"expected change to propagate to root AND at least one ancestor node")
 }
 
 func rootNodeHash(t *testing.T, ctx context.Context, mtreeTable string) []byte {
@@ -1550,6 +1560,43 @@ func pendingDeleteCounter(t *testing.T, ctx context.Context, mtreeTable string) 
 	return n
 }
 
+// mtreeNodeHashes snapshots every node in the mtree leaf table keyed by
+// "level:position" with the hex-encoded node_hash. Snapshotting both sides
+// of an UpdateMtree lets us verify the change propagated past root to at
+// least one internal node — otherwise a degenerate single-leaf tree (e.g.
+// missing ANALYZE) would let the root-hash-changed assertion pass without
+// exercising parent rollup.
+func mtreeNodeHashes(t *testing.T, ctx context.Context, mtreeTable string) map[string]string {
+	t.Helper()
+	rows, err := pgCluster.Node1Pool.Query(ctx, fmt.Sprintf(`
+		SELECT node_level, node_position, encode(node_hash, 'hex')
+		FROM %s
+		ORDER BY node_level, node_position`, mtreeTable))
+	require.NoError(t, err)
+	defer rows.Close()
+
+	out := map[string]string{}
+	for rows.Next() {
+		var level int
+		var pos int64
+		var hash string
+		require.NoError(t, rows.Scan(&level, &pos, &hash))
+		out[fmt.Sprintf("%d:%d", level, pos)] = hash
+	}
+	require.NoError(t, rows.Err())
+	return out
+}
+
+func countChangedNodes(before, after map[string]string) int {
+	n := 0
+	for k, beforeHash := range before {
+		if afterHash, ok := after[k]; ok && afterHash != beforeHash {
+			n++
+		}
+	}
+	return n
+}
+
 // TestUpdateMtreeReflectsDeletes covers the deletion path through the
 // UpdateMtree pipeline: deletes_since_tree_update counters increment via
 // CDC, the affected leaves are recomputed, and the counters reset.
@@ -1577,6 +1624,9 @@ func TestUpdateMtreeReflectsDeletes(t *testing.T) {
 
 	rootBefore := rootNodeHash(t, ctx, mtreeTable)
 	require.NotEmpty(t, rootBefore)
+	nodesBefore := mtreeNodeHashes(t, ctx, mtreeTable)
+	require.Greater(t, len(nodesBefore), 2,
+		"expected a multi-level tree (>2 nodes); ANALYZE may not have run")
 
 	res, err := pgCluster.Node1Pool.Exec(ctx,
 		fmt.Sprintf("DELETE FROM %s WHERE index BETWEEN 100 AND 124", qualifiedTableName))
@@ -1592,6 +1642,10 @@ func TestUpdateMtreeReflectsDeletes(t *testing.T) {
 		"no leaves should remain dirty after UpdateMtree")
 	require.Equal(t, int64(0), pendingDeleteCounter(t, ctx, mtreeTable),
 		"deletes_since_tree_update should reset to 0 after UpdateMtree")
+
+	nodesAfter := mtreeNodeHashes(t, ctx, mtreeTable)
+	require.GreaterOrEqual(t, countChangedNodes(nodesBefore, nodesAfter), 2,
+		"expected change to propagate to root AND at least one ancestor node")
 }
 
 // TestACEConnSuppressesSpockDDLReplication verifies that every connection
@@ -1785,6 +1839,9 @@ func TestUpdateMtreeReflectsUpdates(t *testing.T) {
 
 	rootBefore := rootNodeHash(t, ctx, mtreeTable)
 	require.NotEmpty(t, rootBefore)
+	nodesBefore := mtreeNodeHashes(t, ctx, mtreeTable)
+	require.Greater(t, len(nodesBefore), 2,
+		"expected a multi-level tree (>2 nodes); ANALYZE may not have run")
 
 	res, err := pgCluster.Node1Pool.Exec(ctx, fmt.Sprintf(
 		"UPDATE %s SET email = email || '.updated' WHERE index BETWEEN 200 AND 224",
@@ -1799,4 +1856,8 @@ func TestUpdateMtreeReflectsUpdates(t *testing.T) {
 		"root node_hash must change after non-PK column updates")
 	require.Equal(t, 0, dirtyLeafCount(t, ctx, mtreeTable),
 		"no leaves should remain dirty after UpdateMtree")
+
+	nodesAfter := mtreeNodeHashes(t, ctx, mtreeTable)
+	require.GreaterOrEqual(t, countChangedNodes(nodesBefore, nodesAfter), 2,
+		"expected change to propagate to root AND at least one ancestor node")
 }

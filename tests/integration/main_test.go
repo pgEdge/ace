@@ -466,6 +466,14 @@ func setupSharedCustomersTable(tableName string) error {
 				err,
 			)
 		}
+		// ANALYZE so pg_class.reltuples / pg_stat_user_tables.n_live_tup
+		// reflect the real row count before any test reads
+		// GetRowCountEstimate. Without it, BuildMtree sees ~0 rows on a
+		// just-loaded table and builds a degenerate 1-leaf tree.
+		// Quoted identifier preserves the case of names like customers_1M.
+		if _, err := pool.Exec(ctx, fmt.Sprintf(`ANALYZE "%s"."%s"`, testSchema, tableName)); err != nil {
+			return fmt.Errorf("failed to ANALYZE %s on node %s: %w", qualifiedTableName, nodeName, err)
+		}
 	}
 	return nil
 }
