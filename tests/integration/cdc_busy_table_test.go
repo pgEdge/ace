@@ -316,6 +316,15 @@ func setupCDCTestTable(t *testing.T, ctx context.Context, tableName string) {
 		require.NoError(t, err)
 		_, err = pool.Exec(ctx, fmt.Sprintf("INSERT INTO %s.%s SELECT * FROM %s.customers", testSchema, tableName, testSchema))
 		require.NoError(t, err)
+		// Without ANALYZE, GetRowCountEstimate falls back to pg_class.reltuples
+		// (~0 for a just-INSERTed table), and BuildMtree calculates
+		// numBlocks = ceil(estimate / blockSize) = 1, producing a degenerate
+		// 1-leaf tree where root and leaf hashes are identical. ANALYZE
+		// populates n_live_tup so BuildMtree sees the real row count and
+		// builds a realistic multi-leaf tree. Quoted identifier preserves
+		// case for table names that include capital letters.
+		_, err = pool.Exec(ctx, fmt.Sprintf(`ANALYZE "%s"."%s"`, testSchema, tableName))
+		require.NoError(t, err)
 	}
 }
 
