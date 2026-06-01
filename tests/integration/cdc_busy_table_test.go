@@ -385,8 +385,8 @@ func TestGetCDCMetadataLegacySchema(t *testing.T) {
 
 	startBefore := metadataStartLSN(t, ctx)
 
-	_, err = pgCluster.Node1Pool.Exec(ctx,
-		fmt.Sprintf("UPDATE %s SET email = email || '.legacy' WHERE index = 1", qualifiedTableName))
+	safeTbl := pgx.Identifier{testSchema, tableName}.Sanitize()
+	_, err = pgCluster.Node1Pool.Exec(ctx, "UPDATE "+safeTbl+" SET email = email || '.legacy' WHERE index = 1") // nosemgrep
 	require.NoError(t, err)
 
 	targetFlush := walFlushLSN(t, ctx, pgCluster.Node1Pool)

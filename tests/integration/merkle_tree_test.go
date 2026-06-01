@@ -1355,9 +1355,8 @@ func TestBuildMtreePoolLeakOnNodeError(t *testing.T) {
 	// so the build loop never reaches n2. n2's pool was created by the
 	// row-estimate loop above and has no per-iteration defer to close it.
 	// Without the outer defer added in ff67d12, n2's pool leaks.
-	_, err := pgCluster.Node1Pool.Exec(ctx, fmt.Sprintf(
-		"DELETE FROM %s.ace_cdc_metadata WHERE publication_name = $1",
-		config.Cfg.MTree.Schema), config.Cfg.MTree.CDC.PublicationName)
+	metaTbl := pgx.Identifier{config.Cfg.MTree.Schema, "ace_cdc_metadata"}.Sanitize()
+	_, err := pgCluster.Node1Pool.Exec(ctx, "DELETE FROM "+metaTbl+" WHERE publication_name = $1", config.Cfg.MTree.CDC.PublicationName) // nosemgrep
 	require.NoError(t, err)
 
 	// Anchor the baseline at 0 by waiting for MtreeInit's n2 backend to
@@ -1479,8 +1478,10 @@ func TestUpdateMtreeReflectsInserts(t *testing.T) {
 		dropCDCTestTable(t, tableName)
 	})
 
-	mtreeTable := fmt.Sprintf("%s.ace_mtree_%s_%s",
-		config.Cfg.MTree.Schema, testSchema, tableName)
+	mtreeTable := pgx.Identifier{
+		config.Cfg.MTree.Schema,
+		fmt.Sprintf("ace_mtree_%s_%s", testSchema, tableName),
+	}.Sanitize()
 
 	rootBefore := rootNodeHash(t, ctx, mtreeTable)
 	require.NotEmpty(t, rootBefore, "BuildMtree should populate the root hash")
@@ -1491,15 +1492,16 @@ func TestUpdateMtreeReflectsInserts(t *testing.T) {
 	require.Greater(t, len(nodesBefore), 2,
 		"expected a multi-level tree (>2 nodes); a single-leaf tree means ANALYZE didn't take effect and parent-rollup isn't exercised")
 
+	safeTbl := pgx.Identifier{testSchema, tableName}.Sanitize()
 	var maxIndex int64
 	require.NoError(t, pgCluster.Node1Pool.QueryRow(ctx,
-		fmt.Sprintf("SELECT COALESCE(max(index), 0) FROM %s", qualifiedTableName)).
+		"SELECT COALESCE(max(index), 0) FROM "+safeTbl). // nosemgrep
 		Scan(&maxIndex))
 
-	_, err := pgCluster.Node1Pool.Exec(ctx, fmt.Sprintf(`
-		INSERT INTO %s (index, first_name, last_name, email)
-		SELECT $1 + g, 'Mtree', 'Update', 'mtree-update-' || g || '@test.com'
-		FROM generate_series(1, 25) g`, qualifiedTableName), maxIndex)
+	_, err := pgCluster.Node1Pool.Exec(ctx, // nosemgrep
+		"INSERT INTO "+safeTbl+" (index, first_name, last_name, email) "+
+			"SELECT $1 + g, 'Mtree', 'Update', 'mtree-update-' || g || '@test.com' "+
+			"FROM generate_series(1, 25) g", maxIndex)
 	require.NoError(t, err)
 
 	require.NoError(t, mtreeTask.UpdateMtree(false))
@@ -1519,13 +1521,17 @@ func TestUpdateMtreeReflectsInserts(t *testing.T) {
 		"expected change to propagate to root AND at least one ancestor node")
 }
 
+// mtreeTable arguments to these helpers must be sanitized via
+// pgx.Identifier{...}.Sanitize() at the call site so the interpolation
+// below is safe; the // nosemgrep markers tell the static analyzer that
+// we've enforced the contract.
 func rootNodeHash(t *testing.T, ctx context.Context, mtreeTable string) []byte {
 	t.Helper()
 	var h []byte
-	err := pgCluster.Node1Pool.QueryRow(ctx, fmt.Sprintf(`
-		SELECT node_hash FROM %s
-		WHERE node_level = (SELECT max(node_level) FROM %s)
-		  AND node_position = 0`, mtreeTable, mtreeTable)).Scan(&h)
+	err := pgCluster.Node1Pool.QueryRow(ctx, // nosemgrep
+		"SELECT node_hash FROM "+mtreeTable+
+			" WHERE node_level = (SELECT max(node_level) FROM "+mtreeTable+")"+
+			" AND node_position = 0").Scan(&h)
 	require.NoError(t, err)
 	return h
 }
@@ -1533,9 +1539,8 @@ func rootNodeHash(t *testing.T, ctx context.Context, mtreeTable string) []byte {
 func dirtyLeafCount(t *testing.T, ctx context.Context, mtreeTable string) int {
 	t.Helper()
 	var n int
-	err := pgCluster.Node1Pool.QueryRow(ctx, fmt.Sprintf(`
-		SELECT count(*) FROM %s WHERE node_level = 0 AND dirty = true`,
-		mtreeTable)).Scan(&n)
+	err := pgCluster.Node1Pool.QueryRow(ctx, // nosemgrep
+		"SELECT count(*) FROM "+mtreeTable+" WHERE node_level = 0 AND dirty = true").Scan(&n)
 	require.NoError(t, err)
 	return n
 }
@@ -1543,9 +1548,9 @@ func dirtyLeafCount(t *testing.T, ctx context.Context, mtreeTable string) int {
 func pendingInsertCounter(t *testing.T, ctx context.Context, mtreeTable string) int64 {
 	t.Helper()
 	var n int64
-	err := pgCluster.Node1Pool.QueryRow(ctx, fmt.Sprintf(`
-		SELECT COALESCE(sum(inserts_since_tree_update), 0) FROM %s
-		WHERE node_level = 0`, mtreeTable)).Scan(&n)
+	err := pgCluster.Node1Pool.QueryRow(ctx, // nosemgrep
+		"SELECT COALESCE(sum(inserts_since_tree_update), 0) FROM "+mtreeTable+
+			" WHERE node_level = 0").Scan(&n)
 	require.NoError(t, err)
 	return n
 }
@@ -1553,9 +1558,9 @@ func pendingInsertCounter(t *testing.T, ctx context.Context, mtreeTable string) 
 func pendingDeleteCounter(t *testing.T, ctx context.Context, mtreeTable string) int64 {
 	t.Helper()
 	var n int64
-	err := pgCluster.Node1Pool.QueryRow(ctx, fmt.Sprintf(`
-		SELECT COALESCE(sum(deletes_since_tree_update), 0) FROM %s
-		WHERE node_level = 0`, mtreeTable)).Scan(&n)
+	err := pgCluster.Node1Pool.QueryRow(ctx, // nosemgrep
+		"SELECT COALESCE(sum(deletes_since_tree_update), 0) FROM "+mtreeTable+
+			" WHERE node_level = 0").Scan(&n)
 	require.NoError(t, err)
 	return n
 }
@@ -1568,10 +1573,9 @@ func pendingDeleteCounter(t *testing.T, ctx context.Context, mtreeTable string) 
 // exercising parent rollup.
 func mtreeNodeHashes(t *testing.T, ctx context.Context, mtreeTable string) map[string]string {
 	t.Helper()
-	rows, err := pgCluster.Node1Pool.Query(ctx, fmt.Sprintf(`
-		SELECT node_level, node_position, encode(node_hash, 'hex')
-		FROM %s
-		ORDER BY node_level, node_position`, mtreeTable))
+	rows, err := pgCluster.Node1Pool.Query(ctx, // nosemgrep
+		"SELECT node_level, node_position, encode(node_hash, 'hex') FROM "+mtreeTable+
+			" ORDER BY node_level, node_position")
 	require.NoError(t, err)
 	defer rows.Close()
 
@@ -1619,8 +1623,10 @@ func TestUpdateMtreeReflectsDeletes(t *testing.T) {
 		dropCDCTestTable(t, tableName)
 	})
 
-	mtreeTable := fmt.Sprintf("%s.ace_mtree_%s_%s",
-		config.Cfg.MTree.Schema, testSchema, tableName)
+	mtreeTable := pgx.Identifier{
+		config.Cfg.MTree.Schema,
+		fmt.Sprintf("ace_mtree_%s_%s", testSchema, tableName),
+	}.Sanitize()
 
 	rootBefore := rootNodeHash(t, ctx, mtreeTable)
 	require.NotEmpty(t, rootBefore)
@@ -1628,8 +1634,9 @@ func TestUpdateMtreeReflectsDeletes(t *testing.T) {
 	require.Greater(t, len(nodesBefore), 2,
 		"expected a multi-level tree (>2 nodes); ANALYZE may not have run")
 
-	res, err := pgCluster.Node1Pool.Exec(ctx,
-		fmt.Sprintf("DELETE FROM %s WHERE index BETWEEN 100 AND 124", qualifiedTableName))
+	safeTbl := pgx.Identifier{testSchema, tableName}.Sanitize()
+	res, err := pgCluster.Node1Pool.Exec(ctx, // nosemgrep
+		"DELETE FROM "+safeTbl+" WHERE index BETWEEN 100 AND 124")
 	require.NoError(t, err)
 	require.Equal(t, int64(25), res.RowsAffected(), "expected to delete 25 customer rows")
 
@@ -1834,8 +1841,10 @@ func TestUpdateMtreeReflectsUpdates(t *testing.T) {
 		dropCDCTestTable(t, tableName)
 	})
 
-	mtreeTable := fmt.Sprintf("%s.ace_mtree_%s_%s",
-		config.Cfg.MTree.Schema, testSchema, tableName)
+	mtreeTable := pgx.Identifier{
+		config.Cfg.MTree.Schema,
+		fmt.Sprintf("ace_mtree_%s_%s", testSchema, tableName),
+	}.Sanitize()
 
 	rootBefore := rootNodeHash(t, ctx, mtreeTable)
 	require.NotEmpty(t, rootBefore)
@@ -1843,9 +1852,9 @@ func TestUpdateMtreeReflectsUpdates(t *testing.T) {
 	require.Greater(t, len(nodesBefore), 2,
 		"expected a multi-level tree (>2 nodes); ANALYZE may not have run")
 
-	res, err := pgCluster.Node1Pool.Exec(ctx, fmt.Sprintf(
-		"UPDATE %s SET email = email || '.updated' WHERE index BETWEEN 200 AND 224",
-		qualifiedTableName))
+	safeTbl := pgx.Identifier{testSchema, tableName}.Sanitize()
+	res, err := pgCluster.Node1Pool.Exec(ctx, // nosemgrep
+		"UPDATE "+safeTbl+" SET email = email || '.updated' WHERE index BETWEEN 200 AND 224")
 	require.NoError(t, err)
 	require.Equal(t, int64(25), res.RowsAffected(), "expected to update 25 customer rows")
 
