@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/jackc/pglogrepl"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/pgedge/ace/db/queries"
 	"github.com/pgedge/ace/internal/infra/cdc"
@@ -321,9 +322,9 @@ func setupCDCTestTable(t *testing.T, ctx context.Context, tableName string) {
 		// numBlocks = ceil(estimate / blockSize) = 1, producing a degenerate
 		// 1-leaf tree where root and leaf hashes are identical. ANALYZE
 		// populates n_live_tup so BuildMtree sees the real row count and
-		// builds a realistic multi-leaf tree. Quoted identifier preserves
-		// case for table names that include capital letters.
-		_, err = pool.Exec(ctx, fmt.Sprintf(`ANALYZE "%s"."%s"`, testSchema, tableName))
+		// builds a realistic multi-leaf tree. pgx.Identifier.Sanitize
+		// avoids raw-string interpolation in SQL.
+		_, err = pool.Exec(ctx, "ANALYZE "+pgx.Identifier{testSchema, tableName}.Sanitize()) // nosemgrep
 		require.NoError(t, err)
 	}
 }
@@ -369,10 +370,10 @@ func TestGetCDCMetadataLegacySchema(t *testing.T) {
 
 	// Real upgrades reach this state when an operator upgrades the binary
 	// against a database initialised by an older ACE that never had the
-	// column.
-	_, err = pgCluster.Node1Pool.Exec(ctx, fmt.Sprintf(
-		"ALTER TABLE %s.ace_cdc_metadata DROP COLUMN pub_commit_lsn",
-		config.Cfg.MTree.Schema))
+	// column. pgx.Identifier.Sanitize avoids interpolating a config string
+	// into SQL.
+	metadataTbl := pgx.Identifier{config.Cfg.MTree.Schema, "ace_cdc_metadata"}.Sanitize()
+	_, err = pgCluster.Node1Pool.Exec(ctx, "ALTER TABLE "+metadataTbl+" DROP COLUMN pub_commit_lsn") // nosemgrep
 	require.NoError(t, err)
 
 	slot, startLSN, tables, pubCommitAfter, err := getCDCMetadataInTx(ctx, pgCluster.Node1Pool)

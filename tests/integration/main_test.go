@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/docker/go-connections/nat"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/pgedge/ace/pkg/config"
 	"github.com/pgedge/ace/pkg/types"
@@ -470,8 +471,11 @@ func setupSharedCustomersTable(tableName string) error {
 		// reflect the real row count before any test reads
 		// GetRowCountEstimate. Without it, BuildMtree sees ~0 rows on a
 		// just-loaded table and builds a degenerate 1-leaf tree.
-		// Quoted identifier preserves the case of names like customers_1M.
-		if _, err := pool.Exec(ctx, fmt.Sprintf(`ANALYZE "%s"."%s"`, testSchema, tableName)); err != nil {
+		// pgx.Identifier.Sanitize quotes and escapes the schema/table so
+		// names like customers_1M survive and no SQL is interpolated from
+		// raw strings.
+		tbl := pgx.Identifier{testSchema, tableName}.Sanitize()
+		if _, err := pool.Exec(ctx, "ANALYZE "+tbl); err != nil { // nosemgrep
 			return fmt.Errorf("failed to ANALYZE %s on node %s: %w", qualifiedTableName, nodeName, err)
 		}
 	}
