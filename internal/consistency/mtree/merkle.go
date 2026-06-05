@@ -2192,13 +2192,26 @@ func (m *MerkleTreeTask) getPkeyBatches(pool1, pool2 *pgxpool.Pool, mismatchedPo
 
 	allRanges := append(leafRanges1, leafRanges2...)
 
+	// A leaf with range_end IS NULL extends to +infinity, and range_start IS
+	// NULL extends to -infinity. GeneratePkeyOffsetsQuery always produces a
+	// last leaf with range_end = NULL — the LEAD() over the trailing seq=2
+	// row yields NULL — so the open-ended tail is the common case, not a
+	// corner one. Track which sides need an extra unbounded slice; without
+	// it the finite-boundary slicing below never queries past the last
+	// boundary, and rows on the non-reference node beyond the reference's
+	// last_row are silently dropped from the diff.
 	boundaries := []any{}
+	hasOpenStart, hasOpenEnd := false, false
 	for _, r := range allRanges {
 		if r.RangeStart != nil {
 			boundaries = append(boundaries, r.RangeStart)
+		} else {
+			hasOpenStart = true
 		}
 		if r.RangeEnd != nil {
 			boundaries = append(boundaries, r.RangeEnd)
+		} else {
+			hasOpenEnd = true
 		}
 	}
 
@@ -2217,15 +2230,18 @@ func (m *MerkleTreeTask) getPkeyBatches(pool1, pool2 *pgxpool.Pool, mismatchedPo
 		return m.compareBoundaries(sortedBoundaries[i], sortedBoundaries[j]) < 0
 	})
 
-	if len(sortedBoundaries) == 0 {
-		return [][2][]any{}, nil
-	}
-
 	var slices [][2]any
-	if len(sortedBoundaries) == 1 {
+	switch len(sortedBoundaries) {
+	case 0:
+		// Every mismatched leaf is fully unbounded (start and end NULL).
+		// One fully-open slice makes processWorkItem scan both sides.
+		if hasOpenStart || hasOpenEnd {
+			slices = append(slices, [2]any{nil, nil})
+		}
+	case 1:
 		s := sortedBoundaries[0]
 		slices = append(slices, [2]any{s, s})
-	} else {
+	default:
 		for i := 0; i < len(sortedBoundaries)-1; i++ {
 			s := sortedBoundaries[i]
 			e := sortedBoundaries[i+1]
@@ -2233,6 +2249,24 @@ func (m *MerkleTreeTask) getPkeyBatches(pool1, pool2 *pgxpool.Pool, mismatchedPo
 				slices = append(slices, [2]any{s, e})
 			}
 		}
+	}
+
+	// Cover the unbounded regions outside the finite boundary set when any
+	// mismatched leaf is open on that side. boundaryToSlice(nil) returns
+	// nil; processWorkItem then omits the corresponding inequality clause,
+	// producing WHERE pkey >= firstBoundary (open-end) or WHERE pkey <=
+	// firstBoundary (open-start), so the diff sees rows past the envelope.
+	if len(sortedBoundaries) > 0 {
+		if hasOpenStart {
+			slices = append(slices, [2]any{nil, sortedBoundaries[0]})
+		}
+		if hasOpenEnd {
+			slices = append(slices, [2]any{sortedBoundaries[len(sortedBoundaries)-1], nil})
+		}
+	}
+
+	if len(slices) == 0 {
+		return [][2][]any{}, nil
 	}
 
 	var batches [][2][]any

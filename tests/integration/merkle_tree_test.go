@@ -18,6 +18,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -1869,4 +1870,188 @@ func TestUpdateMtreeReflectsUpdates(t *testing.T) {
 	nodesAfter := mtreeNodeHashes(t, ctx, mtreeTable)
 	require.GreaterOrEqual(t, countChangedNodes(nodesBefore, nodesAfter), 2,
 		"expected change to propagate to root AND at least one ancestor node")
+}
+
+// TestMerkleTreeBidirectionalDiff is a multi-scenario reproducer for the
+// asymmetric-diff bug: mtree table-diff reports rows present on n1 but
+// missing on n2 while silently dropping rows present on n2 but missing on n1
+// (and vice-versa once the reference role flips).
+//
+// Each scenario varies where the divergence sits relative to the reference
+// node's pkey envelope. The reference node — the one with the most rows; on a
+// tie BuildMtree's strict `count > maxRows` lets n1 win — defines the block
+// ranges via GeneratePkeyOffsetsQuery, whose final range always has
+// range_end IS NULL. getPkeyBatches collects only non-NULL boundaries when
+// slicing, so the open-ended tail contributes no slice and any row on the
+// non-reference node beyond the reference's last_row is never queried by
+// processWorkItem.
+//
+// The scenarios are designed to falsify, not just fail:
+//
+//   - ExactReproducer mirrors the bug report verbatim (n1=[1], n2=[2]).
+//   - N2HasRowsAboveN1Max keeps n1 as reference with extras stacked above
+//     its max; the open-ended-tail theory predicts n2's extras vanish.
+//   - N1HasRowAboveN2Max flips the asymmetry so n2 becomes the reference;
+//     the same bug should surface from that side — if it doesn't, the
+//     diagnosis is incomplete.
+func TestMerkleTreeBidirectionalDiff(t *testing.T) {
+	cases := []struct {
+		name         string
+		seedN1       []int
+		seedN2       []int
+		expectN1Only []int
+		expectN2Only []int
+	}{
+		{
+			name:         "ExactReproducer",
+			seedN1:       []int{1},
+			seedN2:       []int{2},
+			expectN1Only: []int{1},
+			expectN2Only: []int{2},
+		},
+		{
+			name:         "N2HasRowsAboveN1Max",
+			seedN1:       []int{1, 2, 3, 4, 5},
+			seedN2:       []int{1, 1000, 2000, 3000, 4000},
+			expectN1Only: []int{2, 3, 4, 5},
+			expectN2Only: []int{1000, 2000, 3000, 4000},
+		},
+		{
+			name:         "N1HasRowAboveN2Max",
+			seedN1:       []int{1, 10000},
+			seedN2:       []int{1, 2, 3, 4, 5, 6},
+			expectN1Only: []int{10000},
+			expectN2Only: []int{2, 3, 4, 5, 6},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			env := newSpockEnv()
+			tableName := "mtree_bidir_" + strings.ToLower(tc.name)
+			qualifiedTable := fmt.Sprintf("%s.%s", testSchema, tableName)
+			safeTable := pgx.Identifier{testSchema, tableName}.Sanitize()
+
+			// Use IF NOT EXISTS because Spock DDL replication may
+			// propagate the first node's CREATE to the second; the second
+			// explicit CREATE would otherwise fail with relation exists.
+			//
+			// Deliberately do NOT add the table to a Spock replication set:
+			// with the table outside any repset, Spock has no rule to
+			// replicate INSERTs even though the rows go to WAL, so each
+			// node holds exactly what we seed and the reproducer can
+			// actually diverge. spock.repair_mode alone does not suffice
+			// here — it suppresses apply for tables that are already
+			// replicating, not for tables freshly added to the repset.
+			for _, pool := range env.pools() {
+				_, err := pool.Exec(ctx,
+					"CREATE TABLE IF NOT EXISTS "+safeTable+" (id INT PRIMARY KEY, payload TEXT)") // nosemgrep
+				require.NoError(t, err, "create %s", qualifiedTable)
+			}
+			t.Cleanup(func() {
+				for _, pool := range env.pools() {
+					_, _ = pool.Exec(ctx, "DROP TABLE IF EXISTS "+safeTable+" CASCADE") // nosemgrep
+				}
+				files, _ := filepath.Glob("*_diffs-*.json")
+				for _, f := range files {
+					os.Remove(f)
+				}
+			})
+
+			// TRUNCATE inside repair_mode in case a DDL-replicated CREATE
+			// from a sibling subtest left rows behind on either node.
+			for _, pool := range env.pools() {
+				env.withRepairMode(t, ctx, pool, func(conn *pgxpool.Conn) {
+					_, err := conn.Exec(ctx, "TRUNCATE TABLE "+safeTable) // nosemgrep
+					require.NoError(t, err, "truncate %s", qualifiedTable)
+				})
+			}
+
+			seed := func(pool *pgxpool.Pool, ids []int) {
+				for _, id := range ids {
+					_, err := pool.Exec(ctx,
+						"INSERT INTO "+safeTable+" (id, payload) VALUES ($1, $2)", // nosemgrep
+						id, fmt.Sprintf("row-%d", id))
+					require.NoError(t, err, "seed id=%d", id)
+				}
+			}
+			seed(env.N1Pool, tc.seedN1)
+			seed(env.N2Pool, tc.seedN2)
+
+			// ANALYZE so GetRowCountEstimate reflects the seeded counts;
+			// otherwise BuildMtree falls back to pg_class.reltuples == 0
+			// and the reference-node tiebreak becomes order-dependent
+			// rather than count-driven.
+			for _, pool := range env.pools() {
+				_, err := pool.Exec(ctx, "ANALYZE "+safeTable) // nosemgrep
+				require.NoError(t, err)
+			}
+
+			// Diagnostic: dump actual rows per node so a future Spock-
+			// replication regression doesn't masquerade as an mtree bug.
+			for nodeName, pool := range map[string]*pgxpool.Pool{
+				env.ServiceN1: env.N1Pool, env.ServiceN2: env.N2Pool,
+			} {
+				rows, err := pool.Query(ctx, "SELECT id FROM "+safeTable+" ORDER BY id") // nosemgrep
+				require.NoError(t, err)
+				var got []int
+				for rows.Next() {
+					var id int
+					require.NoError(t, rows.Scan(&id))
+					got = append(got, id)
+				}
+				rows.Close()
+				t.Logf("post-seed state on %s: ids=%v", nodeName, got)
+			}
+
+			mtreeTask := env.newMerkleTreeTask(t, qualifiedTable,
+				[]string{env.ServiceN1, env.ServiceN2})
+			require.NoError(t, mtreeTask.RunChecks(false))
+			require.NoError(t, mtreeTask.MtreeInit())
+			t.Cleanup(func() {
+				if err := mtreeTask.MtreeTeardown(); err != nil {
+					t.Logf("MtreeTeardown cleanup: %v", err)
+				}
+			})
+			require.NoError(t, mtreeTask.BuildMtree())
+			require.NoError(t, mtreeTask.DiffMtree())
+
+			pair := env.pairKey()
+			nodeDiffs, ok := mtreeTask.DiffResult.NodeDiffs[pair]
+			require.True(t, ok, "diff missing pair %s; full result: %+v",
+				pair, mtreeTask.DiffResult)
+
+			gotN1 := extractDiffIDs(nodeDiffs.Rows[env.ServiceN1])
+			gotN2 := extractDiffIDs(nodeDiffs.Rows[env.ServiceN2])
+
+			sort.Ints(tc.expectN1Only)
+			sort.Ints(tc.expectN2Only)
+
+			require.Equal(t, tc.expectN1Only, gotN1,
+				"rows present only on n1 — diff under-reports n1 side")
+			require.Equal(t, tc.expectN2Only, gotN2,
+				"rows present only on n2 — open-ended-tail bug if empty")
+		})
+	}
+}
+
+func extractDiffIDs(rows []types.OrderedMap) []int {
+	ids := make([]int, 0, len(rows))
+	for _, row := range rows {
+		v, ok := row.Get("id")
+		if !ok {
+			continue
+		}
+		switch x := v.(type) {
+		case int32:
+			ids = append(ids, int(x))
+		case int64:
+			ids = append(ids, int(x))
+		case int:
+			ids = append(ids, x)
+		}
+	}
+	sort.Ints(ids)
+	return ids
 }
