@@ -13,6 +13,7 @@ package integration
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"math/rand"
 	"os"
@@ -2054,4 +2055,237 @@ func extractDiffIDs(rows []types.OrderedMap) []int {
 	}
 	sort.Ints(ids)
 	return ids
+}
+
+// TestMerkleTreeReferenceMaxInMultiLeafTail reproduces the residual ACE-189
+// symptom Zaid reported: the reference node's single largest row — the
+// range_start of the open-ended tail leaf in a MULTI-LEAF tree — is dropped
+// from the diff even after the open-ended-tail fix (f9a3961). The earlier
+// bidirectional tests use tiny row counts (single-leaf trees), so they never
+// exercise the boundary where the last closed leaf [B, max] meets the open
+// tail [max, NULL).
+//
+// Zaid saw it on a 3-node cluster (n3 held the cluster max; every pair
+// involving n3 was short by one, n1/n2 was correct). The 3-node shape is
+// incidental — the bug is "the reference node's own max is dropped" — so this
+// reproduces it minimally on the 2-node test cluster, with the reference (n2,
+// more rows) holding the cluster max. Row counts are above the cluster's
+// min block size (1000) so the default block size still yields a multi-leaf
+// tree, which is what exercises the last-closed-leaf/open-tail boundary.
+//
+//   n1 = 1..2000, n2 = 1..2010  → n2 is the reference (3 leaves).
+// Expected n1/n2 diff = {2001..2010} (10 rows). The bug drops id=2010 (n2's
+// max), yielding 9 — the same off-by-the-last-row Zaid observed.
+func TestMerkleTreeReferenceMaxInMultiLeafTail(t *testing.T) {
+	ctx := context.Background()
+	env := newSpockEnv()
+
+	tableName := "mtree_ref_max_tail"
+	qualifiedTable := fmt.Sprintf("%s.%s", testSchema, tableName)
+	safeTable := pgx.Identifier{testSchema, tableName}.Sanitize()
+
+	seedCount := map[*pgxpool.Pool]int{
+		env.N1Pool: 2000,
+		env.N2Pool: 2010, // n2 holds the cluster max → reference node
+	}
+
+	// No repset: each node must keep exactly what we seed (see the
+	// bidirectional test for why repair_mode alone is insufficient).
+	for _, pool := range env.pools() {
+		_, err := pool.Exec(ctx,
+			"CREATE TABLE IF NOT EXISTS "+safeTable+" (id INT PRIMARY KEY, name VARCHAR)") // nosemgrep
+		require.NoError(t, err, "create %s", qualifiedTable)
+	}
+	t.Cleanup(func() {
+		for _, pool := range env.pools() {
+			_, _ = pool.Exec(ctx, "DROP TABLE IF EXISTS "+safeTable+" CASCADE") // nosemgrep
+		}
+		files, _ := filepath.Glob("*_diffs-*.json")
+		for _, f := range files {
+			os.Remove(f)
+		}
+	})
+
+	for _, pool := range env.pools() {
+		env.withRepairMode(t, ctx, pool, func(conn *pgxpool.Conn) {
+			_, err := conn.Exec(ctx, "TRUNCATE TABLE "+safeTable) // nosemgrep
+			require.NoError(t, err, "truncate %s", qualifiedTable)
+		})
+		_, err := pool.Exec(ctx,
+			"INSERT INTO "+safeTable+" (id, name) SELECT g, 'user_' || g FROM generate_series(1, $1) g", // nosemgrep
+			seedCount[pool])
+		require.NoError(t, err, "seed table")
+		_, err = pool.Exec(ctx, "ANALYZE "+safeTable) // nosemgrep
+		require.NoError(t, err)
+	}
+
+	mtreeTask := env.newMerkleTreeTask(t, qualifiedTable,
+		[]string{env.ServiceN1, env.ServiceN2})
+	require.NoError(t, mtreeTask.RunChecks(false))
+	require.NoError(t, mtreeTask.MtreeInit())
+	t.Cleanup(func() {
+		if err := mtreeTask.MtreeTeardown(); err != nil {
+			t.Logf("MtreeTeardown cleanup: %v", err)
+		}
+	})
+	require.NoError(t, mtreeTask.BuildMtree())
+	require.NoError(t, mtreeTask.DiffMtree())
+
+	nodeDiffs, ok := mtreeTask.DiffResult.NodeDiffs[env.pairKey()]
+	require.True(t, ok, "no diff for pair %s; result: %+v",
+		env.pairKey(), mtreeTask.DiffResult.NodeDiffs)
+
+	expected := make([]int, 0, 10)
+	for i := 2001; i <= 2010; i++ {
+		expected = append(expected, i)
+	}
+	require.Equal(t, expected, extractDiffIDs(nodeDiffs.Rows[env.ServiceN2]),
+		"reference's max (id=2010) dropped from the open tail of a multi-leaf tree — ACE-189")
+}
+
+// writeClusterConfigJSON emits a <clusterName>.json cluster config in the
+// working directory listing the given nodes, so a task pointed at clusterName
+// resolves all of them via utils.ReadClusterInfo. The shared test_cluster.json
+// only registers n1/n2; this lets a single test opt into a 3-node cluster
+// without changing that file (which would alter Nodes="all" suite-wide).
+func writeClusterConfigJSON(t *testing.T, clusterName string, nodes []types.NodeGroup) {
+	t.Helper()
+	cfg := types.ClusterConfig{
+		JSONVersion: "1.0",
+		ClusterName: clusterName,
+		LogLevel:    "info",
+		UpdateDate:  time.Now().Format(time.RFC3339),
+	}
+	cfg.PGEdge.PGVersion = 16
+	cfg.PGEdge.AutoStart = "yes"
+	cfg.PGEdge.Spock = types.SpockConfig{SpockVersion: "4.0.10", AutoDDL: "yes"}
+	cfg.PGEdge.Databases = []types.Database{{DBName: dbName, DBUser: pgEdgeUser, DBPassword: pgEdgePassword}}
+	cfg.NodeGroups = nodes
+
+	data, err := json.MarshalIndent(cfg, "", "  ")
+	require.NoError(t, err)
+	path := clusterName + ".json"
+	require.NoError(t, os.WriteFile(path, data, 0644))
+	t.Cleanup(func() { os.Remove(path) })
+}
+
+// TestMerkleTreeThreeNodeReferenceTail is the faithful 3-node reproduction of
+// Zaid's ACE-189 report: n3 holds the cluster max, and every diff pair that
+// involves n3 was short by exactly one row (its largest), while n1/n2 was
+// correct. The shared test cluster only registers n1/n2, so this test emits
+// its own 3-node cluster config and points the task at it.
+//
+//	n1 = 1..2000, n2 = 1..2005, n3 = 1..2010  → n3 is the reference.
+//
+// Counts are above the cluster min block size (1000) so the tree is multi-leaf
+// (the single-leaf case is already covered and behaves differently at the
+// tail). Expected: n1/n3 = {2001..2010} (10), n2/n3 = {2006..2010} (5),
+// n1/n2 = {2001..2005} (5) — Zaid's 10/5/5 ratio. The bug drops id=2010 from
+// both n3 pairs (9 and 4).
+func TestMerkleTreeThreeNodeReferenceTail(t *testing.T) {
+	ctx := context.Background()
+	env := newSpockEnv()
+	if env.N3Pool == nil {
+		t.Skip("requires a 3-node cluster")
+	}
+
+	clusterName := "test_cluster_3node"
+	mkNode := func(name, host, port string) types.NodeGroup {
+		ng := types.NodeGroup{Name: name, IsActive: "yes", PublicIP: host, Port: port, Path: "/usr/local/bin"}
+		ng.SSH.OSUser = "pgedge"
+		return ng
+	}
+	writeClusterConfigJSON(t, clusterName, []types.NodeGroup{
+		mkNode(env.ServiceN1, pgCluster.Node1Host, pgCluster.Node1Port),
+		mkNode(env.ServiceN2, pgCluster.Node2Host, pgCluster.Node2Port),
+		mkNode(env.ServiceN3, pgCluster.Node3Host, pgCluster.Node3Port),
+	})
+
+	tableName := "mtree_three_node_tail"
+	qualifiedTable := fmt.Sprintf("%s.%s", testSchema, tableName)
+	safeTable := pgx.Identifier{testSchema, tableName}.Sanitize()
+
+	pools := map[string]*pgxpool.Pool{
+		env.ServiceN1: env.N1Pool,
+		env.ServiceN2: env.N2Pool,
+		env.ServiceN3: env.N3Pool,
+	}
+	seedCount := map[string]int{
+		env.ServiceN1: 2000,
+		env.ServiceN2: 2005,
+		env.ServiceN3: 2010, // cluster max → reference node
+	}
+
+	// No repset: each node must keep exactly what we seed.
+	for _, pool := range pools {
+		_, err := pool.Exec(ctx,
+			"CREATE TABLE IF NOT EXISTS "+safeTable+" (id INT PRIMARY KEY, name VARCHAR)") // nosemgrep
+		require.NoError(t, err, "create %s", qualifiedTable)
+	}
+	t.Cleanup(func() {
+		for _, pool := range pools {
+			_, _ = pool.Exec(ctx, "DROP TABLE IF EXISTS "+safeTable+" CASCADE") // nosemgrep
+		}
+		files, _ := filepath.Glob("*_diffs-*.json")
+		for _, f := range files {
+			os.Remove(f)
+		}
+	})
+
+	for name, pool := range pools {
+		env.withRepairMode(t, ctx, pool, func(conn *pgxpool.Conn) {
+			_, err := conn.Exec(ctx, "TRUNCATE TABLE "+safeTable) // nosemgrep
+			require.NoError(t, err, "truncate %s on %s", qualifiedTable, name)
+		})
+		_, err := pool.Exec(ctx,
+			"INSERT INTO "+safeTable+" (id, name) SELECT g, 'user_' || g FROM generate_series(1, $1) g", // nosemgrep
+			seedCount[name])
+		require.NoError(t, err, "seed %s", name)
+		_, err = pool.Exec(ctx, "ANALYZE "+safeTable) // nosemgrep
+		require.NoError(t, err)
+	}
+
+	mtreeTask := env.newMerkleTreeTask(t, qualifiedTable,
+		[]string{env.ServiceN1, env.ServiceN2, env.ServiceN3})
+	mtreeTask.ClusterName = clusterName
+	require.NoError(t, mtreeTask.RunChecks(false))
+	require.NoError(t, mtreeTask.MtreeInit())
+	t.Cleanup(func() {
+		if err := mtreeTask.MtreeTeardown(); err != nil {
+			t.Logf("MtreeTeardown cleanup: %v", err)
+		}
+	})
+	require.NoError(t, mtreeTask.BuildMtree())
+	require.NoError(t, mtreeTask.DiffMtree())
+
+	// Pair keys follow cluster-node order; look up under either ordering.
+	findPair := func(a, b string) (types.DiffByNodePair, bool) {
+		if d, ok := mtreeTask.DiffResult.NodeDiffs[a+"/"+b]; ok {
+			return d, true
+		}
+		d, ok := mtreeTask.DiffResult.NodeDiffs[b+"/"+a]
+		return d, ok
+	}
+	rangeIDs := func(lo, hi int) []int {
+		ids := make([]int, 0, hi-lo+1)
+		for i := lo; i <= hi; i++ {
+			ids = append(ids, i)
+		}
+		return ids
+	}
+
+	d13, ok := findPair(env.ServiceN1, env.ServiceN3)
+	require.True(t, ok, "no diff for n1/n3; result: %+v", mtreeTask.DiffResult.NodeDiffs)
+	require.Equal(t, rangeIDs(2001, 2010), extractDiffIDs(d13.Rows[env.ServiceN3]),
+		"n1/n3: reference's max (2010) dropped from the open tail — ACE-189")
+
+	d23, ok := findPair(env.ServiceN2, env.ServiceN3)
+	require.True(t, ok, "no diff for n2/n3; result: %+v", mtreeTask.DiffResult.NodeDiffs)
+	require.Equal(t, rangeIDs(2006, 2010), extractDiffIDs(d23.Rows[env.ServiceN3]),
+		"n2/n3: reference's max (2010) dropped from the open tail — ACE-189")
+
+	d12, ok := findPair(env.ServiceN1, env.ServiceN2)
+	require.True(t, ok, "no diff for n1/n2; result: %+v", mtreeTask.DiffResult.NodeDiffs)
+	require.Equal(t, rangeIDs(2001, 2005), extractDiffIDs(d12.Rows[env.ServiceN2]),
+		"n1/n2: rows below the reference's max should be reported in full")
 }
