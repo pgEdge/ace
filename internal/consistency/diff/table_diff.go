@@ -114,7 +114,11 @@ type TableDiffTask struct {
 	firstErrorMu    sync.Mutex
 	errorRecorded   atomic.Bool
 
-	totalDiffRows      atomic.Int64
+	// pairDiffRows enforces max_diff_rows per node pair, keyed by pairKey ->
+	// *atomic.Int64. A single shared counter would make the cap a budget split
+	// across all C(n,2) pairs on clusters with more than two nodes, truncating
+	// the report and requiring multiple repair passes (ACE-191).
+	pairDiffRows       sync.Map
 	diffLimitTriggered atomic.Bool
 
 	// diffSem limits how many recursive diff goroutines can run at the same time.
@@ -163,36 +167,53 @@ func (t *TableDiffTask) hasError() bool {
 	return t.errorRecorded.Load()
 }
 
-// shouldStop returns true if diff workers should cease processing, either because
-// the diff row limit was reached or because a node error has been recorded (circuit
-// breaker). This prevents OOM when a node starts failing: without this check,
-// goroutines would keep grinding through every remaining sub-range — each waiting
-// up to 60 s for a timeout — accumulating error objects until the process is killed.
-func (t *TableDiffTask) shouldStop() bool {
-	return t.shouldStopDueToLimit() || t.hasError()
+// pairKeyFor returns the canonical (lexically ordered) "nodeA/nodeB" key used to
+// bucket diffs and the per-pair row limit.
+func pairKeyFor(node1, node2 string) string {
+	if strings.Compare(node1, node2) > 0 {
+		return node2 + "/" + node1
+	}
+	return node1 + "/" + node2
 }
 
-func (t *TableDiffTask) shouldStopDueToLimit() bool {
+// pairCounter returns the per-pair diff-row counter, creating it on first use.
+func (t *TableDiffTask) pairCounter(pairKey string) *atomic.Int64 {
+	v, _ := t.pairDiffRows.LoadOrStore(pairKey, new(atomic.Int64))
+	return v.(*atomic.Int64)
+}
+
+// shouldStopPair returns true if enumeration for this node pair should cease,
+// either because the pair reached max_diff_rows or because a node error has been
+// recorded (circuit breaker that prevents OOM when a node starts failing). The
+// row limit is per pair so one pair's divergence cannot exhaust another pair's
+// budget on clusters with more than two nodes (ACE-191).
+//
+// The cap is best-effort, not exact: this gate is checked before the diffMutex
+// is taken, so several concurrent comparisons for the same pair can each pass it
+// just under the limit and then append their batches, leaving the pair a few
+// rows over max_diff_rows. That is acceptable for a report-size bound and
+// matches the prior global-counter behaviour.
+func (t *TableDiffTask) shouldStopPair(pairKey string) bool {
+	if t.hasError() {
+		return true
+	}
 	if t.MaxDiffRows <= 0 {
 		return false
 	}
-	if t.diffLimitTriggered.Load() {
-		return true
-	}
-	return t.totalDiffRows.Load() >= t.MaxDiffRows
+	return t.pairCounter(pairKey).Load() >= t.MaxDiffRows
 }
 
 // It's imperative for the caller to hold the diffMutex while calling this function
-func (t *TableDiffTask) incrementDiffRowsLocked(delta int) bool {
+func (t *TableDiffTask) incrementPairDiffRowsLocked(pairKey string, delta int) bool {
 	if delta <= 0 || t.MaxDiffRows <= 0 {
 		return false
 	}
 
-	total := t.totalDiffRows.Add(int64(delta))
+	total := t.pairCounter(pairKey).Add(int64(delta))
 	if total >= t.MaxDiffRows {
 		t.DiffResult.Summary.DiffRowLimitReached = true
 		if t.diffLimitTriggered.CompareAndSwap(false, true) {
-			logger.Warn("table-diff: detected %d differences which meets/exceeds max_diff_rows limit (%d); stopping early", total, t.MaxDiffRows)
+			logger.Warn("table-diff: %s reached max_diff_rows limit (%d); enumeration for this pair stops (other pairs continue)", pairKey, t.MaxDiffRows)
 		}
 		return true
 	}
@@ -1199,7 +1220,10 @@ func (t *TableDiffTask) ExecuteTask() (err error) {
 	t.Task.TaskStatus = taskstore.StatusRunning
 	t.Task.ClusterName = t.ClusterName
 
-	t.totalDiffRows.Store(0)
+	t.pairDiffRows.Range(func(k, _ any) bool {
+		t.pairDiffRows.Delete(k)
+		return true
+	})
 	t.diffLimitTriggered.Store(false)
 	t.errorRecorded.Store(false)
 	t.firstErrorMu.Lock()
@@ -1536,7 +1560,10 @@ func (t *TableDiffTask) ExecuteTask() (err error) {
 		go func() {
 			defer initialHashWg.Done()
 			for task := range hashTaskQueue {
-				if t.shouldStop() {
+				// Initial hashing runs before any rows are counted, so only the
+				// error circuit-breaker is relevant here; the per-pair row limit
+				// is enforced later in recursiveDiff.
+				if t.hasError() {
 					bar.Increment()
 					continue
 				}
@@ -1628,7 +1655,7 @@ func (t *TableDiffTask) ExecuteTask() (err error) {
 		)
 
 		for _, task := range mismatchedTasks {
-			if t.shouldStop() {
+			if t.shouldStopPair(pairKeyFor(task.Node1Name, task.Node2Name)) {
 				diffBar.Increment()
 				continue
 			}
@@ -1952,12 +1979,14 @@ func (t *TableDiffTask) recursiveDiff(
 ) {
 	defer wg.Done()
 
-	if t.shouldStop() {
+	node1Name := task.Node1Name
+	node2Name := task.Node2Name
+	pairKey := pairKeyFor(node1Name, node2Name)
+
+	if t.shouldStopPair(pairKey) {
 		return
 	}
 
-	node1Name := task.Node1Name
-	node2Name := task.Node2Name
 	currentRange := task.CurrentRange
 	currentEstimatedBlockSize := task.CurrentEstimatedBlockSize
 
@@ -1980,11 +2009,6 @@ func (t *TableDiffTask) recursiveDiff(
 			return
 		}
 
-		pairKey := node1Name + "/" + node2Name
-		if strings.Compare(node1Name, node2Name) > 0 {
-			pairKey = node2Name + "/" + node1Name
-		}
-
 		var currentDiffRowsForPair int
 		limitReached := false
 		if len(diffInfo.Node1OnlyRows) > 0 || len(diffInfo.Node2OnlyRows) > 0 || len(diffInfo.ModifiedRows) > 0 {
@@ -2004,7 +2028,7 @@ func (t *TableDiffTask) recursiveDiff(
 			}
 
 			for _, row := range diffInfo.Node1OnlyRows {
-				if t.shouldStop() {
+				if t.shouldStopPair(pairKey) {
 					limitReached = true
 					break
 				}
@@ -2013,7 +2037,7 @@ func (t *TableDiffTask) recursiveDiff(
 				rowAsOrderedMap := utils.MapToOrderedMap(rowWithMeta, t.Cols)
 				t.DiffResult.NodeDiffs[pairKey].Rows[node1Name] = append(t.DiffResult.NodeDiffs[pairKey].Rows[node1Name], rowAsOrderedMap)
 				currentDiffRowsForPair++
-				if t.incrementDiffRowsLocked(1) {
+				if t.incrementPairDiffRowsLocked(pairKey, 1) {
 					limitReached = true
 					break
 				}
@@ -2021,7 +2045,7 @@ func (t *TableDiffTask) recursiveDiff(
 
 			if !limitReached {
 				for _, row := range diffInfo.Node2OnlyRows {
-					if t.shouldStop() {
+					if t.shouldStopPair(pairKey) {
 						limitReached = true
 						break
 					}
@@ -2030,7 +2054,7 @@ func (t *TableDiffTask) recursiveDiff(
 					rowAsOrderedMap := utils.MapToOrderedMap(rowWithMeta, t.Cols)
 					t.DiffResult.NodeDiffs[pairKey].Rows[node2Name] = append(t.DiffResult.NodeDiffs[pairKey].Rows[node2Name], rowAsOrderedMap)
 					currentDiffRowsForPair++
-					if t.incrementDiffRowsLocked(1) {
+					if t.incrementPairDiffRowsLocked(pairKey, 1) {
 						limitReached = true
 						break
 					}
@@ -2039,7 +2063,7 @@ func (t *TableDiffTask) recursiveDiff(
 
 			if !limitReached {
 				for _, modRow := range diffInfo.ModifiedRows {
-					if t.shouldStop() {
+					if t.shouldStopPair(pairKey) {
 						limitReached = true
 						break
 					}
@@ -2053,7 +2077,7 @@ func (t *TableDiffTask) recursiveDiff(
 					node2DataAsOrderedMap := utils.MapToOrderedMap(node2DataWithMeta, t.Cols)
 					t.DiffResult.NodeDiffs[pairKey].Rows[node2Name] = append(t.DiffResult.NodeDiffs[pairKey].Rows[node2Name], node2DataAsOrderedMap)
 					currentDiffRowsForPair++
-					if t.incrementDiffRowsLocked(1) {
+					if t.incrementPairDiffRowsLocked(pairKey, 1) {
 						limitReached = true
 						break
 					}
@@ -2066,14 +2090,14 @@ func (t *TableDiffTask) recursiveDiff(
 			t.DiffResult.Summary.DiffRowsCount[pairKey] += currentDiffRowsForPair
 			t.diffMutex.Unlock()
 
-			if limitReached || t.shouldStop() {
+			if limitReached || t.shouldStopPair(pairKey) {
 				return
 			}
 		}
 		return
 	}
 
-	if t.shouldStop() {
+	if t.shouldStopPair(pairKey) {
 		return
 	}
 
@@ -2112,7 +2136,7 @@ func (t *TableDiffTask) recursiveDiff(
 	}
 
 	for _, sr := range subRanges {
-		if t.shouldStop() {
+		if t.shouldStopPair(pairKey) {
 			return
 		}
 
@@ -2156,7 +2180,7 @@ func (t *TableDiffTask) recursiveDiff(
 			logger.Debug("%s Mismatch in sub-range %v-%v for %s (%s...) vs %s (%s...). Recursing.",
 				utils.CrossMark, sr.Start, sr.End, node1Name, utils.SafeCut(res1.hash, 8), node2Name, utils.SafeCut(res2.hash, 8))
 
-			if t.shouldStop() {
+			if t.shouldStopPair(pairKey) {
 				return
 			}
 

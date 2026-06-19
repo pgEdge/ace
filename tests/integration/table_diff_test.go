@@ -21,6 +21,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/pgedge/ace/internal/consistency/diff"
 	"github.com/stretchr/testify/require"
@@ -1258,6 +1259,99 @@ func testTableDiff_TableFilterNoRows(t *testing.T, env *testEnv) {
 	err := tdTask.ExecuteTask()
 	require.Error(t, err, "table-diff should fail when table filter produces no rows")
 	require.Contains(t, err.Error(), "table filter produced no rows")
+}
+
+// TestTableDiffMaxDiffRowsPerPair is the ACE-191 regression guard: max_diff_rows
+// must bound EACH node pair independently, not act as one budget shared across
+// all pairs. Bug: a single global counter (totalDiffRows) is incremented by
+// every pair's rows, so on a 3-node cluster the cap is reached by the SUM across
+// pairs and enumeration is truncated and split arbitrarily.
+//
+// Setup avoids the open-tail/boundary confound (ACE-189): n1 holds ids 1..20;
+// n2 and n3 each hold the same {1..5, 16..20} (10 MIDDLE rows missing). So
+// n1/n2 and n1/n3 each differ by exactly 10, n2/n3 match, and all nodes share
+// min=1/max=20. With max_diff_rows=14 a per-pair cap reports all 10+10 and never
+// trips the limit; the global-counter bug stops at 14 total (each pair < 10) and
+// sets DiffRowLimitReached.
+func TestTableDiffMaxDiffRowsPerPair(t *testing.T) {
+	ctx := context.Background()
+	env := newSpockEnv()
+	if env.N3Pool == nil {
+		t.Skip("requires a 3-node cluster")
+	}
+
+	clusterName := writeThreeNodeClusterConfig(t, env)
+
+	tableName := "tdiff_percap"
+	qualifiedTable := fmt.Sprintf("%s.%s", testSchema, tableName)
+	safeTable := pgx.Identifier{testSchema, tableName}.Sanitize()
+
+	pools := map[string]*pgxpool.Pool{
+		env.ServiceN1: env.N1Pool,
+		env.ServiceN2: env.N2Pool,
+		env.ServiceN3: env.N3Pool,
+	}
+
+	for _, pool := range pools {
+		_, err := pool.Exec(ctx,
+			"CREATE TABLE IF NOT EXISTS "+safeTable+" (id INT PRIMARY KEY, name VARCHAR)") // nosemgrep
+		require.NoError(t, err, "create %s", qualifiedTable)
+	}
+	t.Cleanup(func() {
+		for _, pool := range pools {
+			_, _ = pool.Exec(ctx, "DROP TABLE IF EXISTS "+safeTable+" CASCADE") // nosemgrep
+		}
+		files, _ := filepath.Glob("*_diffs-*.json")
+		for _, f := range files {
+			os.Remove(f)
+		}
+	})
+
+	// n1: full 1..20. n2/n3: the same {1..5, 16..20} (missing the 10 middle rows).
+	seed := func(pool *pgxpool.Pool, where string) {
+		env.withRepairMode(t, ctx, pool, func(conn *pgxpool.Conn) {
+			_, err := conn.Exec(ctx, "TRUNCATE TABLE "+safeTable) // nosemgrep
+			require.NoError(t, err)
+		})
+		q := "INSERT INTO " + safeTable + " (id, name) SELECT g, 'user_' || g FROM generate_series(1, 20) g"
+		if where != "" {
+			q += " WHERE " + where
+		}
+		_, err := pool.Exec(ctx, q) // nosemgrep
+		require.NoError(t, err)
+		_, err = pool.Exec(ctx, "ANALYZE "+safeTable) // nosemgrep
+		require.NoError(t, err)
+	}
+	seed(env.N1Pool, "")
+	seed(env.N2Pool, "g <= 5 OR g >= 16")
+	seed(env.N3Pool, "g <= 5 OR g >= 16")
+
+	tdTask := env.newTableDiffTask(t, qualifiedTable,
+		[]string{env.ServiceN1, env.ServiceN2, env.ServiceN3})
+	tdTask.ClusterName = clusterName
+	tdTask.BlockSize = 10
+	tdTask.CompareUnitSize = 1
+	tdTask.MaxDiffRows = 14 // > per-pair (10), < total across pairs (20)
+
+	require.NoError(t, tdTask.RunChecks(false))
+	require.NoError(t, tdTask.ExecuteTask())
+
+	pk := func(a, b string) string {
+		if a < b {
+			return a + "/" + b
+		}
+		return b + "/" + a
+	}
+	counts := tdTask.DiffResult.Summary.DiffRowsCount
+
+	require.False(t, tdTask.DiffResult.Summary.DiffRowLimitReached,
+		"ACE-191: per-pair divergence (10) is under max_diff_rows (14); the global-counter bug trips the limit on the cross-pair sum")
+	require.Equal(t, 10, counts[pk(env.ServiceN1, env.ServiceN2)],
+		"n1/n2 must report all 10 differing rows")
+	require.Equal(t, 10, counts[pk(env.ServiceN1, env.ServiceN3)],
+		"n1/n3 must report all 10 differing rows")
+	require.Zero(t, counts[pk(env.ServiceN2, env.ServiceN3)],
+		"n2/n3 are identical and must report no differences")
 }
 
 func testTableDiff_MaxDiffRowsLimit(t *testing.T, env *testEnv) {
