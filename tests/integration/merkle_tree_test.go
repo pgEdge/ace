@@ -2169,6 +2169,26 @@ func writeClusterConfigJSON(t *testing.T, clusterName string, nodes []types.Node
 	t.Cleanup(func() { os.Remove(path) })
 }
 
+// writeThreeNodeClusterConfig emits a 3-node cluster config (n1/n2/n3) for the
+// isolated 3-node tests and returns the cluster name to point a task at. Keeps
+// the types.NodeGroup construction in this file so other test files in the
+// package can opt into a 3-node cluster without importing the config types.
+func writeThreeNodeClusterConfig(t *testing.T, env *testEnv) string {
+	t.Helper()
+	clusterName := "test_cluster_3node"
+	mkNode := func(name, host, port string) types.NodeGroup {
+		ng := types.NodeGroup{Name: name, IsActive: "yes", PublicIP: host, Port: port, Path: "/usr/local/bin"}
+		ng.SSH.OSUser = "pgedge"
+		return ng
+	}
+	writeClusterConfigJSON(t, clusterName, []types.NodeGroup{
+		mkNode(env.ServiceN1, pgCluster.Node1Host, pgCluster.Node1Port),
+		mkNode(env.ServiceN2, pgCluster.Node2Host, pgCluster.Node2Port),
+		mkNode(env.ServiceN3, pgCluster.Node3Host, pgCluster.Node3Port),
+	})
+	return clusterName
+}
+
 // TestMerkleTreeThreeNodeReferenceTail is the faithful 3-node reproduction of
 // Zaid's ACE-189 report: n3 holds the cluster max, and every diff pair that
 // involves n3 was short by exactly one row (its largest), while n1/n2 was
