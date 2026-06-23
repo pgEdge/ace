@@ -2057,15 +2057,14 @@ func extractDiffIDs(rows []types.OrderedMap) []int {
 	return ids
 }
 
-// TestMerkleTreeReferenceMaxInMultiLeafTail reproduces the residual ACE-189
-// symptom Zaid reported: the reference node's single largest row — the
+// TestMerkleTreeReferenceMaxInMultiLeafTail reproduces a residual symptom of
+// the open-ended-tail diff bug: the reference node's single largest row — the
 // range_start of the open-ended tail leaf in a MULTI-LEAF tree — is dropped
-// from the diff even after the open-ended-tail fix (f9a3961). The earlier
-// bidirectional tests use tiny row counts (single-leaf trees), so they never
-// exercise the boundary where the last closed leaf [B, max] meets the open
-// tail [max, NULL).
+// from the diff even after the open-ended-tail fix. The earlier bidirectional
+// tests use tiny row counts (single-leaf trees), so they never exercise the
+// boundary where the last closed leaf [B, max] meets the open tail [max, NULL).
 //
-// Zaid saw it on a 3-node cluster (n3 held the cluster max; every pair
+// It was observed on a 3-node cluster (n3 held the cluster max; every pair
 // involving n3 was short by one, n1/n2 was correct). The 3-node shape is
 // incidental — the bug is "the reference node's own max is dropped" — so this
 // reproduces it minimally on the 2-node test cluster, with the reference (n2,
@@ -2075,7 +2074,7 @@ func extractDiffIDs(rows []types.OrderedMap) []int {
 //
 //   n1 = 1..2000, n2 = 1..2010  → n2 is the reference (3 leaves).
 // Expected n1/n2 diff = {2001..2010} (10 rows). The bug drops id=2010 (n2's
-// max), yielding 9 — the same off-by-the-last-row Zaid observed.
+// max), yielding 9 — the same off-by-the-last-row symptom that was reported.
 func TestMerkleTreeReferenceMaxInMultiLeafTail(t *testing.T) {
 	ctx := context.Background()
 	env := newSpockEnv()
@@ -2140,7 +2139,7 @@ func TestMerkleTreeReferenceMaxInMultiLeafTail(t *testing.T) {
 		expected = append(expected, i)
 	}
 	require.Equal(t, expected, extractDiffIDs(nodeDiffs.Rows[env.ServiceN2]),
-		"reference's max (id=2010) dropped from the open tail of a multi-leaf tree — ACE-189")
+		"reference's max (id=2010) dropped from the open tail of a multi-leaf tree")
 }
 
 // writeClusterConfigJSON emits a <clusterName>.json cluster config in the
@@ -2190,7 +2189,7 @@ func writeThreeNodeClusterConfig(t *testing.T, env *testEnv) string {
 }
 
 // TestMerkleTreeThreeNodeReferenceTail is the faithful 3-node reproduction of
-// Zaid's ACE-189 report: n3 holds the cluster max, and every diff pair that
+// the reported symptom: n3 holds the cluster max, and every diff pair that
 // involves n3 was short by exactly one row (its largest), while n1/n2 was
 // correct. The shared test cluster only registers n1/n2, so this test emits
 // its own 3-node cluster config and points the task at it.
@@ -2200,8 +2199,8 @@ func writeThreeNodeClusterConfig(t *testing.T, env *testEnv) string {
 // Counts are above the cluster min block size (1000) so the tree is multi-leaf
 // (the single-leaf case is already covered and behaves differently at the
 // tail). Expected: n1/n3 = {2001..2010} (10), n2/n3 = {2006..2010} (5),
-// n1/n2 = {2001..2005} (5) — Zaid's 10/5/5 ratio. The bug drops id=2010 from
-// both n3 pairs (9 and 4).
+// n1/n2 = {2001..2005} (5) — the reported 10/5/5 ratio. The bug drops id=2010
+// from both n3 pairs (9 and 4).
 func TestMerkleTreeThreeNodeReferenceTail(t *testing.T) {
 	ctx := context.Background()
 	env := newSpockEnv()
@@ -2297,12 +2296,12 @@ func TestMerkleTreeThreeNodeReferenceTail(t *testing.T) {
 	d13, ok := findPair(env.ServiceN1, env.ServiceN3)
 	require.True(t, ok, "no diff for n1/n3; result: %+v", mtreeTask.DiffResult.NodeDiffs)
 	require.Equal(t, rangeIDs(2001, 2010), extractDiffIDs(d13.Rows[env.ServiceN3]),
-		"n1/n3: reference's max (2010) dropped from the open tail — ACE-189")
+		"n1/n3: reference's max (2010) dropped from the open tail")
 
 	d23, ok := findPair(env.ServiceN2, env.ServiceN3)
 	require.True(t, ok, "no diff for n2/n3; result: %+v", mtreeTask.DiffResult.NodeDiffs)
 	require.Equal(t, rangeIDs(2006, 2010), extractDiffIDs(d23.Rows[env.ServiceN3]),
-		"n2/n3: reference's max (2010) dropped from the open tail — ACE-189")
+		"n2/n3: reference's max (2010) dropped from the open tail")
 
 	d12, ok := findPair(env.ServiceN1, env.ServiceN2)
 	require.True(t, ok, "no diff for n1/n2; result: %+v", mtreeTask.DiffResult.NodeDiffs)
