@@ -76,6 +76,27 @@ func TestCompareSubscriptions_DifferentReplicationSets(t *testing.T) {
 	assert.Len(t, d.Different, 1, "replication set difference should be reported")
 }
 
+// compareSubscriptions must not reorder the caller's ReplicationSets: the slices
+// are shared with the SpockConfigs section of the written JSON, which should
+// preserve database-returned order.
+func TestCompareSubscriptions_DoesNotMutateReplicationSets(t *testing.T) {
+	n1Sets := []string{"default_insert_only", "default"}
+	n2Sets := []string{"default", "default_insert_only"}
+	n1 := spockCfg("n1", types.SpockSubscription{
+		SubName: "a", ProviderNode: "n2", SubEnabled: true, ReplicationSets: n1Sets,
+	})
+	n2 := spockCfg("n2", types.SpockSubscription{
+		SubName: "b", ProviderNode: "n1", SubEnabled: true, ReplicationSets: n2Sets,
+	})
+
+	compareSubscriptions(n1, n2)
+
+	assert.Equal(t, []string{"default_insert_only", "default"}, n1Sets,
+		"n1 replication set order must be preserved")
+	assert.Equal(t, []string{"default", "default_insert_only"}, n2Sets,
+		"n2 replication set order must be preserved")
+}
+
 // In a 3-node mesh, comparing n1 and n2 ignores their subscriptions with n3.
 func TestCompareSubscriptions_IgnoresUnrelatedPeers(t *testing.T) {
 	n1 := spockCfg("n1",
