@@ -601,17 +601,19 @@ var SQLTemplates = Templates{
 	`)),
 	SpockNodeAndSubInfo: template.Must(template.New("spockNodeAndSubInfo").Parse(`
 		SELECT
-			n.node_id,
+			n.node_id::bigint,
 			n.node_name,
 			n.location,
 			n.country,
-			s.sub_id,
+			s.sub_id::bigint,
 			s.sub_name,
 			s.sub_enabled,
-			s.sub_replication_sets
+			s.sub_replication_sets,
+			COALESCE(o.node_name, '') AS sub_origin_name
 		FROM
 			spock.node n
 			LEFT OUTER JOIN spock.subscription s ON s.sub_target = n.node_id
+			LEFT OUTER JOIN spock.node o ON o.node_id = s.sub_origin
 		WHERE
 			s.sub_name IS NOT NULL;
 	`)),
@@ -626,6 +628,8 @@ var SQLTemplates = Templates{
 				relname
 			FROM
 				spock.tables
+			WHERE
+				set_name IS NOT NULL
 			ORDER BY
 				set_name, nspname, relname
 		) subquery

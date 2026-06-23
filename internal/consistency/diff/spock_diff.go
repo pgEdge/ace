@@ -344,8 +344,15 @@ func (t *SpockDiffTask) ExecuteTask() (err error) {
 				sub := types.SpockSubscription{}
 				if ni.SubName != "" {
 					sub.SubName = ni.SubName
+					sub.ProviderNode = ni.SubOriginName
 					sub.SubEnabled = ni.SubEnabled
 					sub.ReplicationSets = ni.SubReplicationSets
+					if ni.SubOriginName == "" {
+						hint := fmt.Sprintf("Subscription '%s' has an unresolved origin node and is excluded from comparison.", sub.SubName)
+						if !utils.Contains(config.Hints, hint) {
+							config.Hints = append(config.Hints, hint)
+						}
+					}
 					if len(ni.SubReplicationSets) == 0 {
 						hint := fmt.Sprintf("Subscription '%s' has no replication sets.", sub.SubName)
 						if !utils.Contains(config.Hints, hint) {
@@ -508,48 +515,47 @@ func compareSubscriptions(c1, c2 SpockNodeConfig) types.SubscriptionDiff {
 	n1Name := c1.NodeName
 	n2Name := c2.NodeName
 
-	subsOnN1 := make(map[string]types.SpockSubscription)
-	for _, s := range c1.Subscriptions {
-		if s.SubName != "" {
-			subsOnN1[s.SubName] = s
-		}
-	}
-	subsOnN2 := make(map[string]types.SpockSubscription)
-	for _, s := range c2.Subscriptions {
-		if s.SubName != "" {
-			subsOnN2[s.SubName] = s
-		}
-	}
+	// A healthy pair requires n1 to subscribe from n2 and n2 from n1. Match on the
+	// provider node identity, not the subscription name (which users may override).
+	subsFromOnN1 := subscriptionsByProvider(c1.Subscriptions)
+	subsFromOnN2 := subscriptionsByProvider(c2.Subscriptions)
 
-	// Check for reciprocal subscriptions between n1 and n2
-	subN1toN2_name := fmt.Sprintf("sub_%s%s", n1Name, n2Name) // Subscription on n2, from n1
-	subN2toN1_name := fmt.Sprintf("sub_%s%s", n2Name, n1Name) // Subscription on n1, from n2
+	s1, n1SubsFromN2 := subsFromOnN1[n2Name] // subscription on n1 receiving from n2
+	s2, n2SubsFromN1 := subsFromOnN2[n1Name] // subscription on n2 receiving from n1
 
-	s1, s1_exists := subsOnN2[subN1toN2_name]
-	s2, s2_exists := subsOnN1[subN2toN1_name]
-
-	if !s1_exists {
-		diff.MissingOnNode2 = append(diff.MissingOnNode2, subN1toN2_name)
+	if !n1SubsFromN2 {
+		diff.MissingOnNode1 = append(diff.MissingOnNode1, n2Name)
 	}
-	if !s2_exists {
-		diff.MissingOnNode1 = append(diff.MissingOnNode1, subN2toN1_name)
+	if !n2SubsFromN1 {
+		diff.MissingOnNode2 = append(diff.MissingOnNode2, n1Name)
 	}
 
-	if s1_exists && s2_exists {
+	if n1SubsFromN2 && n2SubsFromN1 {
 		sort.Strings(s1.ReplicationSets)
 		sort.Strings(s2.ReplicationSets)
 
-		// Compare properties, ignoring the name which is expected to be different.
+		// Both directions exist; their properties should match (names aside).
 		if s1.SubEnabled != s2.SubEnabled || !reflect.DeepEqual(s1.ReplicationSets, s2.ReplicationSets) {
 			diff.Different = append(diff.Different, types.SubscriptionPair{
-				Name:  fmt.Sprintf("reciprocal subscriptions for %s and %s", n1Name, n2Name),
-				Node1: s2, // This is sub on n1
-				Node2: s1, // This is sub on n2
+				Name:  fmt.Sprintf("reciprocal subscriptions between %s and %s", n1Name, n2Name),
+				Node1: s1, // subscription on n1 (from n2)
+				Node2: s2, // subscription on n2 (from n1)
 			})
 		}
 	}
 
 	return diff
+}
+
+// subscriptionsByProvider indexes subscriptions by the node they replicate from.
+func subscriptionsByProvider(subs []types.SpockSubscription) map[string]types.SpockSubscription {
+	byProvider := make(map[string]types.SpockSubscription, len(subs))
+	for _, s := range subs {
+		if s.ProviderNode != "" {
+			byProvider[s.ProviderNode] = s
+		}
+	}
+	return byProvider
 }
 
 func compareReplicationSets(c1, c2 SpockNodeConfig) types.ReplicationSetDiff {
@@ -605,17 +611,17 @@ func compareReplicationSets(c1, c2 SpockNodeConfig) types.ReplicationSetDiff {
 
 func printDiffDetails(details types.SpockDiffDetail, node1, node2 string) {
 	if len(details.Subscriptions.MissingOnNode1) > 0 {
-		fmt.Printf("    Missing reciprocal subscriptions on %s: %v\n", node1, details.Subscriptions.MissingOnNode1)
+		fmt.Printf("    %s is missing a subscription receiving from: %v\n", node1, details.Subscriptions.MissingOnNode1)
 	}
 	if len(details.Subscriptions.MissingOnNode2) > 0 {
-		fmt.Printf("    Missing reciprocal subscriptions on %s: %v\n", node2, details.Subscriptions.MissingOnNode2)
+		fmt.Printf("    %s is missing a subscription receiving from: %v\n", node2, details.Subscriptions.MissingOnNode2)
 	}
 	if len(details.Subscriptions.Different) > 0 {
-		fmt.Println("    Subscriptions with different properties:")
+		fmt.Println("    Reciprocal subscriptions with different properties:")
 		for _, d := range details.Subscriptions.Different {
-			fmt.Printf("      - Mismatch in settings for subscriptions between %s and %s:\n", node1, node2)
-			fmt.Printf("        - On %s (subscription '%s'): Enabled: %t, Repsets: %v\n", node1, d.Node1.SubName, d.Node1.SubEnabled, d.Node1.ReplicationSets)
-			fmt.Printf("        - On %s (subscription '%s'): Enabled: %t, Repsets: %v\n", node2, d.Node2.SubName, d.Node2.SubEnabled, d.Node2.ReplicationSets)
+			fmt.Printf("      - Mismatch in settings for reciprocal subscriptions between %s and %s:\n", node1, node2)
+			fmt.Printf("        - On %s (subscription '%s', from %s): Enabled: %t, Repsets: %v\n", node1, d.Node1.SubName, d.Node1.ProviderNode, d.Node1.SubEnabled, d.Node1.ReplicationSets)
+			fmt.Printf("        - On %s (subscription '%s', from %s): Enabled: %t, Repsets: %v\n", node2, d.Node2.SubName, d.Node2.ProviderNode, d.Node2.SubEnabled, d.Node2.ReplicationSets)
 		}
 	}
 

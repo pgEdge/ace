@@ -52,6 +52,12 @@ jobs:
     - name: Run schema-diff tests
       run: go test -count=1 -v ./tests/integration -run 'TestSchemaDiff_'
 
+    - name: Run spock-diff comparison unit tests
+      run: go test -count=1 -v ./internal/consistency/diff -run 'TestCompareSubscriptions'
+
+    - name: Run spock-diff tests
+      run: go test -count=1 -v ./tests/integration -run 'TestSpockDiff_|TestGetSpockNodeAndSubInfo'
+
     - name: Run Merkle tree numeric scale invariance test
       run: go test -count=1 -v ./tests/integration -run 'TestMerkleTreeNumericScaleInvariance'
 

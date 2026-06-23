@@ -225,7 +225,11 @@ type NodePairDiff struct {
 
 // SpockSubscription holds information about a spock subscription.
 type SpockSubscription struct {
-	SubName         string   `json:"sub_name"`
+	SubName string `json:"sub_name"`
+	// ProviderNode is the spock node_name this subscription replicates FROM
+	// (resolved from sub_origin); used to match reciprocal subscriptions by node
+	// identity instead of by the user-overridable subscription name.
+	ProviderNode    string   `json:"provider_node"`
 	SubEnabled      bool     `json:"sub_enabled"`
 	ReplicationSets []string `json:"replication_sets"`
 }
@@ -316,6 +320,7 @@ type SpockNodeAndSubInfo struct {
 	SubName            string   `db:"sub_name"`
 	SubEnabled         bool     `db:"sub_enabled"`
 	SubReplicationSets []string `db:"sub_replication_sets"`
+	SubOriginName      string   `db:"sub_origin_name"`
 }
 
 // SpockRepSetInfo contains information about a replication set.
