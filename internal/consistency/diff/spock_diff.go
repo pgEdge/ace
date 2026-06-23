@@ -348,7 +348,7 @@ func (t *SpockDiffTask) ExecuteTask() (err error) {
 					sub.SubEnabled = ni.SubEnabled
 					sub.ReplicationSets = ni.SubReplicationSets
 					if ni.SubOriginName == "" {
-						hint := fmt.Sprintf("Subscription '%s' has an unresolved origin node and is excluded from comparison.", sub.SubName)
+						hint := fmt.Sprintf("Subscription '%s' has an unresolved origin node; its reciprocal peer cannot be determined and it may be reported below as a missing subscription.", sub.SubName)
 						if !utils.Contains(config.Hints, hint) {
 							config.Hints = append(config.Hints, hint)
 						}
