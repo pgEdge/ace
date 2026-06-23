@@ -1261,13 +1261,13 @@ func testTableDiff_TableFilterNoRows(t *testing.T, env *testEnv) {
 	require.Contains(t, err.Error(), "table filter produced no rows")
 }
 
-// TestTableDiffMaxDiffRowsPerPair is the ACE-191 regression guard: max_diff_rows
-// must bound EACH node pair independently, not act as one budget shared across
-// all pairs. Bug: a single global counter (totalDiffRows) is incremented by
+// TestTableDiffMaxDiffRowsPerPair guards that max_diff_rows bounds EACH node
+// pair independently, not as one budget shared across all pairs. The bug it
+// guards against: a single global counter (totalDiffRows) is incremented by
 // every pair's rows, so on a 3-node cluster the cap is reached by the SUM across
 // pairs and enumeration is truncated and split arbitrarily.
 //
-// Setup avoids the open-tail/boundary confound (ACE-189): n1 holds ids 1..20;
+// Setup avoids the open-tail/boundary confound: n1 holds ids 1..20;
 // n2 and n3 each hold the same {1..5, 16..20} (10 MIDDLE rows missing). So
 // n1/n2 and n1/n3 each differ by exactly 10, n2/n3 match, and all nodes share
 // min=1/max=20. With max_diff_rows=14 a per-pair cap reports all 10+10 and never
@@ -1345,7 +1345,7 @@ func TestTableDiffMaxDiffRowsPerPair(t *testing.T) {
 	counts := tdTask.DiffResult.Summary.DiffRowsCount
 
 	require.False(t, tdTask.DiffResult.Summary.DiffRowLimitReached,
-		"ACE-191: per-pair divergence (10) is under max_diff_rows (14); the global-counter bug trips the limit on the cross-pair sum")
+		"per-pair divergence (10) is under max_diff_rows (14); a global counter would trip the limit on the cross-pair sum")
 	require.Equal(t, 10, counts[pk(env.ServiceN1, env.ServiceN2)],
 		"n1/n2 must report all 10 differing rows")
 	require.Equal(t, 10, counts[pk(env.ServiceN1, env.ServiceN3)],

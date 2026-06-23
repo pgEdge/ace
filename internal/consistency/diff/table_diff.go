@@ -117,7 +117,7 @@ type TableDiffTask struct {
 	// pairDiffRows enforces max_diff_rows per node pair, keyed by pairKey ->
 	// *atomic.Int64. A single shared counter would make the cap a budget split
 	// across all C(n,2) pairs on clusters with more than two nodes, truncating
-	// the report and requiring multiple repair passes (ACE-191).
+	// the report and requiring multiple repair passes.
 	pairDiffRows       sync.Map
 	diffLimitTriggered atomic.Bool
 
@@ -186,7 +186,7 @@ func (t *TableDiffTask) pairCounter(pairKey string) *atomic.Int64 {
 // either because the pair reached max_diff_rows or because a node error has been
 // recorded (circuit breaker that prevents OOM when a node starts failing). The
 // row limit is per pair so one pair's divergence cannot exhaust another pair's
-// budget on clusters with more than two nodes (ACE-191).
+// budget on clusters with more than two nodes.
 //
 // The cap is best-effort, not exact: this gate is checked before the diffMutex
 // is taken, so several concurrent comparisons for the same pair can each pass it
