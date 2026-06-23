@@ -531,11 +531,15 @@ func compareSubscriptions(c1, c2 SpockNodeConfig) types.SubscriptionDiff {
 	}
 
 	if n1SubsFromN2 && n2SubsFromN1 {
-		sort.Strings(s1.ReplicationSets)
-		sort.Strings(s2.ReplicationSets)
+		// Compare order-insensitively without mutating the originals: these slices
+		// are shared with the SpockConfigs JSON output, which keeps DB order.
+		sets1 := append([]string(nil), s1.ReplicationSets...)
+		sets2 := append([]string(nil), s2.ReplicationSets...)
+		sort.Strings(sets1)
+		sort.Strings(sets2)
 
 		// Both directions exist; their properties should match (names aside).
-		if s1.SubEnabled != s2.SubEnabled || !reflect.DeepEqual(s1.ReplicationSets, s2.ReplicationSets) {
+		if s1.SubEnabled != s2.SubEnabled || !reflect.DeepEqual(sets1, sets2) {
 			diff.Different = append(diff.Different, types.SubscriptionPair{
 				Name:  fmt.Sprintf("reciprocal subscriptions between %s and %s", n1Name, n2Name),
 				Node1: s1, // subscription on n1 (from n2)
