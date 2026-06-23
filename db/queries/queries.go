@@ -868,6 +868,7 @@ func GetSpockNodeAndSubInfo(ctx context.Context, db DBQuerier) ([]types.SpockNod
 			&info.SubName,
 			&info.SubEnabled,
 			&info.SubReplicationSets,
+			&info.SubOriginName,
 		); err != nil {
 			return nil, err
 		}
