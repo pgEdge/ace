@@ -321,6 +321,19 @@ func processReplicationStream(ctx context.Context, nodeInfo map[string]any, cont
 					}
 				}
 
+				// ServerWALEnd is the server's "I have sent you everything up
+				// to here" marker. Replication messages arrive in LSN order, so
+				// once a keepalive reports ServerWALEnd >= targetFlushLSN every
+				// committed change up to the target has already been delivered
+				// (and queued for apply, which wg.Wait below awaits). Stopping
+				// here avoids waiting out the 1s idle timeout in the common case
+				// where the tracked table did not change but other tables did,
+				// so no data message ever reaches the target LSN.
+				if !continuous && targetFlushLSN != 0 && pkm.ServerWALEnd >= targetFlushLSN {
+					logger.Info("Server caught up to target WAL flush LSN %s via keepalive; stopping replication stream", targetFlushLSN)
+					stopStreaming = true
+				}
+
 			case pglogrepl.XLogDataByteID:
 				xld, err := pglogrepl.ParseXLogData(msg.Data[1:])
 				if err != nil {
