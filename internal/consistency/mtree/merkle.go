@@ -1598,9 +1598,28 @@ func (m *MerkleTreeTask) UpdateMtree(skipAllChecks bool) (err error) {
 		ctx, cancel := context.WithTimeout(baseCtx, timeout)
 		defer cancel()
 
-		for _, nodeInfo := range m.ClusterNodes {
-			if err := cdc.UpdateFromCDC(ctx, nodeInfo); err != nil {
-				return fmt.Errorf("CDC update failed for node %s: %w", nodeInfo["Name"], err)
+		// Drain each node's CDC stream concurrently. Each UpdateFromCDC targets
+		// a distinct node over its own connection and writes only that node's
+		// CDC metadata, so the calls are independent. Draining sequentially
+		// made every mtree update/diff pay the per-node drain latency once per
+		// node; running them together collapses that to roughly a single
+		// drain's wall-clock. Errors are collected per node and the first
+		// (in node order) is returned, preserving the prior semantics.
+		var wg sync.WaitGroup
+		cdcErrs := make([]error, len(m.ClusterNodes))
+		for i, nodeInfo := range m.ClusterNodes {
+			wg.Add(1)
+			go func(i int, nodeInfo map[string]any) {
+				defer wg.Done()
+				if err := cdc.UpdateFromCDC(ctx, nodeInfo); err != nil {
+					cdcErrs[i] = fmt.Errorf("CDC update failed for node %s: %w", nodeInfo["Name"], err)
+				}
+			}(i, nodeInfo)
+		}
+		wg.Wait()
+		for _, e := range cdcErrs {
+			if e != nil {
+				return e
 			}
 		}
 	}
