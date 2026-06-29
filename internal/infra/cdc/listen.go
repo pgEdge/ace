@@ -50,6 +50,16 @@ func UpdateFromCDC(ctx context.Context, nodeInfo map[string]any) error {
 	return processReplicationStream(ctx, nodeInfo, false)
 }
 
+// MaxBufferedChanges bounds how many un-committed CDC changes a bounded
+// (non-continuous) drain will buffer before refusing to continue. Under
+// proto_version '1' a single transaction is buffered in full before its commit
+// is decoded, so a very large backlog (e.g. a bulk load on a diverged node)
+// would otherwise exhaust memory. Exceeding it is reported as an error that
+// recommends rebuilding the tree -- never a silent partial drain (ACE-190). It
+// is a package var so tests can adjust it; a future --max-drain flag will
+// surface it as configuration.
+var MaxBufferedChanges = 1_000_000
+
 func processReplicationStream(ctx context.Context, nodeInfo map[string]any, continuous bool) error {
 	pool, err := auth.GetClusterNodeConnection(ctx, nodeInfo, auth.ConnectionOptions{})
 	if err != nil {
@@ -147,6 +157,13 @@ func processReplicationStream(ctx context.Context, nodeInfo map[string]any, cont
 	var lastFlushedLSN pglogrepl.LSN = lastLSN
 	var lastLSNVal atomic.Uint64
 	lastLSNVal.Store(uint64(lastLSN))
+	// Bounded-drain (non-continuous) safety state. ACE-190: a bounded drain must
+	// actually reach the call-time snapshot (targetFlushLSN) before it may report
+	// success; otherwise UpdateMtree/DiffMtree would compare a stale tree and
+	// silently miss real divergence. reachedTarget records whether we got there;
+	// bufferedChanges caps in-memory buffering of a single large backlog.
+	reachedTarget := false
+	var bufferedChanges int
 	flushInterval := 10 * time.Second
 	if cfg.CDCMetadataFlushSec > 0 {
 		flushInterval = time.Duration(cfg.CDCMetadataFlushSec) * time.Second
@@ -284,12 +301,27 @@ func processReplicationStream(ctx context.Context, nodeInfo map[string]any, cont
 					logger.Info("Replication stopping due to context cancellation")
 					return nil
 				}
+				if lastLSN < targetFlushLSN {
+					return fmt.Errorf("CDC drain timed out at LSN %s of target %s on slot %s "+
+						"(cdc_processing_timeout): the backlog is too large to drain incrementally "+
+						"-- rebuild the tree with 'ace mtree build': %w", lastLSN, targetFlushLSN, slotName, ctx.Err())
+				}
 				return ctx.Err()
 			}
 			if pgconn.Timeout(err) {
 				if !continuous {
-					logger.Info("Replication stream drained.")
-					stopStreaming = true
+					if lastLSN >= targetFlushLSN {
+						// Received every change up to the call-time snapshot.
+						logger.Info("Replication stream drained to target LSN %s.", targetFlushLSN)
+						reachedTarget = true
+						stopStreaming = true
+					}
+					// Otherwise this is a quiet interval while the server decodes
+					// a large transaction: proto_version '1' streams nothing until
+					// the commit is decoded, so silence here does NOT mean the
+					// stream is drained (ACE-190). Keep waiting; the parent
+					// context's cdc_processing_timeout bounds the wait and turns
+					// an unreachable target into the error above.
 				}
 				continue
 			}
@@ -321,16 +353,21 @@ func processReplicationStream(ctx context.Context, nodeInfo map[string]any, cont
 					}
 				}
 
-				// ServerWALEnd is the server's "I have sent you everything up
-				// to here" marker. Replication messages arrive in LSN order, so
-				// once a keepalive reports ServerWALEnd >= targetFlushLSN every
-				// committed change up to the target has already been delivered
-				// (and queued for apply, which wg.Wait below awaits). Stopping
-				// here avoids waiting out the 1s idle timeout in the common case
-				// where the tracked table did not change but other tables did,
-				// so no data message ever reaches the target LSN.
+				// ServerWALEnd on a logical keepalive is the walsender's decode
+				// position (how far it has read this slot's WAL). When it reaches
+				// targetFlushLSN the decoder has processed every commit at or
+				// before the target, and those commits' changes were streamed --
+				// and received, in LSN order -- ahead of this keepalive. So the
+				// gap between lastLSN and the target holds no further tracked-table
+				// changes and the drain is complete. This is the common case where
+				// the tracked table did not change but other tables did, so no
+				// data message ever advances lastLSN to the target. (Note: this
+				// fires only after the decoder reaches the target; while it is
+				// still decoding a large in-progress transaction, ServerWALEnd
+				// stays below the target and we keep waiting -- see ACE-190.)
 				if !continuous && targetFlushLSN != 0 && pkm.ServerWALEnd >= targetFlushLSN {
 					logger.Info("Server caught up to target WAL flush LSN %s via keepalive; stopping replication stream", targetFlushLSN)
+					reachedTarget = true
 					stopStreaming = true
 				}
 
@@ -368,6 +405,7 @@ func processReplicationStream(ctx context.Context, nodeInfo map[string]any, cont
 							}(changes)
 							logger.Info("Processed %d changes for XID %d", len(changes), currentXID)
 						}
+						bufferedChanges -= len(changes)
 						delete(txChanges, currentXID)
 					}
 				case *pglogrepl.RelationMessage:
@@ -381,6 +419,7 @@ func processReplicationStream(ctx context.Context, nodeInfo map[string]any, cont
 						relation:  rel,
 						tuple:     logicalMsg.Tuple,
 					})
+					bufferedChanges++
 				case *pglogrepl.UpdateMessage:
 					rel := relations[logicalMsg.RelationID]
 					txChanges[currentXID] = append(txChanges[currentXID], cdcMsg{
@@ -390,6 +429,7 @@ func processReplicationStream(ctx context.Context, nodeInfo map[string]any, cont
 						relation:  rel,
 						tuple:     logicalMsg.NewTuple,
 					})
+					bufferedChanges++
 				case *pglogrepl.DeleteMessage:
 					rel := relations[logicalMsg.RelationID]
 					txChanges[currentXID] = append(txChanges[currentXID], cdcMsg{
@@ -399,6 +439,18 @@ func processReplicationStream(ctx context.Context, nodeInfo map[string]any, cont
 						relation:  rel,
 						tuple:     logicalMsg.OldTuple,
 					})
+					bufferedChanges++
+				}
+
+				// Bound in-memory buffering of a single large backlog. proto_version
+				// '1' buffers a whole transaction until its commit is decoded, so a
+				// multi-million-row backlog would otherwise grow unboundedly here.
+				// Refuse rather than risk OOM or a silent partial drain (ACE-190).
+				if !continuous && bufferedChanges > MaxBufferedChanges {
+					processingErr = fmt.Errorf("CDC backlog exceeds %d buffered changes on slot %s; "+
+						"the divergence is too large to drain incrementally -- rebuild the tree with "+
+						"'ace mtree build'", MaxBufferedChanges, slotName)
+					stopStreaming = true
 				}
 
 				lastLSN = xld.WALStart + pglogrepl.LSN(len(xld.WALData))
@@ -413,6 +465,7 @@ func processReplicationStream(ctx context.Context, nodeInfo map[string]any, cont
 				}
 				if !continuous && targetFlushLSN != 0 && lastLSN >= targetFlushLSN {
 					logger.Info("Reached target WAL flush LSN %s; stopping replication stream", targetFlushLSN)
+					reachedTarget = true
 					stopStreaming = true
 				}
 			}
@@ -447,6 +500,16 @@ func processReplicationStream(ctx context.Context, nodeInfo map[string]any, cont
 			processingErr = err
 		default:
 		}
+	}
+
+	// Data-safety backstop (ACE-190): a bounded drain must not report success
+	// unless it actually reached the call-time snapshot. Every legitimate
+	// completion above sets reachedTarget; if the loop exited any other way
+	// without an error, fail loud rather than checkpoint a stale position and
+	// let UpdateMtree/DiffMtree compare a tree that never saw the backlog.
+	if !continuous && processingErr == nil && !reachedTarget {
+		processingErr = fmt.Errorf("CDC drain ended at LSN %s without reaching target %s on slot %s; "+
+			"refusing to report a possibly-stale Merkle tree as current", lastLSN, targetFlushLSN, slotName)
 	}
 
 	if processingErr != nil {
