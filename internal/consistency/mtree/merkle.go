@@ -85,6 +85,7 @@ type MerkleTreeTask struct {
 	OverrideBlockSize bool
 	Mode              string
 	NoCDC             bool
+	CDCTimeoutSec     int // per-invocation CDC drain budget; 0 = use config/default
 	SkipDBUpdate      bool
 	Until             string
 
@@ -95,10 +96,10 @@ type MerkleTreeTask struct {
 
 	mtreeSchema string
 
-	DiffResult  types.DiffOutput
-	diffMutex   sync.Mutex
-	diffRowKeySets map[string]map[string]map[string]struct{}
-	StartTime      time.Time
+	DiffResult      types.DiffOutput
+	diffMutex       sync.Mutex
+	diffRowKeySets  map[string]map[string]map[string]struct{}
+	StartTime       time.Time
 	NodeOriginNames map[string]map[string]string
 
 	Ctx context.Context
@@ -1586,8 +1587,15 @@ func (m *MerkleTreeTask) UpdateMtree(skipAllChecks bool) (err error) {
 
 	if !m.NoCDC {
 		cdcCfg := config.Get().MTree.CDC
-		timeout := 30 * time.Second
-		if cdcCfg.CDCProcessingTimeout > 0 {
+		// Wall-clock budget for the whole CDC catch-up (all nodes drained
+		// concurrently). Generous by default: a timeout now means "re-run or raise"
+		// (progress is durable), not "rebuild", so we favour absorbing large
+		// backlogs and busy-server slowdowns over failing fast. A per-invocation
+		// --cdc-timeout flag (m.CDCTimeoutSec) overrides this, then config.
+		timeout := 300 * time.Second
+		if m.CDCTimeoutSec > 0 {
+			timeout = time.Duration(m.CDCTimeoutSec) * time.Second
+		} else if cdcCfg.CDCProcessingTimeout > 0 {
 			timeout = time.Duration(cdcCfg.CDCProcessingTimeout) * time.Second
 		}
 

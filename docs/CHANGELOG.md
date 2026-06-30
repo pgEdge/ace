@@ -2,6 +2,30 @@
 
 All notable changes to ACE will be captured in this document. This project follows semantic versioning; the latest changes appear first.
 
+## [Unreleased]
+
+### Changed
+- **CDC drain now absorbs large transactions instead of forcing a rebuild.** A
+  bounded `mtree update` / `mtree table-diff` drain applies changes in
+  sub-batches (`cdc_flush_batch_size`, default 10000) and buffers only primary
+  keys, so memory scales with key size — not row width — regardless of
+  transaction size. The previous hard `MaxBufferedChanges` cap (which erred and
+  recommended a rebuild) is removed.
+- Bounded drains apply synchronously so the slot's confirmed LSN never advances
+  ahead of durably-applied work; a crash mid-drain is recovered by re-streaming
+  the in-flight transaction on the next run.
+- `cdc_processing_timeout` default raised from 30s to **300s** (a timeout now
+  means "re-run or raise", since drain progress is durable).
+
+### Added
+- `--cdc-timeout` flag on `mtree update` and `mtree table-diff` to override the
+  CDC drain budget per invocation.
+- `cdc_flush_batch_size` configuration key (mtree → cdc).
+
+### Fixed
+- A bounded drain now fails with a clear, actionable error when a tracked
+  table's `REPLICA IDENTITY` exposes no primary key, instead of panicking.
+
 ## [v2.0.0] - 2026-04-22
 
 ### Added

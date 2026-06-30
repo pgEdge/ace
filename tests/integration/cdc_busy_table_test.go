@@ -135,6 +135,67 @@ func TestCDCDrainCompletesWithBusyTable(t *testing.T) {
 	require.GreaterOrEqual(t, lsnAfter2, lsnAfter, "CDC metadata LSN should not go backwards")
 }
 
+// TestCDCDrainHandlesLargeSingleTransaction verifies that a bounded drain
+// absorbs a single transaction far larger than its in-memory flush size by
+// applying sub-batches as it goes (ACE-190 follow-up). Under proto_version '1'
+// the whole transaction is buffered until its commit is decoded, so sub-batch
+// flushing is what keeps memory bounded; every change must survive being split
+// across many flush batches.
+func TestCDCDrainHandlesLargeSingleTransaction(t *testing.T) {
+	ctx := context.Background()
+	tableName := "customers_cdc_bigtx"
+	qualifiedTableName := fmt.Sprintf("%s.%s", testSchema, tableName)
+
+	setupCDCTestTable(t, ctx, tableName)
+
+	mtreeTask := newTestMerkleTreeTask(t, qualifiedTableName, []string{serviceN1})
+	require.NoError(t, mtreeTask.RunChecks(false))
+	require.NoError(t, mtreeTask.MtreeInit())
+	require.NoError(t, mtreeTask.BuildMtree())
+
+	t.Cleanup(func() {
+		if err := mtreeTask.MtreeTeardown(); err != nil {
+			t.Logf("Warning: MtreeTeardown failed during cleanup: %v", err)
+		}
+		dropCDCTestTable(t, tableName)
+	})
+
+	// A tiny flush size forces the single transaction to be applied across many
+	// sub-batches (200 changes / 25 = 8 flushes), exercising the path that must
+	// not drop or double-count changes at batch boundaries.
+	const changes = 200
+	prevFlush := cdc.FlushBatchSize
+	cdc.FlushBatchSize = 25
+	t.Cleanup(func() {
+		cdc.FlushBatchSize = prevFlush
+	})
+
+	startBefore := metadataStartLSN(t, ctx)
+
+	// One transaction deleting 200 existing (in-range) rows. Deletes land in
+	// their leaf blocks, so deletes_since_tree_update sums exactly to the
+	// number of changes drained -- a robust "no change dropped" check.
+	_, err := pgCluster.Node1Pool.Exec(ctx, fmt.Sprintf("DELETE FROM %s WHERE index BETWEEN 1 AND %d", qualifiedTableName, changes))
+	require.NoError(t, err)
+
+	targetFlush := walFlushLSN(t, ctx, pgCluster.Node1Pool)
+
+	nodeInfo := pgCluster.ClusterNodes[0]
+	require.NoError(t, cdc.UpdateFromCDC(context.Background(), nodeInfo),
+		"bounded drain should apply sub-batches and absorb a transaction far larger than FlushBatchSize")
+
+	startAfter := metadataStartLSN(t, ctx)
+	require.True(t, startAfter > startBefore, "start_lsn should advance after draining the large transaction")
+	require.True(t, startAfter >= targetFlush, "start_lsn should reach the snapshot wal_flush_lsn")
+
+	// Every change drained: none dropped by sub-batch flushing.
+	mtreeLeaf := pgx.Identifier{config.Cfg.MTree.Schema, fmt.Sprintf("ace_mtree_%s_%s", testSchema, tableName)}.Sanitize()
+	var totalDeletes int64
+	err = pgCluster.Node1Pool.QueryRow(ctx, fmt.Sprintf("SELECT COALESCE(SUM(deletes_since_tree_update),0) FROM %s WHERE node_level=0", mtreeLeaf)).Scan(&totalDeletes) // nosemgrep
+	require.NoError(t, err)
+	require.Equal(t, int64(changes), totalDeletes, "every deleted row should be reflected in leaf delete counters")
+}
+
 func TestCDCUpdateHighWater(t *testing.T) {
 	ctx := context.Background()
 	tableName := "customers_cdc_hw"

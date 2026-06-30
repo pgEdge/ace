@@ -230,9 +230,9 @@ func SetupCLI() *cli.Command {
 			Value: false,
 		},
 		&cli.BoolFlag{
-			Name:    "preserve-origin",
-			Usage:   "Preserve replication origin node ID and commit timestamp for repaired rows",
-			Value:   false,
+			Name:  "preserve-origin",
+			Usage: "Preserve replication origin node ID and commit timestamp for repaired rows",
+			Value: false,
 		},
 		&cli.BoolFlag{
 			Name:    "fix-nulls",
@@ -354,6 +354,11 @@ func SetupCLI() *cli.Command {
 			Usage:   "Skip CDC processing (only rehash dirty blocks)",
 			Value:   false,
 		},
+		&cli.IntFlag{
+			Name:  "cdc-timeout",
+			Usage: "Seconds to spend draining CDC before giving up (0 = use cdc_processing_timeout / default)",
+			Value: 0,
+		},
 	}
 	mtreeUpdateFlags = append(mtreeUpdateFlags, commonFlags...)
 
@@ -380,6 +385,11 @@ func SetupCLI() *cli.Command {
 			Aliases: []string{"U"},
 			Usage:   "Skip CDC processing (only rehash dirty blocks and compare)",
 			Value:   false,
+		},
+		&cli.IntFlag{
+			Name:  "cdc-timeout",
+			Usage: "Seconds to spend draining CDC before giving up (0 = use cdc_processing_timeout / default)",
+			Value: 0,
 		},
 	}
 	mtreeDiffFlags = append(mtreeDiffFlags, commonFlags...)
@@ -1118,6 +1128,7 @@ func MtreeUpdateCLI(cmd *cli.Command) error {
 	task.MaxCpuRatio = cmd.Float64("max-cpu-ratio")
 	task.Rebalance = cmd.Bool("rebalance")
 	task.NoCDC = cmd.Bool("skip-cdc")
+	task.CDCTimeoutSec = cmd.Int("cdc-timeout")
 	task.Mode = "update"
 	task.Ctx = context.Background()
 
@@ -1150,6 +1161,7 @@ func MtreeDiffCLI(cmd *cli.Command) error {
 	task.MaxCpuRatio = cmd.Float64("max-cpu-ratio")
 	task.Output = cmd.String("output")
 	task.NoCDC = cmd.Bool("skip-cdc")
+	task.CDCTimeoutSec = cmd.Int("cdc-timeout")
 	task.Until = cmd.String("until")
 	task.Mode = "diff"
 	task.Ctx = context.Background()
@@ -1487,8 +1499,8 @@ func StartSchedulerCLI(_ context.Context, cmd *cli.Command) error {
 //     a. Load and validate the new config (parse YAML + dry-run job build).
 //     b. If invalid: log the error and keep the current scheduler running.
 //     c. If valid: cancel the per-iteration scheduler context, which causes
-//        gocron.Shutdown() to drain all in-flight jobs before returning.
-//        Then atomically swap in the new config and loop back to step 1.
+//     gocron.Shutdown() to drain all in-flight jobs before returning.
+//     Then atomically swap in the new config and loop back to step 1.
 //  4. On SIGINT/SIGTERM: drain in-flight jobs via schedCancel and return.
 func schedulerReloadLoop(
 	runCtx context.Context,

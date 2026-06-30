@@ -22,6 +22,7 @@ By default, updates trees first using CDC.
 | `--max-cpu-ratio` | `-m` | Max CPU ratio | `0.5` |
 | `--output` | `-o` | `json` or `html` | `json` |
 | `--skip-cdc` | `-U` | Skip CDC processing (only rehash and compare) | `false` |
+| `--cdc-timeout` |  | Seconds to drain CDC before giving up (`0` = use `cdc_processing_timeout` / default) | `0` |
 | `--quiet` | `-q` | Suppress output | `false` |
 | `--debug` | `-v` | Debug logging | `false` |
 

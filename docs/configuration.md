@@ -35,8 +35,9 @@ The [`ace.yaml` file](https://github.com/pgEdge/ace/blob/main/ace.yaml) defines 
 | table_diff --> max_connections | Maximum database connections per node during diff operations. When set, caps the connection pool regardless of concurrency factor. **Default: 0** (derive from concurrency factor) |
 | mtree → cdc --> slot_name | Logical decoding slot name for mtree CDC. **Default: "ace_mtree_slot"** |
 | mtree → cdc --> publication_name | Publication used for mtree CDC. **Default: "ace_mtree_pub"** |
-| mtree → cdc --> cdc_processing_timeout | CDC processing timeout (s). **Default: 30** |
+| mtree → cdc --> cdc_processing_timeout | Wall-clock budget (s) for a CDC catch-up drain before it gives up. Progress is durable, so a timeout means "re-run or raise", not "rebuild". **Default: 300** |
 | mtree → cdc --> cdc_metadata_flush_seconds | How often (s) CDC metadata is flushed to disk. **Default: 10** |
+| mtree → cdc --> cdc_flush_batch_size | Peak un-committed CDC changes a bounded drain buffers before applying them to the tree and freeing memory. Only primary keys are buffered, so memory scales with key size, not row width. **Default: 10000** |
 | mtree --> schema | Schema used for mtree metadata/objects. **Default: "pgedge_ace"** |
 | mtree → diff --> min_block_size | Minimum Merkle diff block size. **Default: 1000** |
 | mtree → diff --> block_size | Target Merkle diff block size. **Default: 100000** |
