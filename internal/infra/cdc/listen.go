@@ -34,6 +34,8 @@ import (
 // abstract away a lot of the low-level details, but wherever raw codes, flags, OIDs,
 // etc. are used, we have provided the necessary context when needed.
 
+// cdcMsg is one decoded CDC change (INSERT/UPDATE/DELETE) buffered during a
+// drain, carrying only what a Merkle-tree update needs to locate the change.
 type cdcMsg struct {
 	operation string
 	schema    string
@@ -47,10 +49,17 @@ type cdcMsg struct {
 	pks []string
 }
 
+// ListenForChanges runs a continuous (unbounded) CDC drain for a node, applying
+// changes to its Merkle tree until ctx is cancelled. It is the long-running
+// counterpart to UpdateFromCDC.
 func ListenForChanges(ctx context.Context, nodeInfo map[string]any) {
 	processReplicationStream(ctx, nodeInfo, true)
 }
 
+// UpdateFromCDC runs one bounded CDC drain for a node: it catches the node's
+// Merkle tree up to the WAL flush position captured at call time, then returns.
+// It returns an error rather than reporting success if it cannot reach that
+// snapshot, so a stale tree is never silently treated as current (ACE-190).
 func UpdateFromCDC(ctx context.Context, nodeInfo map[string]any) error {
 	return processReplicationStream(ctx, nodeInfo, false)
 }
@@ -66,6 +75,13 @@ func UpdateFromCDC(ctx context.Context, nodeInfo map[string]any) error {
 // overrides this default. It is a package var so tests can adjust it.
 var FlushBatchSize = 10_000
 
+// processReplicationStream drains a node's logical-replication slot and applies
+// the decoded changes to its Merkle tree. With continuous=true it streams
+// indefinitely, dispatching apply work to worker goroutines. With
+// continuous=false it performs a bounded catch-up: it must reach the call-time
+// WAL flush snapshot (targetFlushLSN) before reporting success, applies changes
+// synchronously, and flushes them in memory-bounded sub-batches so a single
+// large transaction drains without buffering the whole transaction.
 func processReplicationStream(ctx context.Context, nodeInfo map[string]any, continuous bool) error {
 	pool, err := auth.GetClusterNodeConnection(ctx, nodeInfo, auth.ConnectionOptions{})
 	if err != nil {
@@ -439,6 +455,18 @@ func processReplicationStream(ctx context.Context, nodeInfo map[string]any, cont
 				// stays below the target and we keep waiting -- see ACE-190.)
 				if !continuous && targetFlushLSN != 0 && pkm.ServerWALEnd >= targetFlushLSN {
 					logger.Info("Server caught up to target WAL flush LSN %s via keepalive; stopping replication stream", targetFlushLSN)
+					// Advance the checkpoint to the target. We stopped on a keepalive
+					// (not a data message), so lastLSN still sits at the start when no
+					// tracked change reached the target; per the reasoning above the
+					// gap holds no tracked changes, so it is safe to checkpoint at the
+					// target. Without this the final standby status update and metadata
+					// write below would persist the stale start LSN, the slot would
+					// never advance, and every subsequent drain would re-scan the same
+					// span (and the server would retain that WAL indefinitely).
+					if lastLSN < targetFlushLSN {
+						lastLSN = targetFlushLSN
+						lastLSNVal.Store(uint64(lastLSN))
+					}
 					reachedTarget = true
 					stopStreaming = true
 				}
@@ -637,6 +665,8 @@ func processReplicationStream(ctx context.Context, nodeInfo map[string]any, cont
 	return nil
 }
 
+// getCurrentWalFlushLSN returns the node's current WAL flush LSN -- the snapshot
+// position a bounded drain must reach before it is considered caught up.
 func getCurrentWalFlushLSN(ctx context.Context, pool *pgxpool.Pool) (pglogrepl.LSN, error) {
 	var lsnStr string
 	err := pool.QueryRow(ctx, "SELECT pg_current_wal_flush_lsn()").Scan(&lsnStr)
@@ -653,6 +683,8 @@ func getCurrentWalFlushLSN(ctx context.Context, pool *pgxpool.Pool) (pglogrepl.L
 	return lsn, nil
 }
 
+// flushMetadata persists drain progress (slot, tracked tables, and the
+// last-applied LSN) to ace_cdc_metadata in its own transaction.
 func flushMetadata(ctx context.Context, pool *pgxpool.Pool, publication, slotName string, lsn pglogrepl.LSN, tables []string) error {
 	if tables == nil {
 		tables = []string{}
@@ -688,6 +720,10 @@ var quotedOIDs = map[uint32]bool{
 	2950: true, // uuid
 }
 
+// processChanges applies a batch of buffered CDC changes to the Merkle tree in a
+// single transaction: it marks each change's leaf block dirty and bumps its
+// insert/delete counters. typeCache memoises primary-key type-name lookups so a
+// multi-flush drain does not re-query pg_type per sub-batch.
 func processChanges(ctx context.Context, pool *pgxpool.Pool, changes []cdcMsg, mtreeSchema string, typeCache *sync.Map) error {
 	logger.Debug("processChanges called with %d changes", len(changes))
 	tx, err := pool.Begin(ctx)
@@ -782,6 +818,9 @@ func processChanges(ctx context.Context, pool *pgxpool.Pool, changes []cdcMsg, m
 	return nil
 }
 
+// getPKs extracts the primary-key value(s) from a change tuple using the
+// relation's key-column flags. It returns nil when no key column is exposed
+// (e.g. REPLICA IDENTITY FULL or NOTHING), which the caller treats as an error.
 func getPKs(rel *pglogrepl.RelationMessage, tup *pglogrepl.TupleData) []string {
 	var pks []string
 	if tup == nil || rel == nil {
@@ -796,6 +835,8 @@ func getPKs(rel *pglogrepl.RelationMessage, tup *pglogrepl.TupleData) []string {
 	return pks
 }
 
+// getPrimaryKeyColumns returns the names of a relation's primary-key columns, in
+// column order.
 func getPrimaryKeyColumns(rel *pglogrepl.RelationMessage) []string {
 	var pks []string
 	if rel == nil {
@@ -810,6 +851,8 @@ func getPrimaryKeyColumns(rel *pglogrepl.RelationMessage) []string {
 	return pks
 }
 
+// tupleValueToString renders a single tuple column value as the string used to
+// build a primary-key literal, applying type-specific formatting.
 func tupleValueToString(tupCol *pglogrepl.TupleDataColumn, relCol *pglogrepl.RelationMessageColumn) string {
 	switch tupCol.DataType {
 	case 'n': // null
@@ -824,6 +867,7 @@ func tupleValueToString(tupCol *pglogrepl.TupleDataColumn, relCol *pglogrepl.Rel
 	}
 }
 
+// getTypeNameFromOID looks up the SQL type name for a type OID via pg_type.
 func getTypeNameFromOID(ctx context.Context, pool *pgxpool.Pool, oid uint32) (string, error) {
 	var typeName string
 	err := pool.QueryRow(ctx, "SELECT typname FROM pg_type WHERE oid = $1", oid).Scan(&typeName) // nosemgrep
