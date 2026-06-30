@@ -1558,7 +1558,7 @@ func (m *MerkleTreeTask) BuildMtree() (err error) {
 	return nil
 }
 
-func (m *MerkleTreeTask) UpdateMtree(skipAllChecks bool) (err error) {
+func (m *MerkleTreeTask) UpdateMtree(skipAllChecks bool) (err error) { //nolint:gocyclo // orchestrates per-node CDC drain + tree rehash/rebalance; cyclomatic complexity is inherent to the staged flow
 	resultCtx := map[string]any{
 		"rebalance":       m.Rebalance,
 		"skip_all_checks": skipAllChecks,

@@ -82,7 +82,7 @@ var FlushBatchSize = 10_000
 // WAL flush snapshot (targetFlushLSN) before reporting success, applies changes
 // synchronously, and flushes them in memory-bounded sub-batches so a single
 // large transaction drains without buffering the whole transaction.
-func processReplicationStream(ctx context.Context, nodeInfo map[string]any, continuous bool) error {
+func processReplicationStream(ctx context.Context, nodeInfo map[string]any, continuous bool) error { //nolint:gocyclo // CDC drain protocol state machine; interleaved keepalive/XLogData branching is inherent and splitting it would obscure the LSN/stop bookkeeping
 	pool, err := auth.GetClusterNodeConnection(ctx, nodeInfo, auth.ConnectionOptions{})
 	if err != nil {
 		logger.Error("failed to get connection pool: %v", err)

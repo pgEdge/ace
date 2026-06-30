@@ -175,7 +175,7 @@ func TestCDCDrainHandlesLargeSingleTransaction(t *testing.T) {
 	// One transaction deleting 200 existing (in-range) rows. Deletes land in
 	// their leaf blocks, so deletes_since_tree_update sums exactly to the
 	// number of changes drained -- a robust "no change dropped" check.
-	_, err := pgCluster.Node1Pool.Exec(ctx, fmt.Sprintf("DELETE FROM %s WHERE index BETWEEN 1 AND %d", qualifiedTableName, changes))
+	_, err := pgCluster.Node1Pool.Exec(ctx, fmt.Sprintf("DELETE FROM %s WHERE index BETWEEN 1 AND %d", qualifiedTableName, changes)) // nosemgrep
 	require.NoError(t, err)
 
 	targetFlush := walFlushLSN(t, ctx, pgCluster.Node1Pool)
