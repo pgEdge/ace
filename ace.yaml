@@ -36,6 +36,7 @@ mtree:
     publication_name: "ace_mtree_pub"
     cdc_processing_timeout: 300
     cdc_metadata_flush_seconds: 10
+    cdc_flush_batch_size: 10000
   schema: "pgedge_ace"
 
   diff:
