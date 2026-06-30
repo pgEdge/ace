@@ -75,15 +75,26 @@ ACE optimises comparisons with multiprocessing and block hashing:
 - Runtime factors include host resources (CPU/memory), allowed parallelism, table size and row width (e.g., large JSON/bytea/embedding columns can slow hashing), distribution of differences (widely scattered diffs trigger more block fetches), and network latency to database nodes.
 
 ### Tuning tips
-1. Tune `--block-size` and `--concurrency-factor` for your hardware and data profile.
+
+1. Tune `--block-size` and `--concurrency-factor` for your hardware and data
+   profile.
 2. Use `--table-filter`/`-F` to narrow scope on very large tables.
-   - Filters are applied inline (no temporary views) and recorded in the diff summary as both the raw filter and the effective filter (which also includes `--against-origin`/`--until` if set).
-3. Prefer `--output html` when you’ll manually review diffs.
-4. Use `--override-block-size` sparingly; the guardrails in `ace.yaml` prevent allocations that can overwhelm memory.
-5. The `max_diff_rows` setting caps the number of differing rows that `table-diff` collects in a single run.
-   - The cap applies globally across **all node pairs combined**, not to each pair individually. On a three-node cluster that diffs n1/n2 and n1/n3 at the same time, both pairs share the single cap. As a result, each pair can report fewer
-differences than the table actually contains.
-   - The `table-diff stopped after reaching max_diff_rows` warning indicates that the run hit the cap. Treat the reported result as partial whenever the warning appears. Re-run `table-diff` after each repair pass, and continue until the command reports `TABLES MATCH`.
+    - Filters are applied inline (no temporary views) and recorded in the diff
+      summary as both the raw filter and the effective filter (which also
+      includes `--against-origin`/`--until` if set).
+3. Prefer `--output html` when you'll manually review diffs.
+4. Use `--override-block-size` sparingly; the guardrails in `ace.yaml` prevent
+   allocations that can overwhelm memory.
+5. The `max_diff_rows` setting caps the number of differing rows that
+   `table-diff` collects in a single run.
+    - The cap applies globally across **all node pairs combined**, not to each
+      pair individually. On a three-node cluster that diffs n1/n2 and n1/n3 at
+      the same time, both pairs share the single cap. As a result, each pair
+      can report fewer differences than the table actually contains.
+    - The `table-diff stopped after reaching max_diff_rows` warning indicates
+      that the run hit the cap. Treat the reported result as partial whenever
+      the warning appears. Re-run `table-diff` after each repair pass, and
+      continue until the command reports `TABLES MATCH`.
 
 ### Large divergence
 
