@@ -39,7 +39,12 @@ type cdcMsg struct {
 	schema    string
 	table     string
 	relation  *pglogrepl.RelationMessage
-	tuple     *pglogrepl.TupleData
+	// pks holds the primary-key value(s) extracted from the change tuple at
+	// receive time. The Merkle tree update only needs the PK (to mark the
+	// containing leaf block dirty and bump its counters); the rest of the row is
+	// recomputed from the live table at hash time. Keeping only the PK -- rather
+	// than the whole tuple -- bounds per-change memory to the key, not the row.
+	pks []string
 }
 
 func ListenForChanges(ctx context.Context, nodeInfo map[string]any) {
@@ -50,15 +55,16 @@ func UpdateFromCDC(ctx context.Context, nodeInfo map[string]any) error {
 	return processReplicationStream(ctx, nodeInfo, false)
 }
 
-// MaxBufferedChanges bounds how many un-committed CDC changes a bounded
-// (non-continuous) drain will buffer before refusing to continue. Under
-// proto_version '1' a single transaction is buffered in full before its commit
-// is decoded, so a very large backlog (e.g. a bulk load on a diverged node)
-// would otherwise exhaust memory. Exceeding it is reported as an error that
-// recommends rebuilding the tree -- never a silent partial drain (ACE-190). It
-// is a package var so tests can adjust it; a future --max-drain flag will
-// surface it as configuration.
-var MaxBufferedChanges = 1_000_000
+// FlushBatchSize bounds how many un-committed CDC changes a bounded
+// (non-continuous) drain accumulates before applying them to the Merkle tree
+// and freeing them, rather than holding a whole transaction's worth until its
+// commit is decoded (proto_version '1' streams nothing until commit). Flushing
+// sub-batches lets a single very large transaction drain with bounded memory.
+// Only primary keys are buffered (see cdcMsg.pks), so per-change memory scales
+// with the key size, not the row width; this knob mainly trades flush
+// round-trips against per-flush array size. The cdc_flush_batch_size config key
+// overrides this default. It is a package var so tests can adjust it.
+var FlushBatchSize = 10_000
 
 func processReplicationStream(ctx context.Context, nodeInfo map[string]any, continuous bool) error {
 	pool, err := auth.GetClusterNodeConnection(ctx, nodeInfo, auth.ConnectionOptions{})
@@ -160,13 +166,15 @@ func processReplicationStream(ctx context.Context, nodeInfo map[string]any, cont
 	// Bounded-drain (non-continuous) safety state. ACE-190: a bounded drain must
 	// actually reach the call-time snapshot (targetFlushLSN) before it may report
 	// success; otherwise UpdateMtree/DiffMtree would compare a stale tree and
-	// silently miss real divergence. reachedTarget records whether we got there;
-	// bufferedChanges caps in-memory buffering of a single large backlog.
+	// silently miss real divergence. reachedTarget records whether we got there.
 	reachedTarget := false
-	var bufferedChanges int
 	flushInterval := 10 * time.Second
 	if cfg.CDCMetadataFlushSec > 0 {
 		flushInterval = time.Duration(cfg.CDCMetadataFlushSec) * time.Second
+	}
+	flushBatchSize := FlushBatchSize
+	if cfg.CDCFlushBatchSize > 0 {
+		flushBatchSize = cfg.CDCFlushBatchSize
 	}
 	lastFlushTime := time.Now()
 	var conn *pgconn.PgConn
@@ -211,6 +219,68 @@ func processReplicationStream(ctx context.Context, nodeInfo map[string]any, cont
 		maxWorkers = 4
 	}
 	workerSem := make(chan struct{}, maxWorkers)
+
+	// typeCache memoizes PK type-name lookups (OID -> typname) for this drain.
+	// processChanges runs once per flush, so without this a large transaction
+	// would re-query pg_type for the same key type on every sub-batch. Scoped to
+	// this stream (one node), so per-node OID differences for custom types can't
+	// leak across nodes; a sync.Map because continuous-mode workers run it
+	// concurrently.
+	var typeCache sync.Map
+
+	// applyChanges applies a batch of buffered changes to the Merkle tree. In
+	// continuous mode it dispatches to a worker goroutine for throughput. In a
+	// bounded drain it applies synchronously, so lastLSN -- which drives the
+	// slot's confirmed_flush_lsn (via the standby status updates) and the
+	// metadata checkpoint -- never advances ahead of durably-applied work. That
+	// ordering is what makes a crash safe: the slot is only ever confirmed past
+	// a transaction once that transaction has been applied, so a crash mid-drain
+	// causes the server to resend the in-flight transaction and we recover it on
+	// the next run (see flushActiveTx for the counter-drift caveat).
+	applyChanges := func(c []cdcMsg) {
+		if len(c) == 0 {
+			return
+		}
+		if continuous {
+			wg.Add(1)
+			go func(c []cdcMsg) {
+				defer wg.Done()
+				workerSem <- struct{}{}
+				defer func() { <-workerSem }()
+				if err := processChanges(processingCtx, pool, c, mtreeSchema, &typeCache); err != nil {
+					select {
+					case errCh <- err:
+					default:
+					}
+				}
+			}(c)
+			return
+		}
+		if err := processChanges(processingCtx, pool, c, mtreeSchema, &typeCache); err != nil {
+			processingErr = err
+			stopStreaming = true
+		}
+	}
+
+	// flushActiveTx applies and frees the changes buffered so far for the
+	// in-flight transaction without waiting for its commit, bounding memory for
+	// a single very large transaction (proto_version '1' streams a whole
+	// transaction at once). Bounded drain only. It is safe because under v1 the
+	// upstream transaction has already committed before the walsender streams
+	// any of it, so there is no in-progress transaction that could still abort.
+	// Caveat: on a crash the server resends the whole transaction and we
+	// re-apply these already-flushed sub-batches, which over-counts the
+	// per-block insert/delete counters. That drift only affects block-split
+	// heuristics, never a leaf hash (recomputed from the live table), and resets
+	// on the next tree update -- a change is never missed.
+	flushActiveTx := func() {
+		c := txChanges[currentXID]
+		if len(c) == 0 {
+			return
+		}
+		applyChanges(c)
+		txChanges[currentXID] = c[:0]
+	}
 
 	var metaWg sync.WaitGroup
 	if continuous {
@@ -302,9 +372,11 @@ func processReplicationStream(ctx context.Context, nodeInfo map[string]any, cont
 					return nil
 				}
 				if lastLSN < targetFlushLSN {
-					return fmt.Errorf("CDC drain timed out at LSN %s of target %s on slot %s "+
-						"(cdc_processing_timeout): the backlog is too large to drain incrementally "+
-						"-- rebuild the tree with 'ace mtree build': %w", lastLSN, targetFlushLSN, slotName, ctx.Err())
+					return fmt.Errorf("CDC drain reached LSN %s of target %s on slot %s but did not "+
+						"catch up within cdc_processing_timeout. Progress is durable: re-run "+
+						"'ace mtree update' to continue draining, or raise cdc_processing_timeout to "+
+						"drain in one pass (required when a single transaction is larger than the "+
+						"timeout window): %w", lastLSN, targetFlushLSN, slotName, ctx.Err())
 				}
 				return ctx.Err()
 			}
@@ -391,21 +463,9 @@ func processReplicationStream(ctx context.Context, nodeInfo map[string]any, cont
 				case *pglogrepl.CommitMessage:
 					if changes, ok := txChanges[currentXID]; ok {
 						if len(changes) > 0 {
-							wg.Add(1)
-							go func(c []cdcMsg) {
-								defer wg.Done()
-								workerSem <- struct{}{}
-								defer func() { <-workerSem }()
-								if err := processChanges(processingCtx, pool, c, mtreeSchema); err != nil {
-									select {
-									case errCh <- err:
-									default:
-									}
-								}
-							}(changes)
+							applyChanges(changes)
 							logger.Info("Processed %d changes for XID %d", len(changes), currentXID)
 						}
-						bufferedChanges -= len(changes)
 						delete(txChanges, currentXID)
 					}
 				case *pglogrepl.RelationMessage:
@@ -417,9 +477,8 @@ func processReplicationStream(ctx context.Context, nodeInfo map[string]any, cont
 						schema:    rel.Namespace,
 						table:     rel.RelationName,
 						relation:  rel,
-						tuple:     logicalMsg.Tuple,
+						pks:       getPKs(rel, logicalMsg.Tuple),
 					})
-					bufferedChanges++
 				case *pglogrepl.UpdateMessage:
 					rel := relations[logicalMsg.RelationID]
 					txChanges[currentXID] = append(txChanges[currentXID], cdcMsg{
@@ -427,9 +486,8 @@ func processReplicationStream(ctx context.Context, nodeInfo map[string]any, cont
 						schema:    rel.Namespace,
 						table:     rel.RelationName,
 						relation:  rel,
-						tuple:     logicalMsg.NewTuple,
+						pks:       getPKs(rel, logicalMsg.NewTuple),
 					})
-					bufferedChanges++
 				case *pglogrepl.DeleteMessage:
 					rel := relations[logicalMsg.RelationID]
 					txChanges[currentXID] = append(txChanges[currentXID], cdcMsg{
@@ -437,20 +495,29 @@ func processReplicationStream(ctx context.Context, nodeInfo map[string]any, cont
 						schema:    rel.Namespace,
 						table:     rel.RelationName,
 						relation:  rel,
-						tuple:     logicalMsg.OldTuple,
+						pks:       getPKs(rel, logicalMsg.OldTuple),
 					})
-					bufferedChanges++
 				}
 
-				// Bound in-memory buffering of a single large backlog. proto_version
-				// '1' buffers a whole transaction until its commit is decoded, so a
-				// multi-million-row backlog would otherwise grow unboundedly here.
-				// Refuse rather than risk OOM or a silent partial drain (ACE-190).
-				if !continuous && bufferedChanges > MaxBufferedChanges {
-					processingErr = fmt.Errorf("CDC backlog exceeds %d buffered changes on slot %s; "+
-						"the divergence is too large to drain incrementally -- rebuild the tree with "+
-						"'ace mtree build'", MaxBufferedChanges, slotName)
-					stopStreaming = true
+				// Flush sub-batches of the in-flight transaction so memory stays
+				// bounded regardless of transaction size. proto_version '1' buffers a
+				// whole transaction until its commit is decoded, so without this a
+				// multi-million-row transaction would grow unboundedly here.
+				if !continuous && len(txChanges[currentXID]) >= flushBatchSize {
+					// Refresh the server's keepalive clock before the synchronous
+					// apply. processChanges blocks the receive loop while it does DB
+					// work; on a busy node a slow flush could otherwise let
+					// wal_sender_timeout elapse with no standby update and the server
+					// would drop the replication connection. Reporting lastLSN here is
+					// the same conservative position the periodic update sends.
+					if conn != nil {
+						if err := pglogrepl.SendStandbyStatusUpdate(ctx, conn, pglogrepl.StandbyStatusUpdate{WALWritePosition: lastLSN}); err != nil {
+							logger.Warn("standby status update before CDC flush failed: %v", err)
+						} else {
+							nextStandbyMessageDeadline = time.Now().Add(10 * time.Second)
+						}
+					}
+					flushActiveTx()
 				}
 
 				lastLSN = xld.WALStart + pglogrepl.LSN(len(xld.WALData))
@@ -621,7 +688,7 @@ var quotedOIDs = map[uint32]bool{
 	2950: true, // uuid
 }
 
-func processChanges(ctx context.Context, pool *pgxpool.Pool, changes []cdcMsg, mtreeSchema string) error {
+func processChanges(ctx context.Context, pool *pgxpool.Pool, changes []cdcMsg, mtreeSchema string, typeCache *sync.Map) error {
 	logger.Debug("processChanges called with %d changes", len(changes))
 	tx, err := pool.Begin(ctx)
 	if err != nil {
@@ -653,18 +720,34 @@ func processChanges(ctx context.Context, pool *pgxpool.Pool, changes []cdcMsg, m
 			if !isComposite {
 				for _, col := range relation.Columns {
 					if col.Flags == 1 {
-						typeName, err := getTypeNameFromOID(ctx, pool, col.DataType)
-						if err != nil {
-							return fmt.Errorf("failed to get type name for oid %d: %w", col.DataType, err)
+						if v, ok := typeCache.Load(col.DataType); ok {
+							pkeyType = v.(string)
+						} else {
+							typeName, err := getTypeNameFromOID(ctx, pool, col.DataType)
+							if err != nil {
+								return fmt.Errorf("failed to get type name for oid %d: %w", col.DataType, err)
+							}
+							typeCache.Store(col.DataType, typeName)
+							pkeyType = typeName
 						}
-						pkeyType = typeName
 						break
 					}
 				}
 			}
 
 			for _, change := range tableChanges {
-				pks := getPKs(relation, change.tuple)
+				pks := change.pks
+				if len(pks) == 0 {
+					// No key columns were extractable from the change tuple --
+					// pgoutput flags no key column under REPLICA IDENTITY FULL or
+					// NOTHING. Without a PK we cannot locate the change's leaf block,
+					// so fail loud rather than silently drop it and miss divergence
+					// (ACE-190). The operator must give the table a PK-bearing
+					// replica identity (DEFAULT, or USING INDEX over the PK).
+					return fmt.Errorf("no primary key extracted for a %s on %s.%s; the "+
+						"table's REPLICA IDENTITY must expose its primary key (use REPLICA "+
+						"IDENTITY DEFAULT or an index covering the PK)", change.operation, schema, table)
+				}
 				var pkVal string
 				if isComposite {
 					// Formatting it as a record literal, e.g., "(123, 'abc')"

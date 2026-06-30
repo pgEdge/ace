@@ -22,6 +22,8 @@ Manually applies changes to a table’s Merkle tree (also supports rebalancing).
 | `--nodes` | `-n` | Nodes to include (comma or `all`) | `all` |
 | `--max-cpu-ratio` | `-m` | Max CPU ratio | `0.5` |
 | `--rebalance` | `-l` | Merge small blocks to rebalance | `false` |
+| `--skip-cdc` | `-U` | Skip CDC processing (only rehash dirty blocks) | `false` |
+| `--cdc-timeout` |  | Seconds to drain CDC before giving up (`0` = use `cdc_processing_timeout` / default) | `0` |
 | `--quiet` | `-q` | Suppress output | `false` |
 | `--debug` | `-v` | Debug logging | `false` |
 
