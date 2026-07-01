@@ -99,7 +99,7 @@ type MerkleTreeTask struct {
 	mtreeSchema string
 
 	// MaxDiffRows bounds how many differing rows are collected per node pair.
-	// 0 (the default) is resolved from config.TableDiff.MaxDiffRows in
+	// 0 (the default) is resolved from config.MTree.Diff.MaxDiffRows in
 	// DiffMtree; a non-positive value after that means unlimited. Without it a
 	// massively diverged table would accumulate every differing row in memory
 	// and OOM the process.
@@ -456,6 +456,8 @@ func (m *MerkleTreeTask) processWorkItem(work CompareRangesWorkItem, pool1, pool
 	if isComposite {
 		for i := 0; i < len(mismatchedComposite); i += fetchBatchSize {
 			if m.pairCapReached(nodePairKey) {
+				// The remaining mismatched keys are real diffs we are skipping.
+				m.notePairLimitReached(nodePairKey)
 				break
 			}
 			end := i + fetchBatchSize
@@ -491,6 +493,8 @@ func (m *MerkleTreeTask) processWorkItem(work CompareRangesWorkItem, pool1, pool
 	} else {
 		for i := 0; i < len(mismatchedSimple); i += fetchBatchSize {
 			if m.pairCapReached(nodePairKey) {
+				// The remaining mismatched keys are real diffs we are skipping.
+				m.notePairLimitReached(nodePairKey)
 				break
 			}
 			end := i + fetchBatchSize
@@ -579,26 +583,38 @@ func (m *MerkleTreeTask) pairCapReached(pairKey string) bool {
 	return m.diffRowCounts[pairKey] >= m.MaxDiffRows
 }
 
-// recordPairRowLocked accounts for one collected differing row-pair and reports
-// whether the pair has now reached MaxDiffRows. On first reaching the cap it
-// flags the report as truncated and warns once. The caller must hold diffMutex.
-func (m *MerkleTreeTask) recordPairRowLocked(pairKey string) bool {
+// recordPairRowLocked accounts for one collected differing row-pair. The caller
+// must hold diffMutex. It does not flag truncation: reaching MaxDiffRows on an
+// accepted row does not mean anything was dropped (the pair may have exactly
+// MaxDiffRows diffs). Truncation is flagged only when a further row is actually
+// refused, via notePairLimitReachedLocked at the stop checks.
+func (m *MerkleTreeTask) recordPairRowLocked(pairKey string) {
 	if m.MaxDiffRows <= 0 {
-		return false
+		return
 	}
 	if m.diffRowCounts == nil {
 		m.diffRowCounts = make(map[string]int64)
 	}
 	m.diffRowCounts[pairKey]++
-	if m.diffRowCounts[pairKey] >= m.MaxDiffRows {
-		m.DiffResult.Summary.DiffRowLimitReached = true
-		if !m.diffLimitWarned {
-			m.diffLimitWarned = true
-			logger.Warn("mtree table-diff: %s reached max_diff_rows limit (%d); enumeration for this pair stops (other pairs continue)", pairKey, m.MaxDiffRows)
-		}
-		return true
+}
+
+// notePairLimitReachedLocked marks the report truncated and warns once. Call it
+// only when a differing row is actually being dropped because the pair is
+// already at MaxDiffRows. The caller must hold diffMutex.
+func (m *MerkleTreeTask) notePairLimitReachedLocked(pairKey string) {
+	m.DiffResult.Summary.DiffRowLimitReached = true
+	if !m.diffLimitWarned {
+		m.diffLimitWarned = true
+		logger.Warn("mtree table-diff: %s reached max_diff_rows limit (%d); enumeration for this pair stops (other pairs continue)", pairKey, m.MaxDiffRows)
 	}
-	return false
+}
+
+// notePairLimitReached is the lock-safe counterpart of notePairLimitReachedLocked,
+// for callers (e.g. the fetch loop) that do not already hold diffMutex.
+func (m *MerkleTreeTask) notePairLimitReached(pairKey string) {
+	m.diffMutex.Lock()
+	defer m.diffMutex.Unlock()
+	m.notePairLimitReachedLocked(pairKey)
 }
 
 // appendDiffs records the differences between two fetched row batches, stopping
@@ -626,12 +642,14 @@ func (m *MerkleTreeTask) appendDiffs(nodePairKey string, work CompareRangesWorkI
 		m.DiffResult.NodeDiffs[nodePairKey].Rows[node2Name] = []types.OrderedMap{}
 	}
 
+	// Each loop stops (and flags truncation) at its top check the moment it is
+	// asked to record a row while the pair is already full, so hitting the cap
+	// on the last accepted row does not spuriously mark the report truncated.
 	var currentDiffRowsForPair int
-	limitReached := false
 
 	for _, row := range diffResult.Node1OnlyRows {
 		if m.pairLimitReachedLocked(nodePairKey) {
-			limitReached = true
+			m.notePairLimitReachedLocked(nodePairKey)
 			break
 		}
 		added, err := m.addRowToDiff(nodePairKey, node1Name, row)
@@ -640,50 +658,39 @@ func (m *MerkleTreeTask) appendDiffs(nodePairKey string, work CompareRangesWorkI
 		}
 		if added {
 			currentDiffRowsForPair++
-			if m.recordPairRowLocked(nodePairKey) {
-				limitReached = true
-				break
-			}
+			m.recordPairRowLocked(nodePairKey)
 		}
 	}
-	if !limitReached {
-		for _, row := range diffResult.Node2OnlyRows {
-			if m.pairLimitReachedLocked(nodePairKey) {
-				limitReached = true
-				break
-			}
-			added, err := m.addRowToDiff(nodePairKey, node2Name, row)
-			if err != nil {
-				return err
-			}
-			if added {
-				currentDiffRowsForPair++
-				if m.recordPairRowLocked(nodePairKey) {
-					limitReached = true
-					break
-				}
-			}
+	for _, row := range diffResult.Node2OnlyRows {
+		if m.pairLimitReachedLocked(nodePairKey) {
+			m.notePairLimitReachedLocked(nodePairKey)
+			break
+		}
+		added, err := m.addRowToDiff(nodePairKey, node2Name, row)
+		if err != nil {
+			return err
+		}
+		if added {
+			currentDiffRowsForPair++
+			m.recordPairRowLocked(nodePairKey)
 		}
 	}
-	if !limitReached {
-		for _, modRow := range diffResult.ModifiedRows {
-			if m.pairLimitReachedLocked(nodePairKey) {
-				break
-			}
-			added1, err := m.addRowToDiff(nodePairKey, node1Name, modRow.Node1Data)
-			if err != nil {
-				return err
-			}
-			added2, err := m.addRowToDiff(nodePairKey, node2Name, modRow.Node2Data)
-			if err != nil {
-				return err
-			}
-			if added1 || added2 {
-				currentDiffRowsForPair++
-				if m.recordPairRowLocked(nodePairKey) {
-					break
-				}
-			}
+	for _, modRow := range diffResult.ModifiedRows {
+		if m.pairLimitReachedLocked(nodePairKey) {
+			m.notePairLimitReachedLocked(nodePairKey)
+			break
+		}
+		added1, err := m.addRowToDiff(nodePairKey, node1Name, modRow.Node1Data)
+		if err != nil {
+			return err
+		}
+		added2, err := m.addRowToDiff(nodePairKey, node2Name, modRow.Node2Data)
+		if err != nil {
+			return err
+		}
+		if added1 || added2 {
+			currentDiffRowsForPair++
+			m.recordPairRowLocked(nodePairKey)
 		}
 	}
 
@@ -2150,13 +2157,13 @@ func (m *MerkleTreeTask) DiffMtree() (err error) {
 	})
 
 	m.StartTime = time.Now()
-	// Resolve the differing-row cap from config when the caller left it unset,
-	// mirroring the classic table-diff engine. Without a bound a heavily
-	// diverged table collects every differing row in memory and OOMs the
-	// process.
+	// Resolve the differing-row cap from the mtree config when the caller left
+	// it unset, mirroring how every other mtree tunable is sourced from the
+	// mtree section. Without a bound a heavily diverged table collects every
+	// differing row in memory and OOMs the process.
 	if m.MaxDiffRows == 0 {
-		if cfg := config.Get(); cfg != nil {
-			m.MaxDiffRows = cfg.TableDiff.MaxDiffRows
+		if cfg := config.Get(); cfg != nil && cfg.MTree.Diff.MaxDiffRows > 0 {
+			m.MaxDiffRows = cfg.MTree.Diff.MaxDiffRows
 		}
 	}
 	m.diffRowCounts = make(map[string]int64)

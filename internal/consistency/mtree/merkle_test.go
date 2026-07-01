@@ -54,6 +54,28 @@ func TestMtreeDiffEnforcesMaxDiffRows(t *testing.T) {
 	}
 }
 
+// A pair with exactly max_diff_rows diffs collects them all and is NOT marked
+// truncated: reaching the cap on the last row does not mean anything was dropped.
+func TestMtreeDiffExactCapNotTruncated(t *testing.T) {
+	const cap = 5
+	m := mtreeTaskWithDiffState(cap)
+	work := CompareRangesWorkItem{
+		Node1: map[string]any{"Name": "n1"},
+		Node2: map[string]any{"Name": "n2"},
+	}
+
+	if err := m.appendDiffs("n1/n2", work, node1OnlyRows(cap), nil); err != nil {
+		t.Fatalf("appendDiffs returned error: %v", err)
+	}
+
+	if got := len(m.DiffResult.NodeDiffs["n1/n2"].Rows["n1"]); got != cap {
+		t.Errorf("collected %d rows for n1, want all %d", got, cap)
+	}
+	if m.DiffResult.Summary.DiffRowLimitReached {
+		t.Errorf("did not expect DiffRowLimitReached when diffs exactly equal the cap")
+	}
+}
+
 // With no cap configured, every differing row is collected and nothing is flagged truncated.
 func TestMtreeDiffNoLimitCollectsAll(t *testing.T) {
 	m := mtreeTaskWithDiffState(0)
