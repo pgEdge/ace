@@ -3,6 +3,12 @@
 Compares Merkle trees of a table across nodes to find inconsistencies.  
 By default, updates trees first using CDC.
 
+If `mtree listen` is running and holds the replication slot, `table-diff` skips
+the CDC drain for that node (printing a warning) and compares against the
+listen-maintained tree instead of failing. The comparison reflects `listen`'s
+last-applied state. Stop `mtree listen` first if you need a guaranteed-current
+drain.
+
 **Usage**
 
 ```

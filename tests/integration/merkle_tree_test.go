@@ -217,6 +217,9 @@ func runMerkleTreeTests(t *testing.T, env *testEnv, tableName string) {
 		t.Run("ContinuousCDC", func(t *testing.T) {
 			testMerkleTreeContinuousCDC(t, env, tableName)
 		})
+		t.Run("DiffWhileListenActive", func(t *testing.T) {
+			testMerkleTreeDiffWhileListenActive(t, env, tableName)
+		})
 	}
 	t.Run("Teardown", func(t *testing.T) {
 		testMerkleTreeTeardown(t, env, tableName)
@@ -731,6 +734,92 @@ func testMerkleTreeContinuousCDC(t *testing.T, env *testEnv, tableName string) {
 
 	err = tdTask.ExecuteTask()
 	require.NoError(t, err, "ExecuteTask should succeed")
+}
+
+// testMerkleTreeDiffWhileListenActive proves that table-diff and update no
+// longer fail with a "replication slot is active" (SQLSTATE 55006) error
+// when `mtree listen` is concurrently holding the CDC replication slot.
+// Earlier work on this branch made the bounded CDC drain return
+// cdc.ErrSlotBusy and made UpdateMtree skip that node's drain with a
+// warning instead of failing; this test confirms the end-to-end fix.
+func testMerkleTreeDiffWhileListenActive(t *testing.T, env *testEnv, tableName string) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	qualifiedTableName := fmt.Sprintf("%s.%s", testSchema, tableName)
+	// Mirrors testMerkleTreeContinuousCDC: the CDC listener and merkle tree
+	// work run only on n1, so we don't need n2 in the task's node list.
+	nodes := []string{env.ServiceN1}
+	mtreeTask := env.newMerkleTreeTask(t, qualifiedTableName, nodes)
+
+	err := mtreeTask.RunChecks(false)
+	require.NoError(t, err, "RunChecks should succeed")
+	err = mtreeTask.MtreeInit()
+	require.NoError(t, err, "MtreeInit should succeed")
+	t.Cleanup(func() {
+		err := mtreeTask.MtreeTeardown()
+		if err != nil {
+			t.Logf("Warning: MtreeTeardown failed during cleanup: %v", err)
+		}
+		env.repairTable(t, qualifiedTableName, env.ServiceN2)
+		files, _ := filepath.Glob("*_diffs-*.json")
+		for _, f := range files {
+			os.Remove(f)
+		}
+	})
+
+	err = mtreeTask.BuildMtree()
+	require.NoError(t, err, "BuildMtree should succeed")
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		nodeInfo := env.ClusterNodes[0]
+		cdc.ListenForChanges(ctx, nodeInfo)
+	}()
+
+	time.Sleep(3 * time.Second) // let the listener attach to the slot
+
+	pool := env.N1Pool
+	tx, err := pool.Begin(ctx)
+	require.NoError(t, err)
+	defer tx.Rollback(ctx)
+
+	env.withRepairModeTx(t, ctx, tx, func() {
+		if mtreeTask.SimplePrimaryKey {
+			updateSQL := fmt.Sprintf("UPDATE %s SET email = 'diff.while.listen.active@example.com' WHERE index = 1", qualifiedTableName)
+			_, err = tx.Exec(ctx, updateSQL)
+			require.NoError(t, err)
+		} else {
+			var customerID string
+			err := pool.QueryRow(ctx, fmt.Sprintf("SELECT customer_id FROM %s WHERE index = 1 LIMIT 1", qualifiedTableName)).Scan(&customerID)
+			require.NoError(t, err, "could not get customer_id for index 1")
+			updateSQL := fmt.Sprintf("UPDATE %s SET email = 'diff.while.listen.active@example.com' WHERE index = 1 AND customer_id = $1", qualifiedTableName)
+			_, err = tx.Exec(ctx, updateSQL, customerID)
+			require.NoError(t, err)
+		}
+	})
+	require.NoError(t, tx.Commit(ctx))
+
+	time.Sleep(2 * time.Second) // give listen time to mark the block dirty
+
+	// The core assertion: table-diff must NOT fail with a slot-active error
+	// while listen holds the slot.
+	err = mtreeTask.DiffMtree()
+	require.NoError(t, err, "table-diff should succeed while listen is active")
+
+	// update must likewise not fail with a slot-active error.
+	require.NoError(t, mtreeTask.UpdateMtree(true),
+		"update should succeed while listen is active")
+
+	// Prove the busy-slot SKIP path actually executed, rather than merely
+	// not erroring (e.g. because the slot happened to be free).
+	require.NotEmpty(t, mtreeTask.CDCSkippedNodes,
+		"expected the node's CDC drain to be skipped while listen holds the slot")
+
+	cancel()
+	wg.Wait()
 }
 
 type mergeCase string
