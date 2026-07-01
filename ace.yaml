@@ -43,6 +43,8 @@ mtree:
     min_block_size: 1000
     block_size: 100000
     max_block_size: 1000000
+    # Max differing rows collected per node pair; 0 or absent means unbounded.
+    max_diff_rows: 1000000
 
 # Example scheduler configuration:
 # schedule_jobs:

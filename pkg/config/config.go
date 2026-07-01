@@ -67,9 +67,10 @@ type MTreeConfig struct {
 	} `yaml:"cdc"`
 	Schema string `yaml:"schema"`
 	Diff   struct {
-		MinBlockSize int `yaml:"min_block_size"`
-		BlockSize    int `yaml:"block_size"`
-		MaxBlockSize int `yaml:"max_block_size"`
+		MinBlockSize int   `yaml:"min_block_size"`
+		BlockSize    int   `yaml:"block_size"`
+		MaxBlockSize int   `yaml:"max_block_size"`
+		MaxDiffRows  int64 `yaml:"max_diff_rows"`
 	} `yaml:"diff"`
 }
 

@@ -46,7 +46,7 @@ holding the node's slot, then re-run, if you need a guaranteed-current drain.
 
 - With `--output html`, both JSON and HTML reports are generated with matching timestamps.
 - The number of differing rows collected per node pair is bounded by
-  `table_diff.max_diff_rows` (the shipped `ace.yaml` sets `1000000`; if the key
+  `mtree.diff.max_diff_rows` (the shipped `ace.yaml` sets `1000000`; if the key
   is absent or `0`, the diff is unbounded). When the cap is reached, enumeration
   for that pair stops, the report's `diff_row_limit_reached` flag is set, and a
   warning is logged. This keeps a heavily diverged table from exhausting memory;
