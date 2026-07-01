@@ -13,6 +13,7 @@ package cli
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/pgedge/ace/pkg/config"
@@ -58,6 +59,25 @@ func TestResolveClusterArgErrorsWithoutDefault(t *testing.T) {
 
 	if _, _, err := resolveClusterArg("table-rerun", "", "[cluster]", 0, []string{}); err == nil {
 		t.Fatalf("expected error when no cluster and no default configured")
+	}
+}
+
+// A lone positional is consumed as the required entity (repset), not the
+// cluster. The error must name the consumed argument so the user sees why
+// "cluster name is required" fired, instead of thinking their argument was
+// ignored.
+func TestResolveClusterArgSinglePositionalRevealsConsumedArg(t *testing.T) {
+	t.Cleanup(func() { config.Cfg = nil })
+	config.Cfg = &config.Config{}
+
+	_, _, err := resolveClusterArg("repset-diff", "<repset>", "[cluster] <repset>", 1, []string{"demo"})
+	if err == nil {
+		t.Fatalf("expected error for a lone positional with no default_cluster set")
+	}
+	for _, want := range []string{"demo", "<repset>", "repset-diff"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q missing expected substring %q", err.Error(), want)
+		}
 	}
 }
 

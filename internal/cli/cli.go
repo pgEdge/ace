@@ -865,6 +865,16 @@ func resolveClusterArg(cmd, missingUsage, argsUsage string, required int, args [
 	if len(args) == required {
 		cluster := config.DefaultCluster()
 		if cluster == "" {
+			if required > 0 {
+				// The positional(s) supplied were consumed as the required
+				// entity (e.g. <repset>), leaving the cluster unset. Spell that
+				// out so a lone argument isn't silently misread as the cluster
+				// and reported back as a bare "cluster name is required".
+				return "", nil, fmt.Errorf(
+					"cluster name is required: %q was read as the %s argument (usage: %s %s); "+
+						"pass the cluster as the first argument or set default_cluster in ace.yaml",
+					strings.Join(args, " "), missingUsage, cmd, argsUsage)
+			}
 			return "", nil, fmt.Errorf("cluster name is required: specify one explicitly or set default_cluster in ace.yaml")
 		}
 		return cluster, args, nil
