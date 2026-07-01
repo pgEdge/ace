@@ -1,9 +1,89 @@
 package mtree
 
 import (
+	"context"
+	"fmt"
 	"strings"
 	"testing"
+
+	"github.com/pgedge/ace/pkg/types"
 )
+
+// mtreeTaskWithDiffState returns a task wired just enough to exercise the diff
+// accumulator (appendDiffs) without a database.
+func mtreeTaskWithDiffState(maxDiffRows int64) *MerkleTreeTask {
+	m := &MerkleTreeTask{MaxDiffRows: maxDiffRows}
+	m.Key = []string{"id"}
+	m.Cols = []string{"id", "val"}
+	m.DiffResult = types.DiffOutput{
+		NodeDiffs: make(map[string]types.DiffByNodePair),
+		Summary:   types.DiffSummary{DiffRowsCount: make(map[string]int)},
+	}
+	m.diffRowKeySets = make(map[string]map[string]map[string]struct{})
+	m.diffRowCounts = make(map[string]int64)
+	return m
+}
+
+// node1OnlyRows builds n rows with unique primary keys, all absent from the peer.
+func node1OnlyRows(n int) []types.OrderedMap {
+	rows := make([]types.OrderedMap, n)
+	for i := range rows {
+		rows[i] = types.OrderedMap{{Key: "id", Value: fmt.Sprintf("%d", i)}, {Key: "val", Value: "x"}}
+	}
+	return rows
+}
+
+// A diverged table stops collecting at max_diff_rows and marks the report truncated.
+func TestMtreeDiffEnforcesMaxDiffRows(t *testing.T) {
+	const cap = 5
+	m := mtreeTaskWithDiffState(cap)
+	work := CompareRangesWorkItem{
+		Node1: map[string]any{"Name": "n1"},
+		Node2: map[string]any{"Name": "n2"},
+	}
+
+	if err := m.appendDiffs("n1/n2", work, node1OnlyRows(20), nil); err != nil {
+		t.Fatalf("appendDiffs returned error: %v", err)
+	}
+
+	if got := len(m.DiffResult.NodeDiffs["n1/n2"].Rows["n1"]); got != cap {
+		t.Errorf("collected %d rows for n1, want the cap of %d", got, cap)
+	}
+	if !m.DiffResult.Summary.DiffRowLimitReached {
+		t.Errorf("expected DiffRowLimitReached=true after exceeding the cap")
+	}
+}
+
+// With no cap configured, every differing row is collected and nothing is flagged truncated.
+func TestMtreeDiffNoLimitCollectsAll(t *testing.T) {
+	m := mtreeTaskWithDiffState(0)
+	work := CompareRangesWorkItem{
+		Node1: map[string]any{"Name": "n1"},
+		Node2: map[string]any{"Name": "n2"},
+	}
+
+	if err := m.appendDiffs("n1/n2", work, node1OnlyRows(20), nil); err != nil {
+		t.Fatalf("appendDiffs returned error: %v", err)
+	}
+
+	if got := len(m.DiffResult.NodeDiffs["n1/n2"].Rows["n1"]); got != 20 {
+		t.Errorf("collected %d rows for n1, want all 20", got)
+	}
+	if m.DiffResult.Summary.DiffRowLimitReached {
+		t.Errorf("did not expect DiffRowLimitReached with no cap configured")
+	}
+}
+
+// A negative max_diff_rows is rejected before any work runs.
+func TestMtreeDiffRejectsNegativeMaxDiffRows(t *testing.T) {
+	m := &MerkleTreeTask{MaxDiffRows: -1, SkipDBUpdate: true}
+	m.Ctx = context.Background()
+
+	err := m.DiffMtree()
+	if err == nil || !strings.Contains(err.Error(), "max_diff_rows must be >= 0") {
+		t.Fatalf("expected max_diff_rows validation error, got %v", err)
+	}
+}
 
 func TestIsNumericColType(t *testing.T) {
 	tests := []struct {
