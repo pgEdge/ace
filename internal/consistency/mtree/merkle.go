@@ -86,6 +86,8 @@ type MerkleTreeTask struct {
 	Mode              string
 	NoCDC             bool
 	CDCTimeoutSec     int // per-invocation CDC drain budget; 0 = use config/default
+	// CDCSkippedNodes lists nodes whose CDC drain was skipped because a running `mtree listen` held the replication slot (best-effort mode).
+	CDCSkippedNodes []string
 	SkipDBUpdate      bool
 	Until             string
 
@@ -1615,12 +1617,25 @@ func (m *MerkleTreeTask) UpdateMtree(skipAllChecks bool) (err error) { //nolint:
 		// (in node order) is returned, preserving the prior semantics.
 		var wg sync.WaitGroup
 		cdcErrs := make([]error, len(m.ClusterNodes))
+		skipped := make([]string, len(m.ClusterNodes))
 		for i, nodeInfo := range m.ClusterNodes {
 			wg.Add(1)
 			go func(i int, nodeInfo map[string]any) {
 				defer wg.Done()
 				if err := cdc.UpdateFromCDC(ctx, nodeInfo); err != nil {
-					cdcErrs[i] = fmt.Errorf("CDC update failed for node %s: %w", nodeInfo["Name"], err)
+					name := fmt.Sprintf("%v", nodeInfo["Name"])
+					// A busy slot means `mtree listen` is draining this node. Skip
+					// its CDC catch-up (best-effort) and compare against the tree
+					// listen is keeping warm, rather than failing the whole run.
+					if errors.Is(err, cdc.ErrSlotBusy) {
+						logger.Warn("node %s: 'mtree listen' is active on the replication slot; "+
+							"skipping CDC drain and comparing against the listen-maintained tree. "+
+							"Result may omit changes newer than listen's last apply. For a "+
+							"guaranteed-current diff, stop 'mtree listen' first. (%v)", name, err)
+						skipped[i] = name
+						return
+					}
+					cdcErrs[i] = fmt.Errorf("CDC update failed for node %s: %w", name, err)
 				}
 			}(i, nodeInfo)
 		}
@@ -1629,6 +1644,16 @@ func (m *MerkleTreeTask) UpdateMtree(skipAllChecks bool) (err error) { //nolint:
 			if e != nil {
 				return e
 			}
+		}
+		var skippedNodes []string
+		for _, n := range skipped {
+			if n != "" {
+				skippedNodes = append(skippedNodes, n)
+			}
+		}
+		if len(skippedNodes) > 0 {
+			resultCtx["cdc_skipped_nodes"] = skippedNodes
+			m.CDCSkippedNodes = skippedNodes
 		}
 	}
 
@@ -2007,6 +2032,9 @@ func (m *MerkleTreeTask) DiffMtree() (err error) {
 
 	if err = m.UpdateMtree(true); err != nil {
 		return fmt.Errorf("failed to update merkle tree before diff: %w", err)
+	}
+	if len(m.CDCSkippedNodes) > 0 {
+		resultCtx["cdc_skipped_nodes"] = m.CDCSkippedNodes
 	}
 	if err := m.loadNodeOriginNames(); err != nil {
 		logger.Warn("mtree diff: unable to load node origin names; using raw node_origin values: %v", err)

@@ -2838,16 +2838,28 @@ func DropPublication(ctx context.Context, db DBQuerier, publicationName string) 
 	return nil
 }
 
-func DropReplicationSlot(ctx context.Context, db DBQuerier, slotName string) error {
+// GetActiveSlotPID returns the PID of the active consumer holding the named
+// logical replication slot, or nil if the slot exists but is not currently
+// active (or does not exist). Used to detect a running `mtree listen` before a
+// bounded CDC drain attempts to attach to the same slot.
+func GetActiveSlotPID(ctx context.Context, db DBQuerier, slotName string) (*int32, error) {
 	var pid *int32
 	pidSQL, err := RenderSQL(SQLTemplates.GetReplicationSlotPID, nil)
 	if err != nil {
-		return fmt.Errorf("failed to render GetReplicationSlotPID SQL: %w", err)
+		return nil, fmt.Errorf("failed to render GetReplicationSlotPID SQL: %w", err)
 	}
 
 	err = db.QueryRow(ctx, pidSQL, slotName).Scan(&pid)
 	if err != nil && err != pgx.ErrNoRows {
-		return fmt.Errorf("query to get replication slot PID failed for slot %s: %w", slotName, err)
+		return nil, fmt.Errorf("query to get replication slot PID failed for slot %s: %w", slotName, err)
+	}
+	return pid, nil
+}
+
+func DropReplicationSlot(ctx context.Context, db DBQuerier, slotName string) error {
+	pid, err := GetActiveSlotPID(ctx, db, slotName)
+	if err != nil {
+		return err
 	}
 
 	if pid != nil {

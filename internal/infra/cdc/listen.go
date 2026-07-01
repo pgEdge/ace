@@ -13,6 +13,7 @@ package cdc
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -28,6 +29,21 @@ import (
 	"github.com/pgedge/ace/pkg/config"
 	"github.com/pgedge/ace/pkg/logger"
 )
+
+// ErrSlotBusy signals that a bounded CDC drain could not run because the
+// node's logical replication slot is already held by another active consumer
+// (typically a running `mtree listen`). Bounded callers (UpdateMtree) treat
+// this as a per-node skip rather than a fatal error; the continuous listener
+// never returns it as terminal.
+var ErrSlotBusy = errors.New("replication slot is held by another consumer")
+
+// isSlotBusyErr reports whether err wraps a PostgreSQL "object in use" error
+// (SQLSTATE 55006), which is what StartReplication returns when the slot is
+// already active for another PID.
+func isSlotBusyErr(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == "55006"
+}
 
 // Since we're using the native pgoutput plugin, there are some wire protocol
 // specifics that need to be used for parsing the messages. pglogrepl helps
@@ -210,10 +226,29 @@ func processReplicationStream(ctx context.Context, nodeInfo map[string]any, cont
 
 		if err := pglogrepl.StartReplication(ctx, c, slotName, lastLSN, opts); err != nil {
 			c.Close(context.Background())
+			// If listen acquired the slot in the race window after the up-front
+			// check, surface it as ErrSlotBusy so a bounded caller skips rather
+			// than fails. (Continuous mode just retries via its reconnect loop.)
+			if isSlotBusyErr(err) {
+				return nil, fmt.Errorf("%w: %v", ErrSlotBusy, err)
+			}
 			return nil, fmt.Errorf("StartReplication failed: %w", err)
 		}
 		logger.Info("Logical replication started on slot %s from LSN %s", slotName, lastLSN)
 		return c, nil
+	}
+
+	// Best-effort cooperation with a running `mtree listen`: a bounded drain
+	// cannot attach to a slot that listen already holds (PostgreSQL allows one
+	// active consumer per slot). Detect that up front and return ErrSlotBusy so
+	// the caller can skip this node's drain instead of failing. Continuous mode
+	// is the legitimate slot owner and is exempt.
+	if !continuous {
+		if pid, perr := queries.GetActiveSlotPID(ctx, pool, slotName); perr != nil {
+			return fmt.Errorf("failed to check replication slot status: %w", perr)
+		} else if pid != nil {
+			return fmt.Errorf("%w (slot %s, pid %d)", ErrSlotBusy, slotName, *pid)
+		}
 	}
 
 	conn, err = connect()

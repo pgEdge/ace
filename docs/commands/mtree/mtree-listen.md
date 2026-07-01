@@ -25,3 +25,9 @@ Starts a long-running process to listen for changes and auto-update Merkle trees
 ```sh
 ./ace mtree listen --dbname=mydatabase my-cluster
 ```
+
+You no longer need to stop `mtree listen` before running `mtree table-diff` or
+`mtree update`. While `listen` is active, those commands skip their own CDC
+drain for the affected node and compare against the tree `listen` maintains
+(best-effort freshness). Stop `listen` first only when you need a diff that is
+guaranteed current to the present instant.

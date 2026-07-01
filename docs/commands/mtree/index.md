@@ -47,6 +47,14 @@ Finally, you can use the diff file to initiate table repair with the ACE [table-
 
     Running `mtree listen` can help keep trees current; every `mtree table-diff` also performs an on-demand update before comparing.
 
+`mtree listen` and `mtree table-diff` / `mtree update` can run at the same time.
+When a diff or update runs while `listen` holds a node's replication slot, ACE
+skips that node's CDC catch-up and compares against the tree `listen` is already
+maintaining. A warning is printed, and the result reflects `listen`'s
+last-applied state — it may omit changes newer than `listen`'s most recent
+apply. For a diff that is guaranteed current to the present moment, stop
+`mtree listen` first so the diff can perform its own bounded CDC drain.
+
 ### Building Merkle Trees in Parallel (for Very Large Tables)
 
 If a table is extremely large (e.g., ~1B rows or ~1 TB), remote building the Merkle tree from a single ACE node can be slowed by network latency. You can parallelize the build (per node) to speed up the process.
