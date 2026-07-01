@@ -48,12 +48,17 @@ Finally, you can use the diff file to initiate table repair with the ACE [table-
     Running `mtree listen` can help keep trees current; every `mtree table-diff` also performs an on-demand update before comparing.
 
 `mtree listen` and `mtree table-diff` / `mtree update` can run at the same time.
-When a diff or update runs while `listen` holds a node's replication slot, ACE
-skips that node's CDC catch-up and compares against the tree `listen` is already
-maintaining. A warning is printed, and the result reflects `listen`'s
-last-applied state — it may omit changes newer than `listen`'s most recent
-apply. For a diff that is guaranteed current to the present moment, stop
-`mtree listen` first so the diff can perform its own bounded CDC drain.
+Each node has a single replication slot shared across all of its Merkle trees,
+and PostgreSQL allows only one active consumer per slot. So whenever a diff or
+update finds a node's slot already held by another consumer — normally a running
+`mtree listen`, but also a concurrent `mtree table-diff`/`update` on the same
+node (even for a different table) — ACE skips that node's CDC catch-up and
+compares against the tree already maintained on that node. A warning is printed,
+the skipped nodes are listed in the diff summary (`cdc_skipped_nodes`), and the
+result is best-effort: it may omit changes newer than the last apply, so
+divergence can be under-reported. For a diff that is guaranteed current to the
+present moment, ensure no `mtree listen` or other mtree operation is holding the
+node's slot, then re-run so the diff can perform its own bounded CDC drain.
 
 ### Building Merkle Trees in Parallel (for Very Large Tables)
 

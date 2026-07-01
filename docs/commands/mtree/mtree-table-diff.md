@@ -3,11 +3,15 @@
 Compares Merkle trees of a table across nodes to find inconsistencies.  
 By default, updates trees first using CDC.
 
-If `mtree listen` is running and holds the replication slot, `table-diff` skips
-the CDC drain for that node (printing a warning) and compares against the
-listen-maintained tree instead of failing. The comparison reflects `listen`'s
-last-applied state. Stop `mtree listen` first if you need a guaranteed-current
-drain.
+If a node's replication slot is already held by another consumer — normally a
+running `mtree listen`, but also a concurrent `table-diff`/`update` on the same
+node (the slot is shared across all of a node's Merkle trees) — `table-diff`
+skips the CDC drain for that node (printing a warning) and compares against the
+already-maintained tree instead of failing. The comparison is best-effort and
+may omit the most recent changes on those nodes, so divergence can be
+under-reported; the skipped nodes are listed in the diff summary
+(`cdc_skipped_nodes`). Ensure no `mtree listen` or other mtree operation is
+holding the node's slot, then re-run, if you need a guaranteed-current drain.
 
 **Usage**
 

@@ -1624,14 +1624,18 @@ func (m *MerkleTreeTask) UpdateMtree(skipAllChecks bool) (err error) { //nolint:
 				defer wg.Done()
 				if err := cdc.UpdateFromCDC(ctx, nodeInfo); err != nil {
 					name := fmt.Sprintf("%v", nodeInfo["Name"])
-					// A busy slot means `mtree listen` is draining this node. Skip
-					// its CDC catch-up (best-effort) and compare against the tree
-					// listen is keeping warm, rather than failing the whole run.
+					// The slot is held by another active consumer -- typically a
+					// running `mtree listen`, but possibly a concurrent bounded mtree
+					// operation sharing this node's slot. Skip this node's CDC
+					// catch-up (best-effort) and compare against the already-maintained
+					// tree rather than failing the whole run.
 					if errors.Is(err, cdc.ErrSlotBusy) {
-						logger.Warn("node %s: 'mtree listen' is active on the replication slot; "+
-							"skipping CDC drain and comparing against the listen-maintained tree. "+
-							"Result may omit changes newer than listen's last apply. For a "+
-							"guaranteed-current diff, stop 'mtree listen' first. (%v)", name, err)
+						logger.Warn("node %s: replication slot is held by another consumer "+
+							"(expected: 'mtree listen'); skipping this node's CDC drain and comparing "+
+							"against the already-maintained tree (best-effort). Recent changes may be "+
+							"omitted, so divergence can be under-reported. For a guaranteed-current "+
+							"diff, ensure no 'mtree listen' or other mtree operation is holding the "+
+							"slot, then re-run. (%v)", name, err)
 						skipped[i] = name
 						return
 					}
@@ -2053,11 +2057,12 @@ func (m *MerkleTreeTask) DiffMtree() (err error) {
 	m.DiffResult = types.DiffOutput{
 		NodeDiffs: make(map[string]types.DiffByNodePair),
 		Summary: types.DiffSummary{
-			Schema:        m.Schema,
-			Table:         m.Table,
-			Nodes:         m.NodeList,
-			StartTime:     time.Now().Format(time.RFC3339),
-			DiffRowsCount: make(map[string]int),
+			Schema:          m.Schema,
+			Table:           m.Table,
+			Nodes:           m.NodeList,
+			StartTime:       time.Now().Format(time.RFC3339),
+			DiffRowsCount:   make(map[string]int),
+			CDCSkippedNodes: m.CDCSkippedNodes,
 		},
 	}
 	m.diffRowKeySets = make(map[string]map[string]map[string]struct{})
@@ -2166,6 +2171,15 @@ func (m *MerkleTreeTask) DiffMtree() (err error) {
 	}
 
 	resultCtx["mismatched_pairs"] = len(m.DiffResult.NodeDiffs)
+
+	if len(m.CDCSkippedNodes) > 0 {
+		logger.Warn("diff completed in best-effort mode: the CDC drain was skipped for "+
+			"node(s) %v because the replication slot was held by another consumer "+
+			"(expected: 'mtree listen'). Recent changes on those node(s) may not be "+
+			"reflected, so divergence can be under-reported. Re-run with no concurrent "+
+			"'mtree listen' or other mtree operation holding the slot for a "+
+			"guaranteed-current diff.", m.CDCSkippedNodes)
+	}
 
 	return nil
 }

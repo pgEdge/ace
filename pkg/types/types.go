@@ -124,6 +124,12 @@ type DiffSummary struct {
 	AgainstOriginResolved string         `json:"against_origin_resolved,omitempty"`
 	Until                 string         `json:"until,omitempty"`
 	OriginOnly            bool           `json:"origin_only,omitempty"`
+	// CDCSkippedNodes lists nodes whose pre-diff CDC drain was skipped because
+	// the replication slot was held by another consumer (typically a running
+	// mtree listen, but possibly a concurrent bounded mtree operation sharing
+	// the node's slot). The comparison for those nodes is best-effort and may
+	// omit their most recent changes, so divergence can be under-reported.
+	CDCSkippedNodes []string `json:"cdc_skipped_nodes,omitempty"`
 }
 
 type KVPair struct {
