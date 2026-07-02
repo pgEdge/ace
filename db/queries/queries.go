@@ -3018,6 +3018,25 @@ func CreateSchema(ctx context.Context, db DBQuerier, schemaName string) error {
 	return nil
 }
 
+// RegisterSkipSchema asks the local Spock node to exclude schemaName from
+// replication by appending it to spock.node.info->'skip_schema'. The call is
+// idempotent: a schema already in the array is left untouched. Returns the
+// number of rows updated (0 when the schema is already registered or the
+// local node row is missing).
+func RegisterSkipSchema(ctx context.Context, db DBQuerier, schemaName string) (int64, error) {
+	sql, err := RenderSQL(SQLTemplates.RegisterSkipSchema, nil)
+	if err != nil {
+		return 0, fmt.Errorf("failed to render RegisterSkipSchema SQL: %w", err)
+	}
+
+	tag, err := db.Exec(ctx, sql, schemaName)
+	if err != nil {
+		return 0, fmt.Errorf("query to register skip_schema failed: %w", err)
+	}
+
+	return tag.RowsAffected(), nil
+}
+
 func ResetPositionsByStartFromTemp(ctx context.Context, db DBQuerier, mtreeTable string, offset int64) error {
 	data := map[string]any{
 		"MtreeTable": mtreeTable,
