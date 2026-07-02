@@ -1417,6 +1417,27 @@ func UpdateLeafHashesBatch(ctx context.Context, db DBQuerier, mtreeTable string,
 }
 
 
+// MarkLeavesDirtyByPositions flags the given leaf blocks for rehash. Used to
+// refresh leaves whose stored hash is stale relative to the live table data
+// (e.g. mismatches resolved as false positives during a diff).
+func MarkLeavesDirtyByPositions(ctx context.Context, db DBQuerier, mtreeTable string, nodePositions []int64) error {
+	data := map[string]interface{}{
+		"MtreeTable": mtreeTable,
+	}
+
+	sql, err := RenderSQL(SQLTemplates.MarkLeavesDirtyByPositions, data)
+	if err != nil {
+		return fmt.Errorf("failed to render MarkLeavesDirtyByPositions SQL: %w", err)
+	}
+
+	_, err = db.Exec(ctx, sql, nodePositions)
+	if err != nil {
+		return fmt.Errorf("query to mark leaves dirty for '%s' failed: %w", mtreeTable, err)
+	}
+
+	return nil
+}
+
 func ClearDirtyFlags(ctx context.Context, db DBQuerier, mtreeTable string, nodePositions []int64) error {
 	data := map[string]interface{}{
 		"MtreeTable": mtreeTable,

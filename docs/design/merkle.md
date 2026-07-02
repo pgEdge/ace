@@ -41,7 +41,7 @@ flowchart TB
 - **Initial build (full scan once)**: ACE partitions the table into PK-ordered blocks (like table-diff) and computes leaf hashes for every block on each node—this is the only full-table scan. Parent hashes are built upward using XOR to form the root.
 - **Change capture (pgoutput + replication slot)**: The table is added to a publication; pgoutput changes are streamed into a logical replication slot. ACE marks affected blocks as dirty based on PK ranges (no full re-scan).
 - **Update step**: `UpdateMtree` reads accumulated changes from the slot, splits or merges blocks if needed, recomputes hashes only for dirty/new leaves, rebuilds parent XORs, and clears dirty flags. Block size is recovered from metadata to stay consistent with the build.
-- **Diff step**: `DiffMtree` first runs an update (to fold recent changes into the tree), then traverses trees across nodes. Matching hashes at a node mean “skip subtree”; mismatches recurse until leaves are reached, where row-level diffs are fetched if required.
+- **Diff step**: `DiffMtree` first runs an update (to fold recent changes into the tree), then traverses trees across nodes. Matching hashes at a node mean “skip subtree”; mismatches recurse until leaves are reached, where row-level diffs are fetched if required. When every mismatched block for a node pair compares clean at row level, the diff refreshes those stale leaf hashes from live data (a write to the `ace_mtree_*` tables) so the phantom mismatch does not recur.
 
 ```mermaid
 flowchart TD
