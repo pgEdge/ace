@@ -64,6 +64,7 @@ type Templates struct {
 
 	GetDirtyAndNewBlocks             *template.Template
 	ClearDirtyFlags                  *template.Template
+	MarkLeavesDirtyByPositions       *template.Template
 	BuildParentNodes                 *template.Template
 	GetRootNode                      *template.Template
 	GetNodeChildren                  *template.Template
@@ -1029,6 +1030,16 @@ var SQLTemplates = Templates{
 			dirty = false,
 			inserts_since_tree_update = 0,
 			deletes_since_tree_update = 0,
+			last_modified = current_timestamp
+		WHERE
+			node_level = 0
+			AND node_position = ANY($1)
+	`)),
+	MarkLeavesDirtyByPositions: template.Must(template.New("markLeavesDirtyByPositions").Parse(`
+		UPDATE
+			{{.MtreeTable}}
+		SET
+			dirty = true,
 			last_modified = current_timestamp
 		WHERE
 			node_level = 0
