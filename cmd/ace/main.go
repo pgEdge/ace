@@ -22,6 +22,11 @@ import (
 	"github.com/pgedge/ace/pkg/logger"
 )
 
+// version is the ACE release version. It defaults to the value below for
+// local builds and is overridden at release time via -ldflags "-X main.version=..."
+// (see .goreleaser.yaml).
+var version = "2.1.0"
+
 func main() {
 	var cfgPath string
 	if !shouldSkipConfig(os.Args[1:]) {
@@ -60,7 +65,7 @@ func main() {
 		}
 	}
 
-	app := cli.SetupCLI()
+	app := cli.SetupCLI(version)
 	err := app.Run(context.Background(), os.Args)
 	if err != nil {
 		logger.Error("%v", err)

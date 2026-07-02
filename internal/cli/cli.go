@@ -43,7 +43,15 @@ var defaultConfigYAML string
 //go:embed default_pg_service.conf
 var defaultPgServiceConf string
 
-func SetupCLI() *cli.Command {
+func SetupCLI(version string) *cli.Command {
+	// Use -V (not the urfave default -v) for version, so -v stays reserved for
+	// the debug/verbose flag on subcommands (matching go tooling conventions).
+	cli.VersionFlag = &cli.BoolFlag{
+		Name:    "version",
+		Aliases: []string{"V"},
+		Usage:   "print the version",
+	}
+
 	commonFlags := []cli.Flag{
 		&cli.StringFlag{
 			Name:    "dbname",
@@ -433,8 +441,9 @@ func SetupCLI() *cli.Command {
 	}
 
 	app := &cli.Command{
-		Name:  "ace",
-		Usage: "ACE - Active Consistency Engine",
+		Name:    "ace",
+		Usage:   "ACE - Active Consistency Engine",
+		Version: version,
 		Commands: []*cli.Command{
 			{
 				Name:  "config",
