@@ -130,6 +130,10 @@ type DiffSummary struct {
 	// the node's slot). The comparison for those nodes is best-effort and may
 	// omit their most recent changes, so divergence can be under-reported.
 	CDCSkippedNodes []string `json:"cdc_skipped_nodes,omitempty"`
+	// StaleBlocksRefreshed counts, per node pair, mismatched Merkle-tree blocks
+	// that row comparison resolved as false positives (stale hashes, no data
+	// differences) and that the diff refreshed from live data in place.
+	StaleBlocksRefreshed map[string]int `json:"stale_blocks_refreshed,omitempty"`
 }
 
 type KVPair struct {

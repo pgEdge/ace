@@ -73,9 +73,10 @@ func ListenForChanges(ctx context.Context, nodeInfo map[string]any) {
 }
 
 // UpdateFromCDC runs one bounded CDC drain for a node: it catches the node's
-// Merkle tree up to the WAL flush position captured at call time, then returns.
-// It returns an error rather than reporting success if it cannot reach that
-// snapshot, so a stale tree is never silently treated as current (ACE-190).
+// Merkle tree up to a WAL position that covers every commit visible at call
+// time (see getDrainTargetLSN), then returns. It returns an error rather than
+// reporting success if it cannot reach that snapshot, so a stale tree is never
+// silently treated as current (ACE-190).
 func UpdateFromCDC(ctx context.Context, nodeInfo map[string]any) error {
 	return processReplicationStream(ctx, nodeInfo, false)
 }
@@ -95,7 +96,7 @@ var FlushBatchSize = 10_000
 // the decoded changes to its Merkle tree. With continuous=true it streams
 // indefinitely, dispatching apply work to worker goroutines. With
 // continuous=false it performs a bounded catch-up: it must reach the call-time
-// WAL flush snapshot (targetFlushLSN) before reporting success, applies changes
+// snapshot (drainTargetLSN) before reporting success, applies changes
 // synchronously, and flushes them in memory-bounded sub-batches so a single
 // large transaction drains without buffering the whole transaction.
 func processReplicationStream(ctx context.Context, nodeInfo map[string]any, continuous bool) error { //nolint:gocyclo // CDC drain protocol state machine; interleaved keepalive/XLogData branching is inherent and splitting it would obscure the LSN/stop bookkeeping
@@ -177,15 +178,15 @@ func processReplicationStream(ctx context.Context, nodeInfo map[string]any, cont
 		}
 	}
 
-	targetFlushLSN := pglogrepl.LSN(0)
+	drainTargetLSN := pglogrepl.LSN(0)
 	if !continuous {
-		targetFlushLSN, err = getCurrentWalFlushLSN(ctx, pool)
+		drainTargetLSN, err = getDrainTargetLSN(ctx, pool)
 		if err != nil {
-			logger.Error("failed to get current WAL flush LSN: %v", err)
-			return fmt.Errorf("failed to get current WAL flush LSN: %w", err)
+			logger.Error("failed to get drain target LSN: %v", err)
+			return fmt.Errorf("failed to get drain target LSN: %w", err)
 		}
 
-		if targetFlushLSN == startLSN {
+		if drainTargetLSN == startLSN {
 			logger.Info("CDC already up-to-date at LSN %s; exiting", startLSN)
 			return nil
 		}
@@ -196,7 +197,7 @@ func processReplicationStream(ctx context.Context, nodeInfo map[string]any, cont
 	var lastLSNVal atomic.Uint64
 	lastLSNVal.Store(uint64(lastLSN))
 	// Bounded-drain (non-continuous) safety state. ACE-190: a bounded drain must
-	// actually reach the call-time snapshot (targetFlushLSN) before it may report
+	// actually reach the call-time snapshot (drainTargetLSN) before it may report
 	// success; otherwise UpdateMtree/DiffMtree would compare a stale tree and
 	// silently miss real divergence. reachedTarget records whether we got there.
 	reachedTarget := false
@@ -261,6 +262,12 @@ func processReplicationStream(ctx context.Context, nodeInfo map[string]any, cont
 
 	txChanges := make(map[uint32][]cdcMsg)
 	var currentXID uint32
+	// inTx is true between a BeginMessage and its CommitMessage. A bounded
+	// drain must never stop inside that window: the transaction's changes sit
+	// unapplied in txChanges, and stopping would discard them while the final
+	// standby update may confirm past the commit -- permanently skipping the
+	// transaction and leaving the Merkle tree stale.
+	inTx := false
 	var wg sync.WaitGroup
 	errCh := make(chan error, 1)
 	stopStreaming := false
@@ -422,20 +429,20 @@ func processReplicationStream(ctx context.Context, nodeInfo map[string]any, cont
 					logger.Info("Replication stopping due to context cancellation")
 					return nil
 				}
-				if lastLSN < targetFlushLSN {
+				if lastLSN < drainTargetLSN {
 					return fmt.Errorf("CDC drain reached LSN %s of target %s on slot %s but did not "+
 						"catch up within cdc_processing_timeout. Progress is durable: re-run "+
 						"'ace mtree update' to continue draining, or raise cdc_processing_timeout to "+
 						"drain in one pass (required when a single transaction is larger than the "+
-						"timeout window): %w", lastLSN, targetFlushLSN, slotName, ctx.Err())
+						"timeout window): %w", lastLSN, drainTargetLSN, slotName, ctx.Err())
 				}
 				return ctx.Err()
 			}
 			if pgconn.Timeout(err) {
 				if !continuous {
-					if lastLSN >= targetFlushLSN {
+					if lastLSN >= drainTargetLSN && !inTx {
 						// Received every change up to the call-time snapshot.
-						logger.Info("Replication stream drained to target LSN %s.", targetFlushLSN)
+						logger.Info("Replication stream drained to target LSN %s.", drainTargetLSN)
 						reachedTarget = true
 						stopStreaming = true
 					}
@@ -478,7 +485,7 @@ func processReplicationStream(ctx context.Context, nodeInfo map[string]any, cont
 
 				// ServerWALEnd on a logical keepalive is the walsender's decode
 				// position (how far it has read this slot's WAL). When it reaches
-				// targetFlushLSN the decoder has processed every commit at or
+				// drainTargetLSN the decoder has processed every commit at or
 				// before the target, and those commits' changes were streamed --
 				// and received, in LSN order -- ahead of this keepalive. So the
 				// gap between lastLSN and the target holds no further tracked-table
@@ -488,8 +495,12 @@ func processReplicationStream(ctx context.Context, nodeInfo map[string]any, cont
 				// fires only after the decoder reaches the target; while it is
 				// still decoding a large in-progress transaction, ServerWALEnd
 				// stays below the target and we keep waiting -- see ACE-190.)
-				if !continuous && targetFlushLSN != 0 && pkm.ServerWALEnd >= targetFlushLSN {
-					logger.Info("Server caught up to target WAL flush LSN %s via keepalive; stopping replication stream", targetFlushLSN)
+				// The !inTx guard: a keepalive can interleave between a
+				// transaction's data messages and its commit message. Stopping
+				// there would discard the buffered changes yet checkpoint at the
+				// target, permanently skipping the transaction.
+				if !continuous && drainTargetLSN != 0 && pkm.ServerWALEnd >= drainTargetLSN && !inTx {
+					logger.Info("Server caught up to drain target LSN %s via keepalive; stopping replication stream", drainTargetLSN)
 					// Advance the checkpoint to the target. We stopped on a keepalive
 					// (not a data message), so lastLSN still sits at the start when no
 					// tracked change reached the target; per the reasoning above the
@@ -498,8 +509,8 @@ func processReplicationStream(ctx context.Context, nodeInfo map[string]any, cont
 					// write below would persist the stale start LSN, the slot would
 					// never advance, and every subsequent drain would re-scan the same
 					// span (and the server would retain that WAL indefinitely).
-					if lastLSN < targetFlushLSN {
-						lastLSN = targetFlushLSN
+					if lastLSN < drainTargetLSN {
+						lastLSN = drainTargetLSN
 						lastLSNVal.Store(uint64(lastLSN))
 					}
 					reachedTarget = true
@@ -523,6 +534,7 @@ func processReplicationStream(ctx context.Context, nodeInfo map[string]any, cont
 				case *pglogrepl.BeginMessage:
 					currentXID = logicalMsg.Xid
 					txChanges[currentXID] = []cdcMsg{}
+					inTx = true
 				case *pglogrepl.CommitMessage:
 					if changes, ok := txChanges[currentXID]; ok {
 						if len(changes) > 0 {
@@ -531,6 +543,7 @@ func processReplicationStream(ctx context.Context, nodeInfo map[string]any, cont
 						}
 						delete(txChanges, currentXID)
 					}
+					inTx = false
 				case *pglogrepl.RelationMessage:
 					relations[logicalMsg.RelationID] = logicalMsg
 				case *pglogrepl.InsertMessage:
@@ -593,8 +606,12 @@ func processReplicationStream(ctx context.Context, nodeInfo map[string]any, cont
 						lastFlushTime = time.Now()
 					}
 				}
-				if !continuous && targetFlushLSN != 0 && lastLSN >= targetFlushLSN {
-					logger.Info("Reached target WAL flush LSN %s; stopping replication stream", targetFlushLSN)
+				// The !inTx guard: lastLSN advances on every data message, so it
+				// can cross the target between a transaction's changes and its
+				// commit. Keep reading until the commit lands -- it was already
+				// decoded and sent, so it is at most a few messages away.
+				if !continuous && drainTargetLSN != 0 && lastLSN >= drainTargetLSN && !inTx {
+					logger.Info("Reached drain target LSN %s; stopping replication stream", drainTargetLSN)
 					reachedTarget = true
 					stopStreaming = true
 				}
@@ -639,7 +656,7 @@ func processReplicationStream(ctx context.Context, nodeInfo map[string]any, cont
 	// let UpdateMtree/DiffMtree compare a tree that never saw the backlog.
 	if !continuous && processingErr == nil && !reachedTarget {
 		processingErr = fmt.Errorf("CDC drain ended at LSN %s without reaching target %s on slot %s; "+
-			"refusing to report a possibly-stale Merkle tree as current", lastLSN, targetFlushLSN, slotName)
+			"refusing to report a possibly-stale Merkle tree as current", lastLSN, drainTargetLSN, slotName)
 	}
 
 	if processingErr != nil {
@@ -700,20 +717,38 @@ func processReplicationStream(ctx context.Context, nodeInfo map[string]any, cont
 	return nil
 }
 
-// getCurrentWalFlushLSN returns the node's current WAL flush LSN -- the snapshot
-// position a bounded drain must reach before it is considered caught up.
-func getCurrentWalFlushLSN(ctx context.Context, pool *pgxpool.Pool) (pglogrepl.LSN, error) {
+// getDrainTargetLSN returns the snapshot position a bounded drain must reach
+// before it is considered caught up. Two requirements shape it:
+//
+//   - It must cover every commit visible to readers at call time. The flush
+//     LSN alone does not: transactions applied by Spock commit asynchronously
+//     (synchronous_commit=off), so a row can be visible while its commit
+//     record is still ahead of the flush pointer, and a flush-LSN target
+//     would let the drain stop before covering it.
+//   - It must be reachable by the walsender, whose send pointer is capped by
+//     *flushed* WAL. The raw insert LSN is not always reachable: the WAL
+//     writer flushes partial pages only up to the last async commit, so an
+//     insert-LSN target behind a non-commit tail record could stall the
+//     drain until the next checkpoint.
+//
+// Both are satisfied by nudging a trivial committing transaction and reading
+// the insert LSN in the same statement: every previously visible commit sits
+// at or below the captured position, and the nudge's own commit record lands
+// just above it, guaranteeing the WAL writer flushes past the target within
+// one wal_writer_delay in every synchronous_commit configuration.
+func getDrainTargetLSN(ctx context.Context, pool *pgxpool.Pool) (pglogrepl.LSN, error) {
 	var lsnStr string
-	err := pool.QueryRow(ctx, "SELECT pg_current_wal_flush_lsn()").Scan(&lsnStr)
+	var xid int64
+	err := pool.QueryRow(ctx, "SELECT pg_current_wal_insert_lsn(), txid_current()").Scan(&lsnStr, &xid)
 	if err != nil {
-		return 0, fmt.Errorf("failed to fetch pg_current_wal_flush_lsn: %w", err)
+		return 0, fmt.Errorf("failed to fetch drain target LSN: %w", err)
 	}
 	if lsnStr == "" {
-		return 0, fmt.Errorf("pg_current_wal_flush_lsn returned empty string")
+		return 0, fmt.Errorf("pg_current_wal_insert_lsn returned empty string")
 	}
 	lsn, err := pglogrepl.ParseLSN(lsnStr)
 	if err != nil {
-		return 0, fmt.Errorf("failed to parse pg_current_wal_flush_lsn %s: %w", lsnStr, err)
+		return 0, fmt.Errorf("failed to parse drain target LSN %s: %w", lsnStr, err)
 	}
 	return lsn, nil
 }

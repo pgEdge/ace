@@ -52,3 +52,10 @@ holding the node's slot, then re-run, if you need a guaranteed-current drain.
   warning is logged. This keeps a heavily diverged table from exhausting memory;
   lower the value in `ace.yaml` on memory-constrained hosts, and re-run after
   repairing to surface the remaining differences.
+- When *all* mismatched blocks between a node pair turn out to hold no row
+  differences, the tree hashes were stale rather than the data divergent. The
+  diff reports this, refreshes those blocks from live data (recorded in the
+  summary's `stale_blocks_refreshed`), and the next diff runs clean. A pair
+  with any real differences, an incomplete comparison, or an `--until` filter
+  is not refreshed. If the trees still disagree after a refresh, the nodes'
+  leaf ranges have diverged; run `ace mtree build` to realign them.

@@ -113,6 +113,11 @@ type MerkleTreeTask struct {
 	// once. Both are guarded by diffMutex.
 	diffRowCounts   map[string]int64
 	diffLimitWarned bool
+	// pairCompareErrs records node pairs whose range comparison lost work items
+	// to errors. A zero diff count for such a pair means "not fully compared",
+	// not "no differences", so stale-block healing must not act on it. Guarded
+	// by diffMutex.
+	pairCompareErrs map[string]bool
 	StartTime       time.Time
 	NodeOriginNames map[string]map[string]string
 
@@ -280,6 +285,8 @@ func (m *MerkleTreeTask) compareRangesWorker(wg *sync.WaitGroup, jobs <-chan Com
 	}()
 
 	for work := range jobs {
+		nodePairKey := fmt.Sprintf("%s/%s", work.Node1["Name"], work.Node2["Name"])
+
 		node1Name := work.Node1["Name"].(string)
 		pool1, ok := pools[node1Name]
 		if !ok {
@@ -287,6 +294,7 @@ func (m *MerkleTreeTask) compareRangesWorker(wg *sync.WaitGroup, jobs <-chan Com
 			pool1, err = auth.GetClusterNodeConnection(m.Ctx, work.Node1, m.connOpts())
 			if err != nil {
 				logger.Error("worker failed to connect to %s: %v", node1Name, err)
+				m.recordPairCompareErr(nodePairKey)
 				bar.Increment()
 				continue
 			}
@@ -300,6 +308,7 @@ func (m *MerkleTreeTask) compareRangesWorker(wg *sync.WaitGroup, jobs <-chan Com
 			pool2, err = auth.GetClusterNodeConnection(m.Ctx, work.Node2, m.connOpts())
 			if err != nil {
 				logger.Error("worker failed to connect to %s: %v", node2Name, err)
+				m.recordPairCompareErr(nodePairKey)
 				bar.Increment()
 				continue
 			}
@@ -308,11 +317,23 @@ func (m *MerkleTreeTask) compareRangesWorker(wg *sync.WaitGroup, jobs <-chan Com
 
 		err := m.processWorkItem(work, pool1, pool2)
 		if err != nil {
-			nodePairKey := fmt.Sprintf("%s/%s", work.Node1["Name"], work.Node2["Name"])
 			logger.Error("failed to process work item for %s: %v", nodePairKey, err)
+			m.recordPairCompareErr(nodePairKey)
 		}
 		bar.Increment()
 	}
+}
+
+// recordPairCompareErr flags a node pair as incompletely compared: at least one
+// of its range-comparison work items was lost to an error, so a zero diff
+// count for the pair cannot be trusted.
+func (m *MerkleTreeTask) recordPairCompareErr(pairKey string) {
+	m.diffMutex.Lock()
+	defer m.diffMutex.Unlock()
+	if m.pairCompareErrs == nil {
+		m.pairCompareErrs = make(map[string]bool)
+	}
+	m.pairCompareErrs[pairKey] = true
 }
 
 func (m *MerkleTreeTask) processWorkItem(work CompareRangesWorkItem, pool1, pool2 *pgxpool.Pool) error {
@@ -2150,11 +2171,18 @@ func (m *MerkleTreeTask) DiffMtree() (err error) {
 	mtreeTableIdentifier := pgx.Identifier{m.aceSchema(), fmt.Sprintf("ace_mtree_%s_%s", m.Schema, m.Table)}
 	mtreeTableName := mtreeTableIdentifier.Sanitize()
 
-	allNodePairBatches := make(map[string]struct {
-		node1   map[string]any
-		node2   map[string]any
-		batches [][2][]any
-	})
+	// pairDiffWork collects, per node pair, the pkey ranges to row-compare plus
+	// the mismatched leaf positions and open pools, so blocks that turn out to
+	// hold no row differences (stale hashes) can be refreshed afterwards.
+	type pairDiffWork struct {
+		node1     map[string]any
+		node2     map[string]any
+		batches   [][2][]any
+		positions []int64
+		pool1     *pgxpool.Pool
+		pool2     *pgxpool.Pool
+	}
+	allNodePairBatches := make(map[string]*pairDiffWork)
 
 	m.StartTime = time.Now()
 	// Resolve the differing-row cap from the mtree config when the caller left
@@ -2168,6 +2196,7 @@ func (m *MerkleTreeTask) DiffMtree() (err error) {
 	}
 	m.diffRowCounts = make(map[string]int64)
 	m.diffLimitWarned = false
+	m.pairCompareErrs = make(map[string]bool)
 	m.DiffResult = types.DiffOutput{
 		NodeDiffs: make(map[string]types.DiffByNodePair),
 		Summary: types.DiffSummary{
@@ -2248,14 +2277,11 @@ func (m *MerkleTreeTask) DiffMtree() (err error) {
 		nodePairKey := fmt.Sprintf("%s/%s", node1["Name"], node2["Name"])
 		entry, exists := allNodePairBatches[nodePairKey]
 		if !exists {
-			entry = struct {
-				node1   map[string]any
-				node2   map[string]any
-				batches [][2][]any
-			}{node1: node1, node2: node2, batches: [][2][]any{}}
+			entry = &pairDiffWork{node1: node1, node2: node2, pool1: pool1, pool2: pool2}
+			allNodePairBatches[nodePairKey] = entry
 		}
 		entry.batches = append(entry.batches, batches...)
-		allNodePairBatches[nodePairKey] = entry
+		entry.positions = append(entry.positions, positions...)
 
 	}
 
@@ -2274,6 +2300,59 @@ func (m *MerkleTreeTask) DiffMtree() (err error) {
 
 	if len(workItems) > 0 {
 		m.CompareRanges(workItems)
+
+		// Mismatched blocks whose row comparison found no differences had stale
+		// tree hashes, not data divergence (typically rows applied by
+		// replication that a past drain missed). Say so -- a bare "Found N
+		// mismatched blocks" followed by "TABLES MATCH" reads as a
+		// contradiction -- and rehash those leaves from live data so the
+		// phantom mismatch does not recur on every subsequent diff. A zero diff
+		// count only proves staleness when every work item for the pair was
+		// actually compared and no row filter narrowed the comparison, so pairs
+		// with lost work items -- and any run under --until, whose comparison
+		// deliberately excludes rows past the cutoff -- are left alone.
+		for pairKey, entry := range allNodePairBatches {
+			if len(entry.positions) == 0 || m.DiffResult.Summary.DiffRowsCount[pairKey] > 0 {
+				continue
+			}
+			if m.pairCompareErrs[pairKey] {
+				logger.Warn("comparison between %s and %s was incomplete (worker errors); "+
+					"skipping stale-block refresh -- re-run the diff",
+					entry.node1["Name"], entry.node2["Name"])
+				continue
+			}
+			if m.untilTime != nil {
+				continue
+			}
+			logger.Info("The mismatched block(s) between %s and %s contained no row differences; "+
+				"the tree hashes were stale. Refreshing them from live data",
+				entry.node1["Name"], entry.node2["Name"])
+			healed := true
+			for _, side := range []struct {
+				pool *pgxpool.Pool
+				name any
+			}{{entry.pool1, entry.node1["Name"]}, {entry.pool2, entry.node2["Name"]}} {
+				if err := m.refreshStaleLeaves(side.pool, entry.positions); err != nil {
+					healed = false
+					logger.Warn("failed to refresh stale blocks on %s (the diff result is unaffected; "+
+						"the mismatch may reappear on the next diff): %v", side.name, err)
+				}
+			}
+			if healed {
+				if m.DiffResult.Summary.StaleBlocksRefreshed == nil {
+					m.DiffResult.Summary.StaleBlocksRefreshed = make(map[string]int)
+				}
+				m.DiffResult.Summary.StaleBlocksRefreshed[pairKey] = len(entry.positions)
+				r1, err1 := queries.GetRootNode(m.Ctx, entry.pool1, mtreeTableName)
+				r2, err2 := queries.GetRootNode(m.Ctx, entry.pool2, mtreeTableName)
+				if err1 == nil && err2 == nil && r1 != nil && r2 != nil && !bytes.Equal(r1.NodeHash, r2.NodeHash) {
+					logger.Warn("trees between %s and %s still differ after refreshing stale blocks; "+
+						"their leaf ranges have likely diverged -- run 'ace mtree build' to realign them",
+						entry.node1["Name"], entry.node2["Name"])
+				}
+			}
+		}
+
 		endTime := time.Now()
 		m.DiffResult.Summary.EndTime = endTime.Format(time.RFC3339)
 		m.DiffResult.Summary.TimeTaken = endTime.Sub(m.StartTime).String()
@@ -2297,6 +2376,71 @@ func (m *MerkleTreeTask) DiffMtree() (err error) {
 	}
 
 	return nil
+}
+
+// refreshStaleLeaves rehashes exactly the given leaf blocks from live table
+// data and rebuilds the parent chain, in one transaction on one node. Used
+// when a diff resolves a leaf-hash mismatch as a false positive: the data
+// matches, so only the stored hash is behind, and without a refresh the
+// phantom mismatch would recur on every diff until a full rebuild. Blocks
+// dirtied concurrently by CDC keep their dirty state and counters for the
+// next update.
+func (m *MerkleTreeTask) refreshStaleLeaves(pool *pgxpool.Pool, positions []int64) error { //nolint:gocyclo // linear mark->rehash->rebuild->clear pipeline; the count is per-step error returns, not branching logic
+	mtreeTableIdentifier := pgx.Identifier{m.aceSchema(), fmt.Sprintf("ace_mtree_%s_%s", m.Schema, m.Table)}
+	mtreeTableName := mtreeTableIdentifier.Sanitize()
+
+	tx, err := pool.Begin(m.Ctx)
+	if err != nil {
+		return fmt.Errorf("failed to begin transaction: %w", err)
+	}
+	defer tx.Rollback(m.Ctx)
+
+	if err := queries.MarkLeavesDirtyByPositions(m.Ctx, tx, mtreeTableName, positions); err != nil {
+		return err
+	}
+	// Reuse the update pipeline: fetch the (now dirty) block ranges, rehash
+	// them from the live table, rebuild parents, clear the flags -- but only
+	// for the requested positions. GetDirtyAndNewBlocks also returns blocks a
+	// concurrent CDC consumer dirtied; rehash-and-clear on those would zero
+	// their counters without split evaluation and could clear a dirty flag for
+	// a change committed after the hash read. Leaving them dirty hands them to
+	// the next update, which owns that logic.
+	blocks, err := queries.GetDirtyAndNewBlocks(m.Ctx, tx, mtreeTableName, m.SimplePrimaryKey, m.Key)
+	if err != nil {
+		return err
+	}
+	requested := make(map[int64]struct{}, len(positions))
+	for _, p := range positions {
+		requested[p] = struct{}{}
+	}
+	kept := blocks[:0]
+	for _, b := range blocks {
+		if _, ok := requested[b.NodePosition]; ok {
+			kept = append(kept, b)
+		}
+	}
+	blocks = kept
+	if len(blocks) == 0 {
+		return tx.Commit(m.Ctx)
+	}
+	numWorkers := int(float64(runtime.NumCPU()) * m.MaxCpuRatio)
+	if numWorkers < 1 {
+		numWorkers = 1
+	}
+	if err := m.computeLeafHashes(pool, tx, blocks, numWorkers, "Refreshing stale blocks:"); err != nil {
+		return err
+	}
+	if err := m.buildParentNodes(tx); err != nil {
+		return err
+	}
+	affected := make([]int64, 0, len(blocks))
+	for _, b := range blocks {
+		affected = append(affected, b.NodePosition)
+	}
+	if err := queries.ClearDirtyFlags(m.Ctx, tx, mtreeTableName, affected); err != nil {
+		return err
+	}
+	return tx.Commit(m.Ctx)
 }
 
 func (m *MerkleTreeTask) findMismatchedLeaves(pool1, pool2 *pgxpool.Pool, parentLevel int, parentPosition int64) (map[int64]bool, error) {
