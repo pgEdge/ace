@@ -584,10 +584,10 @@ func (m *MerkleTreeTask) pairCapReached(pairKey string) bool {
 }
 
 // recordPairRowLocked accounts for one collected differing row-pair. The caller
-// must hold diffMutex. It does not flag truncation: reaching MaxDiffRows on an
-// accepted row does not mean anything was dropped (the pair may have exactly
-// MaxDiffRows diffs). Truncation is flagged only when a further row is actually
-// refused, via notePairLimitReachedLocked at the stop checks.
+// must hold diffMutex. Reaching MaxDiffRows flags the report truncated, matching
+// table-diff: the cap is a report-size bound, so once a pair holds max_diff_rows
+// rows we treat any further divergence as possible-but-unenumerated ("additional
+// differences may exist"), even when this pair happens to hold exactly the cap.
 func (m *MerkleTreeTask) recordPairRowLocked(pairKey string) {
 	if m.MaxDiffRows <= 0 {
 		return
@@ -596,11 +596,14 @@ func (m *MerkleTreeTask) recordPairRowLocked(pairKey string) {
 		m.diffRowCounts = make(map[string]int64)
 	}
 	m.diffRowCounts[pairKey]++
+	if m.diffRowCounts[pairKey] >= m.MaxDiffRows {
+		m.notePairLimitReachedLocked(pairKey)
+	}
 }
 
 // notePairLimitReachedLocked marks the report truncated and warns once. Call it
-// only when a differing row is actually being dropped because the pair is
-// already at MaxDiffRows. The caller must hold diffMutex.
+// when the pair has reached MaxDiffRows, whether on the row that fills the cap
+// or on a later row being dropped. The caller must hold diffMutex.
 func (m *MerkleTreeTask) notePairLimitReachedLocked(pairKey string) {
 	m.DiffResult.Summary.DiffRowLimitReached = true
 	if !m.diffLimitWarned {
@@ -642,9 +645,9 @@ func (m *MerkleTreeTask) appendDiffs(nodePairKey string, work CompareRangesWorkI
 		m.DiffResult.NodeDiffs[nodePairKey].Rows[node2Name] = []types.OrderedMap{}
 	}
 
-	// Each loop stops (and flags truncation) at its top check the moment it is
-	// asked to record a row while the pair is already full, so hitting the cap
-	// on the last accepted row does not spuriously mark the report truncated.
+	// Each loop stops at its top check the moment it is asked to record a row
+	// while the pair is already full; recordPairRowLocked flags truncation as
+	// soon as a pair reaches the cap, matching table-diff.
 	var currentDiffRowsForPair int
 
 	for _, row := range diffResult.Node1OnlyRows {
@@ -2278,6 +2281,9 @@ func (m *MerkleTreeTask) DiffMtree() (err error) {
 		m.DiffResult.Summary.EndTime = endTime.Format(time.RFC3339)
 		m.DiffResult.Summary.TimeTaken = endTime.Sub(m.StartTime).String()
 		m.DiffResult.Summary.PrimaryKey = m.Key
+		if m.DiffResult.Summary.DiffRowLimitReached {
+			logger.Warn("mtree table-diff stopped after reaching max_diff_rows=%d; additional differences may exist", m.MaxDiffRows)
+		}
 		if diffPath, _, writeErr := utils.WriteDiffReport(m.DiffResult, m.Schema, m.Table, m.Output); writeErr != nil {
 			return writeErr
 		} else if diffPath != "" {
