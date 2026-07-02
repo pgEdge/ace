@@ -31,9 +31,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/jackc/pgtype"
 	"github.com/jackc/pgx/v5"
-	pgxv5type "github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/pgedge/ace/db/queries"
 	auth "github.com/pgedge/ace/internal/infra/db"
@@ -631,124 +629,7 @@ func (t *TableDiffTask) fetchRows(nodeName string, r Range) ([]types.OrderedMap,
 
 		rowData := make(types.OrderedMap, len(colsDesc))
 		for i, colD := range colsDesc {
-			val := rowValues[i]
-			var processedVal any
-			if val == nil {
-				processedVal = nil
-			} else {
-				switch v := val.(type) {
-				case pgtype.Numeric:
-					if v.Status == pgtype.Present {
-						text, err := v.EncodeText(nil, nil)
-						if err == nil {
-							processedVal = utils.NormalizeNumericString(string(text))
-						} else {
-							processedVal = v
-						}
-					} else {
-						processedVal = nil
-					}
-				case pgtype.Timestamp:
-					if v.Status == pgtype.Present {
-						processedVal = v.Time
-					} else {
-						processedVal = nil
-					}
-				case pgtype.Timestamptz:
-					if v.Status == pgtype.Present {
-						processedVal = v.Time
-					} else {
-						processedVal = nil
-					}
-				case pgtype.Date:
-					if v.Status == pgtype.Present {
-						processedVal = v.Time
-					} else {
-						processedVal = nil
-					}
-				case pgtype.Bytea:
-					if v.Status == pgtype.Present {
-						processedVal = v.Bytes
-					} else {
-						processedVal = nil
-					}
-				case pgtype.Interval:
-					if v.Status == pgtype.Present {
-						if encoded, err := v.EncodeText(nil, nil); err == nil {
-							processedVal = string(encoded)
-						} else {
-							processedVal = nil
-						}
-					} else {
-						processedVal = nil
-					}
-				case pgtype.UUID:
-					if v.Status == pgtype.Present {
-						processedVal = fmt.Sprintf("%x-%x-%x-%x-%x",
-							v.Bytes[0:4], v.Bytes[4:6], v.Bytes[6:8], v.Bytes[8:10], v.Bytes[10:16])
-					} else {
-						processedVal = nil
-					}
-				case [16]byte: // pgx/v5 returns UUIDs as [16]byte
-					// nil caught above
-					processedVal = fmt.Sprintf("%x-%x-%x-%x-%x",
-						v[0:4], v[4:6], v[6:8], v[8:10], v[10:16])
-				case pgxv5type.Time: // pgx/v5 returns "time without time zone" as pgtype.Time
-					if v.Valid {
-						usec := v.Microseconds
-						hours := usec / 3_600_000_000
-						usec -= hours * 3_600_000_000
-						minutes := usec / 60_000_000
-						usec -= minutes * 60_000_000
-						seconds := usec / 1_000_000
-						usec -= seconds * 1_000_000
-						processedVal = fmt.Sprintf("%02d:%02d:%02d.%06d", hours, minutes, seconds, usec)
-					} else {
-						processedVal = nil
-					}
-				case time.Time:
-					processedVal = v
-				case string:
-					processedVal = v
-				case int8, int16, int32, int64, int,
-					uint8, uint16, uint32, uint64, uint,
-					float32, float64, bool:
-					processedVal = v
-				case pgtype.JSON, pgtype.JSONB:
-					if v.(interface{ GetStatus() pgtype.Status }).GetStatus() != pgtype.Present {
-						processedVal = nil
-					} else {
-						var dataHolder any
-						if assignable, ok := v.(interface{ AssignTo(dst any) error }); ok {
-							err := assignable.AssignTo(&dataHolder)
-							if err == nil {
-								if marshalled, mErr := json.Marshal(dataHolder); mErr == nil {
-									processedVal = string(marshalled)
-								} else {
-									processedVal = fmt.Sprint(dataHolder)
-								}
-							} else {
-								processedVal = nil
-							}
-						} else {
-							processedVal = nil
-						}
-					}
-				default:
-					if marshaler, ok := val.(json.Marshaler); ok {
-						if marshalled, err := marshaler.MarshalJSON(); err == nil {
-							processedVal = string(marshalled)
-						} else {
-							processedVal = fmt.Sprint(val)
-						}
-					} else if stringer, ok := val.(fmt.Stringer); ok {
-						processedVal = stringer.String()
-					} else {
-						processedVal = fmt.Sprint(val)
-					}
-				}
-			}
-			rowData[i] = types.KVPair{Key: string(colD.Name), Value: processedVal}
+			rowData[i] = types.KVPair{Key: string(colD.Name), Value: utils.NormalizeScannedValue(rowValues[i])}
 		}
 		results = append(results, rowData)
 	}

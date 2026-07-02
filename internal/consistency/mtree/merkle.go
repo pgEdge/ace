@@ -865,7 +865,10 @@ func processRows(rows pgx.Rows) ([]types.OrderedMap, error) {
 		}
 		rowMap := make(types.OrderedMap, len(fields))
 		for i, field := range fields {
-			rowMap[i] = types.KVPair{Key: string(field.Name), Value: values[i]}
+			// Normalise driver structs (pgtype.Time, [16]byte UUIDs, ...) to
+			// the canonical diff-report representation; raw pgx values would
+			// serialise as JSON objects that table-repair cannot convert back.
+			rowMap[i] = types.KVPair{Key: string(field.Name), Value: utils.NormalizeScannedValue(values[i])}
 		}
 		results = append(results, rowMap)
 	}

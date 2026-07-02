@@ -4,9 +4,11 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/jackc/pgtype"
 	pgxv5type "github.com/jackc/pgx/v5/pgtype"
 	"github.com/pgedge/ace/pkg/types"
 	"github.com/stretchr/testify/require"
@@ -59,6 +61,113 @@ func TestConvertToPgxType_FallbackStringer(t *testing.T) {
 	val, err := ConvertToPgxType(customStringer{v: "x"}, "unknown_type")
 	require.NoError(t, err)
 	require.Equal(t, "stringer:x", val)
+}
+
+// A time value round-trips through the diff report as HH:MM:SS, so repair can
+// convert it back into a typed parameter.
+func TestNormalizeScannedValue_Time(t *testing.T) {
+	// 16:11:49 = 58309 s since midnight
+	val := NormalizeScannedValue(pgxv5type.Time{Microseconds: 58_309_000_000, Valid: true})
+	require.Equal(t, "16:11:49.000000", val)
+	require.Nil(t, NormalizeScannedValue(pgxv5type.Time{Valid: false}))
+
+	converted, err := ConvertToPgxType(val, "time without time zone")
+	require.NoError(t, err)
+	require.Equal(t, pgxv5type.Time{Microseconds: 58_309_000_000, Valid: true}, converted)
+}
+
+// A pgx v5 UUID ([16]byte) becomes the canonical string form, not a JSON array.
+func TestNormalizeScannedValue_UUID(t *testing.T) {
+	raw := [16]byte{0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde, 0xf0, 0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde, 0xf0}
+	require.Equal(t, "12345678-9abc-def0-1234-56789abcdef0", NormalizeScannedValue(raw))
+}
+
+// Plain values and nil pass through unchanged.
+func TestNormalizeScannedValue_Passthrough(t *testing.T) {
+	require.Nil(t, NormalizeScannedValue(nil))
+	require.Equal(t, "abc", NormalizeScannedValue("abc"))
+	require.Equal(t, int64(42), NormalizeScannedValue(int64(42)))
+	ts := time.Date(2026, 7, 1, 10, 0, 0, 0, time.UTC)
+	require.Equal(t, ts, NormalizeScannedValue(ts))
+}
+
+// A pgx v5 interval struct becomes its Postgres text form.
+func TestNormalizeScannedValue_Interval(t *testing.T) {
+	val := NormalizeScannedValue(pgxv5type.Interval{Days: 1, Microseconds: 7_384_000_000, Valid: true})
+	s, ok := val.(string)
+	require.True(t, ok, "interval should normalise to a string, got %T", val)
+	require.Contains(t, s, "1 day")
+	require.Nil(t, NormalizeScannedValue(pgxv5type.Interval{Valid: false}))
+}
+
+// Diff files written before values were normalised carry the raw pgx struct
+// form for time; repair still accepts it.
+func TestConvertToPgxType_TimeLegacyMapForm(t *testing.T) {
+	val, err := ConvertToPgxType(map[string]any{"Microseconds": float64(9_316_000_000), "Valid": true}, "time without time zone")
+	require.NoError(t, err)
+	require.Equal(t, pgxv5type.Time{Microseconds: 9_316_000_000, Valid: true}, val)
+
+	val, err = ConvertToPgxType(map[string]any{"Microseconds": json.Number("9316000000"), "Valid": true}, "time")
+	require.NoError(t, err)
+	require.Equal(t, pgxv5type.Time{Microseconds: 9_316_000_000, Valid: true}, val)
+
+	val, err = ConvertToPgxType(map[string]any{"Microseconds": float64(0), "Valid": false}, "time")
+	require.NoError(t, err)
+	require.Nil(t, val)
+}
+
+// Money strings pass through as-is for Postgres to parse, without warnings.
+func TestConvertToPgxType_Money(t *testing.T) {
+	val, err := ConvertToPgxType("$532.96", "money")
+	require.NoError(t, err)
+	require.Equal(t, "$532.96", val)
+}
+
+// Concurrent normalisation is race-free (a pgtype.Map must not be shared
+// across goroutines; run with -race).
+func TestNormalizeScannedValue_ConcurrentInterval(t *testing.T) {
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 100; j++ {
+				_ = NormalizeScannedValue(pgxv5type.Interval{Days: 2, Microseconds: 3_600_000_000, Valid: true})
+			}
+		}()
+	}
+	wg.Wait()
+}
+
+// Infinite timestamps and dates survive as their Postgres text form instead of
+// collapsing to a zero time.
+func TestNormalizeScannedValue_Infinity(t *testing.T) {
+	require.Equal(t, "infinity", NormalizeScannedValue(pgtype.Timestamp{Status: pgtype.Present, InfinityModifier: pgtype.Infinity}))
+	require.Equal(t, "-infinity", NormalizeScannedValue(pgtype.Timestamptz{Status: pgtype.Present, InfinityModifier: pgtype.NegativeInfinity}))
+	require.Equal(t, "-infinity", NormalizeScannedValue(pgtype.Date{Status: pgtype.Present, InfinityModifier: pgtype.NegativeInfinity}))
+}
+
+// Raw bytea payloads pass through untouched (JSON base64) instead of being
+// stringified into an unrepairable "[104 101 ...]" form.
+func TestNormalizeScannedValue_ByteaPassthrough(t *testing.T) {
+	b := []byte{0x00, 0xff, 0x10, 0x7f}
+	val := NormalizeScannedValue(b)
+	require.Equal(t, b, val)
+
+	// The full report round-trip: JSON-encode, decode, convert for repair.
+	encoded, err := json.Marshal(val)
+	require.NoError(t, err)
+	var decoded string
+	require.NoError(t, json.Unmarshal(encoded, &decoded))
+	converted, err := ConvertToPgxType(decoded, "bytea")
+	require.NoError(t, err)
+	require.Equal(t, b, converted)
+}
+
+// pgtype v1 JSON values normalise to their raw text without panicking.
+func TestNormalizeScannedValue_JSONv1(t *testing.T) {
+	require.Equal(t, `{"a":1}`, NormalizeScannedValue(pgtype.JSON{Bytes: []byte(`{"a":1}`), Status: pgtype.Present}))
+	require.Nil(t, NormalizeScannedValue(pgtype.JSONB{Status: pgtype.Null}))
 }
 
 func TestNormalizeNumericString(t *testing.T) {
