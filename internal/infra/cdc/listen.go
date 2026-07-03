@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/jackc/pglogrepl"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgproto3"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -209,6 +210,35 @@ func processReplicationStream(ctx context.Context, nodeInfo map[string]any, cont
 	if cfg.CDCFlushBatchSize > 0 {
 		flushBatchSize = cfg.CDCFlushBatchSize
 	}
+	// Adaptive drain (bounded mode only): once a table's decoded UPDATE count
+	// crosses max(adaptive_drain_min_changes, adaptive_drain_fraction * rows),
+	// per-update dirty-marking for it is replaced by one MarkAllLeavesDirty +
+	// bulk rehash on the next tree update. Inserts/deletes are exempt: their
+	// per-block counters drive split/merge maintenance, so they are always
+	// tracked individually. Measured crossover: per-PK applies cost
+	// ~60us/change while a full-tree rehash costs ~a tree build, so the
+	// break-even sits near 1% of table rows. Escalation can only over-mark
+	// dirty blocks (leaf hashes are recomputed from live data), never miss a
+	// change. A negative fraction disables escalation.
+	var esc *escalator
+	if !continuous && cfg.AdaptiveDrainFraction >= 0 {
+		fraction := cfg.AdaptiveDrainFraction
+		if fraction == 0 {
+			fraction = 0.01
+		}
+		minChanges := int64(cfg.AdaptiveDrainMinChanges)
+		if minChanges <= 0 {
+			minChanges = 1000
+		}
+		esc = newEscalator(minChanges, fraction, func(schema, table string) int64 {
+			rows, err := queries.GetRowCountEstimateFromMetadata(ctx, pool, schema, table)
+			if err != nil {
+				logger.Warn("adaptive drain: no row estimate for %s.%s (using min-changes floor): %v", schema, table, err)
+				return 0
+			}
+			return rows
+		})
+	}
 	lastFlushTime := time.Now()
 	var conn *pgconn.PgConn
 
@@ -268,6 +298,58 @@ func processReplicationStream(ctx context.Context, nodeInfo map[string]any, cont
 	// standby update may confirm past the commit -- permanently skipping the
 	// transaction and leaving the Merkle tree stale.
 	inTx := false
+
+	// bufferChange records one decoded change for the bounded drain.
+	// Escalation applies to UPDATEs ONLY: an update never changes a row's
+	// block membership, so mark-all-dirty fully covers its effect on leaf
+	// hashes, and skipping its per-PK tracking is pure savings. INSERTs and
+	// DELETEs are always tracked per-PK regardless of escalation -- their
+	// per-block counters drive block split/merge maintenance, and discarding
+	// them would leave the tree structurally unbalanced until a full rebuild
+	// (regression: the MerkleTree Split* suites fail if inserts are dropped).
+	// Returns a terminal error only if the escalation's mark-all-dirty write
+	// fails: proceeding without either per-PK marks or the bulk mark would
+	// silently miss divergence.
+	bufferChange := func(op string, rel *pglogrepl.RelationMessage, tup *pglogrepl.TupleData) error {
+		if esc != nil && op == "UPDATE" {
+			if esc.isEscalated(rel.Namespace, rel.RelationName) {
+				return nil
+			}
+			if esc.noteChange(rel.Namespace, rel.RelationName) {
+				// Keepalive before the blocking write, like the sub-batch
+				// flush below, so a slow mark-all cannot trip wal_sender_timeout.
+				if conn != nil {
+					if err := pglogrepl.SendStandbyStatusUpdate(ctx, conn, pglogrepl.StandbyStatusUpdate{WALWritePosition: lastLSN}); err != nil {
+						logger.Warn("standby status update before adaptive-drain escalation failed: %v", err)
+					} else {
+						nextStandbyMessageDeadline = time.Now().Add(10 * time.Second)
+					}
+				}
+				// Sanitized: the mtree table is created quoted/case-preserved.
+				mtreeTable := pgx.Identifier{mtreeSchema, fmt.Sprintf("ace_mtree_%s_%s", rel.Namespace, rel.RelationName)}.Sanitize()
+				// processingCtx so the write survives the drain deadline,
+				// like every other apply here.
+				marked, err := queries.MarkAllLeavesDirty(processingCtx, pool, mtreeTable)
+				if err != nil {
+					return fmt.Errorf("adaptive drain: failed to mark all leaves dirty for %s: %w", mtreeTable, err)
+				}
+				esc.markEscalated(rel.Namespace, rel.RelationName)
+				purgeTableChanges(txChanges, rel.Namespace, rel.RelationName)
+				logger.Info("adaptive drain: %s.%s crossed %d buffered UPDATE changes; marked all %d blocks dirty and skipping its per-update tracking for the rest of this drain (inserts/deletes still tracked for block splits/merges)",
+					rel.Namespace, rel.RelationName, esc.threshold(rel.Namespace, rel.RelationName), marked)
+				return nil
+			}
+		}
+		txChanges[currentXID] = append(txChanges[currentXID], cdcMsg{
+			operation: op,
+			schema:    rel.Namespace,
+			table:     rel.RelationName,
+			relation:  rel,
+			pks:       getPKs(rel, tup),
+		})
+		return nil
+	}
+
 	var wg sync.WaitGroup
 	errCh := make(chan error, 1)
 	stopStreaming := false
@@ -548,31 +630,22 @@ func processReplicationStream(ctx context.Context, nodeInfo map[string]any, cont
 					relations[logicalMsg.RelationID] = logicalMsg
 				case *pglogrepl.InsertMessage:
 					rel := relations[logicalMsg.RelationID]
-					txChanges[currentXID] = append(txChanges[currentXID], cdcMsg{
-						operation: "INSERT",
-						schema:    rel.Namespace,
-						table:     rel.RelationName,
-						relation:  rel,
-						pks:       getPKs(rel, logicalMsg.Tuple),
-					})
+					if err := bufferChange("INSERT", rel, logicalMsg.Tuple); err != nil {
+						processingErr = err
+						stopStreaming = true
+					}
 				case *pglogrepl.UpdateMessage:
 					rel := relations[logicalMsg.RelationID]
-					txChanges[currentXID] = append(txChanges[currentXID], cdcMsg{
-						operation: "UPDATE",
-						schema:    rel.Namespace,
-						table:     rel.RelationName,
-						relation:  rel,
-						pks:       getPKs(rel, logicalMsg.NewTuple),
-					})
+					if err := bufferChange("UPDATE", rel, logicalMsg.NewTuple); err != nil {
+						processingErr = err
+						stopStreaming = true
+					}
 				case *pglogrepl.DeleteMessage:
 					rel := relations[logicalMsg.RelationID]
-					txChanges[currentXID] = append(txChanges[currentXID], cdcMsg{
-						operation: "DELETE",
-						schema:    rel.Namespace,
-						table:     rel.RelationName,
-						relation:  rel,
-						pks:       getPKs(rel, logicalMsg.OldTuple),
-					})
+					if err := bufferChange("DELETE", rel, logicalMsg.OldTuple); err != nil {
+						processingErr = err
+						stopStreaming = true
+					}
 				}
 
 				// Flush sub-batches of the in-flight transaction so memory stays

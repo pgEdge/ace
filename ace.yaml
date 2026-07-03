@@ -37,6 +37,13 @@ mtree:
     cdc_processing_timeout: 300
     cdc_metadata_flush_seconds: 10
     cdc_flush_batch_size: 10000
+    # Escalate a table to a whole-tree rehash when a bounded drain sees more
+    # than max(adaptive_drain_min_changes, adaptive_drain_fraction * rows)
+    # UPDATE changes for it (inserts/deletes are always tracked individually,
+    # preserving block split/merge maintenance). Set adaptive_drain_fraction
+    # to -1 to disable.
+    adaptive_drain_fraction: 0.01
+    adaptive_drain_min_changes: 1000
   schema: "pgedge_ace"
 
   diff:
