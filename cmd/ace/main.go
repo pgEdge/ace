@@ -78,7 +78,8 @@ func shouldSkipConfig(args []string) bool {
 	}
 
 	for _, arg := range args {
-		if arg == "--help" || arg == "-h" || arg == "help" {
+		if arg == "--help" || arg == "-h" || arg == "help" ||
+			arg == "--version" || arg == "-V" {
 			return true
 		}
 	}
