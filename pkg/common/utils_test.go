@@ -123,6 +123,34 @@ func TestConvertToPgxType_Money(t *testing.T) {
 	require.Equal(t, "$532.96", val)
 }
 
+// Complex and unknown types are fetched as ::TEXT so their Postgres text form
+// round-trips through the diff report; known scalars stay native.
+func TestSelectColExpr(t *testing.T) {
+	tests := []struct {
+		colType string
+		want    string
+	}{
+		{"integer", `"c"`},
+		{"timestamp without time zone", `"c"`},
+		{"uuid", `"c"`},
+		{"integer[]", `"c"::TEXT AS "c"`},
+		{"jsonb", `"c"::TEXT AS "c"`},
+		{"bytea", `"c"::TEXT AS "c"`},
+		{"point", `"c"::TEXT AS "c"`},
+		{"int4range", `"c"::TEXT AS "c"`},
+		{"mood_enum", `"c"::TEXT AS "c"`},
+		{"xml", `"c"::TEXT AS "c"`},
+		{"bit(8)", `"c"::TEXT AS "c"`},
+		{"inet", `"c"::TEXT AS "c"`},
+		{"time with time zone", `"c"::TEXT AS "c"`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.colType, func(t *testing.T) {
+			require.Equal(t, tt.want, SelectColExpr(`"c"`, tt.colType))
+		})
+	}
+}
+
 // Concurrent normalisation is race-free (a pgtype.Map must not be shared
 // across goroutines; run with -race).
 func TestNormalizeScannedValue_ConcurrentInterval(t *testing.T) {
