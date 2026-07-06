@@ -453,6 +453,18 @@ func (m *MerkleTreeTask) processWorkItem(work CompareRangesWorkItem, pool1, pool
 	// so this is not canonicalised (unlike table_diff.pairKeyFor).
 	nodePairKey := fmt.Sprintf("%s/%s", work.Node1["Name"], work.Node2["Name"])
 
+	// Build the row-fetch SELECT list with the same cast policy as the classic
+	// engine (SelectColExpr): complex/unknown types arrive as Postgres text
+	// instead of opaque driver structs, so the diff report stays repairable.
+	refTypes := m.ColTypes["_ref"]
+	colExprs := make([]string, 0, len(m.Cols))
+	for _, c := range m.Cols {
+		colExprs = append(colExprs, utils.SelectColExpr(pgx.Identifier{c}.Sanitize(), refTypes[c]))
+	}
+	selectCols := "pg_xact_commit_timestamp(xmin) as commit_ts, " +
+		"to_json(pg_xact_commit_timestamp_origin(xmin))->>'roident' as node_origin, " +
+		strings.Join(colExprs, ", ")
+
 	if isComposite {
 		for i := 0; i < len(mismatchedComposite); i += fetchBatchSize {
 			if m.pairCapReached(nodePairKey) {
@@ -466,7 +478,7 @@ func (m *MerkleTreeTask) processWorkItem(work CompareRangesWorkItem, pool1, pool
 			}
 			batch := mismatchedComposite[i:end]
 
-			q, qArgs := buildFetchRowsSQLComposite(m.Schema, m.Table, m.Key, orderByStr, batch)
+			q, qArgs := buildFetchRowsSQLComposite(m.Schema, m.Table, m.Key, selectCols, orderByStr, batch)
 
 			r1, err := pool1.Query(m.Ctx, q, qArgs...) // nosemgrep
 			if err != nil {
@@ -503,7 +515,7 @@ func (m *MerkleTreeTask) processWorkItem(work CompareRangesWorkItem, pool1, pool
 			}
 			batch := mismatchedSimple[i:end]
 
-			q, qArgs := buildFetchRowsSQLSimple(m.Schema, m.Table, m.Key[0], orderByStr, batch)
+			q, qArgs := buildFetchRowsSQLSimple(m.Schema, m.Table, m.Key[0], selectCols, orderByStr, batch)
 
 			r1, err := pool1.Query(m.Ctx, q, qArgs...) // nosemgrep
 			if err != nil {
@@ -816,7 +828,7 @@ func splitCompositeKey(k string) []any {
 	return res
 }
 
-func buildFetchRowsSQLSimple(schema, table, pk string, orderBy string, keys []any) (string, []any) {
+func buildFetchRowsSQLSimple(schema, table, pk, selectCols, orderBy string, keys []any) (string, []any) {
 	placeholders := make([]string, len(keys))
 	args := make([]any, len(keys))
 	for i := range keys {
@@ -825,12 +837,11 @@ func buildFetchRowsSQLSimple(schema, table, pk string, orderBy string, keys []an
 	}
 	qualifiedTable := fmt.Sprintf("%s.%s", pgx.Identifier{schema}.Sanitize(), pgx.Identifier{table}.Sanitize())
 	where := fmt.Sprintf("%s IN (%s)", pgx.Identifier{pk}.Sanitize(), strings.Join(placeholders, ","))
-	selectCols := "pg_xact_commit_timestamp(xmin) as commit_ts, to_json(pg_xact_commit_timestamp_origin(xmin))->>'roident' as node_origin, *"
 	q := fmt.Sprintf("SELECT %s FROM %s WHERE %s ORDER BY %s", selectCols, qualifiedTable, where, orderBy)
 	return q, args
 }
 
-func buildFetchRowsSQLComposite(schema, table string, pk []string, orderBy string, keys [][]any) (string, []any) {
+func buildFetchRowsSQLComposite(schema, table string, pk []string, selectCols, orderBy string, keys [][]any) (string, []any) {
 	tupleCols := make([]string, len(pk))
 	for i, k := range pk {
 		tupleCols[i] = pgx.Identifier{k}.Sanitize()
@@ -849,7 +860,6 @@ func buildFetchRowsSQLComposite(schema, table string, pk []string, orderBy strin
 	}
 	qualifiedTable := fmt.Sprintf("%s.%s", pgx.Identifier{schema}.Sanitize(), pgx.Identifier{table}.Sanitize())
 	where := fmt.Sprintf("( %s ) IN ( %s )", strings.Join(tupleCols, ","), strings.Join(tuples, ","))
-	selectCols := "pg_xact_commit_timestamp(xmin) as commit_ts, to_json(pg_xact_commit_timestamp_origin(xmin))->>'roident' as node_origin, *"
 	q := fmt.Sprintf("SELECT %s FROM %s WHERE %s ORDER BY %s", selectCols, qualifiedTable, where, orderBy)
 	return q, args
 }

@@ -807,9 +807,13 @@ func ConvertToPgxType(val any, pgType string) (any, error) {
 		return nil, fmt.Errorf("expected UUID string for %s, got %T", pgType, val)
 
 	default:
-		// For all other types, fall back to string representations to keep repairs viable.
+		// String pass-through is the designed path for every type without a
+		// case above: the diff engines fetch such columns as ::TEXT, and
+		// Postgres parses its own text form on input (geometric, network,
+		// range, enum, xml, ...). Only non-string values indicate a value that
+		// bypassed that normalisation and deserve a warning.
 		if s, ok := val.(string); ok {
-			log.Printf("Warning: Passing raw string value '%s' for unknown or complex pgType '%s'", s, pgType)
+			logger.Debug("passing text value through for pgType %s", pgType)
 			return s, nil
 		}
 		if stringer, ok := val.(fmt.Stringer); ok {
@@ -988,6 +992,24 @@ func SafeCut(s string, n int) string {
 		return s
 	}
 	return s[:n]
+}
+
+// SelectColExpr returns the SELECT-list expression for one column of a diff
+// row fetch: the quoted name for known scalar types the driver scans
+// losslessly, or a ::TEXT cast (aliased back to the column name) for arrays,
+// json, bytea and any type the driver would surface as an opaque Go struct
+// (geometric, network, range, enum, xml, ...). Postgres parses its own text
+// form on repair, so text values round-trip for every type without per-type
+// conversion code. Both diff engines must build their row-fetch SELECTs with
+// it so reports stay engine-independent and repairable.
+func SelectColExpr(quotedCol, colType string) string {
+	if strings.HasSuffix(colType, "[]") ||
+		strings.Contains(strings.ToLower(colType), "json") ||
+		strings.Contains(strings.ToLower(colType), "bytea") ||
+		!IsKnownScalarType(colType) {
+		return fmt.Sprintf("%s::TEXT AS %s", quotedCol, quotedCol)
+	}
+	return quotedCol
 }
 
 func IsKnownScalarType(colType string) bool {
