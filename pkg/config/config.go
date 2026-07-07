@@ -64,6 +64,16 @@ type MTreeConfig struct {
 		CDCProcessingTimeout int    `yaml:"cdc_processing_timeout"`
 		CDCMetadataFlushSec  int    `yaml:"cdc_metadata_flush_seconds"`
 		CDCFlushBatchSize    int    `yaml:"cdc_flush_batch_size"`
+		// AdaptiveDrainFraction and AdaptiveDrainMinChanges tune when a
+		// bounded CDC drain escalates a flooded table's UPDATE tracking from
+		// per-change dirty-marking to one mark-all-dirty + bulk rehash
+		// (inserts/deletes are always tracked per-change: their per-block
+		// counters drive block split/merge maintenance). Threshold per
+		// table = max(min_changes, fraction * table_row_estimate), counting
+		// UPDATEs only. 0 means "use default" (0.01 / 1000); a negative
+		// fraction disables escalation entirely.
+		AdaptiveDrainFraction   float64 `yaml:"adaptive_drain_fraction"`
+		AdaptiveDrainMinChanges int     `yaml:"adaptive_drain_min_changes"`
 	} `yaml:"cdc"`
 	Schema string `yaml:"schema"`
 	Diff   struct {

@@ -60,6 +60,17 @@ divergence can be under-reported. For a diff that is guaranteed current to the
 present moment, ensure no `mtree listen` or other mtree operation is holding the
 node's slot, then re-run so the diff can perform its own bounded CDC drain.
 
+Because the replication slot is shared, the bounded CDC drain that runs before a
+diff or update processes the pending changes for **all** Merkle-tracked tables on
+that node, not just the table named on the command line. For the other tables this
+only records which of their tree blocks are now stale (marks them dirty); it never
+recomputes their hashes. Each table's dirty blocks are rehashed when that table is
+next the target of an `mtree table-diff`, `mtree update`, or `mtree listen` apply,
+so a table-diff on one table may slightly speed up — never slow down or alter —
+a later diff of another table.
+
+When a single bounded drain encounters a very large number of row updates for one table (by default more than ~1% of its rows), ACE marks that table's whole Merkle tree dirty instead of tracking each update individually, and the next tree update for that table recomputes its leaf hashes in bulk — much faster for heavily-updated tables, with no effect on diff correctness (inserts and deletes are always tracked individually, so block structure maintenance is unaffected). This applies to any tracked table whose updates appear in the drained stream, including tables other than the one being diffed. Keeping `mtree listen` running still gives the best interactive `table-diff` latency, since the tree is then maintained continuously.
+
 ### Building Merkle Trees in Parallel (for Very Large Tables)
 
 If a table is extremely large (e.g., ~1B rows or ~1 TB), remote building the Merkle tree from a single ACE node can be slowed by network latency. You can parallelize the build (per node) to speed up the process.
