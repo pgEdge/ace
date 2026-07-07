@@ -88,8 +88,8 @@ type MerkleTreeTask struct {
 	CDCTimeoutSec     int // per-invocation CDC drain budget; 0 = use config/default
 	// CDCSkippedNodes lists nodes whose CDC drain was skipped because a running `mtree listen` held the replication slot (best-effort mode).
 	CDCSkippedNodes []string
-	SkipDBUpdate      bool
-	Until             string
+	SkipDBUpdate    bool
+	Until           string
 
 	untilTime *time.Time
 
@@ -1711,6 +1711,46 @@ func (m *MerkleTreeTask) UpdateMtree(skipAllChecks bool) (err error) { //nolint:
 		}()
 	}
 
+	// Pre-flight: read the tree's block size from metadata before any CDC
+	// work. Block size is fixed at build time, so reading it first is safe —
+	// and it doubles as an existence check: a table whose tree was never
+	// built fails fast here with an actionable message instead of after a
+	// full replication-stream drain.
+	var blockSize int
+	var foundBlockSize bool
+	for _, nodeInfo := range m.ClusterNodes {
+		pool, err := auth.GetClusterNodeConnection(m.Ctx, nodeInfo, m.connOpts())
+		if err != nil {
+			return fmt.Errorf("error getting connection pool for node %s: %w", nodeInfo["Name"], err)
+		}
+
+		// Ensure hash_version column exists (schema migration for upgrades).
+		if err := queries.EnsureHashVersionColumn(m.Ctx, pool); err != nil {
+			pool.Close()
+			if isMissingTreeErr(err) {
+				return m.missingTreeError(nodeInfo["Name"], err)
+			}
+			return fmt.Errorf("error migrating metadata schema on node %s: %w", nodeInfo["Name"], err)
+		}
+
+		blockSize, err = queries.GetBlockSizeFromMetadata(m.Ctx, pool, m.Schema, m.Table)
+		if err != nil {
+			pool.Close()
+			if isMissingTreeErr(err) {
+				return m.missingTreeError(nodeInfo["Name"], err)
+			}
+			return fmt.Errorf("error getting block size from metadata on node %s: %w", nodeInfo["Name"], err)
+		}
+
+		pool.Close()
+		foundBlockSize = true
+	}
+
+	if !foundBlockSize {
+		return fmt.Errorf("could not determine block size from any node")
+	}
+	m.BlockSize = blockSize
+
 	if !m.NoCDC {
 		cdcCfg := config.Get().MTree.CDC
 		// Wall-clock budget for the whole CDC catch-up (all nodes drained
@@ -1784,35 +1824,6 @@ func (m *MerkleTreeTask) UpdateMtree(skipAllChecks bool) (err error) { //nolint:
 			m.CDCSkippedNodes = skippedNodes
 		}
 	}
-
-	var blockSize int
-	var foundBlockSize bool
-	for _, nodeInfo := range m.ClusterNodes {
-		pool, err := auth.GetClusterNodeConnection(m.Ctx, nodeInfo, m.connOpts())
-		if err != nil {
-			return fmt.Errorf("error getting connection pool for node %s: %w", nodeInfo["Name"], err)
-		}
-
-		// Ensure hash_version column exists (schema migration for upgrades).
-		if err := queries.EnsureHashVersionColumn(m.Ctx, pool); err != nil {
-			pool.Close()
-			return fmt.Errorf("error migrating metadata schema on node %s: %w", nodeInfo["Name"], err)
-		}
-
-		blockSize, err = queries.GetBlockSizeFromMetadata(m.Ctx, pool, m.Schema, m.Table)
-		if err != nil {
-			pool.Close()
-			return fmt.Errorf("error getting block size from metadata on node %s: %w", nodeInfo["Name"], err)
-		}
-
-		pool.Close()
-		foundBlockSize = true
-	}
-
-	if !foundBlockSize {
-		return fmt.Errorf("could not determine block size from any node")
-	}
-	m.BlockSize = blockSize
 
 	for _, nodeInfo := range m.ClusterNodes {
 		fmt.Printf("\nUpdating Merkle tree on node: %s\n", nodeInfo["Name"])
@@ -2165,6 +2176,11 @@ func (m *MerkleTreeTask) DiffMtree() (err error) {
 	}
 
 	if err = m.UpdateMtree(true); err != nil {
+		// A missing tree already carries a complete, actionable message;
+		// prefixing it with update-failure context only buries the fix.
+		if errors.Is(err, ErrMtreeNotFound) {
+			return err
+		}
 		return fmt.Errorf("failed to update merkle tree before diff: %w", err)
 	}
 	if len(m.CDCSkippedNodes) > 0 {

@@ -139,16 +139,16 @@ func TestIsNumericColType(t *testing.T) {
 
 func TestBuildRowHashQuery(t *testing.T) {
 	tests := []struct {
-		name          string
-		schema        string
-		table         string
-		key           []string
-		cols          []string
-		whereClause   string
-		colTypes      map[string]string
-		wantContains  []string
+		name           string
+		schema         string
+		table          string
+		key            []string
+		cols           []string
+		whereClause    string
+		colTypes       map[string]string
+		wantContains   []string
 		wantNotContain []string
-		wantOrderBy   string
+		wantOrderBy    string
 	}{
 		{
 			name:        "nil colTypes - no trim_scale",
