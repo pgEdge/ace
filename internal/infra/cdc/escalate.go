@@ -11,6 +11,8 @@
 
 package cdc
 
+import "math"
+
 // escalator decides, per table, when a bounded CDC drain should stop tracking
 // individual changes and instead mark the table's whole Merkle tree dirty for
 // one bulk rehash from live table data. Per-change dirty-marking costs a
@@ -59,7 +61,7 @@ func (e *escalator) noteChange(schema, table string) bool {
 	if !ok {
 		th = e.minChanges
 		if rows := e.rowEstimate(schema, table); rows > 0 {
-			if f := int64(e.fraction * float64(rows)); f > th {
+			if f := int64(math.Round(e.fraction * float64(rows))); f > th {
 				th = f
 			}
 		}
