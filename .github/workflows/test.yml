@@ -37,6 +37,12 @@ jobs:
     - name: Run mtree regression tests
       run: go test -count=1 -v ./tests/integration -run 'TestBuildMtree|TestUpdateMtree|TestMtreeInit|TestACEConn'
 
+    - name: Run mtree unit tests
+      run: go test -count=1 -v ./internal/consistency/mtree
+
+    - name: Run mtree missing-tree fail-fast test
+      run: go test -count=1 -v ./tests/integration -run 'TestMtreeDiffFailsFastWhenTreeNotBuilt'
+
     - name: Run CDC regression tests
       run: go test -count=1 -v ./tests/integration -run 'CDC'
 
