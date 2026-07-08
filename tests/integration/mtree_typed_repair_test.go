@@ -23,34 +23,53 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// typedRepairDDL covers the type classes repair must round-trip: temporal,
+// money, uuid, interval, numeric, plus the complex ones the driver scans as
+// opaque structs (geometric, range, bit, network, enum, xml).
+const typedRepairDDL = ` (id BIGINT PRIMARY KEY, name VARCHAR(100), col_time TIME, col_timetz TIMETZ,
+	col_money MONEY, col_uuid UUID, col_interval INTERVAL, col_num NUMERIC(12,4),
+	col_point POINT, col_range INT4RANGE, col_bit BIT(8), col_inet INET,
+	col_xml XML, col_mood typed_repair_mood)`
+
+const typedRepairSeedSQL = ` (id, name, col_time, col_timetz, col_money, col_uuid, col_interval, col_num,
+		col_point, col_range, col_bit, col_inet, col_xml, col_mood)
+	SELECT i,
+	       'name_' || i,
+	       TIME '00:00:00' + (i * 137 || ' seconds')::interval,
+	       TIMETZ '00:00:00+02' + (i * 91 || ' seconds')::interval,
+	       (i * 13.37)::numeric::money,
+	       ('00000000-0000-0000-0000-' || lpad(i::text, 12, '0'))::uuid,
+	       (i || ' hours 30 minutes')::interval,
+	       i * 1.5,
+	       point(i, i * 2),
+	       int4range(i, i + 100),
+	       (i % 256)::bit(8),
+	       ('10.0.' || (i % 256) || '.' || (i % 200 + 1))::inet,
+	       ('<item id="' || i || '"><name>item_' || i || '</name></item>')::xml,
+	       (ARRAY['happy','sad','neutral']::typed_repair_mood[])[(i % 3) + 1]
+	FROM generate_series(1, 100) AS i`
+
 // seedTypedRepairTable creates the typed-columns table on both nodes and seeds
 // rows on n1 only -- the diverged state a disabled subscription leaves behind.
 func seedTypedRepairTable(t *testing.T, ctx context.Context, env *testEnv, safe string) {
 	t.Helper()
 	pools := []*pgxpool.Pool{env.N1Pool, env.N2Pool}
 	for _, pool := range pools {
-		_, err := pool.Exec(ctx, "CREATE TABLE IF NOT EXISTS "+safe+ // nosemgrep
-			" (id BIGINT PRIMARY KEY, name VARCHAR(100), col_time TIME, col_timetz TIMETZ,"+
-			" col_money MONEY, col_uuid UUID, col_interval INTERVAL, col_num NUMERIC(12,4))")
+		_, err := pool.Exec(ctx, "DROP TYPE IF EXISTS typed_repair_mood CASCADE")
+		require.NoError(t, err)
+		_, err = pool.Exec(ctx, "CREATE TYPE typed_repair_mood AS ENUM ('happy','sad','neutral')")
+		require.NoError(t, err)
+		_, err = pool.Exec(ctx, "CREATE TABLE IF NOT EXISTS "+safe+typedRepairDDL) // nosemgrep
 		require.NoError(t, err)
 	}
 	t.Cleanup(func() {
 		for _, pool := range pools {
 			_, _ = pool.Exec(ctx, "DROP TABLE IF EXISTS "+safe+" CASCADE") // nosemgrep
+			_, _ = pool.Exec(ctx, "DROP TYPE IF EXISTS typed_repair_mood CASCADE")
 		}
 	})
 
-	seedSQL := "INSERT INTO " + safe + ` (id, name, col_time, col_timetz, col_money, col_uuid, col_interval, col_num)
-		SELECT i,
-		       'name_' || i,
-		       TIME '00:00:00' + (i * 137 || ' seconds')::interval,
-		       TIMETZ '00:00:00+02' + (i * 91 || ' seconds')::interval,
-		       (i * 13.37)::numeric::money,
-		       ('00000000-0000-0000-0000-' || lpad(i::text, 12, '0'))::uuid,
-		       (i || ' hours 30 minutes')::interval,
-		       i * 1.5
-		FROM generate_series(1, 100) AS i`
-	_, err := env.N1Pool.Exec(ctx, seedSQL) // nosemgrep
+	_, err := env.N1Pool.Exec(ctx, "INSERT INTO "+safe+typedRepairSeedSQL) // nosemgrep
 	require.NoError(t, err)
 	for _, pool := range pools {
 		_, err := pool.Exec(ctx, "ANALYZE "+safe) // nosemgrep
@@ -92,8 +111,9 @@ func typedRepairFingerprint(t *testing.T, ctx context.Context, pool *pgxpool.Poo
 	return
 }
 
-// A diff produced by the Merkle-tree engine repairs cleanly on a table with
-// time, timetz, money, uuid and interval columns, and the nodes converge.
+// A diff produced by the Merkle-tree engine repairs cleanly on a table
+// spanning temporal, money, uuid, interval, numeric, geometric, range, bit,
+// network, enum and xml columns, and the nodes converge.
 func TestMtreeDiffRepairTypedColumns(t *testing.T) {
 	ctx := context.Background()
 	env := newSpockEnv()
