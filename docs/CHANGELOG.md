@@ -2,7 +2,26 @@
 
 All notable changes to ACE will be captured in this document. This project follows semantic versioning; the latest changes appear first.
 
-## [Unreleased]
+## [v2.1.0]
+
+This release focuses primarily on Merkle tree functionality.
+
+### Added
+- `--version` / `-V` flag to print the ACE version. Works without an
+  `ace.yaml` present.
+- `max_diff_rows` cap for `mtree table-diff` (mtree → diff, default 1000000,
+  0 = unbounded). Previously the Merkle-tree engine collected every differing
+  row in memory, so a heavily diverged table could OOM the process. A capped
+  run is flagged in the report and warned about, matching `table-diff`.
+- `mtree table-diff` and `mtree update` can now run while `mtree listen` is
+  active. Nodes whose replication slot is busy skip the CDC refresh
+  (best-effort, comparing against the tree the listener keeps warm) instead of
+  failing with SQLSTATE 55006; skipped nodes are listed in the diff report
+  under `cdc_skipped_nodes`.
+- `--cdc-timeout` flag on `mtree update` and `mtree table-diff` to override the
+  CDC drain budget per invocation.
+- New configuration keys under mtree → cdc: `cdc_flush_batch_size`,
+  `adaptive_drain_fraction`, and `adaptive_drain_min_changes`.
 
 ### Changed
 - **CDC drain now absorbs large transactions instead of forcing a rebuild.** A
@@ -11,18 +30,73 @@ All notable changes to ACE will be captured in this document. This project follo
   keys, so memory scales with key size — not row width — regardless of
   transaction size. The previous hard `MaxBufferedChanges` cap (which erred and
   recommended a rebuild) is removed.
+- **Heavily-updated tables escalate to a bulk rehash.** When a bounded drain
+  decodes more UPDATEs for a table than
+  `max(adaptive_drain_min_changes, adaptive_drain_fraction × row estimate)`
+  (defaults 1000 / 0.01), all of the table's blocks are marked dirty once and
+  rehashed in bulk instead of tracked per change, keeping drain time flat
+  rather than linear in the backlog (measured 16.85s → 2.13s for a 250k-row
+  backlog on a 2M-row table). Correctness is unaffected — hashes are always
+  recomputed from live table data. Set `adaptive_drain_fraction: -1` to
+  disable.
+- `mtree update` / `mtree table-diff` drain CDC streams for all nodes
+  concurrently and stop as soon as the server confirms the target LSN, instead
+  of sequentially with a fixed ~1s idle timeout per node (measured 3.4s → 1.2s
+  for a no-change diff on a 3-node cluster).
+- `table-diff` applies `max_diff_rows` per node pair instead of as one budget
+  shared across all pairs. On clusters with more than two nodes, one pair's
+  divergence no longer starves the others; note the worst-case report size is
+  now `max_diff_rows × number of pairs`.
 - Bounded drains apply synchronously so the slot's confirmed LSN never advances
   ahead of durably-applied work; a crash mid-drain is recovered by re-streaming
   the in-flight transaction on the next run.
 - `cdc_processing_timeout` default raised from 30s to **300s** (a timeout now
   means "re-run or raise", since drain progress is durable).
 
-### Added
-- `--cdc-timeout` flag on `mtree update` and `mtree table-diff` to override the
-  CDC drain budget per invocation.
-- `cdc_flush_batch_size` configuration key (mtree → cdc).
-
 ### Fixed
+- **A bounded CDC drain could silently under-report divergence.** The drain
+  treated a 1-second idle timeout as "caught up", so a node with a large
+  backlog could leave its Merkle tree stale and the diff would report the
+  tables as identical despite millions of differing rows. The drain now stops
+  only once it has verifiably reached the target LSN, and fails with an
+  actionable error otherwise.
+- Merkle-tree diffs missed rows lying beyond the reference node's largest
+  primary key (the open-ended tail range was never queried). A subsequent
+  `table-repair` could then delete rows instead of converging the nodes.
+- Phantom "trees differ … TABLES MATCH" results after clean replication. The
+  drain target could sit beyond the WAL flush pointer under asynchronous
+  commit (as used by spock apply), leaving subscriber trees stale behind
+  already-visible data, and a drain could stop mid-transaction and skip it
+  permanently. Both causes are fixed, and diffs now self-heal stale leaves by
+  rehashing them from live data (reported as `stale_blocks_refreshed` in the
+  summary) instead of leaving a contradictory verdict.
+- Diff reports produced by the Merkle-tree engine are now repairable for the
+  same column types as the classic engine. Time, uuid, interval, money,
+  geometric, network, range, bit, enum, and xml values previously reached the
+  report as raw driver structs or Go-formatted text, aborting the entire
+  repair batch on the first unparseable value. Both engines now fetch and
+  normalise values identically (as PostgreSQL text forms).
+- `spock-diff` failed outright against spock clusters (OID scan errors, NULL
+  replication-set names) and matched reciprocal subscriptions by
+  reconstructing default names. Subscriptions are now matched by origin node,
+  so renamed subscriptions compare correctly.
+- `mtree init` created the replication slot before the publication commit was
+  durable, which could later fail `mtree table-diff` with `publication
+  "ace_mtree_pub" does not exist` (SQLSTATE 42704). Init now orders the
+  publication strictly before the slot. Previously-broken installs are
+  repaired with `mtree teardown` + `init` + `build`.
+- ACE connections now disable spock DDL replication and repset auto-add, so
+  ACE's per-node metadata objects no longer replicate to peer nodes (which
+  caused cross-node races and leaked `ace_cdc_metadata` into default
+  replication sets). No effect on vanilla PostgreSQL.
+- `mtree build` could hang instead of reporting a per-node error, and leaked
+  connection pools when it aborted early.
+- `mtree table-diff` / `mtree update` on a table whose tree was never built
+  now fail fast with a message pointing at `ace mtree build`, instead of
+  draining the replication stream and erroring with "no rows in result set".
+- Clusters upgraded from older versions whose `ace_cdc_metadata` table predates
+  the `pub_commit_lsn` column no longer fail at CDC startup; ACE warns and
+  continues, and the next `mtree init` adds the column.
 - A bounded drain now fails with a clear, actionable error when a tracked
   table's `REPLICA IDENTITY` exposes no primary key, instead of panicking.
 
