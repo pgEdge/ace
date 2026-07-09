@@ -21,6 +21,8 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/require"
+
+	"github.com/pgedge/ace/internal/consistency/diff"
 )
 
 // typedRepairDDL covers the type classes repair must round-trip: temporal,
@@ -28,11 +30,11 @@ import (
 // opaque structs (geometric, range, bit, network, enum, xml).
 const typedRepairDDL = ` (id BIGINT PRIMARY KEY, name VARCHAR(100), col_time TIME, col_timetz TIMETZ,
 	col_money MONEY, col_uuid UUID, col_interval INTERVAL, col_num NUMERIC(12,4),
-	col_point POINT, col_range INT4RANGE, col_bit BIT(8), col_inet INET,
-	col_xml XML, col_mood typed_repair_mood)`
+	col_point POINT, col_range INT4RANGE, col_daterange DATERANGE, col_bit BIT(8),
+	col_inet INET, col_xml XML, col_mood typed_repair_mood)`
 
 const typedRepairSeedSQL = ` (id, name, col_time, col_timetz, col_money, col_uuid, col_interval, col_num,
-		col_point, col_range, col_bit, col_inet, col_xml, col_mood)
+		col_point, col_range, col_daterange, col_bit, col_inet, col_xml, col_mood)
 	SELECT i,
 	       'name_' || i,
 	       TIME '00:00:00' + (i * 137 || ' seconds')::interval,
@@ -43,6 +45,7 @@ const typedRepairSeedSQL = ` (id, name, col_time, col_timetz, col_money, col_uui
 	       i * 1.5,
 	       point(i, i * 2),
 	       int4range(i, i + 100),
+	       daterange(DATE '2020-01-01' + i, DATE '2020-01-01' + i + 30),
 	       (i % 256)::bit(8),
 	       ('10.0.' || (i % 256) || '.' || (i % 200 + 1))::inet,
 	       ('<item id="' || i || '"><name>item_' || i || '</name></item>')::xml,
@@ -148,4 +151,20 @@ func TestMtreeDiffRepairTypedColumns(t *testing.T) {
 
 	require.Equal(t, typedRepairFingerprint(t, ctx, env.N1Pool, safe), typedRepairFingerprint(t, ctx, env.N2Pool, safe),
 		"nodes must hold identical rows (all typed columns included) after repair")
+
+	// table-rerun re-fetches the diffed rows by primary key -- a separate
+	// SELECT that must apply the same ::TEXT cast policy, or typed columns
+	// fail the scan (timetz) or re-compare as spurious diffs. On the now
+	// converged nodes it must succeed and confirm every diff resolved.
+	rerunTask := diff.NewTableDiffTask()
+	rerunTask.Mode = "rerun"
+	rerunTask.ClusterName = env.ClusterName
+	rerunTask.DBName = env.DBName
+	rerunTask.DiffFilePath = diffFile
+	rerunTask.Ctx = ctx
+	require.NoError(t, rerunTask.ExecuteTask(), "table-rerun must succeed on typed columns")
+
+	rerunReports, err := filepath.Glob(fmt.Sprintf("%s_%s_rerun-diffs-*.json", testSchema, tableName))
+	require.NoError(t, err)
+	require.Empty(t, rerunReports, "rerun on converged nodes must not report persistent diffs")
 }

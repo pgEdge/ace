@@ -1003,37 +1003,52 @@ func SafeCut(s string, n int) string {
 // conversion code. Both diff engines must build their row-fetch SELECTs with
 // it so reports stay engine-independent and repairable.
 func SelectColExpr(quotedCol, colType string) string {
-	if strings.HasSuffix(colType, "[]") ||
-		strings.Contains(strings.ToLower(colType), "json") ||
-		strings.Contains(strings.ToLower(colType), "bytea") ||
-		!IsKnownScalarType(colType) {
+	if NeedsTextCast(colType) {
 		return fmt.Sprintf("%s::TEXT AS %s", quotedCol, quotedCol)
 	}
 	return quotedCol
 }
 
+// NeedsTextCast reports whether a diff row fetch must cast the column to
+// ::TEXT for its value to round-trip through a diff report (see
+// SelectColExpr). Row-fetch sites that cannot use SelectColExpr verbatim
+// (e.g. table-qualified selects) must still consult this policy.
+func NeedsTextCast(colType string) bool {
+	return strings.HasSuffix(colType, "[]") ||
+		strings.Contains(strings.ToLower(colType), "json") ||
+		strings.Contains(strings.ToLower(colType), "bytea") ||
+		!IsKnownScalarType(colType)
+}
+
 func IsKnownScalarType(colType string) bool {
-	// "time with time zone" (timetz) is NOT registered in the pgx v5
-	// default type map, so it cannot be scanned into *interface{}. Exclude it
-	// so the diff layer casts it to ::TEXT.
-	if strings.HasPrefix(colType, "time with time zone") {
-		return false
+	// colType is pg_catalog.format_type output. Strip the typmod so
+	// "numeric(10,2)" and "timestamp(3) with time zone" match their base
+	// names, then require an exact match: prefix matching mistook types that
+	// merely start like a scalar ("daterange" for "date") for the scalar
+	// itself, so they were never cast to ::TEXT and reached diff reports as
+	// unrepairable Go-formatted structs.
+	base := colType
+	if i := strings.IndexByte(base, '('); i >= 0 {
+		if j := strings.IndexByte(base[i:], ')'); j >= 0 {
+			base = strings.TrimSpace(base[:i] + base[i+j+1:])
+		}
 	}
 
-	knownPrefixes := []string{
-		"character", "text",
+	switch base {
+	case "character varying", "character", "text",
 		"integer", "bigint", "smallint",
 		"numeric", "decimal", "real", "double precision",
 		"boolean",
 		"bytea",
 		"json", "jsonb",
 		"uuid",
-		"timestamp", "date", "time",
-	}
-	for _, prefix := range knownPrefixes {
-		if strings.HasPrefix(colType, prefix) {
-			return true
-		}
+		"date",
+		"timestamp without time zone", "timestamp with time zone",
+		// "time with time zone" (timetz) is deliberately absent: it is not
+		// registered in the pgx v5 default type map, so it cannot be scanned
+		// into *interface{} and must be cast to ::TEXT by the diff layer.
+		"time without time zone":
+		return true
 	}
 	return false
 }

@@ -276,10 +276,22 @@ func fetchRowsByPkeys(ctx context.Context, pool *pgxpool.Pool, t *TableDiffTask,
 		joinConditions = append(joinConditions, fmt.Sprintf("t.%s = temp.%s", sanitisedPkCol, sanitisedPkCol))
 	}
 
+	colTypes, err := queries.GetColumnTypes(ctx, tx, t.Schema, t.Table)
+	if err != nil {
+		return nil, fmt.Errorf("could not determine column types: %w", err)
+	}
+
 	selectCols := make([]string, 0, len(t.Cols)+2)
 	selectCols = append(selectCols, "pg_xact_commit_timestamp(t.xmin) as commit_ts", "to_json(pg_xact_commit_timestamp_origin(t.xmin))->>'roident' as node_origin")
 	for _, col := range t.Cols {
-		selectCols = append(selectCols, "t."+pgx.Identifier{col}.Sanitize())
+		quotedCol := pgx.Identifier{col}.Sanitize()
+		// Same cast policy as the diff engines' row fetches: complex types
+		// must travel as Postgres text so the rerun report stays repairable.
+		if utils.NeedsTextCast(colTypes[col]) {
+			selectCols = append(selectCols, fmt.Sprintf("t.%s::TEXT AS %s", quotedCol, quotedCol))
+		} else {
+			selectCols = append(selectCols, "t."+quotedCol)
+		}
 	}
 
 	fetchSQL := fmt.Sprintf("SELECT %s FROM %s t JOIN %s temp ON %s",
