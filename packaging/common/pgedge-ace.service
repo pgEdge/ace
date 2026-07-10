@@ -1,0 +1,16 @@
+[Unit]
+Description=Active Consistency Engine of pgEdge
+After=network.target postgresql.service
+
+[Service]
+User=pgedge
+Group=pgedge
+WorkingDirectory=/var/lib/pgedge/ace
+ExecStart=/usr/bin/ace start
+StandardOutput=append:/var/log/pgedge/ace/ace.log
+StandardError=append:/var/log/pgedge/ace/ace.log
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
+
