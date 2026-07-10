@@ -350,6 +350,42 @@ func processReplicationStream(ctx context.Context, nodeInfo map[string]any, cont
 		return nil
 	}
 
+	// markTableTruncated reacts to a decoded TRUNCATE for one relation.
+	// pgoutput publishes a truncate as a single message carrying only relation
+	// OIDs -- no per-row DELETEs -- so per-PK tracking is impossible and the
+	// only sound reaction is the adaptive drain's bulk path: mark every leaf
+	// dirty so the next tree update rehashes the table from live (now empty)
+	// data. Dropping the message instead would leave the tree at its
+	// pre-truncate state and table-diff would report a truncated node as in
+	// sync. Buffered UPDATEs for the table are purged as at escalation time
+	// (redundant once every leaf is dirty); INSERT/DELETE tracking continues
+	// for split/merge counter maintenance. Block merges from the truncate
+	// itself lag until the next build, which costs rehash work, never
+	// correctness. A failure to mark is terminal for the same reason as in
+	// bufferChange: proceeding would silently miss the divergence.
+	markTableTruncated := func(rel *pglogrepl.RelationMessage) error {
+		// Keepalive before the blocking write, like the escalation path, so a
+		// slow mark-all cannot trip wal_sender_timeout.
+		if conn != nil {
+			if err := pglogrepl.SendStandbyStatusUpdate(ctx, conn, pglogrepl.StandbyStatusUpdate{WALWritePosition: lastLSN}); err != nil {
+				logger.Warn("standby status update before truncate mark-all failed: %v", err)
+			} else {
+				nextStandbyMessageDeadline = time.Now().Add(10 * time.Second)
+			}
+		}
+		// Sanitized: the mtree table is created quoted/case-preserved.
+		mtreeTable := pgx.Identifier{mtreeSchema, fmt.Sprintf("ace_mtree_%s_%s", rel.Namespace, rel.RelationName)}.Sanitize()
+		// processingCtx so the write survives the drain deadline, like every
+		// other apply here.
+		marked, err := queries.MarkAllLeavesDirty(processingCtx, pool, mtreeTable)
+		if err != nil {
+			return fmt.Errorf("failed to mark all leaves dirty for truncated table %s.%s: %w", rel.Namespace, rel.RelationName, err)
+		}
+		purgeTableChanges(txChanges, rel.Namespace, rel.RelationName)
+		logger.Info("TRUNCATE decoded for %s.%s: marked all %d blocks dirty for rehash on next tree update", rel.Namespace, rel.RelationName, marked)
+		return nil
+	}
+
 	var wg sync.WaitGroup
 	errCh := make(chan error, 1)
 	stopStreaming := false
@@ -645,6 +681,27 @@ func processReplicationStream(ctx context.Context, nodeInfo map[string]any, cont
 					if err := bufferChange("DELETE", rel, logicalMsg.OldTuple); err != nil {
 						processingErr = err
 						stopStreaming = true
+					}
+				case *pglogrepl.TruncateMessage:
+					// The publication is created with the default publish list,
+					// which includes truncate, so the server does send these. A
+					// cascaded truncate lists every affected published relation
+					// here. pgoutput sends the RelationMessages ahead of this
+					// message, so the lookups should always hit; treat a miss as
+					// terminal rather than skipping a table whose tree would then
+					// silently go stale.
+					for _, relID := range logicalMsg.RelationIDs {
+						rel, ok := relations[relID]
+						if !ok {
+							processingErr = fmt.Errorf("TRUNCATE references unknown relation OID %d; cannot mark its Merkle tree dirty", relID)
+							stopStreaming = true
+							break
+						}
+						if err := markTableTruncated(rel); err != nil {
+							processingErr = err
+							stopStreaming = true
+							break
+						}
 					}
 				}
 
