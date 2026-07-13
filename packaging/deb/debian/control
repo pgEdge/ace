@@ -1,0 +1,14 @@
+Source: pgedge-ace
+Section: net
+Priority: optional
+Maintainer: Muhammad Aqeel <muhammad.aqeel@pgedge.com>
+Build-Depends: debhelper-compat (= 13), systemd
+Standards-Version: 4.6.2
+Homepage: https://github.com/pgEdge/ace
+Rules-Requires-Root: no
+
+Package: pgedge-ace
+Architecture: any
+Depends: ${misc:Depends}, ${shlibs:Depends}, systemd, logrotate
+Description: The Active Consistency Engine of pgEdge 
+

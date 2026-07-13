@@ -1,0 +1,11 @@
+#!/bin/sh
+set -e
+
+# Tmpfiles setup
+if [ "$1" = "configure" ]; then
+    systemd-tmpfiles --create /usr/lib/tmpfiles.d/pgedge-ace.conf || true
+fi
+
+#DEBHELPER#
+exit 0
+
