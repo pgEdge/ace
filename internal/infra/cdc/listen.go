@@ -382,6 +382,12 @@ func processReplicationStream(ctx context.Context, nodeInfo map[string]any, cont
 			return fmt.Errorf("failed to mark all leaves dirty for truncated table %s.%s: %w", rel.Namespace, rel.RelationName, err)
 		}
 		purgeTableChanges(txChanges, rel.Namespace, rel.RelationName)
+		// All leaves are now dirty, which is the escalated state, so record it:
+		// later UPDATEs on a re-populated table skip per-PK tracking rather than
+		// re-running the threshold count and a redundant mark-all.
+		if esc != nil {
+			esc.markEscalated(rel.Namespace, rel.RelationName)
+		}
 		logger.Info("TRUNCATE decoded for %s.%s: marked all %d blocks dirty for rehash on next tree update", rel.Namespace, rel.RelationName, marked)
 		return nil
 	}
