@@ -45,6 +45,12 @@ changelog:
       - "^test:"
 
 release:
+  # Mark tags carrying a semver pre-release component (-rc.N, -beta, -alpha)
+  # as GitHub pre-releases so they're excluded from the "Latest" badge and
+  # sort below the newest GA release. Without this, GoReleaser's default
+  # (prerelease: false) publishes rc/beta tags as full releases, which GitHub
+  # then stamps "Latest" and pins to the top of the releases list.
+  prerelease: auto
   footer: >-
 
     ---
