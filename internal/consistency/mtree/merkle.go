@@ -1502,6 +1502,7 @@ func (m *MerkleTreeTask) BuildMtree() (err error) {
 	logger.Info("Getting row estimates from all nodes...")
 	var maxRows int64
 	var refNode map[string]any
+	successfulEstimates := 0
 	for _, nodeInfo := range m.ClusterNodes {
 		pool, err := auth.GetSizedClusterNodeConnection(nodeInfo, auth.ConnectionOptions{PoolSize: poolSize})
 		if err != nil {
@@ -1517,15 +1518,29 @@ func (m *MerkleTreeTask) BuildMtree() (err error) {
 			logger.Warn("Warning: Could not get row estimate from node %s: %v", nodeInfo["Name"], err)
 			continue
 		}
+		successfulEstimates++
 
-		if count > maxRows {
+		// Seed refNode on the first successful estimate so an all-empty table
+		// (every count == 0) still resolves a reference node instead of being
+		// mistaken for a total estimate failure below.
+		if refNode == nil || count > maxRows {
 			maxRows = count
 			refNode = nodeInfo
 		}
 	}
 
-	if refNode == nil {
+	if successfulEstimates == 0 {
+		for _, p := range pools {
+			p.Close()
+		}
 		return fmt.Errorf("could not determine a reference node; failed to get row estimates from all nodes")
+	}
+
+	if maxRows == 0 {
+		for _, p := range pools {
+			p.Close()
+		}
+		return fmt.Errorf("table %s has 0 rows on all nodes; add data before building a Merkle tree", m.QualifiedTableName)
 	}
 	logger.Info("Using node %s as the reference for defining block ranges.", refNode["Name"])
 
