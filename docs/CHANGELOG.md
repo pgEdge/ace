@@ -54,6 +54,14 @@ This release focuses primarily on Merkle tree functionality.
   means "re-run or raise", since drain progress is durable).
 
 ### Fixed
+- **`mtree table-diff` could report divergent nodes as identical (silent
+  false-negative).** Leaf hashing used a closed (`<=`) upper bound, so rows on
+  block boundaries were hashed into two adjacent leaves; the XOR-based parent
+  hash then cancelled the duplicate siblings, letting the same primary key with
+  *different* non-key data produce matching root hashes — the core UPDATE-UPDATE
+  conflict active-active clusters produce. Leaf hashing now uses an exclusive
+  (`<`) upper bound, so each row belongs to exactly one leaf. **Merkle trees
+  built before this fix must be rebuilt (`mtree build`).**
 - **A bounded CDC drain could silently under-report divergence.** The drain
   treated a 1-second idle timeout as "caught up", so a node with a large
   backlog could leave its Merkle tree stale and the diff would report the
