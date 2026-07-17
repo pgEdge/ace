@@ -723,15 +723,11 @@ func unionKeys(maps ...map[string]any) map[string]struct{} {
 }
 
 func freshestSide(key string, tie string, row planDiffRow) string {
-	val1 := row.n1Row
-	val2 := row.n2Row
-	var k1, k2 any
-	if val1 != nil {
-		k1 = val1[key]
-	}
-	if val2 != nil {
-		k2 = val2[key]
-	}
+	// Resolve the key via lookupValue so it works for both ordinary data
+	// columns (in n1Row/n2Row) and spock metadata like commit_ts, which the
+	// executor strips from the row and keeps in n1Meta/n2Meta.
+	k1, _ := lookupValue("n1", key, row)
+	k2, _ := lookupValue("n2", key, row)
 	n1Ok := k1 != nil
 	n2Ok := k2 != nil
 	if !n1Ok && n2Ok {

@@ -20,6 +20,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/require"
 )
 
@@ -210,6 +211,147 @@ tables:
 	entries := readStaleSkipEntries(t, logPath)
 	require.True(t, hasStaleSkipEntry(entries, 1, "upsert", "stale_keep_n1_for_pk1"))
 	require.True(t, hasStaleSkipEntry(entries, 2001, "delete", "stale_delete_missing_on_n1"))
+}
+
+// TestAdvancedRepairPlan_PickFreshestByCommitTS verifies the one-pass
+// latest-commit-wins plan: pick_freshest with key: commit_ts keeps the row from
+// the side with the newer Spock commit timestamp. It also guards the regression
+// where pick_freshest read commit_ts from the (stripped) row instead of the
+// spock metadata and therefore always fell back to `tie`.
+func TestAdvancedRepairPlan_PickFreshestByCommitTS(t *testing.T) {
+	ctx := context.Background()
+	qualifiedTableName := "public.customers"
+
+	setupDivergence(t, ctx, qualifiedTableName)
+	diffFile := runTableDiff(t, qualifiedTableName, []string{serviceN1, serviceN2})
+
+	// Precondition: setupDivergence UPDATEs index 1 & 2 on n2 after the initial
+	// inserts, so n2's commit_ts for those rows is strictly newer than n1's.
+	// That ordering is what "latest commit wins" must resolve to.
+	for _, idx := range []int{1, 2} {
+		var tsN1, tsN2 time.Time
+		require.NoError(t, pgCluster.Node1Pool.QueryRow(ctx,
+			fmt.Sprintf("SELECT pg_xact_commit_timestamp(xmin) FROM %s WHERE index = %d", qualifiedTableName, idx)).Scan(&tsN1))
+		require.NoError(t, pgCluster.Node2Pool.QueryRow(ctx,
+			fmt.Sprintf("SELECT pg_xact_commit_timestamp(xmin) FROM %s WHERE index = %d", qualifiedTableName, idx)).Scan(&tsN2))
+		require.Truef(t, tsN2.After(tsN1),
+			"precondition for index %d: n2 commit_ts %s should be newer than n1 %s", idx, tsN2, tsN1)
+	}
+
+	// One-pass plan: pick_freshest by commit_ts resolves the modified rows to
+	// the newer (n2) side; apply_from rules propagate the single-sided inserts
+	// so the tables fully converge.
+	plan := `
+version: 1
+tables:
+  public.customers:
+    rules:
+      - name: latest_commit_wins
+        diff_type: [row_mismatch]
+        action:
+          type: custom
+          helpers:
+            pick_freshest: { key: commit_ts, tie: n1 }
+      - name: insert_missing_on_n2
+        diff_type: [missing_on_n2]
+        action: { type: apply_from, from: n1, mode: insert }
+      - name: insert_missing_on_n1
+        diff_type: [missing_on_n1]
+        action: { type: apply_from, from: n2, mode: insert }
+`
+	planPath := filepath.Join(t.TempDir(), "repair.yaml")
+	require.NoError(t, os.WriteFile(planPath, []byte(plan), 0o644))
+
+	task := newTestTableRepairTask("", qualifiedTableName, diffFile)
+	task.RepairPlanPath = planPath
+	require.NoError(t, task.ValidateAndPrepare())
+	require.NoError(t, task.Run(true))
+
+	assertNoTableDiff(t, qualifiedTableName)
+
+	// The newer (n2) side won for the modified rows, on BOTH nodes.
+	for _, idx := range []int{1, 2} {
+		want := fmt.Sprintf("modified.email%d@example.com", idx)
+		var e1, e2 string
+		require.NoError(t, pgCluster.Node1Pool.QueryRow(ctx,
+			fmt.Sprintf("SELECT email FROM %s WHERE index = %d", qualifiedTableName, idx)).Scan(&e1))
+		require.NoError(t, pgCluster.Node2Pool.QueryRow(ctx,
+			fmt.Sprintf("SELECT email FROM %s WHERE index = %d", qualifiedTableName, idx)).Scan(&e2))
+		require.Equalf(t, want, e1, "index %d on n1 should be the newer (n2) value", idx)
+		require.Equalf(t, want, e2, "index %d on n2 should be the newer (n2) value", idx)
+	}
+}
+
+// TestAdvancedRepairPlan_PickFreshestByAppColumn verifies pick_freshest with an
+// application-level timestamp column (subscription_date). Unlike commit_ts this
+// is ordinary row data, so it is immune to freezing and works even where
+// commit_ts would be NULL. index 1 is newer on n2, index 2 is newer on n1, so
+// the winning side differs per row.
+func TestAdvancedRepairPlan_PickFreshestByAppColumn(t *testing.T) {
+	ctx := context.Background()
+	qualifiedTableName := "public.customers"
+	env := newSpockEnv()
+	t.Cleanup(func() { resetSharedTable(t, "customers") })
+
+	// Clean slate on both nodes.
+	for _, pool := range []*pgxpool.Pool{pgCluster.Node1Pool, pgCluster.Node2Pool} {
+		env.withRepairMode(t, ctx, pool, func(conn *pgxpool.Conn) {
+			_, err := conn.Exec(ctx, fmt.Sprintf("TRUNCATE TABLE %s CASCADE", qualifiedTableName))
+			require.NoError(t, err)
+		})
+	}
+
+	// Same PKs on both nodes but differing first_name and subscription_date, so
+	// each row is a row_mismatch resolvable by freshness of subscription_date.
+	insert := func(pool *pgxpool.Pool, idx int, firstName, subDate string) {
+		env.withRepairMode(t, ctx, pool, func(conn *pgxpool.Conn) {
+			_, err := conn.Exec(ctx,
+				fmt.Sprintf("INSERT INTO %s (index, customer_id, first_name, last_name, email, subscription_date) VALUES ($1,$2,$3,$4,$5,$6)", qualifiedTableName),
+				idx, fmt.Sprintf("CUST-%d", idx), firstName, "Last", fmt.Sprintf("e%d@example.com", idx), subDate)
+			require.NoError(t, err)
+		})
+	}
+	insert(pgCluster.Node1Pool, 1, "N1", "2020-01-01 00:00:00") // index 1: n2 newer -> n2 wins
+	insert(pgCluster.Node2Pool, 1, "N2", "2021-01-01 00:00:00")
+	insert(pgCluster.Node1Pool, 2, "N1", "2023-01-01 00:00:00") // index 2: n1 newer -> n1 wins
+	insert(pgCluster.Node2Pool, 2, "N2", "2022-01-01 00:00:00")
+
+	diffFile := runTableDiff(t, qualifiedTableName, []string{serviceN1, serviceN2})
+
+	plan := `
+version: 1
+tables:
+  public.customers:
+    rules:
+      - name: latest_by_subscription_date
+        diff_type: [row_mismatch]
+        action:
+          type: custom
+          helpers:
+            pick_freshest: { key: subscription_date, tie: n1 }
+`
+	planPath := filepath.Join(t.TempDir(), "repair.yaml")
+	require.NoError(t, os.WriteFile(planPath, []byte(plan), 0o644))
+
+	task := newTestTableRepairTask("", qualifiedTableName, diffFile)
+	task.RepairPlanPath = planPath
+	require.NoError(t, task.ValidateAndPrepare())
+	require.NoError(t, task.Run(true))
+
+	assertNoTableDiff(t, qualifiedTableName)
+
+	// index 1 -> n2 (newer subscription_date) won; index 2 -> n1 won. The whole
+	// winning row is applied, so first_name identifies the side that won.
+	want := map[int]string{1: "N2", 2: "N1"}
+	for idx, wantName := range want {
+		var f1, f2 string
+		require.NoError(t, pgCluster.Node1Pool.QueryRow(ctx,
+			fmt.Sprintf("SELECT first_name FROM %s WHERE index = %d", qualifiedTableName, idx)).Scan(&f1))
+		require.NoError(t, pgCluster.Node2Pool.QueryRow(ctx,
+			fmt.Sprintf("SELECT first_name FROM %s WHERE index = %d", qualifiedTableName, idx)).Scan(&f2))
+		require.Equalf(t, wantName, f1, "index %d on n1 should be the fresher side", idx)
+		require.Equalf(t, wantName, f2, "index %d on n2 should be the fresher side", idx)
+	}
 }
 
 func listStaleSkipLogs(t *testing.T) []string {
