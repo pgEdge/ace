@@ -169,6 +169,62 @@ tables:
           allow_stale_repairs: false
 ```
 
+## 5g) One-pass "latest commit wins" (complete, multi-table)
+
+A ready-to-run plan that resolves every `row_mismatch` in a single pass by
+keeping the row with the newer Spock commit timestamp, reused across several
+tables via a YAML anchor. See
+[`examples/repair-plan-latest-wins.yaml`](examples/repair-plan-latest-wins.yaml)
+for the fully-commented version (opt-in alternatives, per-table override, and
+the caveats in detail).
+
+The core rule, shared by every table via the `&latest_wins` anchor:
+```yaml
+tables:
+  public.inventory:
+    rules: &latest_wins
+      - name: latest_commit_wins
+        diff_type: [row_mismatch]
+        action:
+          type: custom
+          helpers:
+            pick_freshest: { key: commit_ts, tie: n1 }
+  public.orders:
+    rules: *latest_wins
+```
+
+How each case resolves, all in one pass:
+
+| Situation | Result |
+| --- | --- |
+| Both sides have `commit_ts`, and they differ | The newer one wins |
+| One side's `commit_ts` is NULL | The side that still has a timestamp wins |
+| Timestamps are equal, or both are NULL | The positional `tie` node |
+
+Caveats:
+
+- **`n1`/`n2` are positional, not node names.** For each compared pair, `n1`
+  is the alphabetically-first node name and `n2` the second. `tie: n1` means
+  "prefer the alphabetically-first node on a tie", not a node you can name; the
+  plan DSL cannot target a physical node (that is what `--source-of-truth` is
+  for).
+- **`track_commit_timestamp` must be on** across all nodes, or a node's rows
+  always read a NULL `commit_ts` regardless of recency.
+- **`commit_ts` is compared as a string**, so "newer wins" is only reliable
+  when all nodes emit it with the same UTC offset (ideally UTC).
+- **Last-write-wins is not the same as always-correct** — a recent errant
+  update beats an older good value.
+- **A NULL `commit_ts` is rare.** PostgreSQL preserves a tuple's raw `xmin`
+  across freezing (the frozen bit is set but `xmin` still returns the original
+  xid), so a frozen row keeps a resolvable `commit_ts`. It only goes NULL once
+  the xid ages past the commit-timestamp retention horizon — roughly 50M–200M
+  transactions, tied to `vacuum_freeze_min_age` / `autovacuum_freeze_max_age` —
+  and `pg_commit_ts` is truncated, or if `track_commit_timestamp` was off when
+  the row was written.
+
+Always run with `--dry-run --generate-report` first and review the per-row
+decisions before applying.
+
 ## 6) Custom row per PK
 
 Pin a specific PK to a hand-crafted row:
