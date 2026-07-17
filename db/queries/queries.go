@@ -671,10 +671,12 @@ func BlockHashSQL(schema, table string, primaryKeyCols []string, mode string, in
 			endPlaceholders[i] = fmt.Sprintf("$%d", paramIndex)
 			paramIndex++
 		}
-		operator := "<="
-		if mode == "TD_BLOCK_HASH" {
-			operator = "<"
-		}
+		// Upper bound is always EXCLUSIVE: a block's range_end is the next
+		// block's range_start (from LEAD in the build offsets and from split
+		// points), so a closed "<=" would hash boundary rows into two adjacent
+		// leaves. XOR parent hashing then cancels the duplicate siblings, letting
+		// divergent data produce matching root hashes and hiding real conflicts.
+		operator := "<"
 		var upperExpr string
 		if len(primaryKeyCols) == 1 {
 			upperExpr = fmt.Sprintf("%s %s %s", pkComparisonExpression, operator, endPlaceholders[0])
