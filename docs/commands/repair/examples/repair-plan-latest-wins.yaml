@@ -1,0 +1,172 @@
+# ACE advanced repair plan: one-pass "latest commit wins".
+#
+# A single pick_freshest rule resolves every divergent row (row_mismatch) by
+# keeping the side with the newer Spock commit timestamp (commit_ts). commit_ts
+# comes from _spock_metadata_ in the diff file and is populated from
+# pg_xact_commit_timestamp(xmin).
+#
+# MULTI-TABLE FORM: the rule set is defined ONCE (anchored as &latest_wins on
+# the first table) and reused on the others via `rules: *latest_wins`. Edit the
+# anchored block once and every aliased table updates automatically.
+#
+# ---------------------------------------------------------------------------
+# IMPORTANT CAVEATS - read before running
+# ---------------------------------------------------------------------------
+# 0. n1 / n2 ARE POSITIONAL, NOT NODE NAMES. For each compared pair, n1 is the
+#    alphabetically-first of the two node names and n2 is the second (assigned
+#    at runtime from the diff pair; nothing to configure). So `tie: n1`,
+#    keep_n1/keep_n2, and apply_from {from: n1|n2} all refer to a positional
+#    slot, not a node you can name. The DSL cannot target a physical node by
+#    name -- that is what standard repair's --source-of-truth is for. Also note
+#    there is no wildcard table key: every table you repair must be listed
+#    under `tables:` (aliasing the shared rule set keeps that cheap), and
+#    table-repair processes ONE table's diff file per invocation.
+#
+# 1. ALWAYS DRY-RUN FIRST. Start with --dry-run (and --generate-report) and
+#    review the per-row decisions before applying for real:
+#      ace table-repair --diff-file <schema>_<table>_diffs-<ts>.json \
+#                        --repair-plan repair-plan-latest-wins.yaml \
+#                        --dry-run --generate-report
+#    Only drop --dry-run once the report looks correct.
+#
+# 2. TIMEZONE / STRING COMPARISON. commit_ts is compared as a STRING, not as a
+#    parsed timestamp. "Newer wins" is only reliable when every node emits
+#    commit_ts with the SAME UTC offset (ideally all UTC). Nodes in different
+#    timezones can make the freshest comparison pick the wrong side.
+#
+# 3. track_commit_timestamp MUST BE ON everywhere. If one node has it off, that
+#    node's rows always show a NULL commit_ts regardless of how recently they
+#    changed, which silently breaks the "side with a timestamp is newer" logic.
+#
+# 4. LATEST-WRITE != ALWAYS-CORRECT. This is a last-write-wins strategy: it
+#    picks the most recently written row, which is not necessarily the
+#    semantically correct one (a recent errant update will win over an older
+#    good value). That is inherent to LWW, not a bug in this plan.
+#
+# 5. NULL commit_ts is RARE. PostgreSQL preserves a tuple's raw xmin across
+#    freezing (VACUUM FREEZE sets the frozen bit but SELECT xmin still returns
+#    the original xid), so a frozen tuple keeps a resolvable commit_ts. It only
+#    becomes NULL when pg_commit_ts is actually truncated -- i.e. the xid ages
+#    past the commit-timestamp retention horizon (tied to datfrozenxid) -- or
+#    when track_commit_timestamp was off at commit time. When it does happen
+#    this plan handles it in-pass: if only one
+#    side is NULL the side that still has a timestamp wins (usually the recently
+#    written one); if BOTH are NULL there is no recency signal, so the positional
+#    `tie` node is chosen. If you would rather NOT guess on the ambiguous cases,
+#    use ALTERNATIVE B (defer them to a --source-of-truth pass).
+#
+# 6. REQUIRES the pick_freshest commit_ts fix. pick_freshest resolves `key`
+#    from _spock_metadata_ (where commit_ts lives). On older ACE builds that
+#    lacked this, `key: commit_ts` silently fell back to `tie` every time. If in
+#    doubt, confirm with --dry-run that the NEWER side is actually chosen.
+#
+# when-grammar reminders: use `and`/`or`/`not`, single `=`, `!=`,
+# `is null` / `is not null`.  NOT supported: `&&`, `||`, `==`.
+
+version: 1
+
+tables:
+  # >>> replace these keys with your qualified (schema.table) names <<<
+  # The FIRST table defines the shared rule set (&latest_wins); the rest reuse
+  # it with `rules: *latest_wins`. Editing the anchored block updates them all.
+
+  public.inventory:
+    rules: &latest_wins
+      # =================================================================
+      # ACTIVE RULE - one-pass latest-commit-wins (shared by every table)
+      # =================================================================
+      # A single pick_freshest rule resolves EVERY row_mismatch in one pass:
+      #   - both sides have a commit_ts, different -> the NEWER one wins
+      #   - one side's commit_ts is NULL (frozen/untracked) -> the side that
+      #     still HAS a timestamp wins (it is the recently-written one)
+      #   - timestamps are exactly EQUAL, or BOTH are NULL -> the `tie` node
+      #     (positional n1 = alphabetically-first node; see caveat 0)
+      - name: latest_commit_wins
+        diff_type: [row_mismatch]
+        action:
+          type: custom
+          helpers:
+            pick_freshest:
+              key: commit_ts
+              tie: n1
+
+      # --- Rows that exist on only ONE side --------------------------------
+      # pick_freshest cannot apply (nothing to compare). Uncomment to also
+      # resolve inserts/deletes in the same pass; otherwise they are left alone.
+      #
+      # - name: propagate_inserts_to_n2
+      #   diff_type: [missing_on_n2]
+      #   action: { type: apply_from, from: n1, mode: upsert }
+      #
+      # - name: propagate_inserts_to_n1
+      #   diff_type: [missing_on_n1]
+      #   action: { type: apply_from, from: n2, mode: upsert }
+
+      # =================================================================
+      # OPT-IN ALTERNATIVES - commented out
+      # =================================================================
+      # These edit the SHARED rule set, so a change applies to every table that
+      # aliases *latest_wins. To vary a single table instead, give that table
+      # its own explicit `rules:` list (see the override example at the bottom).
+
+      # --- ALTERNATIVE A (best when available): app-level timestamp column ---
+      # If the table has a real, application-maintained timestamp column (e.g.
+      # updated_at), use it as the key. Being ordinary column data it is immune
+      # to freezing / wraparound, so it never goes NULL and gives correct
+      # latest-wins for every row. Replaces the ACTIVE rule above.
+      #
+      # - name: latest_by_app_column
+      #   diff_type: [row_mismatch]
+      #   action:
+      #     type: custom
+      #     helpers:
+      #       pick_freshest: { key: updated_at, tie: n1 }
+
+      # --- ALTERNATIVE B (two-pass): defer ambiguous rows to source-of-truth -
+      # Instead of letting `tie` guess on equal/NULL cases, resolve only the
+      # clear cases here and SKIP the ambiguous ones, then run a second pass
+      # `table-repair --source-of-truth <node>` to clean up the skipped rows by
+      # a named authoritative node. Each case is its own rule (first match
+      # wins), so you control equal vs NULL independently. Replaces the ACTIVE
+      # rule above.
+      #
+      # - name: freshest_clear_case          # both present AND different
+      #   diff_type: [row_mismatch]
+      #   when: n1.commit_ts is not null and n2.commit_ts is not null and n1.commit_ts != n2.commit_ts
+      #   action:
+      #     type: custom
+      #     helpers:
+      #       pick_freshest: { key: commit_ts, tie: n1 }
+      #
+      # - name: one_side_null_keep_ts_side   # exactly one side has a commit_ts
+      #   diff_type: [row_mismatch]
+      #   when: (n1.commit_ts is null and n2.commit_ts is not null) or (n1.commit_ts is not null and n2.commit_ts is null)
+      #   action:
+      #     type: custom
+      #     helpers:
+      #       pick_freshest: { key: commit_ts, tie: n1 }
+      #
+      # - name: ambiguous_defer              # equal timestamps OR both NULL
+      #   diff_type: [row_mismatch]
+      #   when: n1.commit_ts = n2.commit_ts or (n1.commit_ts is null and n2.commit_ts is null)
+      #   action: { type: skip }
+
+  # Additional tables reuse the exact same rule set via the alias:
+  public.orders:
+    rules: *latest_wins
+
+  public.customers:
+    rules: *latest_wins
+
+  # --- PER-TABLE OVERRIDE EXAMPLE (commented) --------------------------------
+  # To give one table DIFFERENT logic (e.g. it has an updated_at column), do NOT
+  # alias -- give it its own rules list:
+  #
+  # public.events:
+  #   rules:
+  #     - name: latest_by_app_column
+  #       diff_type: [row_mismatch]
+  #       action:
+  #         type: custom
+  #         helpers:
+  #           pick_freshest: { key: updated_at, tie: n1 }
