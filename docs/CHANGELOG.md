@@ -2,6 +2,33 @@
 
 All notable changes to ACE will be captured in this document. This project follows semantic versioning; the latest changes appear first.
 
+## [v2.1.1]
+
+### Added
+- **`repair` can now resolve `pick_freshest` by spock `commit_ts`
+  (latest-commit-wins).** `pick_freshest` previously only compared ordinary data
+  columns (e.g. `updated_at`); keying it on `commit_ts` silently fell back to
+  `tie` because that field is held in the diff's spock metadata, not the row. It
+  now resolves the key from row data or metadata, so a plan can keep the side
+  with the newer commit timestamp. See the latest-commit-wins repair example.
+
+### Changed
+- **`mtree build` on an empty table now fails with a clear message.** A table
+  with 0 rows on every node previously errored with a misleading "could not
+  determine a reference node" (as if row-estimate collection had failed). It now
+  reports that the table is empty and to add data before building, and correctly
+  distinguishes an all-empty table from an actual estimate failure.
+
+### Fixed
+- **`mtree table-diff` could report divergent nodes as identical (silent
+  false-negative).** Leaf hashing used a closed (`<=`) upper bound, so rows on
+  block boundaries were hashed into two adjacent leaves; the XOR-based parent
+  hash then cancelled the duplicate siblings, letting the same primary key with
+  *different* non-key data produce matching root hashes — the core UPDATE-UPDATE
+  conflict active-active clusters produce. Leaf hashing now uses an exclusive
+  (`<`) upper bound, so each row belongs to exactly one leaf. **Merkle trees
+  built before this fix must be rebuilt (`mtree build`).**
+
 ## [v2.1.0]
 
 This release focuses primarily on Merkle tree functionality.
