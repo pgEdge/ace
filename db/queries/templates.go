@@ -42,6 +42,7 @@ type Templates struct {
 	CheckRepSetExists    *template.Template
 	GetTablesInRepSet    *template.Template
 	GetPkeyColumnTypes   *template.Template
+	RegisterSkipSchema   *template.Template
 
 	CreateMetadataTable              *template.Template
 	GetPkeyOffsets                   *template.Template
@@ -687,6 +688,23 @@ var SQLTemplates = Templates{
 	GetTablesInRepSet: template.Must(template.New("getTablesInRepSet").Parse(
 		`SELECT concat_ws('.', nspname, relname) FROM spock.tables where set_name = $1;`,
 	)),
+	// RegisterSkipSchema appends $1 to spock.node.info->'skip_schema' for
+	// the local node, leaving any pre-existing entries intact. The NOT (... ? $1)
+	// guard makes the statement idempotent: running it twice with the same
+	// schema name updates zero rows the second time. spock.local_node is a
+	// view, so the UPDATE goes through spock.node and joins on node_id.
+	RegisterSkipSchema: template.Must(template.New("registerSkipSchema").Parse(`
+		UPDATE spock.node n
+		SET info = jsonb_set(
+			coalesce(n.info, '{}'::jsonb),
+			'{skip_schema}',
+			coalesce(n.info->'skip_schema', '[]'::jsonb) || to_jsonb($1::text),
+			true
+		)
+		FROM spock.local_node l
+		WHERE n.node_id = l.node_id
+		  AND NOT (coalesce(n.info->'skip_schema', '[]'::jsonb) ? $1);
+	`)),
 	GetPkeyColumnTypes: template.Must(template.New("getPkeyColumnTypes").Parse(`
 		SELECT
 			a.attname,

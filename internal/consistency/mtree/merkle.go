@@ -978,6 +978,19 @@ func (m *MerkleTreeTask) initOneNode(nodeInfo map[string]any, publicationName, s
 		return fmt.Errorf("failed to create schema '%s' on node %s: %w", m.aceSchema(), nodeInfo["Name"], err)
 	}
 
+	// Ask Spock to exclude the ACE schema from replication on this node.
+	// ACE metadata (Merkle trees, CDC bookkeeping) is node-local by design;
+	// replicating it would corrupt peers and is what skip_schema is for.
+	// Best-effort: a missing or older Spock should not block MtreeInit, so
+	// we log and continue instead of returning.
+	if rows, err := queries.RegisterSkipSchema(m.Ctx, pool, m.aceSchema()); err != nil {
+		logger.Warn("failed to register skip_schema '%s' with Spock on node %s: %v",
+			m.aceSchema(), nodeInfo["Name"], err)
+	} else if rows > 0 {
+		logger.Info("registered skip_schema '%s' with Spock on node: %s",
+			m.aceSchema(), nodeInfo["Name"])
+	}
+
 	var pubCommitLSN string
 	if err := func() (err error) {
 		tx, err := pool.Begin(m.Ctx)
