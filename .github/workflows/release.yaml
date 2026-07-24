@@ -191,6 +191,12 @@ jobs:
                   # Use the simulated tag (if any) so archive names carry the
                   # right version even in snapshot mode.
                   GORELEASER_CURRENT_TAG: ${{ github.event.inputs.simulate_tag || github.ref_name }}
+                  # The goreleaser image bundles a fixed Go that can lag the
+                  # `go X.Y.Z` line in go.mod, and it sets GOTOOLCHAIN=local so
+                  # a too-old bundled Go fails the build hook outright ("go.mod
+                  # requires go >= 1.26.5, running 1.26.1"). Override to `auto`
+                  # so Go downloads exactly the toolchain go.mod declares.
+                  GOTOOLCHAIN: auto
               run: |
                   # --snapshot on a non-tag (simulate_tag) dispatch builds the
                   # tarballs without publishing a GitHub release.
@@ -199,6 +205,7 @@ jobs:
                     -w /workspace \
                     -e GITHUB_TOKEN \
                     -e GORELEASER_CURRENT_TAG \
+                    -e GOTOOLCHAIN \
                     goreleaser/goreleaser:v2.15.2 \
                     release --clean ${{ (github.event_name == 'workflow_dispatch' && github.ref_type != 'tag') && '--snapshot' || '' }}
 
