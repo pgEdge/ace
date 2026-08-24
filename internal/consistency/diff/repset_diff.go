@@ -45,6 +45,7 @@ type RepsetDiffCmd struct {
 	SkipFile          string
 	skipTablesList    []string
 	tableList         []string
+	coldFrontExcluded []string
 	missingTables     []MissingTableInfo
 	nodeList          []string
 	clusterNodes      []map[string]any
@@ -226,10 +227,24 @@ func (c *RepsetDiffCmd) RunChecks(skipValidation bool) error {
 		return missingTables[i].Table < missingTables[j].Table
 	})
 
-	c.tableList = allTables
+	// A repset can span several schemas, so drop anything belonging to the
+	// ColdFront schema.
+	coldFrontPrefix := coldFrontSchemaName + "."
+	var filteredTables []string
+	var coldFrontExcluded []string
+	for _, table := range allTables {
+		if strings.HasPrefix(table, coldFrontPrefix) {
+			coldFrontExcluded = append(coldFrontExcluded, table)
+			continue
+		}
+		filteredTables = append(filteredTables, table)
+	}
+
+	c.tableList = filteredTables
+	c.coldFrontExcluded = coldFrontExcluded
 	c.missingTables = missingTables
 
-	if len(c.tableList) == 0 {
+	if len(c.tableList) == 0 && len(c.coldFrontExcluded) == 0 {
 		return fmt.Errorf("no tables found in repset %s", c.RepsetName)
 	}
 
@@ -360,6 +375,13 @@ func RepsetDiff(task *RepsetDiffCmd) (err error) {
 			}
 		}
 	}()
+
+	for _, tableName := range task.coldFrontExcluded {
+		if !task.Quiet {
+			logger.Info("Skipping table: %s (pgEdge ColdFront schema)", tableName)
+		}
+		skippedTables = append(skippedTables, fmt.Sprintf("%s (pgEdge ColdFront schema)", tableName))
+	}
 
 	for _, tableName := range task.tableList {
 		var skipped bool
