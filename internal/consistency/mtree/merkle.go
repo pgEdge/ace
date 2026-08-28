@@ -2450,6 +2450,11 @@ func (m *MerkleTreeTask) DiffMtree() (err error) {
 	if len(workItems) > 0 {
 		m.CompareRanges(workItems)
 
+		// Read the worker errors once, under the mutex, and use that copy
+		// below. The workers write pairCompareErrs, so no code here may read
+		// it directly.
+		m.DiffResult.Summary.IncompletePairs = m.incompletePairs()
+
 		// Mismatched blocks whose row comparison found no differences had stale
 		// tree hashes, not data divergence (typically rows applied by
 		// replication that a past drain missed). Say so -- a bare "Found N
@@ -2464,7 +2469,7 @@ func (m *MerkleTreeTask) DiffMtree() (err error) {
 			if len(entry.positions) == 0 || m.DiffResult.Summary.DiffRowsCount[pairKey] > 0 {
 				continue
 			}
-			if m.pairCompareErrs[pairKey] {
+			if slices.Contains(m.DiffResult.Summary.IncompletePairs, pairKey) {
 				logger.Warn("comparison between %s and %s was incomplete (worker errors); "+
 					"skipping stale-block refresh -- re-run the diff",
 					entry.node1["Name"], entry.node2["Name"])
@@ -2530,7 +2535,33 @@ func (m *MerkleTreeTask) DiffMtree() (err error) {
 			"guaranteed-current diff.", m.CDCSkippedNodes)
 	}
 
+	// A lost work item means the run has no result, not that the tables agree.
+	// Callers, and the exit code, must not read it as "no differences".
+	if pairs := m.DiffResult.Summary.IncompletePairs; len(pairs) > 0 {
+		return fmt.Errorf("mtree table-diff of %s.%s has no result: the range comparison "+
+			"failed part way through for node pair(s) %s (see the errors above). "+
+			"Run the diff again",
+			m.Schema, m.Table, strings.Join(pairs, ", "))
+	}
+
 	return nil
+}
+
+// incompletePairs lists the node pairs whose range comparison lost a work
+// item. The list is sorted so that the diff report does not change between
+// runs.
+func (m *MerkleTreeTask) incompletePairs() []string {
+	m.diffMutex.Lock()
+	defer m.diffMutex.Unlock()
+	if len(m.pairCompareErrs) == 0 {
+		return nil
+	}
+	pairs := make([]string, 0, len(m.pairCompareErrs))
+	for pair := range m.pairCompareErrs {
+		pairs = append(pairs, pair)
+	}
+	sort.Strings(pairs)
+	return pairs
 }
 
 // refreshStaleLeaves rehashes exactly the given leaf blocks from live table

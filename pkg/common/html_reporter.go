@@ -135,6 +135,16 @@ func writeHTMLDiffReport(diffResult types.DiffOutput, jsonFilePath string) (stri
 		}
 	}
 
+	// Without this, an incomplete run produces an HTML report that looks just
+	// like a clean one. People who read the report never see the worker
+	// errors, which only went to the log.
+	if len(summary.IncompletePairs) > 0 {
+		summaryItems = append(summaryItems, summaryItem{
+			Label: "Comparison Incomplete",
+			Value: strings.Join(summary.IncompletePairs, ", ") + " (counts are lower bounds)",
+		})
+	}
+
 	var filteredItems []summaryItem
 	for _, item := range summaryItems {
 		if item.Value != "" && item.Value != "0" {
