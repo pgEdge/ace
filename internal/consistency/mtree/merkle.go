@@ -778,6 +778,10 @@ func (m *MerkleTreeTask) addRowToDiff(nodePairKey, nodeName string, row types.Or
 	return true, nil
 }
 
+// buildRowKey renders the primary key of a diff row into the key used to
+// deduplicate rows already recorded for a node pair. It uses the same encoding
+// as the rest of the codebase so that a pkey value containing the delimiter
+// cannot make two distinct rows look like one and silently drop a difference.
 func (m *MerkleTreeTask) buildRowKey(row types.OrderedMap) (string, error) {
 	values := make([]string, len(m.Key))
 	for i, col := range m.Key {
@@ -787,7 +791,7 @@ func (m *MerkleTreeTask) buildRowKey(row types.OrderedMap) (string, error) {
 		}
 		values[i] = fmt.Sprintf("%v", val)
 	}
-	return strings.Join(values, "|"), nil
+	return utils.RowKeyFromStrings(values), nil
 }
 
 func isNumericColType(colType string) bool {
@@ -2777,9 +2781,13 @@ func (m *MerkleTreeTask) getPkeyBatches(pool1, pool2 *pgxpool.Pool, mismatchedPo
 		}
 	}
 
+	// Key each boundary by its components, not by fmt.Sprint of the whole
+	// slice: that renders []any{"a b", "c"} and []any{"a", "b c"} both as
+	// "[a b c]", so one of the two boundaries is dropped and the slice of the
+	// key space between them is never compared.
 	uniqueBoundaries := make(map[string]any)
 	for _, b := range boundaries {
-		key := fmt.Sprint(b)
+		key := utils.RowKeyFromValues(boundaryToSlice(b))
 		uniqueBoundaries[key] = b
 	}
 
