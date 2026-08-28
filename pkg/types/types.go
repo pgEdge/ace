@@ -134,6 +134,10 @@ type DiffSummary struct {
 	// that row comparison resolved as false positives (stale hashes, no data
 	// differences) and that the diff refreshed from live data in place.
 	StaleBlocksRefreshed map[string]int `json:"stale_blocks_refreshed,omitempty"`
+	// IncompletePairs lists the node pairs that lost a range-comparison work
+	// item to an error. For those pairs DiffRowsCount is only a lower bound,
+	// and zero means "not compared", not "no differences".
+	IncompletePairs []string `json:"incomplete_pairs,omitempty"`
 }
 
 type KVPair struct {

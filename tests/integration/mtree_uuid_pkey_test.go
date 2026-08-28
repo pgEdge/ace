@@ -113,6 +113,9 @@ func TestMtreeUUIDPrimaryKeyDiff(t *testing.T) {
 	// Before the fix this returned nil after it logged a 22P02 from the worker.
 	require.NoError(t, task.DiffMtree(), "diff of a uuid-PK table must not fail")
 
+	require.Empty(t, task.DiffResult.Summary.IncompletePairs,
+		"the comparison must finish: a failed work item would make the result meaningless")
+
 	total := 0
 	for _, c := range task.DiffResult.Summary.DiffRowsCount {
 		total += c
