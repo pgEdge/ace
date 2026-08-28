@@ -15,6 +15,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -138,6 +139,35 @@ type DiffSummary struct {
 	// item to an error. For those pairs DiffRowsCount is only a lower bound,
 	// and zero means "not compared", not "no differences".
 	IncompletePairs []string `json:"incomplete_pairs,omitempty"`
+}
+
+// InconclusiveReasons lists why this run could not establish that the tables
+// agree. An empty list means every row in scope really was compared.
+//
+// This is the one place that decides it, so that every source of "we did not
+// look at all of it" gets the same treatment: an empty diff must not be
+// reported as a match, and the run must not exit successfully. Add new sources
+// here rather than handling them at the call site -- the previous split, where
+// a failed worker aborted the run but a skipped CDC drain still printed TABLES
+// MATCH, left callers unable to tell which kind of green they had got.
+//
+// Deliberately NOT listed: Until, which narrows the comparison on purpose and
+// yields a real answer for the range the caller asked about, and
+// DiffRowLimitReached, which truncates the list of differences after the
+// verdict is already "they differ".
+func (s DiffSummary) InconclusiveReasons() []string {
+	var reasons []string
+	if len(s.IncompletePairs) > 0 {
+		reasons = append(reasons, fmt.Sprintf(
+			"the range comparison failed part way through for node pair(s) %s",
+			strings.Join(s.IncompletePairs, ", ")))
+	}
+	if len(s.CDCSkippedNodes) > 0 {
+		reasons = append(reasons, fmt.Sprintf(
+			"the CDC drain was skipped for node(s) %s, so their recent changes are not in the trees",
+			strings.Join(s.CDCSkippedNodes, ", ")))
+	}
+	return reasons
 }
 
 type KVPair struct {

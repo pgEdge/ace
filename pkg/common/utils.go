@@ -1486,14 +1486,20 @@ func MapToOrderedMap(m map[string]any, cols []string) types.OrderedMap {
 }
 
 func WriteDiffReport(diffResult types.DiffOutput, schema, table, format string) (string, string, error) {
-	// An empty NodeDiffs means "the tables match" only if every node pair was
-	// really compared. If work items were lost to errors, it means "we do not
-	// know", and the summary that names those pairs is still worth writing to
-	// disk, even with no rows to show. Engines that never set IncompletePairs
-	// are not affected.
-	incomplete := len(diffResult.Summary.IncompletePairs) > 0
-	if len(diffResult.NodeDiffs) == 0 && !incomplete {
-		logger.Info("%s TABLES MATCH", CheckMark)
+	// An empty NodeDiffs means "the tables match" only if every row in scope was
+	// really compared; DiffSummary.InconclusiveReasons is the single place that
+	// decides. When it is not empty the summary naming those reasons is still
+	// worth writing to disk, even with no rows to show. Engines that set none of
+	// the fields it looks at are not affected.
+	inconclusive := diffResult.Summary.InconclusiveReasons()
+	if len(diffResult.NodeDiffs) == 0 && len(inconclusive) == 0 {
+		if diffResult.Summary.Until != "" {
+			// A scoped answer, not an unqualified one: rows committed after the
+			// cutoff were never in the comparison.
+			logger.Info("%s TABLES MATCH as of %s", CheckMark, diffResult.Summary.Until)
+		} else {
+			logger.Info("%s TABLES MATCH", CheckMark)
+		}
 		return "", "", nil
 	}
 
@@ -1539,9 +1545,12 @@ func WriteDiffReport(diffResult types.DiffOutput, schema, table, format string) 
 			logger.Warn("Found %d differences between %s", diffCount, key)
 		}
 	}
-	if incomplete {
-		logger.Warn("%s COMPARISON INCOMPLETE for node pair(s) %s -- the counts above are lower bounds",
-			CrossMark, strings.Join(diffResult.Summary.IncompletePairs, ", "))
+	if len(inconclusive) > 0 {
+		logger.Warn("%s RESULT NOT ESTABLISHED -- part of the data was never compared, "+
+			"so any count above is a lower bound:", CrossMark)
+		for _, reason := range inconclusive {
+			logger.Warn("  %s", reason)
+		}
 	}
 	logger.Info("Diff report written to %s", jsonFileName)
 

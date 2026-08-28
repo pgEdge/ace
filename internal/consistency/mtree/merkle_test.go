@@ -232,31 +232,6 @@ func TestReadRowHashesRowsDoNotAlias(t *testing.T) {
 	}
 }
 
-// A lost work item means the pair has no result. The summary has to say so,
-// otherwise a diff count of zero reads as a match.
-func TestIncompletePairsReportsFailedWorkItems(t *testing.T) {
-	m := &MerkleTreeTask{}
-
-	if got := m.incompletePairs(); got != nil {
-		t.Errorf("expected no incomplete pairs on a clean task, got %v", got)
-	}
-
-	m.recordPairCompareErr("n2/n3")
-	m.recordPairCompareErr("n1/n2")
-	m.recordPairCompareErr("n1/n2")
-
-	got := m.incompletePairs()
-	want := []string{"n1/n2", "n2/n3"}
-	if len(got) != len(want) {
-		t.Fatalf("incompletePairs() = %v, want %v", got, want)
-	}
-	for i := range want {
-		if got[i] != want[i] {
-			t.Fatalf("incompletePairs() = %v, want %v (stable, sorted)", got, want)
-		}
-	}
-}
-
 // uuid and bytea bounds must be sorted like uuid_cmp() and byteacmp(), not by
 // their printed Go form. 0x02 against 0x11 is the pair the fmt fallback got
 // backwards: as text, "[17 ..." comes before "[2 ...".
@@ -287,19 +262,28 @@ func TestCompareBoundariesOrdersUUIDs(t *testing.T) {
 	}
 }
 
-// NaN is a legal float primary key, and Postgres sorts it above every number
-// while Go's cmp.Compare puts it below. Getting this backwards inverts the
-// bounds around it.
-func TestComparePkeyValuesNaNSortsLast(t *testing.T) {
-	nan := math.NaN()
-	if got, ok := comparePkeyValues(nan, 1.0); !ok || got != 1 {
-		t.Errorf("comparePkeyValues(NaN, 1.0) = %d, %v; want 1, true", got, ok)
+// A lost work item means the pair has no result. The summary has to say so,
+// otherwise a diff count of zero reads as a match.
+func TestIncompletePairsReportsFailedWorkItems(t *testing.T) {
+	m := &MerkleTreeTask{}
+
+	if got := m.incompletePairs(); got != nil {
+		t.Errorf("expected no incomplete pairs on a clean task, got %v", got)
 	}
-	if got, ok := comparePkeyValues(1.0, nan); !ok || got != -1 {
-		t.Errorf("comparePkeyValues(1.0, NaN) = %d, %v; want -1, true", got, ok)
+
+	m.recordPairCompareErr("n2/n3")
+	m.recordPairCompareErr("n1/n2")
+	m.recordPairCompareErr("n1/n2")
+
+	got := m.incompletePairs()
+	want := []string{"n1/n2", "n2/n3"}
+	if len(got) != len(want) {
+		t.Fatalf("incompletePairs() = %v, want %v", got, want)
 	}
-	if got, ok := comparePkeyValues(nan, nan); !ok || got != 0 {
-		t.Errorf("comparePkeyValues(NaN, NaN) = %d, %v; want 0, true", got, ok)
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("incompletePairs() = %v, want %v (stable, sorted)", got, want)
+		}
 	}
 }
 
@@ -454,6 +438,22 @@ func TestBuildRowHashQuery(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// NaN is a legal float primary key, and Postgres sorts it above every number
+// while Go's cmp.Compare puts it below. Getting this backwards inverts the
+// bounds around it.
+func TestComparePkeyValuesNaNSortsLast(t *testing.T) {
+	nan := math.NaN()
+	if got, ok := comparePkeyValues(nan, 1.0); !ok || got != 1 {
+		t.Errorf("comparePkeyValues(NaN, 1.0) = %d, %v; want 1, true", got, ok)
+	}
+	if got, ok := comparePkeyValues(1.0, nan); !ok || got != -1 {
+		t.Errorf("comparePkeyValues(1.0, NaN) = %d, %v; want -1, true", got, ok)
+	}
+	if got, ok := comparePkeyValues(nan, nan); !ok || got != 0 {
+		t.Errorf("comparePkeyValues(NaN, NaN) = %d, %v; want 0, true", got, ok)
 	}
 }
 

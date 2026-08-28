@@ -517,7 +517,7 @@ func TestStringifyOrderedMapKey_JsonNumberNoPKCollision(t *testing.T) {
 // An empty NodeDiffs is a match only if every node pair was really compared.
 // If work items were lost to errors it means "we do not know", and the summary
 // that names those pairs must still be written to disk.
-func TestWriteDiffReportNoMatchVerdictWhenIncomplete(t *testing.T) {
+func TestWriteDiffReportNoMatchVerdictWhenInconclusive(t *testing.T) {
 	t.Chdir(t.TempDir()) // WriteDiffReport writes the report into the current directory
 
 	clean := types.DiffOutput{
@@ -538,6 +538,38 @@ func TestWriteDiffReportNoMatchVerdictWhenIncomplete(t *testing.T) {
 	require.NoError(t, err)
 	require.NotEmpty(t, jsonPath, "an incomplete comparison must not be reported as a match")
 	require.FileExists(t, jsonPath)
+
+	// The same must hold for a skipped CDC drain. Before these were harmonised
+	// one aborted the run and the other printed TABLES MATCH, so a caller had
+	// no way to tell which kind of green it had.
+	cdcSkipped := types.DiffOutput{
+		Summary: types.DiffSummary{
+			Schema:          "public",
+			Table:           "t",
+			CDCSkippedNodes: []string{"n1"},
+		},
+	}
+	jsonPath, _, err = WriteDiffReport(cdcSkipped, "public", "t", "json")
+	require.NoError(t, err)
+	require.NotEmpty(t, jsonPath, "a skipped CDC drain must not be reported as a match either")
+}
+
+// Every source of "part of the data was not compared" has to reach the verdict
+// through one function, so none can be forgotten at a call site.
+func TestInconclusiveReasons(t *testing.T) {
+	require.Empty(t, types.DiffSummary{}.InconclusiveReasons(),
+		"a clean summary establishes its result")
+
+	require.Len(t, types.DiffSummary{IncompletePairs: []string{"n1/n2"}}.InconclusiveReasons(), 1)
+	require.Len(t, types.DiffSummary{CDCSkippedNodes: []string{"n1"}}.InconclusiveReasons(), 1)
+	require.Len(t, types.DiffSummary{
+		IncompletePairs: []string{"n1/n2"},
+		CDCSkippedNodes: []string{"n1"},
+	}.InconclusiveReasons(), 2)
+
+	// A scoped or truncated run still has a real answer and must stay clean.
+	require.Empty(t, types.DiffSummary{Until: "2026-01-01"}.InconclusiveReasons())
+	require.Empty(t, types.DiffSummary{DiffRowLimitReached: true}.InconclusiveReasons())
 }
 
 // Row keys are matched across nodes, so an ambiguous encoding loses rows: with

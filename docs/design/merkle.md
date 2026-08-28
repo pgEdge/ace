@@ -424,7 +424,6 @@ bounds in Go. It stays the fallback for a table whose primary key `mtree`
 cannot sort reliably.
 
 ### Observability and Teardown
-### Observability and Teardown
 - **Task records**: Mtree runs are recorded in `ace_tasks.db` (table `ace_tasks`) with context about block size, nodes, and statuses. Check logs for counts of dirty blocks, splits/merges applied, parent rebuilds, and extra-leaf mismatches during diff traversal.
 - **Slot health**: Monitor logical slot lag/WAL retention; a bloated slot suggests `update` hasn’t consumed changes. If the slot is dropped or stale, rebuild (init + build) and recreate the slot/publication entry.
 - **Teardown/reset**: Prefer the built-in `teardown`/`teardown-table` commands to remove mtree artifacts (mtree table, composite type, metadata, publication entry). Use manual drops only if automation fails, then rebuild with the desired block size and resume CDC.

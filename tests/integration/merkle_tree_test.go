@@ -804,12 +804,25 @@ func testMerkleTreeDiffWhileListenActive(t *testing.T, env *testEnv, tableName s
 
 	time.Sleep(2 * time.Second) // give listen time to mark the block dirty
 
-	// The core assertion: table-diff must NOT fail with a slot-active error
-	// while listen holds the slot.
+	// Two separate things are asserted here, and they used to be conflated.
+	//
+	// First, a busy slot must not stop the diff from running: it falls back to
+	// the trees it already has instead of refusing to start.
+	//
+	// Second, the result of that run is not established. The skipped drain
+	// means the node's recent changes were never folded into the trees, so
+	// "no differences" would be a claim the run cannot support. It therefore
+	// ends with an error naming the node, exactly as a lost work item does --
+	// the two used to behave differently, leaving callers unable to tell which
+	// kind of green they had been given.
 	err = mtreeTask.DiffMtree()
-	require.NoError(t, err, "table-diff should succeed while listen is active")
+	require.Error(t, err, "a diff with a skipped CDC drain must not report success")
+	require.Contains(t, err.Error(), "has no result",
+		"the error must say the result was not established, not that the diff crashed")
+	require.Contains(t, err.Error(), "CDC drain was skipped",
+		"the error must name the reason so an operator knows what to fix")
 
-	// update must likewise not fail with a slot-active error.
+	// update produces no verdict, so a busy slot leaves it successful.
 	require.NoError(t, mtreeTask.UpdateMtree(true),
 		"update should succeed while listen is active")
 
@@ -2161,7 +2174,8 @@ func extractDiffIDs(rows []types.OrderedMap) []int {
 // min block size (1000) so the default block size still yields a multi-leaf
 // tree, which is what exercises the last-closed-leaf/open-tail boundary.
 //
-//   n1 = 1..2000, n2 = 1..2010  → n2 is the reference (3 leaves).
+//	n1 = 1..2000, n2 = 1..2010  → n2 is the reference (3 leaves).
+//
 // Expected n1/n2 diff = {2001..2010} (10 rows). The bug drops id=2010 (n2's
 // max), yielding 9 — the same off-by-the-last-row symptom that was reported.
 func TestMerkleTreeReferenceMaxInMultiLeafTail(t *testing.T) {

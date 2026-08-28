@@ -866,9 +866,9 @@ func pkeyKindOf(v any) pkeyKind {
 	return pkeyUnsupported
 }
 
-// comparePkeyValues orders two primary-key values of the same Go type, the way
-// the server orders that type. ok is false for a kind pkeyKindOf does not
-// know; the caller has to decide what to do about it.
+// comparePkeyValues orders two primary-key values of the same Go type. ok is
+// false only for a kind that pkeyKindOf does not know, which
+// validateBoundaryTypes has already rejected by the time bounds get here.
 func comparePkeyValues(val1, val2 any) (result int, ok bool) {
 	switch pkeyKindOf(val1) {
 	case pkeyInt:
@@ -2561,6 +2561,13 @@ func (m *MerkleTreeTask) DiffMtree() (err error) {
 		m.DiffResult.Summary.EndTime = endTime.Format(time.RFC3339)
 		m.DiffResult.Summary.TimeTaken = endTime.Sub(m.StartTime).String()
 		m.DiffResult.Summary.PrimaryKey = m.Key
+		// Feed the verdict: a skipped drain means those nodes' recent changes
+		// were never in the trees we just compared.
+		m.DiffResult.Summary.CDCSkippedNodes = m.CDCSkippedNodes
+		// Record the cutoff too. Rows committed after it were never in the
+		// comparison, so a verdict without it reads as unqualified when it is
+		// not. The field existed but nothing had ever filled it.
+		m.DiffResult.Summary.Until = m.Until
 		if m.DiffResult.Summary.DiffRowLimitReached {
 			logger.Warn("mtree table-diff stopped after reaching max_diff_rows=%d; additional differences may exist", m.MaxDiffRows)
 		}
@@ -2577,21 +2584,20 @@ func (m *MerkleTreeTask) DiffMtree() (err error) {
 	resultCtx["mismatched_pairs"] = len(m.DiffResult.NodeDiffs)
 
 	if len(m.CDCSkippedNodes) > 0 {
-		logger.Warn("diff completed in best-effort mode: the CDC drain was skipped for "+
-			"node(s) %v because the replication slot was held by another consumer "+
-			"(expected: 'mtree listen'). Recent changes on those node(s) may not be "+
-			"reflected, so divergence can be under-reported. Re-run with no concurrent "+
-			"'mtree listen' or other mtree operation holding the slot for a "+
-			"guaranteed-current diff.", m.CDCSkippedNodes)
+		// The verdict below already refuses to call this a match; this adds the
+		// part an operator can act on.
+		logger.Warn("the CDC drain was skipped for node(s) %v because the replication slot "+
+			"was held by another consumer (expected: 'mtree listen'). Re-run with no "+
+			"concurrent 'mtree listen' or other mtree operation holding the slot.",
+			m.CDCSkippedNodes)
 	}
 
-	// A lost work item means the run has no result, not that the tables agree.
-	// Callers, and the exit code, must not read it as "no differences".
-	if pairs := m.DiffResult.Summary.IncompletePairs; len(pairs) > 0 {
-		return fmt.Errorf("mtree table-diff of %s.%s has no result: the range comparison "+
-			"failed part way through for node pair(s) %s (see the errors above). "+
-			"Run the diff again",
-			m.Schema, m.Table, strings.Join(pairs, ", "))
+	// Anything that left part of the data uncompared means the run has no
+	// result, not that the tables agree. Callers, and the exit code, must not
+	// read it as "no differences".
+	if reasons := m.DiffResult.Summary.InconclusiveReasons(); len(reasons) > 0 {
+		return fmt.Errorf("mtree table-diff of %s.%s has no result: %s. Fix that and run it again",
+			m.Schema, m.Table, strings.Join(reasons, "; "))
 	}
 
 	return nil
