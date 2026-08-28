@@ -190,16 +190,26 @@ func writeHTMLDiffReport(diffResult types.DiffOutput, jsonFilePath string) (stri
 
 		columns := collectColumnsInOrder(summary.PrimaryKey, rowsA, rowsB)
 
+		// Two keys per row, and they are not interchangeable. buildRowKey is
+		// the collision-proof identity used to pair a row on A with the same
+		// row on B; buildRowDisplayKey is the plain rendering shown in the
+		// report and embedded in data-pk, which the report's own JavaScript
+		// interpolates into a CSS attribute selector and so cannot carry the
+		// quotes the identity encoding adds.
+		displayByKey := make(map[string]string, len(rowsA)+len(rowsB))
+
 		rowMapA := make(map[string]types.OrderedMap, len(rowsA))
 		for idx, row := range rowsA {
 			key := buildRowKey(row, summary.PrimaryKey, idx)
 			rowMapA[key] = row
+			displayByKey[key] = buildRowDisplayKey(row, summary.PrimaryKey, idx)
 		}
 
 		rowMapB := make(map[string]types.OrderedMap, len(rowsB))
 		for idx, row := range rowsB {
 			key := buildRowKey(row, summary.PrimaryKey, idx)
 			rowMapB[key] = row
+			displayByKey[key] = buildRowDisplayKey(row, summary.PrimaryKey, idx)
 		}
 
 		var commonKeys []string
@@ -219,9 +229,9 @@ func writeHTMLDiffReport(diffResult types.DiffOutput, jsonFilePath string) (stri
 			}
 		}
 
-		sortPKKeys(commonKeys)
-		sortPKKeys(missingInA)
-		sortPKKeys(missingInB)
+		sortPKKeys(commonKeys, displayByKey)
+		sortPKKeys(missingInA, displayByKey)
+		sortPKKeys(missingInB, displayByKey)
 
 		valueDiffs := make([]row, 0, len(commonKeys))
 		for _, key := range commonKeys {
@@ -255,7 +265,7 @@ func writeHTMLDiffReport(diffResult types.DiffOutput, jsonFilePath string) (stri
 				cells = append(cells, c)
 			}
 			valueDiffs = append(valueDiffs, row{
-				PKey:      key,
+				PKey:      displayByKey[key],
 				Cells:     cells,
 				RowType:   "value_diff",
 				HasDiffs:  hasDiffs,
@@ -282,7 +292,7 @@ func writeHTMLDiffReport(diffResult types.DiffOutput, jsonFilePath string) (stri
 					})
 				}
 				group.Rows = append(group.Rows, row{
-					PKey:      key,
+					PKey:      displayByKey[key],
 					Cells:     cells,
 					RowType:   "missing_in_b",
 					HasDiffs:  true,
@@ -310,7 +320,7 @@ func writeHTMLDiffReport(diffResult types.DiffOutput, jsonFilePath string) (stri
 					})
 				}
 				group.Rows = append(group.Rows, row{
-					PKey:     key,
+					PKey:     displayByKey[key],
 					Cells:    cells,
 					RowType:  "missing_in_a",
 					HasDiffs: true,
@@ -447,6 +457,9 @@ func buildDiffBreakdown(diffCounts map[string]int) []htmlPairCount {
 	return pairs
 }
 
+// buildRowKey returns the identity a row is matched by across the two nodes.
+// It falls back to the row's position when there is no usable primary key,
+// which pairs nothing but at least keeps distinct rows distinct.
 func buildRowKey(row types.OrderedMap, primaryKey []string, index int) string {
 	if len(primaryKey) == 0 {
 		return fmt.Sprintf("__row_%d", index)
@@ -457,6 +470,26 @@ func buildRowKey(row types.OrderedMap, primaryKey []string, index int) string {
 		return fmt.Sprintf("__row_%d", index)
 	}
 	return key
+}
+
+// buildRowDisplayKey renders the same primary key for human eyes: the raw
+// values joined by a pipe, with no quoting. Two rows whose pkey values differ
+// only in where the pipes fall share a display key; they still have distinct
+// identities, so neither is dropped from the report.
+func buildRowDisplayKey(row types.OrderedMap, primaryKey []string, index int) string {
+	if len(primaryKey) == 0 {
+		return fmt.Sprintf("__row_%d", index)
+	}
+
+	parts := make([]string, len(primaryKey))
+	for i, col := range primaryKey {
+		val, ok := row.Get(col)
+		if !ok {
+			return fmt.Sprintf("__row_%d", index)
+		}
+		parts[i] = fmt.Sprintf("%v", val)
+	}
+	return strings.Join(parts, "|")
 }
 
 func collectColumnsInOrder(primaryKey []string, rowSets ...[]types.OrderedMap) []string {
@@ -643,10 +676,32 @@ func buildRowJSONPretty(row types.OrderedMap, columns []string) string {
 	return string(b)
 }
 
-// sortPKKeys orders primary key strings using numeric-aware comparison so 2 sorts before 10.
-func sortPKKeys(keys []string) {
+// sortPKKeys orders row identity keys by their displayed primary key, using
+// numeric-aware comparison so 2 sorts before 10, and falls back to the
+// identity key itself when two displays compare equal. The identity keys are a
+// quoted encoding that comparePKKey cannot read numerically, hence the lookup
+// through display.
+func sortPKKeys(keys []string, display map[string]string) {
+	// A key with no display entry would compare as the empty string against
+	// every other one, which is not an ordering; fall back to the key itself
+	// so the report stays deterministic.
+	shown := func(key string) string {
+		if d, ok := display[key]; ok {
+			return d
+		}
+		return key
+	}
 	sort.Slice(keys, func(i, j int) bool {
-		return comparePKKey(keys[i], keys[j]) < 0
+		if c := comparePKKey(shown(keys[i]), shown(keys[j])); c != 0 {
+			return c < 0
+		}
+		// Distinct rows can share a display key -- that is the whole reason
+		// identity and display are separate -- and comparePKComponent also
+		// ties values that differ only in spelling, such as 1 and 1.0.
+		// sort.Slice is not stable and the input order comes from map
+		// iteration, so without a tie-break on the identity the report
+		// reorders those rows from one run to the next.
+		return keys[i] < keys[j]
 	})
 }
 

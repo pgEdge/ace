@@ -1083,16 +1083,23 @@ func RowKeyFromValues(vals []any) string {
 	return RowKeyFromStrings(parts)
 }
 
+// StringifyKey renders the primary-key columns of a row into the in-memory key
+// that matches that row against the same row on another node. The parts are
+// encoded with RowKeyFromStrings, so a value that itself contains the
+// delimiter cannot collide with a different composite key.
+//
+// Like every RowKeyFromStrings result, this is a matching key and not a pkey
+// value: it must not reach SQL, a report or repair.
 func StringifyKey(row map[string]any, pkeyCols []string) (string, error) {
-	var pkeyParts []string
-	for _, pkeyCol := range pkeyCols {
+	pkeyParts := make([]string, len(pkeyCols))
+	for i, pkeyCol := range pkeyCols {
 		val, ok := row[pkeyCol]
 		if !ok {
 			return "", fmt.Errorf("pkey column %s not found in row", pkeyCol)
 		}
-		pkeyParts = append(pkeyParts, fmt.Sprintf("%v", val))
+		pkeyParts[i] = fmt.Sprintf("%v", val)
 	}
-	return strings.Join(pkeyParts, "|"), nil
+	return RowKeyFromStrings(pkeyParts), nil
 }
 
 func AddSpockMetadata(row map[string]any) map[string]any {
@@ -1449,16 +1456,19 @@ func OrderedMapToMap(om types.OrderedMap) map[string]any {
 	return m
 }
 
+// StringifyOrderedMapKey is StringifyKey for an OrderedMap. It must stay
+// byte-for-byte compatible with StringifyKey: the two are used interchangeably
+// to key the same maps, so a row keyed by one has to be found by the other.
 func StringifyOrderedMapKey(row types.OrderedMap, pkeyCols []string) (string, error) {
-	var pkeyParts []string
-	for _, pkeyCol := range pkeyCols {
+	pkeyParts := make([]string, len(pkeyCols))
+	for i, pkeyCol := range pkeyCols {
 		val, ok := row.Get(pkeyCol)
 		if !ok {
 			return "", fmt.Errorf("pkey column %s not found in row", pkeyCol)
 		}
-		pkeyParts = append(pkeyParts, fmt.Sprintf("%v", val))
+		pkeyParts[i] = fmt.Sprintf("%v", val)
 	}
-	return strings.Join(pkeyParts, "|"), nil
+	return RowKeyFromStrings(pkeyParts), nil
 }
 
 func MapToOrderedMap(m map[string]any, cols []string) types.OrderedMap {

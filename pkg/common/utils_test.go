@@ -498,7 +498,8 @@ func TestStringifyOrderedMapKey_JsonNumber(t *testing.T) {
 
 	key, err := StringifyOrderedMapKey(row, []string{"id"})
 	require.NoError(t, err)
-	require.Equal(t, "415588913294348289", key, "PK must stringify to exact decimal, not scientific notation")
+	require.Equal(t, RowKeyFromStrings([]string{"415588913294348289"}), key,
+		"PK must stringify to exact decimal, not scientific notation")
 }
 
 func TestStringifyOrderedMapKey_JsonNumberNoPKCollision(t *testing.T) {
@@ -553,4 +554,82 @@ func TestRowKeyFromStringsIsUnambiguous(t *testing.T) {
 		RowKeyFromStrings([]string{"a", "b"}),
 		RowKeyFromStrings([]string{"a", "b"}),
 		"the same parts must always encode to the same row key")
+}
+
+// StringifyKey and StringifyOrderedMapKey key the same maps in the diff and
+// repair paths -- a row inserted under one has to be found under the other --
+// and both must inherit the unambiguous encoding, or a pkey value containing
+// the delimiter merges two distinct rows into one.
+func TestStringifyKeyEncodingIsSharedAndUnambiguous(t *testing.T) {
+	pkeyCols := []string{"a", "b"}
+
+	split1 := map[string]any{"a": "x|y", "b": "z"}
+	split2 := map[string]any{"a": "x", "b": "y|z"}
+
+	key1, err := StringifyKey(split1, pkeyCols)
+	require.NoError(t, err)
+	key2, err := StringifyKey(split2, pkeyCols)
+	require.NoError(t, err)
+	require.NotEqual(t, key1, key2, "rows whose pkey values differ must not share a key")
+
+	ordered := types.OrderedMap{{Key: "a", Value: "x|y"}, {Key: "b", Value: "z"}}
+	orderedKey, err := StringifyOrderedMapKey(ordered, pkeyCols)
+	require.NoError(t, err)
+	require.Equal(t, key1, orderedKey, "the two stringifiers must agree on the same row")
+}
+
+// Block boundaries are de-duplicated by this encoding before the key space is
+// sliced up. fmt.Sprint over the whole slice renders both of these as
+// "[a b c]", which drops one boundary and leaves the range between them
+// uncompared, so the parts have to be encoded one at a time.
+func TestRowKeyFromValuesSeparatesComponents(t *testing.T) {
+	require.NotEqual(t,
+		RowKeyFromValues([]any{"a b", "c"}),
+		RowKeyFromValues([]any{"a", "b c"}),
+		"composite boundaries that differ must not encode to the same key")
+
+	require.NotEqual(t,
+		RowKeyFromValues([]any{"a|b", "c"}),
+		RowKeyFromValues([]any{"a", "b|c"}),
+		"the delimiter inside a value must not merge two boundaries")
+
+	require.Equal(t,
+		RowKeyFromValues([]any{1, "x"}),
+		RowKeyFromValues([]any{1, "x"}),
+		"equal boundaries must encode to the same key, or dedup stops working")
+}
+
+// The report must not reorder its rows between runs on identical input. Two
+// rows can share a display key while having distinct identities, and the input
+// order comes from map iteration, so the sort needs a tie-break to be a total
+// order rather than merely a mostly-consistent one.
+func TestSortPKKeysIsDeterministicOnTiedDisplays(t *testing.T) {
+	// Both identities render as the same display string.
+	idA := RowKeyFromStrings([]string{"a|b", "c"})
+	idB := RowKeyFromStrings([]string{"a", "b|c"})
+	display := map[string]string{idA: "a|b|c", idB: "a|b|c"}
+
+	var first []string
+	for run := 0; run < 20; run++ {
+		keys := []string{idA, idB}
+		if run%2 == 1 {
+			keys = []string{idB, idA} // the map-iteration order flips too
+		}
+		sortPKKeys(keys, display)
+		if first == nil {
+			first = append([]string(nil), keys...)
+			continue
+		}
+		require.Equal(t, first, keys, "tied displays must sort to a stable order")
+	}
+
+	// Numerically equal but differently spelled displays tie the same way.
+	keys := []string{"id-b", "id-a"}
+	sortPKKeys(keys, map[string]string{"id-a": "1.0", "id-b": "1"})
+	require.Equal(t, []string{"id-a", "id-b"}, keys, "a tie falls back to the identity key")
+
+	// An ordinary numeric ordering is untouched by the tie-break.
+	keys = []string{"id-10", "id-2"}
+	sortPKKeys(keys, map[string]string{"id-2": "2", "id-10": "10"})
+	require.Equal(t, []string{"id-2", "id-10"}, keys, "2 must still sort before 10")
 }
