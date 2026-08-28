@@ -40,8 +40,15 @@ jobs:
     - name: Run mtree unit tests
       run: go test -count=1 -v ./internal/consistency/mtree
 
+    - name: Run common unit tests
+      run: go test -count=1 -v ./pkg/common
+
     - name: Run mtree missing-tree fail-fast test
       run: go test -count=1 -v ./tests/integration -run 'TestMtreeDiffFailsFastWhenTreeNotBuilt'
+
+    - name: Run mtree uuid primary-key test
+      run: go test -count=1 -v ./tests/integration -run 'TestMtreeUUIDPrimaryKeyDiff'
+
 
     - name: Run CDC regression tests
       run: go test -count=1 -v ./tests/integration -run 'CDC'

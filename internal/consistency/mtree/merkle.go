@@ -13,6 +13,7 @@ package mtree
 
 import (
 	"context"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"maps"
@@ -21,6 +22,7 @@ import (
 	"reflect"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -441,26 +443,28 @@ func (m *MerkleTreeTask) processWorkItem(work CompareRangesWorkItem, pool1, pool
 	mismatchedComposite := make([][]any, 0)
 	isComposite := !m.SimplePrimaryKey
 
+	// Use the scanned pkey values, never the map key: the key is only a
+	// printed form and loses information.
 	if isComposite {
-		for k, h1 := range node1Hashes {
-			if h2, ok := node2Hashes[k]; !ok || h1 != h2 {
-				mismatchedComposite = append(mismatchedComposite, splitCompositeKey(k))
+		for k, e1 := range node1Hashes {
+			if e2, ok := node2Hashes[k]; !ok || e1.hash != e2.hash {
+				mismatchedComposite = append(mismatchedComposite, e1.pkey)
 			}
 		}
-		for k, h2 := range node2Hashes {
-			if h1, ok := node1Hashes[k]; !ok || h1 != h2 {
-				mismatchedComposite = append(mismatchedComposite, splitCompositeKey(k))
+		for k, e2 := range node2Hashes {
+			if e1, ok := node1Hashes[k]; !ok || e1.hash != e2.hash {
+				mismatchedComposite = append(mismatchedComposite, e2.pkey)
 			}
 		}
 	} else {
-		for k, h1 := range node1Hashes {
-			if h2, ok := node2Hashes[k]; !ok || h1 != h2 {
-				mismatchedSimple = append(mismatchedSimple, k)
+		for k, e1 := range node1Hashes {
+			if e2, ok := node2Hashes[k]; !ok || e1.hash != e2.hash {
+				mismatchedSimple = append(mismatchedSimple, e1.pkey[0])
 			}
 		}
-		for k, h2 := range node2Hashes {
-			if h1, ok := node1Hashes[k]; !ok || h1 != h2 {
-				mismatchedSimple = append(mismatchedSimple, k)
+		for k, e2 := range node2Hashes {
+			if e1, ok := node1Hashes[k]; !ok || e1.hash != e2.hash {
+				mismatchedSimple = append(mismatchedSimple, e2.pkey[0])
 			}
 		}
 	}
@@ -814,9 +818,106 @@ func buildRowHashQuery(schema, table string, key []string, cols []string, whereC
 	return query, orderBy
 }
 
-func readRowHashes(rows pgx.Rows, numPK int) (map[string]string, error) {
+// pkeyKind classifies a primary-key value that pgx decoded into an untyped
+// destination. It is the one list of what mtree can handle, and three things
+// have to agree with it: comparePkeyValues sorts these kinds, pkeyIdentity
+// renders them, and validateBoundaryTypes admits them. Nothing in the language
+// ties the three together, so TestPkeyKindsAreFullySupported does.
+//
+// A kind is on the list only if Go can reproduce the Postgres btree order for
+// it, and if two different values always render differently. Adding a kind
+// without both properties brings back a silent wrong answer -- see
+// compareBoundaries' KNOWN GAP for the cases already on the list that only
+// hold under some collations.
+type pkeyKind int
+
+const (
+	pkeyUnsupported pkeyKind = iota
+	pkeyInt
+	pkeyUint
+	pkeyFloat
+	pkeyBool
+	pkeyString
+	pkeyTime
+	pkeyUUID  // pgx decodes uuid as [16]byte
+	pkeyBytes // bytea
+)
+
+func pkeyKindOf(v any) pkeyKind {
+	switch v.(type) {
+	case int, int8, int16, int32, int64:
+		return pkeyInt
+	case uint, uint8, uint16, uint32, uint64:
+		return pkeyUint
+	case float32, float64:
+		return pkeyFloat
+	case bool:
+		return pkeyBool
+	case string:
+		return pkeyString
+	case time.Time:
+		return pkeyTime
+	case [16]byte:
+		return pkeyUUID
+	case []byte:
+		return pkeyBytes
+	}
+	return pkeyUnsupported
+}
+
+// pkeyIdentity renders one primary-key value for use as a row key. The result
+// only has to be injective -- two different values must never render the same
+// -- and stable within a run, because both nodes render with this same code.
+//
+// It exists so that row identity does not depend on fmt: a %v of a driver
+// value is not part of any contract, it changes with the driver, and for a
+// type that prints a pointer it would make two runs disagree about which rows
+// are "the same". ok is false for a kind mtree does not support.
+func pkeyIdentity(v any) (string, bool) {
+	switch pkeyKindOf(v) {
+	case pkeyInt:
+		return strconv.FormatInt(reflect.ValueOf(v).Int(), 10), true
+	case pkeyUint:
+		return strconv.FormatUint(reflect.ValueOf(v).Uint(), 10), true
+	case pkeyFloat:
+		// 'x' is the exact hexadecimal form: no rounding, so no two distinct
+		// float values collide here. Add zero first: Postgres holds -0.0 = 0.0,
+		// but they have different bit patterns and would otherwise get two
+		// identities, splitting one row into two.
+		return strconv.FormatFloat(reflect.ValueOf(v).Float()+0, 'x', -1, 64), true
+	case pkeyBool:
+		return strconv.FormatBool(v.(bool)), true
+	case pkeyString:
+		return v.(string), true
+	case pkeyTime:
+		return v.(time.Time).UTC().Format("2006-01-02T15:04:05.999999999Z"), true
+	case pkeyUUID:
+		u := v.([16]byte)
+		return hex.EncodeToString(u[:]), true
+	case pkeyBytes:
+		return hex.EncodeToString(v.([]byte)), true
+	}
+	return "", false
+}
+
+// rowHashEntry holds a row's hash together with the pkey values it was built
+// from. Keep pkey: the map key is only a printed form, and rebuilding pkey
+// values from it is what broke uuid keys. pkey points into the scan
+// buffer of readRowHashes, so that buffer has to be allocated inside the loop.
+// Moving the allocation out of the loop would make every entry point at the
+// last row.
+type rowHashEntry struct {
+	hash string
+	pkey []any
+}
+
+// readRowHashes runs once for every row of a mismatched block, so up to
+// mtree.max_block_size times per node per work item. The three allocations
+// below sit on that hot path; pkey points into scan instead of copying it,
+// which is what keeps the count at three.
+func readRowHashes(rows pgx.Rows, numPK int) (map[string]rowHashEntry, error) {
 	defer rows.Close()
-	result := make(map[string]string)
+	result := make(map[string]rowHashEntry)
 	for rows.Next() {
 		scan := make([]any, numPK+1)
 		scanPtrs := make([]any, numPK+1)
@@ -826,30 +927,31 @@ func readRowHashes(rows pgx.Rows, numPK int) (map[string]string, error) {
 		if err := rows.Scan(scanPtrs...); err != nil {
 			return nil, err
 		}
+		// Point into the scan buffer instead of copying it: a mismatched block
+		// can hold up to mtree.max_block_size rows, and this map stays in
+		// memory for the whole work item, on both nodes at once. Limit the
+		// capacity so that an append here cannot reach the hash slot after it.
+		pkey := scan[:numPK:numPK]
 		parts := make([]string, numPK)
 		for i := 0; i < numPK; i++ {
-			parts[i] = fmt.Sprintf("%v", scan[i])
+			id, ok := pkeyIdentity(scan[i])
+			if !ok {
+				return nil, fmt.Errorf("primary-key value of type %T cannot be used "+
+					"as a row identity; mtree does not support this column type", scan[i])
+			}
+			parts[i] = id
 		}
-		key := strings.Join(parts, "|")
+		// The key identifies a row across nodes and nothing else. It is NOT a
+		// pkey value and must never reach SQL, a diff report or repair: use
+		// rowHashEntry.pkey for those.
+		key := utils.RowKeyFromStrings(parts)
 		h, _ := scan[numPK].(string)
-		result[key] = h
+		result[key] = rowHashEntry{hash: h, pkey: pkey}
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
 	return result, nil
-}
-
-func splitCompositeKey(k string) []any {
-	if k == "" {
-		return []any{}
-	}
-	parts := strings.Split(k, "|")
-	res := make([]any, len(parts))
-	for i := range parts {
-		res[i] = parts[i]
-	}
-	return res
 }
 
 func buildFetchRowsSQLSimple(schema, table, pk, selectCols, orderBy string, keys []any) (string, []any) {
@@ -2407,9 +2509,12 @@ func (m *MerkleTreeTask) DiffMtree() (err error) {
 		if m.DiffResult.Summary.DiffRowLimitReached {
 			logger.Warn("mtree table-diff stopped after reaching max_diff_rows=%d; additional differences may exist", m.MaxDiffRows)
 		}
-		if diffPath, _, writeErr := utils.WriteDiffReport(m.DiffResult, m.Schema, m.Table, m.Output); writeErr != nil {
+
+		diffPath, _, writeErr := utils.WriteDiffReport(m.DiffResult, m.Schema, m.Table, m.Output)
+		if writeErr != nil {
 			return writeErr
-		} else if diffPath != "" {
+		}
+		if diffPath != "" {
 			resultCtx["diff_file"] = diffPath
 		}
 	}

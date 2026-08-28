@@ -512,3 +512,18 @@ func TestStringifyOrderedMapKey_JsonNumberNoPKCollision(t *testing.T) {
 	require.NoError(t, err)
 	require.NotEqual(t, key1, key2, "adjacent bigint PKs must not collide")
 }
+
+// Row keys are matched across nodes, so an ambiguous encoding loses rows: with
+// the parts joined raw, ("a|b","c") and ("a","b|c") produce one key and one of
+// the two rows disappears from the comparison.
+func TestRowKeyFromStringsIsUnambiguous(t *testing.T) {
+	require.NotEqual(t,
+		RowKeyFromStrings([]string{"a|b", "c"}),
+		RowKeyFromStrings([]string{"a", "b|c"}),
+		"composite keys that differ must not encode to the same row key")
+
+	require.Equal(t,
+		RowKeyFromStrings([]string{"a", "b"}),
+		RowKeyFromStrings([]string{"a", "b"}),
+		"the same parts must always encode to the same row key")
+}
