@@ -12,6 +12,7 @@
 package mtree
 
 import (
+	"cmp"
 	"context"
 	"encoding/hex"
 	"errors"
@@ -863,6 +864,55 @@ func pkeyKindOf(v any) pkeyKind {
 		return pkeyBytes
 	}
 	return pkeyUnsupported
+}
+
+// comparePkeyValues orders two primary-key values of the same Go type, the way
+// the server orders that type. ok is false for a kind pkeyKindOf does not
+// know; the caller has to decide what to do about it.
+func comparePkeyValues(val1, val2 any) (result int, ok bool) {
+	switch pkeyKindOf(val1) {
+	case pkeyInt:
+		return cmp.Compare(reflect.ValueOf(val1).Int(), reflect.ValueOf(val2).Int()), true
+	case pkeyUint:
+		// Postgres has no unsigned integers, so this is unreachable through a
+		// real pkey. It is here because reflect.Value.Int() panics on a uint
+		// kind, and lumping the two together used to risk exactly that.
+		return cmp.Compare(reflect.ValueOf(val1).Uint(), reflect.ValueOf(val2).Uint()), true
+	case pkeyFloat:
+		// Postgres sorts NaN above every number in a float btree; Go's
+		// cmp.Compare puts it below. NaN is a legal pkey value, so follow the
+		// server or the bounds around it come out inverted.
+		a, b := reflect.ValueOf(val1).Float(), reflect.ValueOf(val2).Float()
+		switch aNaN, bNaN := math.IsNaN(a), math.IsNaN(b); {
+		case aNaN && bNaN:
+			return 0, true
+		case aNaN:
+			return 1, true
+		case bNaN:
+			return -1, true
+		}
+		return cmp.Compare(a, b), true
+	case pkeyBool:
+		a, b := val1.(bool), val2.(bool)
+		if a == b {
+			return 0, true
+		}
+		if b {
+			return -1, true
+		}
+		return 1, true
+	case pkeyString:
+		return cmp.Compare(val1.(string), val2.(string)), true
+	case pkeyTime:
+		return val1.(time.Time).Compare(val2.(time.Time)), true
+	case pkeyUUID:
+		// uuid_cmp() and byteacmp() compare bytes, so compare bytes here too.
+		a, b := val1.([16]byte), val2.([16]byte)
+		return bytes.Compare(a[:], b[:]), true
+	case pkeyBytes:
+		return bytes.Compare(val1.([]byte), val2.([]byte)), true
+	}
+	return 0, false
 }
 
 // pkeyIdentity renders one primary-key value for use as a row key. The result
@@ -2788,6 +2838,23 @@ func (m *MerkleTreeTask) getPkeyBatches(pool1, pool2 *pgxpool.Pool, mismatchedPo
 	return batches, nil
 }
 
+// compareBoundaries sorts two block bounds.
+//
+// KNOWN GAP: this rebuilds the btree order of each pkey type in Go, while the
+// blocks themselves were cut by ORDER BY <pkey> in the database. The two agree
+// only where the Postgres order is also the byte order or the numeric order.
+// They do not agree for a text pkey in a collation other than C ('a' < 'B' in
+// en_US.UTF-8, the other way round here), nor for an enum (sorted by
+// enumsortorder, not by label), citext, or a domain over any of these -- all of
+// which arrive here as a plain string. Where the two orders differ, some of the
+// ranges built from these bounds come out the wrong way round, select no rows,
+// and those blocks are never compared: the diff then under-reports instead of
+// failing. Measured on PostgreSQL 17 with 9 differing rows, the pre-fix uuid
+// ordering found 6 of them and a text key in en_US.utf8 found 4.
+//
+// The fix is to sort the bounds in SQL, not to add more Go cases: more cases
+// only make more types look supported. See docs/design/merkle.md, "Primary Key
+// Types and the Postgres Type Boundary".
 func (m *MerkleTreeTask) compareBoundaries(b1, b2 any) int {
 	if b1 == nil && b2 == nil {
 		return 0
@@ -2832,40 +2899,15 @@ func (m *MerkleTreeTask) compareBoundaries(b1, b2 any) int {
 			return 1
 		}
 
-		switch v1 := val1.(type) {
-		case int, int8, int16, int32, int64, uint, uint8, uint16, uint32, uint64:
-			v1Int := reflect.ValueOf(v1).Int()
-			v2Int := reflect.ValueOf(val2).Int()
-			if v1Int < v2Int {
-				return -1
-			}
-			if v1Int > v2Int {
-				return 1
-			}
-		case float32, float64:
-			v1Float := reflect.ValueOf(v1).Float()
-			v2Float := reflect.ValueOf(val2).Float()
-			if v1Float < v2Float {
-				return -1
-			}
-			if v1Float > v2Float {
-				return 1
-			}
-		case string:
-			if v1 < val2.(string) {
-				return -1
-			}
-			if v1 > val2.(string) {
-				return 1
-			}
-		case time.Time:
-			if v1.Before(val2.(time.Time)) {
-				return -1
-			}
-			if v1.After(val2.(time.Time)) {
-				return 1
-			}
-		default:
+		c, ok := comparePkeyValues(val1, val2)
+		if !ok {
+			// Nothing rejects such a bound yet, so this is reachable: fall back
+			// to the Go rendering and say so. That order rarely matches the
+			// server's, which makes the ranges built from these bounds
+			// unreliable rather than merely odd.
+			logger.Warn("cannot sort merkle-tree block bounds of type %T for %s.%s the way "+
+				"the server does; falling back to their Go rendering, so the ranges built "+
+				"from them may be wrong", val1, m.Schema, m.Table)
 			s1 := fmt.Sprintf("%v", val1)
 			s2 := fmt.Sprintf("%v", val2)
 			if s1 < s2 {
@@ -2874,6 +2916,10 @@ func (m *MerkleTreeTask) compareBoundaries(b1, b2 any) int {
 			if s1 > s2 {
 				return 1
 			}
+			continue
+		}
+		if c != 0 {
+			return c
 		}
 	}
 	if len(b1Slice) < len(b2Slice) {

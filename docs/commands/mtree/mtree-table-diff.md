@@ -52,6 +52,15 @@ holding the node's slot, then re-run, if you need a guaranteed-current drain.
   warning is logged. This keeps a heavily diverged table from exhausting memory;
   lower the value in `ace.yaml` on memory-constrained hosts, and re-run after
   repairing to surface the remaining differences.
+- Merkle trees do not order every primary key type the way the server does. `text`
+  keys are compared byte by byte, so a collation other than `C`, and also `enum`
+  or `citext` keys, can sort differently here than in the database; `numeric` and
+  the types the driver decodes into a struct are not ordered correctly at all.
+  When the two orders disagree, some blocks are skipped and the diff reports
+  fewer differences than exist. Use `table-diff` for those tables: it does not
+  sort block bounds outside the database. See
+  [Primary Key Types and the Postgres Type Boundary](../../design/merkle.md#primary-key-types-and-the-postgres-type-boundary)
+  for the full list and the reasons.
 - When *all* mismatched blocks between a node pair turn out to hold no row
   differences, the tree hashes were stale rather than the data divergent. The
   diff reports this, refreshes those blocks from live data (recorded in the

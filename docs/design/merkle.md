@@ -353,6 +353,77 @@ Notes:
 - **Mtree-specific tuning knobs**: `max_cpu_ratio` influences worker count and pool sizing; `batch_size` controls how many ranges are compared per DB round-trip in diffs. Higher values increase throughput but raise DB and network load.
 - **Error handling**: If splits/merges or parent rebuilds fail (e.g., type issues, missing metadata), `update`/`diff` aborts; the remedy is usually to fix the schema/state and rerun, or rebuild the tree when metadata and actual table diverge.
 
+### Primary Key Types and the Postgres Type Boundary
+
+ACE hashes and compares rows inside Postgres, but it decides *which* rows to
+compare in Go. It reads the block bounds out of the tree, sorts and merges them
+in the ACE process, then sends them back as parameters of the next query. So
+every primary key value crosses from one type system into the other. On the Go
+side it is no longer a Postgres value: it is whatever the driver turned it into.
+
+That conversion loses information in three ways, and ACE has hit all three:
+
+- **Representation.** What the driver returns is not always something it will
+  take back. A `uuid` comes back as a plain `[16]byte`, which Go prints as
+  `[17 17 ...]`. Used as a query parameter, that gives
+  `invalid input syntax for type uuid`. Any value that ACE reads from
+  a tree and sends back as a bound has to survive this round trip.
+- **Ordering.** Postgres cuts the blocks with `ORDER BY <pkey>`, but ACE merges
+  and sorts the bounds of the mismatched blocks in Go. The two orders agree only
+  when the btree order of the type is also the natural Go order for the decoded
+  value. When they do not agree, some pairs of neighbouring bounds end up the
+  wrong way round and the range condition selects no rows, so those blocks are
+  never compared and the diff under-reports. The loss is partial and depends on
+  the data: measured on PostgreSQL 17 with 9 differing rows, restoring the
+  pre-fix uuid ordering reported 6 of them, and a `text` key in `en_US.utf8`
+  reported 4. A wrong order often only widens a range instead of emptying it,
+  which is why this shows up as quietly missing rows rather than as an error.
+- **Identity.** Postgres can treat two values as equal where Go sees two
+  different ones. In `numeric`, `1.5` and `1.50` are the same value for the
+  database, but the driver returns two different `(digits, exponent)` pairs. Row
+  hashing already handles this, because it casts through `trim_scale(...)::text`.
+  Bounds do not go through that cast.
+
+So a Merkle tree only works over a primary key whose values ACE can sort and
+rebuild correctly outside the database:
+
+| Primary key type | Status in `mtree` |
+|---|---|
+| `smallint`, `integer`, `bigint`, `real`, `double precision`, `boolean` | Supported |
+| `uuid`, `bytea` | Supported; compared as bytes, like `uuid_cmp` and `byteacmp` |
+| `timestamp`, `timestamptz`, `date` | Supported |
+| `text`, `varchar`, `char` | Supported **only under the `C` or `POSIX` collation**; see below |
+| `numeric`, `time`, and any type the driver decodes into a struct | **Not supported**: ordered by their Go rendering, which bears no relation to the Postgres order |
+| `enum`, `citext`, domains over any of the above, and types the driver has no codec for | Accepted, but the order is not guaranteed; see below |
+
+Nothing stops a tree being built over an unsupported type today; the bounds are
+simply ordered by their Go rendering and the diff can then under-report. A
+follow-up turns that into a refusal, on the grounds that a consistency checker
+which cannot produce a result has to say so: reporting "no differences" after
+quietly comparing an empty range is worse, because nobody can tell that apart
+from a real match.
+
+The last two rows of the table is a known gap, not a supported setup, and it is
+reproducible: `tests/integration/mtree_pkey_types_test.go` carries a case for
+it, skipped until the fix lands. A `text` primary key in any collation other
+than `C` sorts differently in the database than byte by byte in Go: under
+`en_US.UTF-8` the database puts `'a'` before `'B'`, while ACE puts `'B'` first.
+How much that costs depends on the keys -- the same collation over hex strings
+loses nothing, while keys that alternate case lost 5 of 9 differing rows in
+testing -- so a run that finds differences is not evidence that it found all of
+them. An `enum` sorts by `enumsortorder` and not by
+its label, but it reaches ACE as a plain string. The same is true for any type
+the driver has no codec for: it arrives as raw bytes or as text and is compared
+byte by byte, which need not be the order the type really uses. ACE does not
+detect any of this today. The proper fix is to sort the bounds in SQL instead of
+in Go, which removes the whole group of problems at once. Adding more comparison
+cases in Go only makes more types look supported than they are.
+
+`table-diff` has none of these problems, because it never sorts or merges block
+bounds in Go. It stays the fallback for a table whose primary key `mtree`
+cannot sort reliably.
+
+### Observability and Teardown
 ### Observability and Teardown
 - **Task records**: Mtree runs are recorded in `ace_tasks.db` (table `ace_tasks`) with context about block size, nodes, and statuses. Check logs for counts of dirty blocks, splits/merges applied, parent rebuilds, and extra-leaf mismatches during diff traversal.
 - **Slot health**: Monitor logical slot lag/WAL retention; a bloated slot suggests `update` hasn’t consumed changes. If the slot is dropped or stale, rebuild (init + build) and recreate the slot/publication entry.
