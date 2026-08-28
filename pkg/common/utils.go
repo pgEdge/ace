@@ -1053,6 +1053,36 @@ func IsKnownScalarType(colType string) bool {
 	return false
 }
 
+// RowKeyFromStrings joins already-rendered primary-key parts into the
+// in-memory key that matches a row across nodes.
+//
+// Each part is quoted before joining. Joined raw, the composite keys
+// ("a|b","c") and ("a","b|c") produce the same string, so one of the two rows
+// silently drops out of the comparison -- in a consistency checker that is a
+// missed difference, not a cosmetic bug.
+//
+// The result is a matching key, not a primary key: it is never persisted, sent
+// to the server or parsed back. Code that needs real pkey values has to carry
+// them separately.
+func RowKeyFromStrings(parts []string) string {
+	quoted := make([]string, len(parts))
+	for i, p := range parts {
+		quoted[i] = strconv.Quote(p)
+	}
+	return strings.Join(quoted, "|")
+}
+
+// RowKeyFromValues renders each value with fmt and joins them with
+// RowKeyFromStrings. fmt is lossy for driver types -- a uuid prints as
+// "[17 17 ...]" -- which is why the result must not leave the process.
+func RowKeyFromValues(vals []any) string {
+	parts := make([]string, len(vals))
+	for i, v := range vals {
+		parts[i] = fmt.Sprintf("%v", v)
+	}
+	return RowKeyFromStrings(parts)
+}
+
 func StringifyKey(row map[string]any, pkeyCols []string) (string, error) {
 	var pkeyParts []string
 	for _, pkeyCol := range pkeyCols {
@@ -1585,7 +1615,6 @@ func comparePKValues(valuesA, valuesB []any) int {
 	}
 	return 0
 }
-
 
 // CompareNumeric compares two numeric values with full precision.
 // Returns -1 if a < b, 0 if a == b, 1 if a > b, and ok=true if both

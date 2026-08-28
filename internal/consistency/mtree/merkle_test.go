@@ -3,11 +3,69 @@ package mtree
 import (
 	"context"
 	"fmt"
+	"math"
 	"strings"
 	"testing"
 
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/pgedge/ace/pkg/types"
 )
+
+// fakeRows is the smallest pgx.Rows that readRowHashes needs. Scan copies
+// values into *any destinations, which is how an untyped scan buffer receives
+// the driver's own Go values: a uuid arrives as [16]byte, not as text.
+type fakeRows struct {
+	rows [][]any
+	pos  int
+}
+
+func (r *fakeRows) Close()                                       {}
+func (r *fakeRows) Err() error                                   { return nil }
+func (r *fakeRows) CommandTag() pgconn.CommandTag                { return pgconn.CommandTag{} }
+func (r *fakeRows) FieldDescriptions() []pgconn.FieldDescription { return nil }
+func (r *fakeRows) Next() bool                                   { r.pos++; return r.pos <= len(r.rows) }
+func (r *fakeRows) RawValues() [][]byte                          { return nil }
+func (r *fakeRows) Conn() *pgx.Conn                              { return nil }
+
+// current returns the row that Next stopped on. A real pgx.Rows returns an
+// error when it is read past the last row instead of panicking. Do the same
+// here, so that a later test of the error path fails with a message rather
+// than an index panic.
+func (r *fakeRows) current() ([]any, error) {
+	if r.pos < 1 || r.pos > len(r.rows) {
+		return nil, fmt.Errorf("read at position %d, outside the %d rows", r.pos, len(r.rows))
+	}
+	return r.rows[r.pos-1], nil
+}
+
+func (r *fakeRows) Values() ([]any, error) { return r.current() }
+
+func (r *fakeRows) Scan(dest ...any) error {
+	row, err := r.current()
+	if err != nil {
+		return err
+	}
+	if len(dest) != len(row) {
+		return fmt.Errorf("scanning into %d destinations, row has %d values", len(dest), len(row))
+	}
+	for i := range dest {
+		p, ok := dest[i].(*any)
+		if !ok {
+			return fmt.Errorf("dest[%d] is %T, want *any", i, dest[i])
+		}
+		*p = row[i]
+	}
+	return nil
+}
+
+func uuidBytes(b byte) [16]byte {
+	var out [16]byte
+	for i := range out {
+		out[i] = b
+	}
+	return out
+}
 
 // mtreeTaskWithDiffState returns a task wired just enough to exercise the diff
 // accumulator (appendDiffs) without a database.
@@ -105,6 +163,72 @@ func TestMtreeDiffRejectsNegativeMaxDiffRows(t *testing.T) {
 	err := m.DiffMtree()
 	if err == nil || !strings.Contains(err.Error(), "max_diff_rows must be >= 0") {
 		t.Fatalf("expected max_diff_rows validation error, got %v", err)
+	}
+}
+
+// The pkey values that reach the row-fetch query must be the ones pgx decoded,
+// not the map key. For a uuid the key prints as "[17 17 ...]", which the server
+// rejects as invalid uuid input.
+func TestReadRowHashesKeepsScannedPkey(t *testing.T) {
+	id := uuidBytes(0x11)
+	rows := &fakeRows{rows: [][]any{{id, "hash-a"}}}
+
+	got, err := readRowHashes(rows, 1)
+	if err != nil {
+		t.Fatalf("readRowHashes returned error: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("read %d entries, want 1", len(got))
+	}
+	for _, e := range got {
+		if e.hash != "hash-a" {
+			t.Errorf("hash = %q, want %q", e.hash, "hash-a")
+		}
+		if len(e.pkey) != 1 {
+			t.Fatalf("pkey has %d values, want 1", len(e.pkey))
+		}
+		if e.pkey[0] != id {
+			t.Errorf("pkey[0] = %#v (%T), want the scanned [16]byte", e.pkey[0], e.pkey[0])
+		}
+	}
+}
+
+// Composite keys must not collide. Without quotes, ("a|b","c") and
+// ("a","b|c") join into the same string, and one of the two rows drops out of
+// the comparison.
+func TestReadRowHashesKeysDoNotCollide(t *testing.T) {
+	rows := &fakeRows{rows: [][]any{
+		{"a|b", "c", "hash-1"},
+		{"a", "b|c", "hash-2"},
+	}}
+
+	got, err := readRowHashes(rows, 2)
+	if err != nil {
+		t.Fatalf("readRowHashes returned error: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("read %d entries, want 2 distinct keys", len(got))
+	}
+}
+
+// pkey points into the scan buffer, so that buffer has to stay inside the
+// loop. Moving it out would leave every entry pointing at the last row.
+func TestReadRowHashesRowsDoNotAlias(t *testing.T) {
+	rows := &fakeRows{rows: [][]any{
+		{uuidBytes(0x01), "hash-1"},
+		{uuidBytes(0x02), "hash-2"},
+	}}
+
+	got, err := readRowHashes(rows, 1)
+	if err != nil {
+		t.Fatalf("readRowHashes returned error: %v", err)
+	}
+	seen := make(map[[16]byte]bool, len(got))
+	for _, e := range got {
+		seen[e.pkey[0].([16]byte)] = true
+	}
+	if len(seen) != 2 {
+		t.Errorf("entries share %d distinct pkeys, want 2", len(seen))
 	}
 }
 
@@ -259,5 +383,21 @@ func TestBuildRowHashQuery(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// Postgres holds -0.0 = 0.0, so both must get one row identity. Two identities
+// would split a single row into a phantom pair of differences.
+func TestPkeyIdentityNegativeZero(t *testing.T) {
+	pos, ok := pkeyIdentity(0.0)
+	if !ok {
+		t.Fatalf("pkeyIdentity(0.0) refused")
+	}
+	neg, ok := pkeyIdentity(math.Copysign(0, -1))
+	if !ok {
+		t.Fatalf("pkeyIdentity(-0.0) refused")
+	}
+	if pos != neg {
+		t.Errorf("0.0 renders as %q and -0.0 as %q; Postgres treats them as equal", pos, neg)
 	}
 }
