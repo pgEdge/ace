@@ -257,6 +257,52 @@ func TestIncompletePairsReportsFailedWorkItems(t *testing.T) {
 	}
 }
 
+// uuid and bytea bounds must be sorted like uuid_cmp() and byteacmp(), not by
+// their printed Go form. 0x02 against 0x11 is the pair the fmt fallback got
+// backwards: as text, "[17 ..." comes before "[2 ...".
+func TestCompareBoundariesOrdersUUIDs(t *testing.T) {
+	m := &MerkleTreeTask{}
+	m.Key = []string{"id"}
+
+	if got := m.compareBoundaries([]byte{0x02}, []byte{0x11}); got != -1 {
+		t.Errorf("compareBoundaries(bytea 0x02, 0x11) = %d, want -1", got)
+	}
+	if got := m.compareBoundaries(false, true); got != -1 {
+		t.Errorf("compareBoundaries(false, true) = %d, want -1", got)
+	}
+	if got := m.compareBoundaries(true, false); got != 1 {
+		t.Errorf("compareBoundaries(true, false) = %d, want 1", got)
+	}
+
+	small, large := uuidBytes(0x02), uuidBytes(0x11)
+
+	if got := m.compareBoundaries(small, large); got != -1 {
+		t.Errorf("compareBoundaries(0x02.., 0x11..) = %d, want -1", got)
+	}
+	if got := m.compareBoundaries(large, small); got != 1 {
+		t.Errorf("compareBoundaries(0x11.., 0x02..) = %d, want 1", got)
+	}
+	if got := m.compareBoundaries(large, large); got != 0 {
+		t.Errorf("compareBoundaries of equal bounds = %d, want 0", got)
+	}
+}
+
+// NaN is a legal float primary key, and Postgres sorts it above every number
+// while Go's cmp.Compare puts it below. Getting this backwards inverts the
+// bounds around it.
+func TestComparePkeyValuesNaNSortsLast(t *testing.T) {
+	nan := math.NaN()
+	if got, ok := comparePkeyValues(nan, 1.0); !ok || got != 1 {
+		t.Errorf("comparePkeyValues(NaN, 1.0) = %d, %v; want 1, true", got, ok)
+	}
+	if got, ok := comparePkeyValues(1.0, nan); !ok || got != -1 {
+		t.Errorf("comparePkeyValues(1.0, NaN) = %d, %v; want -1, true", got, ok)
+	}
+	if got, ok := comparePkeyValues(nan, nan); !ok || got != 0 {
+		t.Errorf("comparePkeyValues(NaN, NaN) = %d, %v; want 0, true", got, ok)
+	}
+}
+
 func TestIsNumericColType(t *testing.T) {
 	tests := []struct {
 		colType string

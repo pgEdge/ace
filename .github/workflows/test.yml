@@ -49,6 +49,9 @@ jobs:
     - name: Run mtree uuid primary-key test
       run: go test -count=1 -v ./tests/integration -run 'TestMtreeUUIDPrimaryKeyDiff'
 
+    - name: Run mtree primary-key type property test
+      run: go test -count=1 -v ./tests/integration -run 'TestMtreePkeyTypesFindDivergence'
+
 
     - name: Run CDC regression tests
       run: go test -count=1 -v ./tests/integration -run 'CDC'
