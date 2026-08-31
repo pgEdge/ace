@@ -6,6 +6,7 @@ import (
 	"math"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -470,5 +471,120 @@ func TestPkeyIdentityNegativeZero(t *testing.T) {
 	}
 	if pos != neg {
 		t.Errorf("0.0 renders as %q and -0.0 as %q; Postgres treats them as equal", pos, neg)
+	}
+}
+
+// pkeyKind, comparePkeyValues and pkeyIdentity are three independent switches
+// over the same list of kinds. Nothing in the language keeps them in step, so
+// adding a kind to pkeyKindOf without teaching the other two would otherwise
+// surface as a sort that falls back to Go rendering, or a row identity that
+// refuses mid-run. Every kind needs a sample value here.
+func TestPkeyKindsAreFullySupported(t *testing.T) {
+	samples := map[pkeyKind][2]any{
+		pkeyInt:    {int64(1), int64(2)},
+		pkeyUint:   {uint64(1), uint64(2)},
+		pkeyFloat:  {1.0, 2.0},
+		pkeyBool:   {false, true},
+		pkeyString: {"a", "b"},
+		pkeyTime:   {time.Unix(0, 0).UTC(), time.Unix(1, 0).UTC()},
+		pkeyUUID:   {[16]byte{0x02}, [16]byte{0x0a}},
+		pkeyBytes:  {[]byte{0x02}, []byte{0x0a}},
+	}
+
+	// Walk the kind range rather than the map, so a newly added constant fails
+	// here instead of being quietly skipped.
+	for kind := pkeyUnsupported + 1; kind < pkeyKindEnd; kind++ {
+		pair, found := samples[kind]
+		if !found {
+			t.Errorf("kind %d has no sample value; add one when adding a kind", kind)
+			continue
+		}
+		lo, hi := pair[0], pair[1]
+
+		if got := pkeyKindOf(lo); got != kind {
+			t.Errorf("pkeyKindOf(%#v) = %d, want %d", lo, got, kind)
+		}
+
+		// comparePkeyValues must order the kind, and order it the right way.
+		c, ok := comparePkeyValues(lo, hi)
+		if !ok {
+			t.Errorf("comparePkeyValues refuses kind %d, which pkeyKindOf accepts", kind)
+		} else if c >= 0 {
+			t.Errorf("comparePkeyValues(%#v, %#v) = %d, want < 0", lo, hi, c)
+		}
+
+		// pkeyIdentity must render the kind, and render the two distinctly.
+		idLo, ok := pkeyIdentity(lo)
+		if !ok {
+			t.Errorf("pkeyIdentity refuses kind %d, which pkeyKindOf accepts", kind)
+			continue
+		}
+		idHi, ok := pkeyIdentity(hi)
+		if !ok {
+			t.Errorf("pkeyIdentity refuses kind %d, which pkeyKindOf accepts", kind)
+			continue
+		}
+		if idLo == idHi {
+			t.Errorf("kind %d renders %#v and %#v both as %q; identities must be injective",
+				kind, lo, hi, idLo)
+		}
+	}
+}
+
+// Both sides of a comparison come from the same column, but a schema mismatch
+// between nodes could still hand the comparator two different Go types. Every
+// branch asserts on val2, so this must return ok=false rather than panic.
+func TestComparePkeyValuesRejectsMixedKinds(t *testing.T) {
+	for _, pair := range [][2]any{
+		{"a", int64(1)},
+		{int64(1), "a"},
+		{[16]byte{0x01}, []byte{0x01}},
+		{1.0, int64(1)},
+		{time.Unix(0, 0), "1970-01-01"},
+	} {
+		if _, ok := comparePkeyValues(pair[0], pair[1]); ok {
+			t.Errorf("comparePkeyValues(%T, %T) claimed a valid ordering across kinds",
+				pair[0], pair[1])
+		}
+	}
+}
+
+// Bounds are de-duplicated by this key before the ranges are rebuilt, so two
+// different cut points sharing a key drops one of them and can leave rows
+// uncompared. uuids are the case fmt gets wrong: %v renders both of these
+// through the same []byte formatting.
+func TestBoundaryKeyDistinguishesBounds(t *testing.T) {
+	m := &MerkleTreeTask{}
+
+	distinct := [][]any{
+		{"a b", "c"},
+		{"a", "b c"},
+		{"a|b", "c"},
+		{"a", "b|c"},
+		{[16]byte{0x02}, "x"},
+		{[16]byte{0x0a}, "x"},
+		{nil, "x"},
+		{"", "x"},
+		{"n", "x"},
+		{"v", "x"},
+	}
+
+	seen := make(map[string][]any)
+	for _, b := range distinct {
+		key := m.boundaryKey(b)
+		if prev, clash := seen[key]; clash {
+			t.Errorf("bounds %#v and %#v share key %s", prev, b, key)
+			continue
+		}
+		seen[key] = b
+	}
+
+	// Equal bounds must still share a key, or de-duplication stops working.
+	if m.boundaryKey([]any{"a", 1}) != m.boundaryKey([]any{"a", 1}) {
+		t.Error("the same bound produced two different keys")
+	}
+	// A scalar bound and the one-element slice holding it are the same bound.
+	if m.boundaryKey("a") != m.boundaryKey([]any{"a"}) {
+		t.Error("a scalar bound and its one-element slice disagree")
 	}
 }
