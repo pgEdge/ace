@@ -1056,31 +1056,33 @@ func IsKnownScalarType(colType string) bool {
 // RowKeyFromStrings joins already-rendered primary-key parts into the
 // in-memory key that matches a row across nodes.
 //
-// Each part is quoted before joining. Joined raw, the composite keys
-// ("a|b","c") and ("a","b|c") produce the same string, so one of the two rows
-// silently drops out of the comparison -- in a consistency checker that is a
-// missed difference, not a cosmetic bug.
+// Joined raw, the composite keys ("a|b","c") and ("a","b|c") produce the same
+// string, so one of the two rows silently drops out of the comparison -- in a
+// consistency checker that is a missed difference, not a cosmetic bug. So a
+// part is quoted, but only when it has to be: when it is empty, or contains
+// the delimiter or a quote. An ordinary key therefore still reads as
+// 123|abc, which matters because these keys are interpolated into
+// operator-facing messages ("row missing on n2 (pk 123)").
+//
+// That rule keeps distinct part lists distinct. Reading left to right, every
+// element says where it ends: a bare element holds no quote, so it cannot be
+// mistaken for a quoted one, and holds no delimiter, so it ends at the next
+// one; a quoted element starts with a quote and ends where the string literal
+// closes. ("a|b","c") is "a|b"|c and ("a","b|c") is a|"b|c".
 //
 // The result is a matching key, not a primary key: it is never persisted, sent
 // to the server or parsed back. Code that needs real pkey values has to carry
 // them separately.
 func RowKeyFromStrings(parts []string) string {
-	quoted := make([]string, len(parts))
+	encoded := make([]string, len(parts))
 	for i, p := range parts {
-		quoted[i] = strconv.Quote(p)
+		if p == "" || strings.ContainsAny(p, "|\"") {
+			encoded[i] = strconv.Quote(p)
+		} else {
+			encoded[i] = p
+		}
 	}
-	return strings.Join(quoted, "|")
-}
-
-// RowKeyFromValues renders each value with fmt and joins them with
-// RowKeyFromStrings. fmt is lossy for driver types -- a uuid prints as
-// "[17 17 ...]" -- which is why the result must not leave the process.
-func RowKeyFromValues(vals []any) string {
-	parts := make([]string, len(vals))
-	for i, v := range vals {
-		parts[i] = fmt.Sprintf("%v", v)
-	}
-	return RowKeyFromStrings(parts)
+	return strings.Join(encoded, "|")
 }
 
 // StringifyKey renders the primary-key columns of a row into the in-memory key
@@ -1435,17 +1437,22 @@ func areRowsModified(row1, row2 types.OrderedMap, dataCols []string) (bool, erro
 	return false, nil
 }
 
+// buildPKey keys the row maps CompareRowSets matches on. It is a third caller
+// of the encoding StringifyKey and StringifyOrderedMapKey use, and has to stay
+// one: joined raw, two rows whose pkey values differ only in where
+// the delimiter falls collapse into one map entry and the modification between
+// them is never reported.
 func buildPKey(row types.OrderedMap, pkeyCols []string) (string, error) {
 	rowMap := OrderedMapToMap(row)
-	var pkeyParts []string
-	for _, pkeyCol := range pkeyCols {
+	pkeyParts := make([]string, len(pkeyCols))
+	for i, pkeyCol := range pkeyCols {
 		val, ok := rowMap[pkeyCol]
 		if !ok {
 			return "", fmt.Errorf("pkey column %s not found in row", pkeyCol)
 		}
-		pkeyParts = append(pkeyParts, fmt.Sprintf("%v", val))
+		pkeyParts[i] = fmt.Sprintf("%v", val)
 	}
-	return strings.Join(pkeyParts, "|"), nil
+	return RowKeyFromStrings(pkeyParts), nil
 }
 
 func OrderedMapToMap(om types.OrderedMap) map[string]any {
@@ -1458,7 +1465,8 @@ func OrderedMapToMap(om types.OrderedMap) map[string]any {
 
 // StringifyOrderedMapKey is StringifyKey for an OrderedMap. It must stay
 // byte-for-byte compatible with StringifyKey: the two are used interchangeably
-// to key the same maps, so a row keyed by one has to be found by the other.
+// on one map, so a row keyed by either has to be found by the other. buildPKey
+// shares the encoding but keys maps of its own.
 func StringifyOrderedMapKey(row types.OrderedMap, pkeyCols []string) (string, error) {
 	pkeyParts := make([]string, len(pkeyCols))
 	for i, pkeyCol := range pkeyCols {

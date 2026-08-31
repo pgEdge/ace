@@ -393,17 +393,29 @@ rebuild correctly outside the database:
 | `uuid`, `bytea` | Supported; compared as bytes, like `uuid_cmp` and `byteacmp` |
 | `timestamp`, `timestamptz`, `date` | Supported |
 | `text`, `varchar`, `char` | Supported **only under the `C` or `POSIX` collation**; see below |
-| `numeric`, `time`, and any type the driver decodes into a struct | **Not supported**: ordered by their Go rendering, which bears no relation to the Postgres order |
+| `numeric`, `time`, and any type the driver decodes into a struct | **Not supported.** The tree builds and a clean run still reports a match, but the moment a block mismatches, the row identity cannot be built and the comparison stops with an error |
 | `enum`, `citext`, domains over any of the above, and types the driver has no codec for | Accepted, but the order is not guaranteed; see below |
 
-Nothing stops a tree being built over an unsupported type today; the bounds are
-simply ordered by their Go rendering and the diff can then under-report. A
-follow-up turns that into a refusal, on the grounds that a consistency checker
-which cannot produce a result has to say so: reporting "no differences" after
-quietly comparing an empty range is worse, because nobody can tell that apart
-from a real match.
+The two halves of that table fail differently, and the difference matters.
 
-The last two rows of the table is a known gap, not a supported setup, and it is
+A type the driver decodes into a struct -- `numeric`, `time` -- has no row
+identity ACE can build, so as soon as a block mismatches and the rows have to be
+matched up, the comparison stops with an error. The pair is recorded in
+`incomplete_pairs`, `TABLES MATCH` is not printed, and the command exits
+non-zero. Nothing is silently dropped, but note what is *not* covered: a run
+that finds no mismatching block at all still reports a match, and the bounds
+that led to that conclusion were ordered by their Go rendering. A clean verdict
+over such a key is worth no more than the ordering behind it.
+
+A string-like type whose collation Go cannot reproduce -- `text` outside `C`,
+`enum`, `citext` -- is the worse case, because identity works fine and only the
+*order* is wrong. There is nothing to refuse and nothing to report: the run
+completes, prints a verdict, and can be missing rows. A warning naming the type
+is logged once per task when the comparator meets a type it cannot order, but
+that warning does not fire for these, because Go will happily compare two
+strings.
+
+That second half is a known gap, not a supported setup, and it is
 reproducible: `tests/integration/mtree_pkey_types_test.go` carries a case for
 it, skipped until the fix lands. A `text` primary key in any collation other
 than `C` sorts differently in the database than byte by byte in Go: under

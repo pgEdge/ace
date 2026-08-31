@@ -578,25 +578,48 @@ func TestStringifyKeyEncodingIsSharedAndUnambiguous(t *testing.T) {
 	require.Equal(t, key1, orderedKey, "the two stringifiers must agree on the same row")
 }
 
-// Block boundaries are de-duplicated by this encoding before the key space is
-// sliced up. fmt.Sprint over the whole slice renders both of these as
-// "[a b c]", which drops one boundary and leaves the range between them
-// uncompared, so the parts have to be encoded one at a time.
-func TestRowKeyFromValuesSeparatesComponents(t *testing.T) {
-	require.NotEqual(t,
-		RowKeyFromValues([]any{"a b", "c"}),
-		RowKeyFromValues([]any{"a", "b c"}),
-		"composite boundaries that differ must not encode to the same key")
+// These keys reach operators: repair interpolates them into "row missing on %s
+// (pk %s)". So a part is quoted only when it has to be, and an ordinary key
+// still reads the way the pkey does.
+func TestRowKeyFromStringsQuotesOnlyWhenNeeded(t *testing.T) {
+	require.Equal(t, "123", RowKeyFromStrings([]string{"123"}),
+		"a plain value must not gain quotes")
+	require.Equal(t, "123|abc", RowKeyFromStrings([]string{"123", "abc"}),
+		"a plain composite must read as it always did")
 
-	require.NotEqual(t,
-		RowKeyFromValues([]any{"a|b", "c"}),
-		RowKeyFromValues([]any{"a", "b|c"}),
-		"the delimiter inside a value must not merge two boundaries")
+	// Quoting kicks in exactly where the encoding would otherwise be ambiguous.
+	require.Equal(t, `"a|b"|c`, RowKeyFromStrings([]string{"a|b", "c"}))
+	require.Equal(t, `a|"b|c"`, RowKeyFromStrings([]string{"a", "b|c"}))
+	require.Equal(t, `""`, RowKeyFromStrings([]string{""}),
+		"an empty part must still occupy its position")
+	require.Equal(t, `"say \"hi\""`, RowKeyFromStrings([]string{`say "hi"`}),
+		"a value holding a quote must be quoted, or it could pass for an encoded part")
+}
 
-	require.Equal(t,
-		RowKeyFromValues([]any{1, "x"}),
-		RowKeyFromValues([]any{1, "x"}),
-		"equal boundaries must encode to the same key, or dedup stops working")
+// The encoding has to be injective, because a collision merges two rows into
+// one map entry and drops a difference. Values that mix the delimiter, quotes
+// and empties are where a hand-rolled rule goes wrong.
+func TestRowKeyFromStringsIsInjective(t *testing.T) {
+	parts := []string{"", "a", "b", "|", `"`, "a|b", "b|c", `"a`, `a"`, `"a|b"`, `\`}
+
+	seen := make(map[string][]string)
+	for _, p1 := range parts {
+		for _, p2 := range parts {
+			key := RowKeyFromStrings([]string{p1, p2})
+			if prev, clash := seen[key]; clash {
+				t.Errorf("%q and %q both encode to %s", prev, []string{p1, p2}, key)
+				continue
+			}
+			seen[key] = []string{p1, p2}
+		}
+		// A one-part list must not collide with any two-part list either.
+		key := RowKeyFromStrings([]string{p1})
+		if prev, clash := seen[key]; clash {
+			t.Errorf("%q and %q both encode to %s", prev, []string{p1}, key)
+		} else {
+			seen[key] = []string{p1}
+		}
+	}
 }
 
 // The report must not reorder its rows between runs on identical input. Two

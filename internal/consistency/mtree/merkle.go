@@ -121,8 +121,14 @@ type MerkleTreeTask struct {
 	// not "no differences", so stale-block healing must not act on it. Guarded
 	// by diffMutex.
 	pairCompareErrs map[string]bool
-	StartTime       time.Time
-	NodeOriginNames map[string]map[string]string
+	// boundarySortWarned keeps the "cannot sort these bounds" warning to one
+	// line per task. It is raised from inside a sort comparator, which runs
+	// O(n log n) times per block set and again for every leaf in
+	// intervalInUnion, so one unsupported key type would otherwise repeat the
+	// same line thousands of times and bury everything else in the log.
+	boundarySortWarned sync.Once
+	StartTime          time.Time
+	NodeOriginNames    map[string]map[string]string
 
 	Ctx context.Context
 }
@@ -824,10 +830,10 @@ func buildRowHashQuery(schema, table string, key []string, cols []string, whereC
 }
 
 // pkeyKind classifies a primary-key value that pgx decoded into an untyped
-// destination. It is the one list of what mtree can handle, and three things
-// have to agree with it: comparePkeyValues sorts these kinds, pkeyIdentity
-// renders them, and validateBoundaryTypes admits them. Nothing in the language
-// ties the three together, so TestPkeyKindsAreFullySupported does.
+// destination. It is the one list of what mtree can handle, and two things
+// have to agree with it: comparePkeyValues sorts these kinds and pkeyIdentity
+// renders them. Nothing in the language ties the three together, so
+// TestPkeyKindsAreFullySupported does.
 //
 // A kind is on the list only if Go can reproduce the Postgres btree order for
 // it, and if two different values always render differently. Adding a kind
@@ -846,6 +852,12 @@ const (
 	pkeyTime
 	pkeyUUID  // pgx decodes uuid as [16]byte
 	pkeyBytes // bytea
+
+	// pkeyKindEnd is one past the last kind. It exists so
+	// TestPkeyKindsAreFullySupported can walk every kind: a new constant added
+	// above it fails that test until comparePkeyValues and pkeyIdentity handle
+	// it too. Keep it last.
+	pkeyKindEnd
 )
 
 func pkeyKindOf(v any) pkeyKind {
@@ -872,9 +884,20 @@ func pkeyKindOf(v any) pkeyKind {
 
 // comparePkeyValues orders two primary-key values of the same Go type, the way
 // the server orders that type. ok is false for a kind pkeyKindOf does not
-// know; the caller has to decide what to do about it.
+// know, and for two values that did not decode to the same kind; the caller
+// has to decide what to do about it.
 func comparePkeyValues(val1, val2 any) (result int, ok bool) {
-	switch pkeyKindOf(val1) {
+	kind := pkeyKindOf(val1)
+	// Every branch below asserts or reflects on val2 as well, so a val2 of
+	// another kind would panic rather than return ok=false. The two sides come
+	// from the same column on two nodes and should always agree, but "should"
+	// is not a guarantee across a schema mismatch, and a panic inside a sort
+	// comparator takes down the whole run.
+	if pkeyKindOf(val2) != kind {
+		return 0, false
+	}
+
+	switch kind {
 	case pkeyInt:
 		return cmp.Compare(reflect.ValueOf(val1).Int(), reflect.ValueOf(val2).Int()), true
 	case pkeyUint:
@@ -2781,14 +2804,9 @@ func (m *MerkleTreeTask) getPkeyBatches(pool1, pool2 *pgxpool.Pool, mismatchedPo
 		}
 	}
 
-	// Key each boundary by its components, not by fmt.Sprint of the whole
-	// slice: that renders []any{"a b", "c"} and []any{"a", "b c"} both as
-	// "[a b c]", so one of the two boundaries is dropped and the slice of the
-	// key space between them is never compared.
 	uniqueBoundaries := make(map[string]any)
 	for _, b := range boundaries {
-		key := utils.RowKeyFromValues(boundaryToSlice(b))
-		uniqueBoundaries[key] = b
+		uniqueBoundaries[m.boundaryKey(b)] = b
 	}
 
 	sortedBoundaries := make([]any, 0, len(uniqueBoundaries))
@@ -2844,6 +2862,43 @@ func (m *MerkleTreeTask) getPkeyBatches(pool1, pool2 *pgxpool.Pool, mismatchedPo
 	}
 
 	return batches, nil
+}
+
+// boundaryKey renders a block bound into the key that de-duplicates the cut
+// points before the ranges are rebuilt. Two bounds must share a key only if
+// they are the same bound: dropping a real cut point shifts the whole slice set
+// and can leave rows uncompared.
+//
+// fmt is not good enough for that. fmt.Sprint of the whole slice renders
+// []any{"a b","c"} and []any{"a","b c"} both as "[a b c]", and a per-component
+// %v renders two distinct uuids through the same []byte formatting. So each
+// component goes through pkeyIdentity, which is injective by contract, and the
+// components are joined by the encoder that keeps composites unambiguous.
+//
+// Each component carries a one-letter tag, so a NULL cannot be confused with a
+// value that renders as "nil" and a fmt fallback cannot be confused with an
+// identity that happens to look the same.
+func (m *MerkleTreeTask) boundaryKey(b any) string {
+	slice := boundaryToSlice(b)
+	parts := make([]string, len(slice))
+	for i, v := range slice {
+		switch {
+		case v == nil:
+			parts[i] = "n"
+		default:
+			if id, ok := pkeyIdentity(v); ok {
+				parts[i] = "v" + id
+			} else {
+				// The type is already the documented broken case: its bounds
+				// are ordered by their Go rendering too. Warn once and key it
+				// the only way left, rather than refuse a bound the sort
+				// itself still accepts.
+				m.warnBoundarySortFallback(v)
+				parts[i] = "f" + fmt.Sprintf("%v", v)
+			}
+		}
+	}
+	return utils.RowKeyFromStrings(parts)
 }
 
 // compareBoundaries sorts two block bounds.
@@ -2913,9 +2968,7 @@ func (m *MerkleTreeTask) compareBoundaries(b1, b2 any) int {
 			// to the Go rendering and say so. That order rarely matches the
 			// server's, which makes the ranges built from these bounds
 			// unreliable rather than merely odd.
-			logger.Warn("cannot sort merkle-tree block bounds of type %T for %s.%s the way "+
-				"the server does; falling back to their Go rendering, so the ranges built "+
-				"from them may be wrong", val1, m.Schema, m.Table)
+			m.warnBoundarySortFallback(val1)
 			s1 := fmt.Sprintf("%v", val1)
 			s2 := fmt.Sprintf("%v", val2)
 			if s1 < s2 {
@@ -2937,6 +2990,18 @@ func (m *MerkleTreeTask) compareBoundaries(b1, b2 any) int {
 		return 1
 	}
 	return 0
+}
+
+// warnBoundarySortFallback reports, once per task, that block bounds are being
+// ordered by their Go rendering because comparePkeyValues does not know the
+// type. The caller is a sort comparator, so this must stay cheap on the second
+// and every later call.
+func (m *MerkleTreeTask) warnBoundarySortFallback(val any) {
+	m.boundarySortWarned.Do(func() {
+		logger.Warn("cannot sort merkle-tree block bounds of type %T for %s.%s the way "+
+			"the server does; falling back to their Go rendering, so the ranges built "+
+			"from them may be wrong", val, m.Schema, m.Table)
+	})
 }
 
 func (m *MerkleTreeTask) intervalInUnion(s, e any, intervals []types.LeafRange) bool {
