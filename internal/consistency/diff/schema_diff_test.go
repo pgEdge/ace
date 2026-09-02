@@ -18,6 +18,58 @@ import (
 	"testing"
 )
 
+// ---------------------------------------------------------------------------
+// Validate
+// ---------------------------------------------------------------------------
+
+func TestSchemaDiffCmd_Validate(t *testing.T) {
+	tests := []struct {
+		name        string
+		cmd         SchemaDiffCmd
+		wantErr     bool
+		errContains string
+	}{
+		{
+			name:        "missing cluster name",
+			cmd:         SchemaDiffCmd{SchemaName: "public"},
+			wantErr:     true,
+			errContains: "cluster name is required",
+		},
+		{
+			name:        "missing schema name",
+			cmd:         SchemaDiffCmd{ClusterName: "test_cluster"},
+			wantErr:     true,
+			errContains: "schema name is required",
+		},
+		{
+			name:        "coldfront schema is rejected",
+			cmd:         SchemaDiffCmd{ClusterName: "test_cluster", SchemaName: "coldfront"},
+			wantErr:     true,
+			errContains: "reserved for the pgEdge ColdFront extension",
+		},
+		{
+			name: "valid",
+			cmd:  SchemaDiffCmd{ClusterName: "test_cluster", SchemaName: "public", Nodes: "n1,n2"},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := tc.cmd.Validate()
+			if tc.wantErr {
+				if err == nil {
+					t.Fatal("expected error, got nil")
+				}
+				if tc.errContains != "" && !strings.Contains(err.Error(), tc.errContains) {
+					t.Errorf("error = %q, want it to contain %q", err.Error(), tc.errContains)
+				}
+			} else if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+		})
+	}
+}
+
 // writeSkipFile is a helper that writes lines to a temp file and returns its path.
 func writeSkipFile(t *testing.T, lines ...string) string {
 	t.Helper()
