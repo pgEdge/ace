@@ -181,17 +181,30 @@ func (c *RepsetDiffCmd) RunChecks(skipValidation bool) error {
 		repsetNodeNames = append(repsetNodeNames, nodeName)
 
 		tables, err := queries.GetTablesInRepSet(c.Ctx, pool, c.RepsetName)
-		pool.Close()
 		if err != nil {
+			pool.Close()
 			return fmt.Errorf("could not get tables in repset on node %s: %w", nodeName, err)
 		}
 
 		for _, t := range tables {
+			parts := strings.SplitN(t, ".", 2)
+			if len(parts) == 2 {
+				tree, terr := queries.GetRelationTree(c.Ctx, pool, parts[0], parts[1])
+				if terr != nil {
+					pool.Close()
+					return fmt.Errorf("could not read relation kind for %s on node %s: %w", t, nodeName, terr)
+				}
+				if tree != nil && tree.Root.RelKind == "f" {
+					logger.Info("Skipping foreign table %s in repset %s on node %s", t, c.RepsetName, nodeName)
+					continue
+				}
+			}
 			if tablePresence[t] == nil {
 				tablePresence[t] = make(map[string]bool)
 			}
 			tablePresence[t][nodeName] = true
 		}
+		pool.Close()
 	}
 
 	if len(repsetNodeNames) == 0 {
