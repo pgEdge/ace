@@ -12,13 +12,36 @@
 package repair
 
 import (
+	"bytes"
+	"io"
+	"os"
 	"testing"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/pgedge/ace/pkg/logger"
 	"github.com/pgedge/ace/pkg/types"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// captureWarnOutput runs fn with logger output redirected to a pipe and
+// returns everything written to it, so a test can assert whether a
+// particular logger.Warn call fired.
+func captureWarnOutput(t *testing.T, fn func()) string {
+	t.Helper()
+	r, w, err := os.Pipe()
+	require.NoError(t, err)
+	logger.SetOutput(w)
+	defer logger.SetOutput(os.Stderr)
+
+	fn()
+
+	require.NoError(t, w.Close())
+	var buf bytes.Buffer
+	_, err = io.Copy(&buf, r)
+	require.NoError(t, err)
+	return buf.String()
+}
 
 func placementTask() *TableRepairTask {
 	t := NewTableRepairTask()
@@ -117,15 +140,36 @@ func TestGroupByTargetRelation_HeapLeavesWithoutForeignGetsSameNamedLeafAndOnlyF
 // TestGroupByTargetRelation_TreeHasForeignTrueNoPlacementGetsParentWithOnlyTrue
 // covers a node whose tree has a foreign relation (Only must be true) but
 // where a row carries no placement anywhere: it routes to the parent with
-// Only true, which is exactly the case the log warning in
-// groupByTargetRelation is meant to flag (not asserted here).
+// Only true, as a guess, and the "no recorded placement" warning fires.
 func TestGroupByTargetRelation_TreeHasForeignTrueNoPlacementGetsParentWithOnlyTrue(t *testing.T) {
 	task := placementTask()
-	groups := task.groupByTargetRelation("n2", map[string]map[string]any{"999": {"id": 999}})
+	var groups map[string]relationGroup
+	out := captureWarnOutput(t, func() {
+		groups = task.groupByTargetRelation("n2", map[string]map[string]any{"999": {"id": 999}})
+	})
 	require.Len(t, groups, 1)
 	g := groups[`"s"."parent"`]
 	assert.True(t, g.Only)
 	assert.Len(t, g.Rows, 1)
+	assert.Contains(t, out, "no recorded placement")
+}
+
+// TestGroupByTargetRelation_PlacementExplicitlyRecordedAsParentWarnsNothing
+// covers the case the previous, broader warning condition got wrong: id "1"
+// carries a placement on n2 that explicitly names the parent (set up by
+// placementTask), which is a confirmed placement, not a guess, so no warning
+// should fire even though Only is true and the row targets the parent.
+func TestGroupByTargetRelation_PlacementExplicitlyRecordedAsParentWarnsNothing(t *testing.T) {
+	task := placementTask()
+	var groups map[string]relationGroup
+	out := captureWarnOutput(t, func() {
+		groups = task.groupByTargetRelation("n2", map[string]map[string]any{"1": {"id": 1}})
+	})
+	require.Len(t, groups, 1)
+	g := groups[`"s"."parent"`]
+	assert.True(t, g.Only)
+	assert.Len(t, g.Rows, 1)
+	assert.NotContains(t, out, "no recorded placement")
 }
 
 func TestGroupByTargetRelation_NodeWithoutForeignRelationsKeepsParentWithoutOnly(t *testing.T) {

@@ -101,15 +101,23 @@ func (t *TableRepairTask) candidateNodes(nodeName string) []string {
 // targetRelation picks the relation a repair statement for one row should
 // name on nodeName. See targetRelationAmong for the placement rules; this
 // wrapper computes the candidate node list fresh, for callers outside
-// groupByTargetRelation's per-node loop.
+// groupByTargetRelation's per-node loop, and discards the "was this row
+// actually placed" signal that groupByTargetRelation uses for its warning.
 func (t *TableRepairTask) targetRelation(nodeName, pkeyStr string) pgx.Identifier {
-	return t.targetRelationAmong(nodeName, pkeyStr, t.candidateNodes(nodeName))
+	id, _ := t.targetRelationAmong(nodeName, pkeyStr, t.candidateNodes(nodeName))
+	return id
 }
 
 // targetRelationAmong is targetRelation with the candidate node list
-// precomputed by the caller.
+// precomputed by the caller. The second return value, placed, is true when a
+// recorded placement (the row's own on nodeName, or a peer's) actually
+// determined the returned relation - including a placement that names the
+// parent itself - and false only when nothing pinned it down and the parent
+// was returned as a default guess.
 //
-//  1. No inheritance in play: the table itself.
+//  1. No inheritance in play: the table itself. placed is reported true
+//     here: with no inheritance active, Only is never set for the caller,
+//     so this value is never inspected for a warning.
 //  2. The row exists on nodeName, and the relation it is recorded in there is
 //     actually one of nodeName's heap relations: that relation. A stale or
 //     hand-edited diff can record a relation nodeName no longer has (or
@@ -118,18 +126,19 @@ func (t *TableRepairTask) targetRelation(nodeName, pkeyStr string) pgx.Identifie
 //     through to the next step instead.
 //  3. The row is missing on nodeName, or its own recorded relation there
 //     wasn't trustworthy: the relation it lives in on some other node, if
-//     nodeName has a heap relation of that name; otherwise the parent.
-//     INSERT into an inheritance parent lands in the parent, so the fallback
-//     never writes to a foreign relation.
-func (t *TableRepairTask) targetRelationAmong(nodeName, pkeyStr string, candidates []string) pgx.Identifier {
+//     nodeName has a heap relation of that name; otherwise the parent,
+//     reported as unplaced (placed=false). INSERT into an inheritance parent
+//     lands in the parent, so the fallback never writes to a foreign
+//     relation.
+func (t *TableRepairTask) targetRelationAmong(nodeName, pkeyStr string, candidates []string) (pgx.Identifier, bool) {
 	parent := pgx.Identifier{t.Schema, t.Table}
 	if !t.inheritanceActive() {
-		return parent
+		return parent, true
 	}
 	if rel, ok := t.rowPlacement[nodeName][pkeyStr]; ok {
 		if t.heapLeaves[nodeName][rel] {
 			if id, ok := splitQualified(rel); ok {
-				return id
+				return id, true
 			}
 		}
 	}
@@ -141,11 +150,11 @@ func (t *TableRepairTask) targetRelationAmong(nodeName, pkeyStr string, candidat
 		}
 		if t.heapLeaves[nodeName][rel] {
 			if id, ok := splitQualified(rel); ok {
-				return id
+				return id, true
 			}
 		}
 	}
-	return parent
+	return parent, false
 }
 
 // groupByTargetRelation splits a node's repair rows by the relation each
@@ -155,12 +164,23 @@ func (t *TableRepairTask) targetRelationAmong(nodeName, pkeyStr string, candidat
 // heapLeaves[nodeName]: heapLeaves is now recorded for every inherited tree
 // (foreign or not), but only a node whose own tree currently has a foreign
 // relation needs its statements to carry ONLY.
+//
+// When Only is set, a row with no recorded placement anywhere routes to the
+// parent as a guess (targetRelationAmong's fallback), and that statement may
+// then miss rows actually sitting in a child heap relation. This is logged
+// once per call, naming how many such rows there were; a row whose recorded
+// placement explicitly names the parent is not counted, since that is a
+// confirmed placement, not a guess.
 func (t *TableRepairTask) groupByTargetRelation(nodeName string, rows map[string]map[string]any) map[string]relationGroup {
 	groups := make(map[string]relationGroup)
 	only := t.treeHasForeign[nodeName]
 	candidates := t.candidateNodes(nodeName)
+	unplaced := 0
 	for pkeyStr, row := range rows {
-		ident := t.targetRelationAmong(nodeName, pkeyStr, candidates)
+		ident, placed := t.targetRelationAmong(nodeName, pkeyStr, candidates)
+		if only && !placed {
+			unplaced++
+		}
 		key := ident.Sanitize()
 		g, ok := groups[key]
 		if !ok {
@@ -170,11 +190,9 @@ func (t *TableRepairTask) groupByTargetRelation(nodeName string, rows map[string
 		groups[key] = g
 	}
 
-	if only {
-		parentKey := pgx.Identifier{t.Schema, t.Table}.Sanitize()
-		if g, ok := groups[parentKey]; ok && g.Only {
-			logger.Warn("table-repair: %d row(s) on %s route to %s with ONLY but carry no confirmed placement in a child heap relation; the statement may not reach child rows", len(g.Rows), nodeName, parentKey)
-		}
+	if unplaced > 0 {
+		logger.Warn("table-repair: %d row(s) on %s have no recorded placement and route to %s.%s with ONLY as a guess; the statement may not reach child rows",
+			unplaced, nodeName, t.Schema, t.Table)
 	}
 
 	return groups

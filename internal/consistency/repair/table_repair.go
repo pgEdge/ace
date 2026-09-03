@@ -518,30 +518,49 @@ func (t *TableRepairTask) ValidateAndPrepare() error {
 				if t.heapLeaves == nil {
 					t.heapLeaves = make(map[string]map[string]bool)
 				}
-				if tree.HasForeign() && t.Sources == nil {
-					t.Sources = make(map[string]queries.TableSource)
-				}
+				// A leaf's primary key only matters to a node that can
+				// actually route rows to it: when this node's tree has no
+				// foreign relation, inheritanceActive() may still be true
+				// (some other node has one), but every upsert on THIS node
+				// still goes to the parent (targetRelation only ever selects
+				// a leaf other than the parent's own recorded placement, and
+				// a plain heap child here was never a routing target before
+				// foreign-relation support). Requiring its key to match the
+				// parent's here would refuse existing plain-inheritance
+				// setups that have nothing to do with foreign tables. So the
+				// existence/match check is scoped to nodes whose own tree
+				// has a foreign relation; heapLeaves itself is still
+				// recorded for every inherited tree, foreign or not, since a
+				// peer node's placement may still need a same-named leaf
+				// here.
 				leaves := tree.HeapLeaves()
 				set := make(map[string]bool, len(leaves))
-				for _, l := range leaves {
-					set[l.Qualified()] = true
-					pk, perr := queries.GetPrimaryKey(t.Ctx, connPool, l.Schema, l.Name)
-					if perr != nil {
-						return fmt.Errorf("failed to get primary key for %s on node %s: %w", l.Qualified(), nodeName, perr)
+				if tree.HasForeign() {
+					if t.Sources == nil {
+						t.Sources = make(map[string]queries.TableSource)
 					}
-					if len(pk) == 0 {
-						return fmt.Errorf("%s on node %s has no primary key; repair of an inheritance tree needs one on every heap relation so that upserts can use ON CONFLICT", l.Qualified(), nodeName)
+					for _, l := range leaves {
+						set[l.Qualified()] = true
+						pk, perr := queries.GetPrimaryKey(t.Ctx, connPool, l.Schema, l.Name)
+						if perr != nil {
+							return fmt.Errorf("failed to get primary key for %s on node %s: %w", l.Qualified(), nodeName, perr)
+						}
+						if len(pk) == 0 {
+							return fmt.Errorf("%s on node %s has no primary key; repair of an inheritance tree needs one on every heap relation so that upserts can use ON CONFLICT", l.Qualified(), nodeName)
+						}
+						if !keyColumnsMatch(pKey, pk) {
+							return fmt.Errorf("%s on node %s has primary key %v, which does not match %s.%s's primary key %v; repair of an inheritance tree needs every heap relation's key to match the parent's",
+								l.Qualified(), nodeName, pk, t.Schema, t.Table, pKey)
+						}
 					}
-					if !keyColumnsMatch(pKey, pk) {
-						return fmt.Errorf("%s on node %s has primary key %v, which does not match %s.%s's primary key %v; repair of an inheritance tree needs every heap relation's key to match the parent's",
-							l.Qualified(), nodeName, pk, t.Schema, t.Table, pKey)
+					logger.Warn("Repair will skip foreign relations in the inheritance tree of %s.%s on node %s: %s",
+						t.Schema, t.Table, nodeName, strings.Join(tree.ForeignRelations(), ", "))
+				} else {
+					for _, l := range leaves {
+						set[l.Qualified()] = true
 					}
 				}
 				t.heapLeaves[nodeName] = set
-				if tree.HasForeign() {
-					logger.Warn("Repair will skip foreign relations in the inheritance tree of %s.%s on node %s: %s",
-						t.Schema, t.Table, nodeName, strings.Join(tree.ForeignRelations(), ", "))
-				}
 			}
 
 			cols, err := queries.GetColumns(t.Ctx, connPool, t.Schema, t.Table)
