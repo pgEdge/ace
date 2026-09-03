@@ -519,8 +519,12 @@ func (t *TableDiffTask) fetchRows(nodeName string, r Range) ([]types.OrderedMap,
 
 	if source.IsUnion() {
 		// Which heap relation stores the row on this node. Repair uses it to
-		// target that relation with ONLY instead of the parent.
-		selectCols = append(selectCols, "tableoid::regclass::text AS storage_relation")
+		// target that relation with ONLY instead of the parent. Built from
+		// pg_class/pg_namespace directly (not tableoid::regclass::text) so
+		// the schema is always present: regclass output omits the schema
+		// whenever the relation is visible via search_path, which would
+		// otherwise make this value unqualified for anything in "public".
+		selectCols = append(selectCols, "(SELECT n.nspname || '.' || c.relname FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace WHERE c.oid = tableoid) AS storage_relation")
 	}
 
 	for _, colName := range t.Cols {

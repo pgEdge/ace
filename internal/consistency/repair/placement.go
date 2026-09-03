@@ -13,6 +13,8 @@ package repair
 
 import (
 	"fmt"
+	"slices"
+	"sort"
 	"strings"
 
 	"github.com/jackc/pgx/v5"
@@ -57,6 +59,11 @@ func (t *TableRepairTask) sourceFor(nodeName string) queries.TableSource {
 //     node, if nodeName has a heap relation of that name; otherwise the
 //     parent. INSERT into an inheritance parent lands in the parent, so the
 //     fallback never writes to a foreign relation.
+//
+// Step 3 checks the source-of-truth node first (its placement is the one the
+// repair is driving toward), then the remaining nodes in a fixed, sorted
+// order, so the choice is deterministic across runs when several other nodes
+// disagree on where the row lives.
 func (t *TableRepairTask) targetRelation(nodeName, pkeyStr string) pgx.Identifier {
 	parent := pgx.Identifier{t.Schema, t.Table}
 	if !t.inheritanceActive() {
@@ -67,11 +74,23 @@ func (t *TableRepairTask) targetRelation(nodeName, pkeyStr string) pgx.Identifie
 			return id
 		}
 	}
-	for node, byKey := range t.rowPlacement {
+
+	candidates := make([]string, 0, len(t.rowPlacement))
+	for node := range t.rowPlacement {
 		if node == nodeName {
 			continue
 		}
-		rel, ok := byKey[pkeyStr]
+		candidates = append(candidates, node)
+	}
+	sort.Strings(candidates)
+	if t.SourceOfTruth != "" && t.SourceOfTruth != nodeName {
+		candidates = append([]string{t.SourceOfTruth}, slices.DeleteFunc(candidates, func(n string) bool {
+			return n == t.SourceOfTruth
+		})...)
+	}
+
+	for _, node := range candidates {
+		rel, ok := t.rowPlacement[node][pkeyStr]
 		if !ok {
 			continue
 		}
@@ -100,6 +119,22 @@ func (t *TableRepairTask) groupByTargetRelation(nodeName string, rows map[string
 		groups[key] = g
 	}
 	return groups
+}
+
+// placementRequired reports an error when a diff's summary carries no
+// storage_relation placement for a table whose inheritance tree has foreign
+// relations on at least one node. table-diff always sets ExcludedRelations
+// (possibly to an empty map, never nil) whenever it ran the union-source
+// path, so a nil map here means the diff predates that support, or was taken
+// before a foreign relation appeared in the tree: every row would then have
+// no recorded placement and route to the parent, which duplicate-inserts a
+// row already present in a heap leaf and no-ops a delete that should have
+// reached that leaf.
+func placementRequired(schema, table string, summary types.DiffSummary) error {
+	if summary.ExcludedRelations == nil {
+		return fmt.Errorf("the diff file for %s.%s carries no storage_relation placement (it predates foreign-relation support or was taken before a foreign relation appeared); re-run table-diff and repair from the new file", schema, table)
+	}
+	return nil
 }
 
 // buildRowPlacement reads storage_relation from every row in the diff file
@@ -132,13 +167,80 @@ func buildRowPlacement(diffs types.DiffOutput, key []string) (map[string]map[str
 	return out, nil
 }
 
-// splitQualified turns "schema.name" into an identifier. Names from
-// tableoid::regclass::text are quoted only when they need it, so strip one
-// layer of double quotes from each part.
+// buildDeleteSQL renders one DELETE batch: the statement text and its
+// positional arguments, in order. ident is the relation to delete from;
+// only prefixes the statement with ONLY. keyCols is the primary key's
+// column list; when simplePK is true batchKeys holds one scalar per row,
+// otherwise each entry must be a []any of len(keyCols) values in keyCols
+// order.
+func buildDeleteSQL(ident pgx.Identifier, only bool, simplePK bool, keyCols []string, batchKeys []any) (string, []any, error) {
+	var sql strings.Builder
+	var args []any
+	paramIdx := 1
+
+	onlyClause := ""
+	if only {
+		onlyClause = "ONLY "
+	}
+	sql.WriteString(fmt.Sprintf("DELETE FROM %s%s WHERE ", onlyClause, ident.Sanitize()))
+
+	if simplePK {
+		sql.WriteString(fmt.Sprintf("%s IN (", pgx.Identifier{keyCols[0]}.Sanitize()))
+		for j, key := range batchKeys {
+			if j > 0 {
+				sql.WriteString(", ")
+			}
+			sql.WriteString(fmt.Sprintf("$%d", paramIdx))
+			args = append(args, key)
+			paramIdx++
+		}
+		sql.WriteString(")")
+		return sql.String(), args, nil
+	}
+
+	keyColSanitised := make([]string, len(keyCols))
+	for k, keyCol := range keyCols {
+		keyColSanitised[k] = pgx.Identifier{keyCol}.Sanitize()
+	}
+	sql.WriteString(fmt.Sprintf("(%s) IN (", strings.Join(keyColSanitised, ", ")))
+
+	for j, key := range batchKeys {
+		compositeKey, ok := key.([]any)
+		if !ok {
+			return "", nil, fmt.Errorf("expected composite key to be []interface{}, got %T", key)
+		}
+		if len(compositeKey) != len(keyCols) {
+			return "", nil, fmt.Errorf("composite key length mismatch: expected %d, got %d", len(keyCols), len(compositeKey))
+		}
+		if j > 0 {
+			sql.WriteString(", ")
+		}
+		sql.WriteString("(")
+		for k, val := range compositeKey {
+			if k > 0 {
+				sql.WriteString(", ")
+			}
+			sql.WriteString(fmt.Sprintf("$%d", paramIdx))
+			args = append(args, val)
+			paramIdx++
+		}
+		sql.WriteString(")")
+	}
+	sql.WriteString(")")
+
+	return sql.String(), args, nil
+}
+
+// splitQualified turns "schema.name" into an identifier. The diff engines
+// build storage_relation from pg_namespace.nspname || '.' || pg_class.relname
+// (not tableoid::regclass::text, whose output omits the schema when the
+// relation is search_path-visible), so both parts are the raw, unquoted
+// catalog names and a plain split on the first dot is exact: neither a
+// schema nor a relation name may itself contain a literal '.'.
 func splitQualified(q string) (pgx.Identifier, bool) {
-	parts := strings.SplitN(q, ".", 2)
-	if len(parts) != 2 {
+	schema, name, ok := strings.Cut(q, ".")
+	if !ok || schema == "" || name == "" {
 		return nil, false
 	}
-	return pgx.Identifier{strings.Trim(parts[0], `"`), strings.Trim(parts[1], `"`)}, true
+	return pgx.Identifier{schema, name}, true
 }

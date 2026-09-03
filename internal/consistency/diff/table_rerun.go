@@ -298,7 +298,10 @@ func fetchRowsByPkeys(ctx context.Context, pool *pgxpool.Pool, t *TableDiffTask,
 	selectCols := make([]string, 0, len(t.Cols)+3)
 	selectCols = append(selectCols, "pg_xact_commit_timestamp(t.xmin) as commit_ts", "to_json(pg_xact_commit_timestamp_origin(t.xmin))->>'roident' as node_origin")
 	if source.IsUnion() {
-		selectCols = append(selectCols, "t.tableoid::regclass::text AS storage_relation")
+		// See table_diff.go's fetchRows: build from pg_class/pg_namespace, not
+		// tableoid::regclass::text, so the schema is always present even when
+		// the relation is visible via search_path (e.g. "public").
+		selectCols = append(selectCols, "(SELECT n.nspname || '.' || c.relname FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace WHERE c.oid = t.tableoid) AS storage_relation")
 	}
 	for _, col := range t.Cols {
 		quotedCol := pgx.Identifier{col}.Sanitize()

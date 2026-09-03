@@ -615,6 +615,9 @@ func (t *TableRepairTask) ValidateAndPrepare() error {
 		if t.FixNulls {
 			return fmt.Errorf("--fix-nulls is not supported for %s.%s because its inheritance tree contains foreign relations", t.Schema, t.Table)
 		}
+		if err := placementRequired(t.Schema, t.Table, t.RawDiffs.Summary); err != nil {
+			return err
+		}
 		placement, err := buildRowPlacement(t.RawDiffs, t.Key)
 		if err != nil {
 			return err
@@ -2157,12 +2160,12 @@ func executeDeletes(ctx context.Context, tx pgx.Tx, task *TableRepairTask, nodeN
 	}
 
 	deleteFrom := func(g relationGroup) (int, error) {
-		deletes := g.Rows
+		rows := g.Rows
 
-		keysToDelete := make([]any, 0, len(deletes))
+		keysToDelete := make([]any, 0, len(rows))
 
-		for pkeyString := range deletes {
-			rowMap := deletes[pkeyString]
+		for pkeyString := range rows {
+			rowMap := rows[pkeyString]
 			if task.SimplePrimaryKey {
 				pkeyValue, ok := rowMap[task.Key[0]]
 				if !ok {
@@ -2190,8 +2193,6 @@ func executeDeletes(ctx context.Context, tx pgx.Tx, task *TableRepairTask, nodeN
 		// TODO: Make this configurable
 		batchSize := 1000
 
-		tableIdent := g.Ident.Sanitize()
-
 		for i := 0; i < len(keysToDelete); i += batchSize {
 			end := i + batchSize
 			if end > len(keysToDelete) {
@@ -2199,63 +2200,14 @@ func executeDeletes(ctx context.Context, tx pgx.Tx, task *TableRepairTask, nodeN
 			}
 			batchKeys := keysToDelete[i:end]
 
-			var deleteSQL strings.Builder
-			args := []any{}
-			paramIdx := 1
-
-			only := ""
-			if g.Only {
-				only = "ONLY "
-			}
-			deleteSQL.WriteString(fmt.Sprintf("DELETE FROM %s%s WHERE ", only, tableIdent))
-
-			if task.SimplePrimaryKey {
-				deleteSQL.WriteString(fmt.Sprintf("%s IN (", pgx.Identifier{task.Key[0]}.Sanitize()))
-				for j, key := range batchKeys {
-					if j > 0 {
-						deleteSQL.WriteString(", ")
-					}
-					deleteSQL.WriteString(fmt.Sprintf("$%d", paramIdx))
-					args = append(args, key)
-					paramIdx++
-				}
-				deleteSQL.WriteString(")")
-			} else {
-				keyColSanitised := make([]string, len(task.Key))
-				for k, keyCol := range task.Key {
-					keyColSanitised[k] = pgx.Identifier{keyCol}.Sanitize()
-				}
-
-				deleteSQL.WriteString(fmt.Sprintf("(%s) IN (", strings.Join(keyColSanitised, ", ")))
-
-				for j, key := range batchKeys {
-					compositeKey, ok := key.([]any)
-					if !ok {
-						return 0, fmt.Errorf("expected composite key to be []interface{}, got %T", key)
-					}
-					if len(compositeKey) != len(task.Key) {
-						return 0, fmt.Errorf("composite key length mismatch: expected %d, got %d", len(task.Key), len(compositeKey))
-					}
-					if j > 0 {
-						deleteSQL.WriteString(", ")
-					}
-					deleteSQL.WriteString("(")
-					for k, val := range compositeKey {
-						if k > 0 {
-							deleteSQL.WriteString(", ")
-						}
-						deleteSQL.WriteString(fmt.Sprintf("$%d", paramIdx))
-						args = append(args, val)
-						paramIdx++
-					}
-					deleteSQL.WriteString(")")
-				}
-				deleteSQL.WriteString(")")
-			}
-
-			cmdTag, err := tx.Exec(ctx, deleteSQL.String(), args...) // nosemgrep
+			deleteSQL, args, err := buildDeleteSQL(g.Ident, g.Only, task.SimplePrimaryKey, task.Key, batchKeys)
 			if err != nil {
-				return totalDeletedCount, fmt.Errorf("error executing delete batch: %w (SQL: %s, Args: %v)", err, deleteSQL.String(), args)
+				return totalDeletedCount, err
+			}
+
+			cmdTag, err := tx.Exec(ctx, deleteSQL, args...) // nosemgrep
+			if err != nil {
+				return totalDeletedCount, fmt.Errorf("error executing delete batch: %w (SQL: %s, Args: %v)", err, deleteSQL, args)
 			}
 			totalDeletedCount += int(cmdTag.RowsAffected())
 		}
@@ -2268,7 +2220,7 @@ func executeDeletes(ctx context.Context, tx pgx.Tx, task *TableRepairTask, nodeN
 		n, err := deleteFrom(g)
 		total += n
 		if err != nil {
-			return total, err
+			return total, fmt.Errorf("relation %s: %w", g.Ident.Sanitize(), err)
 		}
 	}
 	return total, nil
@@ -2480,11 +2432,11 @@ func executeUpsertBatch(tx pgx.Tx, task *TableRepairTask, nodeName string, upser
 	orderedCols := task.Cols
 
 	upsertInto := func(g relationGroup) (int, error) {
-		upserts := g.Rows
+		rows := g.Rows
 
 		// Convert rows to typed format
-		rowsToUpsert := make([][]any, 0, len(upserts))
-		for _, rowMap := range upserts {
+		rowsToUpsert := make([][]any, 0, len(rows))
+		for _, rowMap := range rows {
 			typedRow := make([]any, len(orderedCols))
 			for i, colName := range orderedCols {
 				val, valExists := rowMap[colName]
@@ -2603,7 +2555,7 @@ func executeUpsertBatch(tx pgx.Tx, task *TableRepairTask, nodeName string, upser
 		n, err := upsertInto(g)
 		total += n
 		if err != nil {
-			return total, err
+			return total, fmt.Errorf("relation %s: %w", g.Ident.Sanitize(), err)
 		}
 	}
 	return total, nil
