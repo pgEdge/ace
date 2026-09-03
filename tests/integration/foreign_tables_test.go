@@ -72,9 +72,9 @@ func setupNonHeapFixtures(t *testing.T, ctx context.Context, pool *pgxpool.Pool)
 	}
 }
 
-// TestNativePGNonHeapRelations checks that ACE refuses foreign tables,
-// views, and trees containing foreign relations with a message that says
-// why, and that ordinary tables next to them are unaffected.
+// TestNativePGNonHeapRelations checks that ACE refuses foreign tables and
+// views with a message that says why, reads a parent with a foreign child
+// without it, and leaves ordinary tables next to them unaffected.
 func TestNativePGNonHeapRelations(t *testing.T) {
 	state := setupNativeCluster(t)
 	t.Cleanup(func() { state.teardown(t) })
@@ -112,12 +112,16 @@ func TestNativePGNonHeapRelations(t *testing.T) {
 		assert.NotContains(t, err.Error(), "_plainview")
 	})
 
-	t.Run("ParentWithForeignChildRefused", func(t *testing.T) {
-		expectCheckError(t, fdwMixedSchema+".parent", "foreign relations in its inheritance tree", fdwMixedSchema+".child_fdw")
+	t.Run("ParentWithForeignChildIsReadWithoutIt", func(t *testing.T) {
+		// Covered in depth by TestNativePGForeignTables; here only that the
+		// pre-check accepts the parent and records the skipped child.
+		task := env.newTableDiffTask(t, fdwMixedSchema+".parent", nodes)
+		require.NoError(t, task.RunChecks(false))
+		assert.Equal(t, []string{fdwMixedSchema + ".child_fdw"}, task.ExcludedRelations[env.ServiceN1])
 	})
 
-	t.Run("PartitionedWithForeignPartitionRefused", func(t *testing.T) {
-		expectCheckError(t, fdwPartSchema+".part_parent", "foreign relations in its inheritance tree", fdwPartSchema+".part_fdw")
+	t.Run("PartitionedWithForeignPartitionExplainsMissingKey", func(t *testing.T) {
+		expectCheckError(t, fdwPartSchema+".part_parent", "cannot have a primary key", fdwPartSchema+".part_fdw")
 	})
 
 	t.Run("MtreeBuildRefusesParentWithForeignChild", func(t *testing.T) {
