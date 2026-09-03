@@ -69,6 +69,30 @@ func TestRelationTree_IsInherited(t *testing.T) {
 	assert.True(t, sampleTree().IsInherited())
 	assert.False(t, (&RelationTree{Root: RelationInfo{RelKind: "r"}}).IsInherited())
 }
+
+func TestRelationTree_UnsupportedReason(t *testing.T) {
+	cases := []struct {
+		name string
+		tree *RelationTree
+		want string
+	}{
+		{"heap table", &RelationTree{Root: RelationInfo{Schema: "s", Name: "t", RelKind: "r"}}, ""},
+		{"partitioned, heap partitions only", &RelationTree{
+			Root:        RelationInfo{Schema: "s", Name: "p", RelKind: "p"},
+			Descendants: []RelationInfo{{Schema: "s", Name: "p1", RelKind: "r"}},
+		}, ""},
+		{"foreign table", &RelationTree{Root: RelationInfo{Schema: "s", Name: "f", RelKind: "f"}}, "is a foreign table; ACE does not compare foreign tables"},
+		{"view", &RelationTree{Root: RelationInfo{Schema: "s", Name: "v", RelKind: "v"}}, "is a view; ACE compares tables"},
+		{"materialized view", &RelationTree{Root: RelationInfo{Schema: "s", Name: "mv", RelKind: "m"}}, "is a view; ACE compares tables"},
+		{"heap parent with foreign child", sampleTree(),
+			"has foreign relations in its inheritance tree (s.child_fdw); ACE does not yet compare tables with foreign children or partitions"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			assert.Equal(t, c.want, c.tree.UnsupportedReason())
+		})
+	}
+}
 func TestBuildRelationTree_KeysBySchemaAndNameSeparately(t *testing.T) {
 	// "a"."b.c" and "a.b"."c" both render as a.b.c. They must stay two
 	// relations, so a foreign one among them is not dropped.
@@ -101,4 +125,26 @@ func TestBuildRelationTree_NoRowsMeansNoTable(t *testing.T) {
 func TestBuildRelationTree_DescendantBeforeRootIsAnError(t *testing.T) {
 	_, err := buildRelationTree([]RelationInfo{{Schema: "s", Name: "c", RelKind: "r", Depth: 1}})
 	require.Error(t, err)
+}
+
+func TestHotTableHintText(t *testing.T) {
+	heap := &RelationTree{Root: RelationInfo{Schema: "public", Name: "_events", RelKind: "r"}}
+	assert.Contains(t, hotTableHintText("public", "events", heap), "compare 'public._events' instead")
+
+	partitioned := &RelationTree{
+		Root:        RelationInfo{Schema: "public", Name: "_events", RelKind: "p"},
+		Descendants: []RelationInfo{{Schema: "public", Name: "_events_p1", RelKind: "r", Depth: 1}},
+	}
+	assert.Contains(t, hotTableHintText("public", "events", partitioned), "public._events")
+
+	assert.Equal(t, "", hotTableHintText("public", "events", nil), "no underscore table")
+
+	view := &RelationTree{Root: RelationInfo{Schema: "public", Name: "_events", RelKind: "v"}}
+	assert.Equal(t, "", hotTableHintText("public", "events", view), "underscore relation is itself a view")
+
+	withForeignChild := &RelationTree{
+		Root:        RelationInfo{Schema: "public", Name: "_events", RelKind: "r"},
+		Descendants: []RelationInfo{{Schema: "public", Name: "_events_cold", RelKind: "f", Depth: 1}},
+	}
+	assert.Equal(t, "", hotTableHintText("public", "events", withForeignChild), "ACE would refuse this table too")
 }

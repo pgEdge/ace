@@ -254,6 +254,14 @@ func (c *SchemaDiffCmd) RunChecks(skipValidation bool) error {
 		if len(foreign) > 0 {
 			logger.Info("Skipping %d foreign table(s) in schema %s on node %s: %s", len(foreign), c.SchemaName, nodeName, strings.Join(foreign, ", "))
 		}
+		views, verr := queries.GetViewsInSchema(c.Ctx, pool, c.SchemaName)
+		if verr != nil {
+			pool.Close()
+			return fmt.Errorf("could not list views in schema on node %s: %w", nodeName, verr)
+		}
+		if len(views) > 0 {
+			logger.Info("Skipping %d view(s) in schema %s on node %s (views are compared as DDL only): %s", len(views), c.SchemaName, nodeName, strings.Join(views, ", "))
+		}
 		pool.Close()
 
 		for _, t := range tables {

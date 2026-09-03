@@ -819,6 +819,24 @@ func (t *TableDiffTask) RunChecks(skipValidation bool) (err error) {
 			}
 			defer conn.Close()
 
+			tree, err := queries.GetRelationTree(t.Ctx, conn, schema, table)
+			if err != nil {
+				return fmt.Errorf("failed to read inheritance tree for %s.%s on node %s: %w", schema, table, hostname, err)
+			}
+			if tree == nil {
+				return fmt.Errorf("table '%s.%s' not found on %s, or the current user does not have adequate privileges", schema, table, hostname)
+			}
+			if reason := tree.UnsupportedReason(); reason != "" {
+				hint := ""
+				if tree.Root.RelKind == "v" || tree.Root.RelKind == "m" {
+					hint, err = queries.HotTableHint(t.Ctx, conn, schema, table)
+					if err != nil {
+						return fmt.Errorf("failed to look up the hot table for view %s.%s on node %s: %w", schema, table, hostname, err)
+					}
+				}
+				return fmt.Errorf("'%s.%s' %s (node %s).%s", schema, table, reason, hostname, hint)
+			}
+
 			currCols, err := queries.GetColumns(t.Ctx, conn, schema, table)
 			if err != nil {
 				return fmt.Errorf("failed to get columns for table %s.%s on node %s: %w", schema, table, hostname, err)

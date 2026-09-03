@@ -5,6 +5,18 @@ All notable changes to ACE will be captured in this document. This project follo
 ## [v2.1.1]
 
 ### Added
+- **Foreign tables, views, and partitioned tables with foreign partitions
+  are refused with a clear message.** `table-diff`, `table-repair`, and
+  `mtree` previously failed on these with "no primary key found", or in the
+  case of an inheritance parent with a foreign child, hashed the foreign rows
+  and then failed on a system column. ACE now reads the table's partitions and
+  children in one catalog query and says what the relation is and why it
+  cannot be compared. A view with an underscore-prefixed table of the same
+  name beside it gets a message mentioning that table, since it may be the
+  table behind the view (the coldfront tiered layout). `schema-diff` and
+  `repset-diff` list the foreign tables and views they skip. Comparing the
+  heap parts of a partitioned table that has foreign partitions is future
+  work.
 - **`repair` can now resolve `pick_freshest` by spock `commit_ts`
   (latest-commit-wins).** `pick_freshest` previously only compared ordinary data
   columns (e.g. `updated_at`); keying it on `commit_ts` silently fell back to
