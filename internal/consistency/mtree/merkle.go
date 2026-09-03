@@ -1579,6 +1579,18 @@ func (m *MerkleTreeTask) RunChecks(skipValidation bool) error {
 		}
 		defer tx.Rollback(m.Ctx)
 
+		tree, err := queries.GetRelationTree(m.Ctx, tx, m.Schema, m.Table)
+		if err != nil {
+			return fmt.Errorf("failed to read inheritance tree on node %s: %w", nodeInfo["Name"], err)
+		}
+		if tree != nil && tree.Root.RelKind == "f" {
+			return fmt.Errorf("'%s' is a foreign table on node %s; ACE does not build Merkle trees for foreign tables", m.QualifiedTableName, nodeInfo["Name"])
+		}
+		if tree != nil && tree.HasForeign() {
+			return fmt.Errorf("'%s' has foreign relations in its inheritance tree on node %s (%s); mtree does not yet track inheritance children, so it cannot build a tree that skips them. Use table-diff for this table",
+				m.QualifiedTableName, nodeInfo["Name"], strings.Join(tree.ForeignRelations(), ", "))
+		}
+
 		currentColsSlice, err := queries.GetColumns(m.Ctx, tx, m.Schema, m.Table)
 		if err != nil {
 			return fmt.Errorf("failed to get columns on node %s: %w", nodeInfo["Name"], err)
