@@ -33,6 +33,7 @@ The [`ace.yaml` file](https://github.com/pgEdge/ace/blob/main/ace.yaml) defines 
 | table_diff --> max_diff_block_size | Maximum diff block size. **Default: 1000000** |
 | table_diff --> compare_unit_size | Unit size for smallest comparison chunk. **Default: 10000** |
 | table_diff --> max_connections | Maximum database connections per node during diff operations. When set, caps the connection pool regardless of concurrency factor. **Default: 0** (derive from concurrency factor) |
+| table_diff --> max_inheritance_branches | When a table's inheritance tree contains foreign relations, ACE diffs the heap relations with a `UNION ALL` and skips the foreign ones. This caps how many heap relations may be combined; trees above it are refused. **Default: 4000** |
 | mtree → cdc --> slot_name | Logical decoding slot name for mtree CDC. **Default: "ace_mtree_slot"** |
 | mtree → cdc --> publication_name | Publication used for mtree CDC. **Default: "ace_mtree_pub"** |
 | mtree → cdc --> cdc_processing_timeout | Wall-clock budget (s) for a CDC catch-up drain before it gives up. Progress is durable, so a timeout means "re-run or raise", not "rebuild". **Default: 300** |

@@ -55,6 +55,10 @@ type DiffConfig struct {
 	MaxBatchSize      int     `yaml:"max_diff_batch_size"`
 	CompareUnitSize   int     `yaml:"compare_unit_size"`
 	MaxConnections    int     `yaml:"max_connections"`
+	// MaxInheritanceBranches caps how many heap relations a diff will combine
+	// with UNION ALL when a table's inheritance tree contains foreign
+	// relations. 0 means use the default (4000).
+	MaxInheritanceBranches int `yaml:"max_inheritance_branches"`
 }
 
 type MTreeConfig struct {

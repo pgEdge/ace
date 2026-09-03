@@ -102,8 +102,9 @@ type TableDiffTask struct {
 
 	NodeOriginNames map[string]map[string]string
 
-	CompareUnitSize int
-	MaxDiffRows     int64
+	CompareUnitSize        int
+	MaxDiffRows            int64
+	MaxInheritanceBranches int
 
 	DiffResult types.DiffOutput
 	diffMutex  sync.Mutex
@@ -680,6 +681,16 @@ func (t *TableDiffTask) Validate() error {
 	}
 	if t.MaxDiffRows == 0 && cfg.TableDiff.MaxDiffRows > 0 {
 		t.MaxDiffRows = cfg.TableDiff.MaxDiffRows
+	}
+
+	if t.MaxInheritanceBranches == 0 {
+		t.MaxInheritanceBranches = cfg.TableDiff.MaxInheritanceBranches
+	}
+	if t.MaxInheritanceBranches == 0 {
+		t.MaxInheritanceBranches = queries.DefaultMaxUnionBranches
+	}
+	if t.MaxInheritanceBranches < 0 {
+		return fmt.Errorf("max_inheritance_branches must be >= 1 (or 0 for the default)")
 	}
 
 	if t.ConcurrencyFactor > 4.0 || t.ConcurrencyFactor <= 0 {

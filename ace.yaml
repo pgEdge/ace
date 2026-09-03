@@ -29,6 +29,9 @@ table_diff:
   max_diff_batch_size: 1000
   compare_unit_size: 10000
   max_connections: 0            # max DB connections per node (0 = derive from concurrency factor)
+  # Heap relations combined with UNION ALL when an inheritance tree contains
+  # foreign relations. Trees with more heap leaves than this are refused.
+  max_inheritance_branches: 4000
 
 mtree:
   cdc:
