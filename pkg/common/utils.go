@@ -1117,6 +1117,10 @@ func AddSpockMetadata(row map[string]any) map[string]any {
 		metadata["commit_ts"] = commitTs
 		delete(row, "commit_ts")
 	}
+	if rel, ok := row["storage_relation"]; ok {
+		metadata["storage_relation"] = rel
+		delete(row, "storage_relation")
+	}
 	row["_spock_metadata_"] = metadata
 	return row
 }
@@ -1143,7 +1147,7 @@ func TranslateNodeOrigin(raw any, nodeNames map[string]string) any {
 func StripSpockMetadata(row map[string]any) map[string]any {
 	newRow := make(map[string]any)
 	for k, v := range row {
-		if k != "_spock_metadata_" && k != "node_origin" && k != "commit_ts" {
+		if k != "_spock_metadata_" && k != "node_origin" && k != "commit_ts" && k != "storage_relation" {
 			newRow[k] = v
 		}
 	}

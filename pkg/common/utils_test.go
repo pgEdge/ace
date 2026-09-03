@@ -656,3 +656,26 @@ func TestSortPKKeysIsDeterministicOnTiedDisplays(t *testing.T) {
 	sortPKKeys(keys, map[string]string{"id-2": "2", "id-10": "10"})
 	require.Equal(t, []string{"id-2", "id-10"}, keys, "2 must still sort before 10")
 }
+
+func TestAddSpockMetadata_MovesStorageRelation(t *testing.T) {
+	row := map[string]any{"id": 1, "commit_ts": "x", "node_origin": "n1", "storage_relation": "s.child_heap"}
+	got := AddSpockMetadata(row)
+	meta, ok := got["_spock_metadata_"].(map[string]any)
+	if !ok {
+		t.Fatalf("no _spock_metadata_ in %v", got)
+	}
+	if meta["storage_relation"] != "s.child_heap" {
+		t.Errorf("storage_relation not moved: %v", meta)
+	}
+	if _, still := got["storage_relation"]; still {
+		t.Errorf("storage_relation left at top level: %v", got)
+	}
+}
+
+func TestStripSpockMetadata_DropsStorageRelation(t *testing.T) {
+	row := map[string]any{"id": 1, "storage_relation": "s.child_heap", "_spock_metadata_": map[string]any{}}
+	got := StripSpockMetadata(row)
+	if len(got) != 1 || got["id"] != 1 {
+		t.Errorf("want only id, got %v", got)
+	}
+}

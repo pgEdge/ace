@@ -124,6 +124,14 @@ type DiffSummary struct {
 	AgainstOriginResolved string         `json:"against_origin_resolved,omitempty"`
 	Until                 string         `json:"until,omitempty"`
 	OriginOnly            bool           `json:"origin_only,omitempty"`
+	// ExcludedRelations lists, per node, the foreign relations in the
+	// table's inheritance tree that the diff skipped.
+	ExcludedRelations map[string][]string `json:"excluded_relations,omitempty"`
+	// ForeignLayoutMismatch is set when the nodes do not agree on which
+	// relations in the tree are foreign. Rows reported missing on a node may
+	// live in that node's foreign relation, so repair refuses to run unless
+	// told to ignore this.
+	ForeignLayoutMismatch bool `json:"foreign_layout_mismatch,omitempty"`
 	// CDCSkippedNodes lists nodes whose pre-diff CDC drain was skipped because
 	// the replication slot was held by another consumer (typically a running
 	// mtree listen, but possibly a concurrent bounded mtree operation sharing
