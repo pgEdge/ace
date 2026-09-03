@@ -92,9 +92,23 @@ saying why:
   table. The cold tier behind a coldfront view is a shared Iceberg catalog, so
   it has no per-node copies to compare, and a coldfront decoupled table has no
   PostgreSQL data at all.
-- **Partitioned tables with foreign partitions**, and inheritance parents with
-  foreign children, are refused, naming the foreign relations. Comparing the
-  heap parts of such a table while skipping the foreign parts is future work.
+- **Inheritance parents with foreign children** are compared without the
+  foreign children. ACE reads the heap relations with `SELECT ... FROM ONLY`
+  joined by `UNION ALL`, so the foreign relations are never scanned, however
+  large they are. The diff summary lists the skipped relations under
+  `excluded_relations`, and every reported row records the heap relation it
+  lives in under `_spock_metadata_.storage_relation`, which `table-repair`
+  uses to write the row back to the same relation. If the nodes disagree on
+  which relations are foreign, the summary sets `foreign_layout_mismatch` and
+  `table-repair` refuses the diff unless run with
+  `--allow-foreign-layout-mismatch`, because rows reported missing on a node
+  may live in that node's foreign relation.
+  `table_diff.max_inheritance_branches` (default 4000) caps how many heap
+  relations one diff may combine. `mtree` still refuses these parents until it
+  tracks inheritance children.
+- **Partitioned tables with foreign partitions** cannot have a primary key,
+  so they are refused for lack of one and the message names the foreign
+  partition.
 
 If a view does stand in front of a coldfront tiered table, note that the
 archiver moves rows from the hot table into Iceberg on a schedule, and the drop

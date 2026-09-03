@@ -5,6 +5,12 @@ All notable changes to ACE will be captured in this document. This project follo
 ## [v2.1.1]
 
 ### Added
+- **`repair` can now resolve `pick_freshest` by spock `commit_ts`
+  (latest-commit-wins).** `pick_freshest` previously only compared ordinary data
+  columns (e.g. `updated_at`); keying it on `commit_ts` silently fell back to
+  `tie` because that field is held in the diff's spock metadata, not the row. It
+  now resolves the key from row data or metadata, so a plan can keep the side
+  with the newer commit timestamp. See the latest-commit-wins repair example.
 - **Foreign tables, views, and partitioned tables with foreign partitions
   are refused with a clear message.** `table-diff`, `table-repair`, and
   `mtree` previously failed on these with "no primary key found", or in the
@@ -14,15 +20,16 @@ All notable changes to ACE will be captured in this document. This project follo
   cannot be compared. A view with an underscore-prefixed table of the same
   name beside it gets a message mentioning that table, since it may be the
   table behind the view (the coldfront tiered layout). `schema-diff` and
-  `repset-diff` list the foreign tables and views they skip. Comparing the
-  heap parts of a partitioned table that has foreign partitions is future
-  work.
-- **`repair` can now resolve `pick_freshest` by spock `commit_ts`
-  (latest-commit-wins).** `pick_freshest` previously only compared ordinary data
-  columns (e.g. `updated_at`); keying it on `commit_ts` silently fell back to
-  `tie` because that field is held in the diff's spock metadata, not the row. It
-  now resolves the key from row data or metadata, so a plan can keep the side
-  with the newer commit timestamp. See the latest-commit-wins repair example.
+  `repset-diff` list the foreign tables and views they skip.
+- **Inheritance parents with foreign children can be diffed and repaired.**
+  A heap parent whose children include a foreign table is read over its heap
+  relations only, via `SELECT ... FROM ONLY` joined by `UNION ALL`, so the
+  foreign data is never scanned. The diff summary lists the skipped relations
+  under `excluded_relations`, each row records the heap relation that stores
+  it under `_spock_metadata_.storage_relation`, and `table-repair` writes rows
+  back to that relation. New config `table_diff.max_inheritance_branches`
+  (default 4000) and repair flag `--allow-foreign-layout-mismatch`. `mtree`
+  still refuses these parents until it tracks inheritance children. (ACE-207)
 
 ### Changed
 - **`mtree build` on an empty table now fails with a clear message.** A table
@@ -32,6 +39,9 @@ All notable changes to ACE will be captured in this document. This project follo
   distinguishes an all-empty table from an actual estimate failure.
 
 ### Fixed
+- **Diffing an inheritance parent with a foreign child no longer fails with
+  `cannot retrieve a system column in this context`.** Block hashes had been
+  including the foreign child's rows and the row fetch then failed on `xmin`.
 - **`mtree table-diff` could report divergent nodes as identical (silent
   false-negative).** Leaf hashing used a closed (`<=`) upper bound, so rows on
   block boundaries were hashed into two adjacent leaves; the XOR-based parent
