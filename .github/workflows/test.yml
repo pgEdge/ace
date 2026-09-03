@@ -43,6 +43,9 @@ jobs:
     - name: Run common unit tests
       run: go test -count=1 -v ./pkg/common
 
+    - name: Run query, diff, and repair unit tests
+      run: go test -count=1 -v ./db/queries ./internal/consistency/diff ./internal/consistency/repair
+
     - name: Run mtree missing-tree fail-fast test
       run: go test -count=1 -v ./tests/integration -run 'TestMtreeDiffFailsFastWhenTreeNotBuilt'
 
