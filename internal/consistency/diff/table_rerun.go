@@ -28,6 +28,7 @@ import (
 	"github.com/pgedge/ace/db/queries"
 	"github.com/pgedge/ace/internal/infra/db"
 	utils "github.com/pgedge/ace/pkg/common"
+	"github.com/pgedge/ace/pkg/config"
 	"github.com/pgedge/ace/pkg/logger"
 	"github.com/pgedge/ace/pkg/types"
 )
@@ -268,7 +269,20 @@ func fetchRowsByPkeys(ctx context.Context, pool *pgxpool.Pool, t *TableDiffTask,
 		return nil, fmt.Errorf("failed to copy primary keys to temporary table: %w", err)
 	}
 
-	schemaTable := fmt.Sprintf("%s.%s", pgx.Identifier{t.Schema}.Sanitize(), pgx.Identifier{t.Table}.Sanitize())
+	source := queries.PlainTableSource(t.Schema, t.Table)
+	tree, err := queries.GetRelationTree(ctx, tx, t.Schema, t.Table)
+	if err != nil {
+		return nil, fmt.Errorf("could not read inheritance tree: %w", err)
+	}
+	if tree != nil && tree.HasForeign() {
+		cfgMax := config.Get().TableDiff.MaxInheritanceBranches
+		source, err = queries.UnionTableSource(t.Schema, t.Table, tree.HeapLeaves(), t.Cols, cfgMax)
+		if err != nil {
+			return nil, err
+		}
+		logger.Warn("Skipping foreign relations in the inheritance tree of %s.%s: %s",
+			t.Schema, t.Table, strings.Join(tree.ForeignRelations(), ", "))
+	}
 
 	var joinConditions []string
 	for _, pkCol := range t.Key {
@@ -281,8 +295,11 @@ func fetchRowsByPkeys(ctx context.Context, pool *pgxpool.Pool, t *TableDiffTask,
 		return nil, fmt.Errorf("could not determine column types: %w", err)
 	}
 
-	selectCols := make([]string, 0, len(t.Cols)+2)
+	selectCols := make([]string, 0, len(t.Cols)+3)
 	selectCols = append(selectCols, "pg_xact_commit_timestamp(t.xmin) as commit_ts", "to_json(pg_xact_commit_timestamp_origin(t.xmin))->>'roident' as node_origin")
+	if source.IsUnion() {
+		selectCols = append(selectCols, "t.tableoid::regclass::text AS storage_relation")
+	}
 	for _, col := range t.Cols {
 		quotedCol := pgx.Identifier{col}.Sanitize()
 		// Same cast policy as the diff engines' row fetches: complex types
@@ -294,8 +311,8 @@ func fetchRowsByPkeys(ctx context.Context, pool *pgxpool.Pool, t *TableDiffTask,
 		}
 	}
 
-	fetchSQL := fmt.Sprintf("SELECT %s FROM %s t JOIN %s temp ON %s",
-		strings.Join(selectCols, ", "), schemaTable, sanitisedTempTable, strings.Join(joinConditions, " AND "))
+	fetchSQL := fmt.Sprintf("SELECT %s FROM %s JOIN %s temp ON %s",
+		strings.Join(selectCols, ", "), source.FromClause("t"), sanitisedTempTable, strings.Join(joinConditions, " AND "))
 
 	logger.Debug("Fetching rows with pkeys from temporary table: %s", fetchSQL)
 	pgRows, err := tx.Query(ctx, fetchSQL) // nosemgrep
