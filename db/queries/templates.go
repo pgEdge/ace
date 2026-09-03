@@ -42,6 +42,7 @@ type Templates struct {
 	CheckRepSetExists    *template.Template
 	GetTablesInRepSet    *template.Template
 	GetPkeyColumnTypes   *template.Template
+	GetRelationTree      *template.Template
 
 	CreateMetadataTable              *template.Template
 	GetPkeyOffsets                   *template.Template
@@ -652,6 +653,34 @@ var SQLTemplates = Templates{
 	CheckSchemaExists: template.Must(template.New("checkSchemaExists").Parse(
 		`SELECT EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = $1);`,
 	)),
+	// GetRelationTree walks pg_inherits from one table down to every
+	// descendant in a single query. Depth 0 is the table itself. relkind
+	// tells heap (r), partitioned (p), and foreign (f) relations apart.
+	GetRelationTree: template.Must(template.New("getRelationTree").Parse(`
+		WITH RECURSIVE tree AS (
+			SELECT c.oid, c.relkind, 0 AS depth, NULL::oid AS parent_oid
+			FROM pg_catalog.pg_class c
+			JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+			WHERE n.nspname = $1 AND c.relname = $2
+		  UNION ALL
+			SELECT c.oid, c.relkind, t.depth + 1, i.inhparent
+			FROM tree t
+			JOIN pg_catalog.pg_inherits i ON i.inhparent = t.oid
+			JOIN pg_catalog.pg_class c ON c.oid = i.inhrelid
+		)
+		SELECT
+			n.nspname,
+			c.relname,
+			t.relkind::text,
+			t.depth,
+			COALESCE(pn.nspname || '.' || pc.relname, '') AS parent
+		FROM tree t
+		JOIN pg_catalog.pg_class c ON c.oid = t.oid
+		JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+		LEFT JOIN pg_catalog.pg_class pc ON pc.oid = t.parent_oid
+		LEFT JOIN pg_catalog.pg_namespace pn ON pn.oid = pc.relnamespace
+		ORDER BY t.depth, n.nspname, c.relname;
+	`)),
 	GetTablesInSchema: template.Must(template.New("getTablesInSchema").Parse(`
 		SELECT
 			table_name
