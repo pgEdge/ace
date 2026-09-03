@@ -153,19 +153,29 @@ func buildRelationTree(relations []RelationInfo) (*RelationTree, error) {
 	return tree, nil
 }
 
-// UnsupportedReason says why ACE cannot compare the tree's root relation, or
-// returns "" for an ordinary heap or partitioned table whose tree holds no
-// foreign relations. The text reads as a predicate on the table name, e.g.
-// "'s.t' is a foreign table; ...".
-func (t *RelationTree) UnsupportedReason() string {
+// UnsupportedKindReason says why ACE cannot compare a relation of the root's
+// kind, or returns "" for a heap or partitioned table. The text reads as a
+// predicate on the table name, e.g. "'s.t' is a foreign table; ...".
+func (t *RelationTree) UnsupportedKindReason() string {
 	switch t.Root.RelKind {
 	case "f":
 		return "is a foreign table; ACE does not compare foreign tables"
 	case "v", "m":
 		return "is a view; ACE compares tables"
 	}
+	return ""
+}
+
+// UnsupportedReason is UnsupportedKindReason plus a refusal for trees that
+// contain foreign relations. table-diff and table-repair read such trees
+// through a UNION ALL of the heap relations and so check only the kind;
+// mtree cannot yet do that and uses this stricter check.
+func (t *RelationTree) UnsupportedReason() string {
+	if reason := t.UnsupportedKindReason(); reason != "" {
+		return reason
+	}
 	if t.HasForeign() {
-		return fmt.Sprintf("has foreign relations in its inheritance tree (%s); ACE does not yet compare tables with foreign children or partitions",
+		return fmt.Sprintf("has foreign relations in its inheritance tree (%s); mtree does not yet track inheritance children, so it cannot build a tree that skips them. Use table-diff for this table",
 			strings.Join(t.ForeignRelations(), ", "))
 	}
 	return ""

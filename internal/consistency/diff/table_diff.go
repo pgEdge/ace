@@ -23,6 +23,7 @@ import (
 	"os"
 	"reflect"
 	"runtime"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -105,6 +106,17 @@ type TableDiffTask struct {
 	CompareUnitSize        int
 	MaxDiffRows            int64
 	MaxInheritanceBranches int
+
+	// Sources holds, per node name, the relation each query reads from. A
+	// node with no entry reads the plain schema.table. An entry is a
+	// UNION ALL over heap relations when that node's inheritance tree for
+	// the table contains foreign relations.
+	Sources map[string]queries.TableSource
+
+	// ExcludedRelations and ForeignLayoutMismatch are filled by RunChecks and
+	// copied into the diff summary when ExecuteTask builds it.
+	ExcludedRelations     map[string][]string
+	ForeignLayoutMismatch bool
 
 	DiffResult types.DiffOutput
 	diffMutex  sync.Mutex
@@ -359,6 +371,7 @@ type HashResult struct {
 }
 
 type hashBoundsKey struct {
+	node     string
 	hasLower bool
 	hasUpper bool
 }
@@ -385,10 +398,7 @@ func extractPlanRowEstimate(planJSON []byte) (int64, error) {
 }
 
 func (t *TableDiffTask) estimateRowCount(pool *pgxpool.Pool, nodeName string) (int64, error) {
-	schemaIdent := pgx.Identifier{t.Schema}.Sanitize()
-	tableIdent := pgx.Identifier{t.Table}.Sanitize()
-
-	query := fmt.Sprintf("EXPLAIN (FORMAT JSON) SELECT 1 FROM %s.%s", schemaIdent, tableIdent)
+	query := fmt.Sprintf("EXPLAIN (FORMAT JSON) SELECT 1 FROM %s", t.sourceFor(nodeName).FromClause(""))
 	if strings.TrimSpace(t.EffectiveFilter) != "" {
 		query = fmt.Sprintf("%s WHERE %s", query, t.EffectiveFilter)
 	}
@@ -406,9 +416,7 @@ func (t *TableDiffTask) ensureFilterHasRows(pool *pgxpool.Pool, nodeName string)
 		return nil
 	}
 
-	schemaIdent := pgx.Identifier{t.Schema}.Sanitize()
-	tableIdent := pgx.Identifier{t.Table}.Sanitize()
-	sql := fmt.Sprintf("SELECT 1 FROM %s.%s WHERE %s LIMIT 1", schemaIdent, tableIdent, t.EffectiveFilter)
+	sql := fmt.Sprintf("SELECT 1 FROM %s WHERE %s LIMIT 1", t.sourceFor(nodeName).FromClause(""), t.EffectiveFilter)
 
 	var one int
 	if err := pool.QueryRow(t.Ctx, sql).Scan(&one); err != nil { // nosemgrep
@@ -422,8 +430,8 @@ func (t *TableDiffTask) ensureFilterHasRows(pool *pgxpool.Pool, nodeName string)
 
 type RangeResults map[string]HashResult
 
-func (t *TableDiffTask) getBlockHashSQL(hasLower, hasUpper bool) (string, error) {
-	key := hashBoundsKey{hasLower: hasLower, hasUpper: hasUpper}
+func (t *TableDiffTask) getBlockHashSQL(node string, hasLower, hasUpper bool) (string, error) {
+	key := hashBoundsKey{node: node, hasLower: hasLower, hasUpper: hasUpper}
 
 	t.blockHashSQLMu.Lock()
 	defer t.blockHashSQLMu.Unlock()
@@ -442,7 +450,7 @@ func (t *TableDiffTask) getBlockHashSQL(hasLower, hasUpper bool) (string, error)
 		mergedColTypes = ct
 		break
 	}
-	query, err := queries.BlockHashSQL(t.Schema, t.Table, t.Key, "TD_BLOCK_HASH" /* mode */, hasLower, hasUpper, t.EffectiveFilter, t.Cols, mergedColTypes)
+	query, err := queries.BlockHashSQLFromSource(t.sourceFor(node), t.Key, "TD_BLOCK_HASH" /* mode */, hasLower, hasUpper, t.EffectiveFilter, t.Cols, mergedColTypes)
 	if err != nil {
 		return "", err
 	}
@@ -478,9 +486,8 @@ func (t *TableDiffTask) fetchRows(nodeName string, r Range) ([]types.OrderedMap,
 		return nil, fmt.Errorf("primary key not defined for table %s.%s", t.Schema, t.Table)
 	}
 
-	quotedSchema := pgx.Identifier{t.Schema}.Sanitize()
-	quotedTable := pgx.Identifier{t.Table}.Sanitize()
-	quotedSchemaTable := fmt.Sprintf("%s.%s", quotedSchema, quotedTable)
+	source := t.sourceFor(nodeName)
+	fromClause := source.FromClause("")
 
 	var colTypes map[string]string
 	var colTypesKey string
@@ -507,8 +514,14 @@ func (t *TableDiffTask) fetchRows(nodeName string, r Range) ([]types.OrderedMap,
 		return nil, fmt.Errorf("could not find column types for node %s using key %s", nodeName, colTypesKey)
 	}
 
-	selectCols := make([]string, 0, len(t.Cols)+2)
+	selectCols := make([]string, 0, len(t.Cols)+3)
 	selectCols = append(selectCols, "pg_xact_commit_timestamp(xmin) as commit_ts", "to_json(pg_xact_commit_timestamp_origin(xmin))->>'roident' as node_origin")
+
+	if source.IsUnion() {
+		// Which heap relation stores the row on this node. Repair uses it to
+		// target that relation with ONLY instead of the parent.
+		selectCols = append(selectCols, "tableoid::regclass::text AS storage_relation")
+	}
 
 	for _, colName := range t.Cols {
 		quotedColName := pgx.Identifier{colName}.Sanitize()
@@ -594,7 +607,7 @@ func (t *TableDiffTask) fetchRows(nodeName string, r Range) ([]types.OrderedMap,
 		whereClause = "WHERE " + strings.Join(conditions, " AND ")
 	}
 
-	querySQL = fmt.Sprintf("SELECT %s FROM %s %s %s", selectColsStr, quotedSchemaTable, whereClause, orderByClause)
+	querySQL = fmt.Sprintf("SELECT %s FROM %s %s %s", selectColsStr, fromClause, whereClause, orderByClause)
 
 	logger.Debug("[%s] Fetching rows for range: Start=%v, End=%v. SQL: %s, Args: %v", nodeName, r.Start, r.End, querySQL, args)
 
@@ -803,6 +816,7 @@ func (t *TableDiffTask) RunChecks(skipValidation bool) (err error) {
 
 	var cols, key []string
 	hostMap := make(map[string]string)
+	foreignByNode := make(map[string][]string)
 
 	schema := t.Schema
 	table := t.Table
@@ -837,7 +851,7 @@ func (t *TableDiffTask) RunChecks(skipValidation bool) (err error) {
 			if tree == nil {
 				return fmt.Errorf("table '%s.%s' not found on %s, or the current user does not have adequate privileges", schema, table, hostname)
 			}
-			if reason := tree.UnsupportedReason(); reason != "" {
+			if reason := tree.UnsupportedKindReason(); reason != "" {
 				hint := ""
 				if tree.Root.RelKind == "v" || tree.Root.RelKind == "m" {
 					hint, err = queries.HotTableHint(t.Ctx, conn, schema, table)
@@ -861,7 +875,25 @@ func (t *TableDiffTask) RunChecks(skipValidation bool) (err error) {
 				return fmt.Errorf("failed to get primary key for table %s.%s on node %s: %w", schema, table, hostname, err)
 			}
 			if len(currKey) == 0 {
+				if tree.Root.RelKind == "p" && tree.HasForeign() {
+					return fmt.Errorf("no primary key found for '%s.%s': a partitioned table with foreign partitions (%s) cannot have a primary key, so ACE cannot diff it",
+						schema, table, strings.Join(tree.ForeignRelations(), ", "))
+				}
 				return fmt.Errorf("no primary key found for '%s.%s'", schema, table)
+			}
+
+			if tree.HasForeign() {
+				src, err := queries.UnionTableSource(schema, table, tree.HeapLeaves(), currCols, t.MaxInheritanceBranches)
+				if err != nil {
+					return fmt.Errorf("node %s: %w", hostname, err)
+				}
+				if t.Sources == nil {
+					t.Sources = make(map[string]queries.TableSource)
+				}
+				t.Sources[hostname] = src
+				foreignByNode[hostname] = tree.ForeignRelations()
+				logger.Warn("Skipping foreign relations in the inheritance tree of %s.%s on node %s: %s",
+					schema, table, hostname, strings.Join(tree.ForeignRelations(), ", "))
 			}
 
 			if len(cols) == 0 && len(key) == 0 {
@@ -910,6 +942,26 @@ func (t *TableDiffTask) RunChecks(skipValidation bool) (err error) {
 	}
 
 	logger.Info("Connections successful to nodes in cluster")
+
+	if len(foreignByNode) > 0 {
+		t.ExcludedRelations = foreignByNode
+		var ref []string
+		refSet := false
+		for _, node := range t.NodeList {
+			cur := append([]string(nil), foreignByNode[node]...)
+			sort.Strings(cur)
+			if !refSet {
+				ref, refSet = cur, true
+				continue
+			}
+			if !slices.Equal(ref, cur) {
+				t.ForeignLayoutMismatch = true
+				logger.Warn("Nodes do not agree on which relations under %s.%s are foreign (%v). Rows reported missing on a node may live in that node's foreign relation; table-repair will refuse this diff unless run with --allow-foreign-layout-mismatch",
+					schema, table, foreignByNode)
+				break
+			}
+		}
+	}
 
 	t.HostMap = hostMap
 	t.Cols = cols
@@ -1037,6 +1089,14 @@ func (t *TableDiffTask) connOpts() auth.ConnectionOptions {
 	return auth.ConnectionOptions{PoolSize: t.maxPoolSize()}
 }
 
+// sourceFor returns the table source for a node, plain when none was set.
+func (t *TableDiffTask) sourceFor(node string) queries.TableSource {
+	if s, ok := t.Sources[node]; ok {
+		return s
+	}
+	return queries.PlainTableSource(t.Schema, t.Table)
+}
+
 func (t *TableDiffTask) CheckColumnSize() error {
 	for hostPort, types := range t.ColTypes {
 		parts := strings.Split(hostPort, ":")
@@ -1084,7 +1144,7 @@ func (t *TableDiffTask) CheckColumnSize() error {
 				continue
 			}
 
-			maxSize, err := queries.MaxColumnSize(context.Background(), pool, t.Schema, t.Table, colName)
+			maxSize, err := queries.MaxColumnSizeFromSource(context.Background(), pool, t.sourceFor(t.HostMap[hostPort]), colName)
 			logger.Debug("Column %s of table %s.%s has max size %d", colName, t.Schema, t.Table, maxSize)
 			if err != nil {
 				pool.Close()
@@ -1269,8 +1329,10 @@ func (t *TableDiffTask) ExecuteTask() (err error) {
 	t.EffectiveFilter = effectiveFilter
 	t.DiffSummary["effective_filter"] = effectiveFilter
 
-	if _, err = t.getBlockHashSQL(true, true); err != nil {
-		return fmt.Errorf("failed to build block-hash SQL: %w", err)
+	for name := range pools {
+		if _, err = t.getBlockHashSQL(name, true, true); err != nil {
+			return fmt.Errorf("failed to build block-hash SQL for node %s: %w", name, err)
+		}
 	}
 
 	var maxCount int64
@@ -1326,7 +1388,9 @@ func (t *TableDiffTask) ExecuteTask() (err error) {
 				}
 				return strings.TrimSpace(t.Until)
 			}(),
-			OriginOnly: t.resolvedAgainstOrigin != "",
+			OriginOnly:            t.resolvedAgainstOrigin != "",
+			ExcludedRelations:     t.ExcludedRelations,
+			ForeignLayoutMismatch: t.ForeignLayoutMismatch,
 		},
 	}
 
@@ -1353,7 +1417,7 @@ func (t *TableDiffTask) ExecuteTask() (err error) {
 		ntileCount = 1
 	}
 
-	querySQL, err := queries.GeneratePkeyOffsetsQuery(t.Schema, t.Table, t.Key, sampleMethod, samplePercent, ntileCount, t.EffectiveFilter)
+	querySQL, err := queries.GeneratePkeyOffsetsQueryFromSource(t.sourceFor(maxNode), t.Key, sampleMethod, samplePercent, ntileCount, t.EffectiveFilter)
 	logger.Debug("Generated offsets query: %s", querySQL)
 	if err != nil {
 		return fmt.Errorf("failed to generate offsets query: %w", err)
@@ -1638,7 +1702,7 @@ func (t *TableDiffTask) hashRange(
 		return "", err
 	}
 
-	query, err := t.getBlockHashSQL(hasLower, hasUpper)
+	query, err := t.getBlockHashSQL(node, hasLower, hasUpper)
 	if err != nil {
 		return "", fmt.Errorf("failed to build block-hash SQL: %w", err)
 	}
@@ -1738,7 +1802,7 @@ func (t *TableDiffTask) generateSubRanges(
 	}
 	pkColsStr := strings.Join(quotedKeyCols, ", ")
 	pkTupleStr := fmt.Sprintf("ROW(%s)", pkColsStr)
-	schemaTable := fmt.Sprintf("%s.%s", pgx.Identifier{t.Schema}.Sanitize(), pgx.Identifier{t.Table}.Sanitize())
+	schemaTable := t.sourceFor(node).FromClause("")
 
 	var conditions []string
 	args := []any{}

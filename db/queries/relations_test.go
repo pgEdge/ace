@@ -85,7 +85,7 @@ func TestRelationTree_UnsupportedReason(t *testing.T) {
 		{"view", &RelationTree{Root: RelationInfo{Schema: "s", Name: "v", RelKind: "v"}}, "is a view; ACE compares tables"},
 		{"materialized view", &RelationTree{Root: RelationInfo{Schema: "s", Name: "mv", RelKind: "m"}}, "is a view; ACE compares tables"},
 		{"heap parent with foreign child", sampleTree(),
-			"has foreign relations in its inheritance tree (s.child_fdw); ACE does not yet compare tables with foreign children or partitions"},
+			"has foreign relations in its inheritance tree (s.child_fdw); mtree does not yet track inheritance children, so it cannot build a tree that skips them. Use table-diff for this table"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
