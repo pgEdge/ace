@@ -243,6 +243,11 @@ func SetupCLI(version string) *cli.Command {
 			Value: false,
 		},
 		&cli.BoolFlag{
+			Name:  "allow-foreign-layout-mismatch",
+			Usage: "Repair even when the diff shows nodes disagree on which inherited relations are foreign",
+			Value: false,
+		},
+		&cli.BoolFlag{
 			Name:    "fix-nulls",
 			Aliases: []string{"X"},
 			Usage:   "Fill NULL columns on each node using non-NULL values from its peers (no source-of-truth required)",
@@ -1249,6 +1254,7 @@ func TableRepairCLI(cmd *cli.Command) error {
 	task.GenerateReport = cmd.Bool("generate-report")
 	task.RecoveryMode = cmd.Bool("recovery-mode")
 	task.PreserveOrigin = cmd.Bool("preserve-origin")
+	task.AllowForeignLayoutMismatch = cmd.Bool("allow-foreign-layout-mismatch")
 
 	if err := task.ValidateAndPrepare(); err != nil {
 		return fmt.Errorf("validation failed: %w", err)

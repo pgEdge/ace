@@ -37,6 +37,7 @@ import (
 	planner "github.com/pgedge/ace/internal/consistency/repair/plan"
 	auth "github.com/pgedge/ace/internal/infra/db"
 	utils "github.com/pgedge/ace/pkg/common"
+	"github.com/pgedge/ace/pkg/config"
 	"github.com/pgedge/ace/pkg/logger"
 	"github.com/pgedge/ace/pkg/taskstore"
 	"github.com/pgedge/ace/pkg/types"
@@ -77,6 +78,12 @@ type TableRepairTask struct {
 	RecoveryMode   bool
 	PreserveOrigin bool
 
+	// AllowForeignLayoutMismatch lets a repair run from a diff whose nodes
+	// disagree on which relations in the table's inheritance tree are
+	// foreign. Off by default because rows reported missing on a node may
+	// live in that node's foreign relation.
+	AllowForeignLayoutMismatch bool
+
 	InvokeMethod string // TBD
 	ClientRole   string // TBD
 
@@ -99,6 +106,16 @@ type TableRepairTask struct {
 	autoSelectionDetails      map[string]map[string]string
 
 	spockPerNode map[string]bool
+
+	// heapLeaves: node -> qualified heap relation -> true, for tables whose
+	// inheritance tree contains foreign relations on at least one node. nil
+	// otherwise, and every repair statement then targets schema.table.
+	heapLeaves map[string]map[string]bool
+	// rowPlacement: node -> pkey string -> qualified relation the row lives
+	// in on that node, read from storage_relation in the diff file.
+	rowPlacement map[string]map[string]string
+	// Sources: node -> what read-only repair queries (stale checks) read from.
+	Sources map[string]queries.TableSource
 
 	Ctx context.Context
 }
@@ -466,7 +483,7 @@ func (t *TableRepairTask) ValidateAndPrepare() error {
 			if tree == nil {
 				return fmt.Errorf("table '%s.%s' not found on node %s, or the current user does not have adequate privileges", t.Schema, t.Table, nodeName)
 			}
-			if reason := tree.UnsupportedReason(); reason != "" {
+			if reason := tree.UnsupportedKindReason(); reason != "" {
 				hint := ""
 				if tree.Root.RelKind == "v" || tree.Root.RelKind == "m" {
 					hint, err = queries.HotTableHint(t.Ctx, connPool, t.Schema, t.Table)
@@ -476,12 +493,41 @@ func (t *TableRepairTask) ValidateAndPrepare() error {
 				}
 				return fmt.Errorf("'%s.%s' %s (node %s).%s", t.Schema, t.Table, reason, nodeName, hint)
 			}
+			if tree.HasForeign() {
+				if t.heapLeaves == nil {
+					t.heapLeaves = make(map[string]map[string]bool)
+					t.Sources = make(map[string]queries.TableSource)
+				}
+				leaves := tree.HeapLeaves()
+				set := make(map[string]bool, len(leaves))
+				for _, l := range leaves {
+					set[l.Qualified()] = true
+					pk, perr := queries.GetPrimaryKey(t.Ctx, connPool, l.Schema, l.Name)
+					if perr != nil {
+						return fmt.Errorf("failed to get primary key for %s on node %s: %w", l.Qualified(), nodeName, perr)
+					}
+					if len(pk) == 0 {
+						return fmt.Errorf("%s on node %s has no primary key; repair of an inheritance tree needs one on every heap relation so that upserts can use ON CONFLICT", l.Qualified(), nodeName)
+					}
+				}
+				t.heapLeaves[nodeName] = set
+				logger.Warn("Repair will skip foreign relations in the inheritance tree of %s.%s on node %s: %s",
+					t.Schema, t.Table, nodeName, strings.Join(tree.ForeignRelations(), ", "))
+			}
 
 			cols, err := queries.GetColumns(t.Ctx, connPool, t.Schema, t.Table)
 			if err != nil {
 				return fmt.Errorf("failed to get columns for %s.%s on node %s: %w", t.Schema, t.Table, nodeName, err)
 			}
 			t.Cols = cols
+
+			if tree != nil && tree.HasForeign() {
+				src, serr := queries.UnionTableSource(t.Schema, t.Table, tree.HeapLeaves(), cols, config.Get().TableDiff.MaxInheritanceBranches)
+				if serr != nil {
+					return fmt.Errorf("node %s: %w", nodeName, serr)
+				}
+				t.Sources[nodeName] = src
+			}
 
 			pKey, err := queries.GetPrimaryKey(t.Ctx, connPool, t.Schema, t.Table)
 			if err != nil {
@@ -559,6 +605,21 @@ func (t *TableRepairTask) ValidateAndPrepare() error {
 	}
 	if t.SourceOfTruth != "" && t.Pools[t.SourceOfTruth] == nil {
 		return fmt.Errorf("failed to establish a connection to the source_of_truth node: %s", t.SourceOfTruth)
+	}
+
+	if t.inheritanceActive() {
+		if t.RawDiffs.Summary.ForeignLayoutMismatch && !t.AllowForeignLayoutMismatch {
+			return fmt.Errorf("the diff file records that nodes disagree on which relations under %s.%s are foreign (excluded_relations: %v); rows reported missing may live in a foreign relation. Re-run with --allow-foreign-layout-mismatch to repair anyway",
+				t.Schema, t.Table, t.RawDiffs.Summary.ExcludedRelations)
+		}
+		if t.FixNulls {
+			return fmt.Errorf("--fix-nulls is not supported for %s.%s because its inheritance tree contains foreign relations", t.Schema, t.Table)
+		}
+		placement, err := buildRowPlacement(t.RawDiffs, t.Key)
+		if err != nil {
+			return err
+		}
+		t.rowPlacement = placement
 	}
 
 	logger.Debug("Table repair task validated and prepared successfully.")
@@ -2095,104 +2156,122 @@ func executeDeletes(ctx context.Context, tx pgx.Tx, task *TableRepairTask, nodeN
 		return 0, err
 	}
 
-	keysToDelete := make([]any, 0, len(deletes))
+	deleteFrom := func(g relationGroup) (int, error) {
+		deletes := g.Rows
 
-	for pkeyString := range deletes {
-		rowMap := deletes[pkeyString]
-		if task.SimplePrimaryKey {
-			pkeyValue, ok := rowMap[task.Key[0]]
-			if !ok {
-				return 0, fmt.Errorf("primary key column %s not found in row data for pkey string %s", task.Key[0], pkeyString)
-			}
-			keysToDelete = append(keysToDelete, pkeyValue)
-		} else {
-			compositeKey := make([]any, len(task.Key))
-			for i, keyCol := range task.Key {
-				pkeyValue, ok := rowMap[keyCol]
+		keysToDelete := make([]any, 0, len(deletes))
+
+		for pkeyString := range deletes {
+			rowMap := deletes[pkeyString]
+			if task.SimplePrimaryKey {
+				pkeyValue, ok := rowMap[task.Key[0]]
 				if !ok {
-					return 0, fmt.Errorf("composite primary key column %s not found in row data for pkey string %s", keyCol, pkeyString)
+					return 0, fmt.Errorf("primary key column %s not found in row data for pkey string %s", task.Key[0], pkeyString)
 				}
-				compositeKey[i] = pkeyValue
+				keysToDelete = append(keysToDelete, pkeyValue)
+			} else {
+				compositeKey := make([]any, len(task.Key))
+				for i, keyCol := range task.Key {
+					pkeyValue, ok := rowMap[keyCol]
+					if !ok {
+						return 0, fmt.Errorf("composite primary key column %s not found in row data for pkey string %s", keyCol, pkeyString)
+					}
+					compositeKey[i] = pkeyValue
+				}
+				keysToDelete = append(keysToDelete, compositeKey)
 			}
-			keysToDelete = append(keysToDelete, compositeKey)
 		}
-	}
 
-	if len(keysToDelete) == 0 {
-		return 0, nil
-	}
-
-	totalDeletedCount := 0
-	// TODO: Make this configurable
-	batchSize := 1000
-
-	tableIdent := pgx.Identifier{task.Schema, task.Table}.Sanitize()
-
-	for i := 0; i < len(keysToDelete); i += batchSize {
-		end := i + batchSize
-		if end > len(keysToDelete) {
-			end = len(keysToDelete)
+		if len(keysToDelete) == 0 {
+			return 0, nil
 		}
-		batchKeys := keysToDelete[i:end]
 
-		var deleteSQL strings.Builder
-		args := []any{}
-		paramIdx := 1
+		totalDeletedCount := 0
+		// TODO: Make this configurable
+		batchSize := 1000
 
-		deleteSQL.WriteString(fmt.Sprintf("DELETE FROM %s WHERE ", tableIdent))
+		tableIdent := g.Ident.Sanitize()
 
-		if task.SimplePrimaryKey {
-			deleteSQL.WriteString(fmt.Sprintf("%s IN (", pgx.Identifier{task.Key[0]}.Sanitize()))
-			for j, key := range batchKeys {
-				if j > 0 {
-					deleteSQL.WriteString(", ")
-				}
-				deleteSQL.WriteString(fmt.Sprintf("$%d", paramIdx))
-				args = append(args, key)
-				paramIdx++
+		for i := 0; i < len(keysToDelete); i += batchSize {
+			end := i + batchSize
+			if end > len(keysToDelete) {
+				end = len(keysToDelete)
 			}
-			deleteSQL.WriteString(")")
-		} else {
-			keyColSanitised := make([]string, len(task.Key))
-			for k, keyCol := range task.Key {
-				keyColSanitised[k] = pgx.Identifier{keyCol}.Sanitize()
+			batchKeys := keysToDelete[i:end]
+
+			var deleteSQL strings.Builder
+			args := []any{}
+			paramIdx := 1
+
+			only := ""
+			if g.Only {
+				only = "ONLY "
 			}
+			deleteSQL.WriteString(fmt.Sprintf("DELETE FROM %s%s WHERE ", only, tableIdent))
 
-			deleteSQL.WriteString(fmt.Sprintf("(%s) IN (", strings.Join(keyColSanitised, ", ")))
-
-			for j, key := range batchKeys {
-				compositeKey, ok := key.([]any)
-				if !ok {
-					return 0, fmt.Errorf("expected composite key to be []interface{}, got %T", key)
-				}
-				if len(compositeKey) != len(task.Key) {
-					return 0, fmt.Errorf("composite key length mismatch: expected %d, got %d", len(task.Key), len(compositeKey))
-				}
-				if j > 0 {
-					deleteSQL.WriteString(", ")
-				}
-				deleteSQL.WriteString("(")
-				for k, val := range compositeKey {
-					if k > 0 {
+			if task.SimplePrimaryKey {
+				deleteSQL.WriteString(fmt.Sprintf("%s IN (", pgx.Identifier{task.Key[0]}.Sanitize()))
+				for j, key := range batchKeys {
+					if j > 0 {
 						deleteSQL.WriteString(", ")
 					}
 					deleteSQL.WriteString(fmt.Sprintf("$%d", paramIdx))
-					args = append(args, val)
+					args = append(args, key)
 					paramIdx++
 				}
 				deleteSQL.WriteString(")")
+			} else {
+				keyColSanitised := make([]string, len(task.Key))
+				for k, keyCol := range task.Key {
+					keyColSanitised[k] = pgx.Identifier{keyCol}.Sanitize()
+				}
+
+				deleteSQL.WriteString(fmt.Sprintf("(%s) IN (", strings.Join(keyColSanitised, ", ")))
+
+				for j, key := range batchKeys {
+					compositeKey, ok := key.([]any)
+					if !ok {
+						return 0, fmt.Errorf("expected composite key to be []interface{}, got %T", key)
+					}
+					if len(compositeKey) != len(task.Key) {
+						return 0, fmt.Errorf("composite key length mismatch: expected %d, got %d", len(task.Key), len(compositeKey))
+					}
+					if j > 0 {
+						deleteSQL.WriteString(", ")
+					}
+					deleteSQL.WriteString("(")
+					for k, val := range compositeKey {
+						if k > 0 {
+							deleteSQL.WriteString(", ")
+						}
+						deleteSQL.WriteString(fmt.Sprintf("$%d", paramIdx))
+						args = append(args, val)
+						paramIdx++
+					}
+					deleteSQL.WriteString(")")
+				}
+				deleteSQL.WriteString(")")
 			}
-			deleteSQL.WriteString(")")
+
+			cmdTag, err := tx.Exec(ctx, deleteSQL.String(), args...) // nosemgrep
+			if err != nil {
+				return totalDeletedCount, fmt.Errorf("error executing delete batch: %w (SQL: %s, Args: %v)", err, deleteSQL.String(), args)
+			}
+			totalDeletedCount += int(cmdTag.RowsAffected())
 		}
 
-		cmdTag, err := tx.Exec(ctx, deleteSQL.String(), args...) // nosemgrep
-		if err != nil {
-			return totalDeletedCount, fmt.Errorf("error executing delete batch: %w (SQL: %s, Args: %v)", err, deleteSQL.String(), args)
-		}
-		totalDeletedCount += int(cmdTag.RowsAffected())
+		return totalDeletedCount, nil
 	}
 
-	return totalDeletedCount, nil
+	total := 0
+	for _, g := range task.groupByTargetRelation(nodeName, deletes) {
+		n, err := deleteFrom(g)
+		total += n
+		if err != nil {
+			return total, err
+		}
+	}
+	return total, nil
 }
 
 // rowOriginInfo holds origin metadata for a row
@@ -2397,123 +2476,137 @@ func groupUpsertsByOrigin(upserts map[string]map[string]any, originInfoMap map[s
 // executeUpsertBatch is the canonical implementation of upsert SQL building and
 // execution. It converts values via ConvertToPgxType, applies dynamic batch
 // sizing (max-placeholders guard), and builds INSERT ... ON CONFLICT SQL.
-func executeUpsertBatch(tx pgx.Tx, task *TableRepairTask, upserts map[string]map[string]any, colTypes map[string]string) (int, error) {
+func executeUpsertBatch(tx pgx.Tx, task *TableRepairTask, nodeName string, upserts map[string]map[string]any, colTypes map[string]string) (int, error) {
 	orderedCols := task.Cols
 
-	// Convert rows to typed format
-	rowsToUpsert := make([][]any, 0, len(upserts))
-	for _, rowMap := range upserts {
-		typedRow := make([]any, len(orderedCols))
-		for i, colName := range orderedCols {
-			val, valExists := rowMap[colName]
-			pgType, typeExists := colTypes[colName]
+	upsertInto := func(g relationGroup) (int, error) {
+		upserts := g.Rows
 
-			if !valExists {
-				typedRow[i] = nil
-				continue
-			}
-			if !typeExists {
-				return 0, fmt.Errorf("type for column %s not found in target node's colTypes", colName)
-			}
+		// Convert rows to typed format
+		rowsToUpsert := make([][]any, 0, len(upserts))
+		for _, rowMap := range upserts {
+			typedRow := make([]any, len(orderedCols))
+			for i, colName := range orderedCols {
+				val, valExists := rowMap[colName]
+				pgType, typeExists := colTypes[colName]
 
-			convertedVal, err := utils.ConvertToPgxType(val, pgType)
-			if err != nil {
-				return 0, fmt.Errorf("error converting value for column %s (value: %v, type: %s): %w", colName, val, pgType, err)
+				if !valExists {
+					typedRow[i] = nil
+					continue
+				}
+				if !typeExists {
+					return 0, fmt.Errorf("type for column %s not found in target node's colTypes", colName)
+				}
+
+				convertedVal, err := utils.ConvertToPgxType(val, pgType)
+				if err != nil {
+					return 0, fmt.Errorf("error converting value for column %s (value: %v, type: %s): %w", colName, val, pgType, err)
+				}
+				typedRow[i] = convertedVal
 			}
-			typedRow[i] = convertedVal
+			rowsToUpsert = append(rowsToUpsert, typedRow)
 		}
-		rowsToUpsert = append(rowsToUpsert, typedRow)
-	}
 
-	if len(rowsToUpsert) == 0 {
-		return 0, nil
-	}
-
-	batchSize := 1000
-	if len(orderedCols) > 0 && batchSize*len(orderedCols) > 65500 {
-		batchSize = 65500 / len(orderedCols)
-		if batchSize == 0 {
-			batchSize = 1
+		if len(rowsToUpsert) == 0 {
+			return 0, nil
 		}
-	}
 
-	tableIdent := pgx.Identifier{task.Schema, task.Table}.Sanitize()
-	colIdents := make([]string, len(orderedCols))
-	for i, col := range orderedCols {
-		colIdents[i] = pgx.Identifier{col}.Sanitize()
-	}
-	colsSQL := strings.Join(colIdents, ", ")
-
-	pkColIdents := make([]string, len(task.Key))
-	for i, pkCol := range task.Key {
-		pkColIdents[i] = pgx.Identifier{pkCol}.Sanitize()
-	}
-	pkSQL := strings.Join(pkColIdents, ", ")
-
-	totalUpsertedCount := 0
-
-	for i := 0; i < len(rowsToUpsert); i += batchSize {
-		end := i + batchSize
-		if end > len(rowsToUpsert) {
-			end = len(rowsToUpsert)
-		}
-		batchRows := rowsToUpsert[i:end]
-
-		var upsertSQL strings.Builder
-		args := []any{}
-		paramIdx := 1
-
-		upsertSQL.WriteString(fmt.Sprintf("INSERT INTO %s (%s) VALUES ", tableIdent, colsSQL))
-		for j, row := range batchRows {
-			if j > 0 {
-				upsertSQL.WriteString(", ")
+		batchSize := 1000
+		if len(orderedCols) > 0 && batchSize*len(orderedCols) > 65500 {
+			batchSize = 65500 / len(orderedCols)
+			if batchSize == 0 {
+				batchSize = 1
 			}
-			upsertSQL.WriteString("(")
-			for k, val := range row {
-				if k > 0 {
+		}
+
+		tableIdent := g.Ident.Sanitize()
+		colIdents := make([]string, len(orderedCols))
+		for i, col := range orderedCols {
+			colIdents[i] = pgx.Identifier{col}.Sanitize()
+		}
+		colsSQL := strings.Join(colIdents, ", ")
+
+		pkColIdents := make([]string, len(task.Key))
+		for i, pkCol := range task.Key {
+			pkColIdents[i] = pgx.Identifier{pkCol}.Sanitize()
+		}
+		pkSQL := strings.Join(pkColIdents, ", ")
+
+		totalUpsertedCount := 0
+
+		for i := 0; i < len(rowsToUpsert); i += batchSize {
+			end := i + batchSize
+			if end > len(rowsToUpsert) {
+				end = len(rowsToUpsert)
+			}
+			batchRows := rowsToUpsert[i:end]
+
+			var upsertSQL strings.Builder
+			args := []any{}
+			paramIdx := 1
+
+			upsertSQL.WriteString(fmt.Sprintf("INSERT INTO %s (%s) VALUES ", tableIdent, colsSQL))
+			for j, row := range batchRows {
+				if j > 0 {
 					upsertSQL.WriteString(", ")
 				}
-				upsertSQL.WriteString(fmt.Sprintf("$%d", paramIdx))
-				args = append(args, val)
-				paramIdx++
-			}
-			upsertSQL.WriteString(")")
-		}
-
-		upsertSQL.WriteString(fmt.Sprintf(" ON CONFLICT (%s) ", pkSQL))
-		if task.InsertOnly {
-			upsertSQL.WriteString("DO NOTHING")
-		} else {
-			setClauses := make([]string, 0, len(orderedCols))
-			for _, col := range orderedCols {
-				isPkCol := false
-				for _, pk := range task.Key {
-					if col == pk {
-						isPkCol = true
-						break
+				upsertSQL.WriteString("(")
+				for k, val := range row {
+					if k > 0 {
+						upsertSQL.WriteString(", ")
 					}
+					upsertSQL.WriteString(fmt.Sprintf("$%d", paramIdx))
+					args = append(args, val)
+					paramIdx++
 				}
-				if !isPkCol {
-					sanitisedCol := pgx.Identifier{col}.Sanitize()
-					setClauses = append(setClauses, fmt.Sprintf("%s = EXCLUDED.%s", sanitisedCol, sanitisedCol))
-				}
+				upsertSQL.WriteString(")")
 			}
-			if len(setClauses) == 0 {
+
+			upsertSQL.WriteString(fmt.Sprintf(" ON CONFLICT (%s) ", pkSQL))
+			if task.InsertOnly {
 				upsertSQL.WriteString("DO NOTHING")
 			} else {
-				upsertSQL.WriteString("DO UPDATE SET ")
-				upsertSQL.WriteString(strings.Join(setClauses, ", "))
+				setClauses := make([]string, 0, len(orderedCols))
+				for _, col := range orderedCols {
+					isPkCol := false
+					for _, pk := range task.Key {
+						if col == pk {
+							isPkCol = true
+							break
+						}
+					}
+					if !isPkCol {
+						sanitisedCol := pgx.Identifier{col}.Sanitize()
+						setClauses = append(setClauses, fmt.Sprintf("%s = EXCLUDED.%s", sanitisedCol, sanitisedCol))
+					}
+				}
+				if len(setClauses) == 0 {
+					upsertSQL.WriteString("DO NOTHING")
+				} else {
+					upsertSQL.WriteString("DO UPDATE SET ")
+					upsertSQL.WriteString(strings.Join(setClauses, ", "))
+				}
 			}
+
+			cmdTag, err := tx.Exec(task.Ctx, upsertSQL.String(), args...) // nosemgrep
+			if err != nil {
+				return totalUpsertedCount, fmt.Errorf("error executing upsert batch: %w (SQL: %s, Args: %v)", err, upsertSQL.String(), args)
+			}
+			totalUpsertedCount += int(cmdTag.RowsAffected())
 		}
 
-		cmdTag, err := tx.Exec(task.Ctx, upsertSQL.String(), args...) // nosemgrep
-		if err != nil {
-			return totalUpsertedCount, fmt.Errorf("error executing upsert batch: %w (SQL: %s, Args: %v)", err, upsertSQL.String(), args)
-		}
-		totalUpsertedCount += int(cmdTag.RowsAffected())
+		return totalUpsertedCount, nil
 	}
 
-	return totalUpsertedCount, nil
+	total := 0
+	for _, g := range task.groupByTargetRelation(nodeName, upserts) {
+		n, err := upsertInto(g)
+		total += n
+		if err != nil {
+			return total, err
+		}
+	}
+	return total, nil
 }
 
 // executeUpserts handles upserting rows in a shared transaction.
@@ -2532,7 +2625,7 @@ func executeUpserts(tx pgx.Tx, task *TableRepairTask, nodeName string, upserts m
 		return 0, err
 	}
 
-	return executeUpsertBatch(tx, task, upserts, colTypes)
+	return executeUpsertBatch(tx, task, nodeName, upserts, colTypes)
 }
 
 // extractOriginInfoForNode extracts origin metadata from diff rows for the
@@ -2671,7 +2764,7 @@ func (t *TableRepairTask) executePreserveOriginUpserts(pool *pgxpool.Pool, nodeN
 			return totalUpsertedCount, fmt.Errorf("failed to filter stale repairs for origin %s: %w", batchKey.nodeOrigin, err)
 		}
 
-		count, err := executeUpsertBatch(batchTx, t, originUpserts, colTypes)
+		count, err := executeUpsertBatch(batchTx, t, nodeName, originUpserts, colTypes)
 		if err != nil {
 			batchTx.Rollback(t.Ctx)
 			return totalUpsertedCount, fmt.Errorf("failed to execute upsert batch for origin %s: %w", batchKey.nodeOrigin, err)

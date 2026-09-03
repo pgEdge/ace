@@ -139,7 +139,7 @@ func fetchCommitTimestamps(ctx context.Context, tx pgx.Tx, task *TableRepairTask
 		}
 	}
 
-	tableIdent := pgx.Identifier{task.Schema, task.Table}.Sanitize()
+	tableIdent := task.sourceFor(nodeName).FromClause("")
 	batchSize := 1000
 
 	if task.SimplePrimaryKey {
