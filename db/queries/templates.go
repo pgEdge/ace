@@ -745,9 +745,7 @@ var SQLTemplates = Templates{
 		WITH sampled_data AS (
 			SELECT
 				{{.KeyColumnsSelect}}
-			FROM
-				{{.SchemaIdent}}.{{.TableIdent}}
-			TABLESAMPLE {{.TableSampleMethod}}({{.SamplePercent}})
+			FROM {{.SampledFrom}}
 				{{- if .HasFilter }}
 			WHERE
 				{{.Filter}}
@@ -758,8 +756,7 @@ var SQLTemplates = Templates{
 		first_row AS (
 			SELECT
 				{{.KeyColumnsSelect}}
-			FROM
-				{{.SchemaIdent}}.{{.TableIdent}}
+			FROM {{.From}}
 				{{- if .HasFilter }}
 			WHERE
 				{{.Filter}}
@@ -771,8 +768,7 @@ var SQLTemplates = Templates{
 		last_row AS (
 			SELECT
 				{{.KeyColumnsSelect}}
-			FROM
-				{{.SchemaIdent}}.{{.TableIdent}}
+			FROM {{.From}}
 				{{- if .HasFilter }}
 			WHERE
 				{{.Filter}}
@@ -1015,12 +1011,12 @@ var SQLTemplates = Templates{
     `)),
 	TDBlockHashSQL: template.Must(template.New("tdBlockHashSQL").Parse(`
         SELECT encode(digest(COALESCE(string_agg({{.RowTextExpr}}, '|' ORDER BY {{.PkOrderByStr}}), 'EMPTY_BLOCK'), 'sha256'), 'hex')
-        FROM {{.SchemaIdent}}.{{.TableIdent}} AS {{.TableAlias}}
+        FROM {{.FromClause}}
         WHERE {{.WhereClause}}
     `)),
 	MtreeLeafHashSQL: template.Must(template.New("mtreeLeafHashSQL").Parse(`
         SELECT digest(COALESCE(string_agg({{.RowTextExpr}}, '|' ORDER BY {{.PkOrderByStr}}), 'EMPTY_BLOCK'), 'sha256')
-        FROM {{.SchemaIdent}}.{{.TableIdent}} AS {{.TableAlias}}
+        FROM {{.FromClause}}
         WHERE {{.WhereClause}}
     `)),
 	UpdateLeafHashes: template.Must(template.New("updateLeafHashes").Parse(`
@@ -1516,7 +1512,7 @@ var SQLTemplates = Templates{
 		WHERE node_position = $2
 	`)),
 	GetMaxColumnSize: template.Must(template.New("getMaxColumnSize").Parse(`
-		SELECT COALESCE(MAX(octet_length({{.ColumnIdent}})), 0) FROM {{.SchemaIdent}}.{{.TableIdent}}
+		SELECT COALESCE(MAX(octet_length({{.ColumnIdent}})), 0) FROM {{.From}}
 	`)),
 	UpdateBlockRangeStart: template.Must(template.New("updateBlockRangeStart").Parse(`
 			UPDATE

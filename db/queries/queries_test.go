@@ -491,3 +491,81 @@ func TestConcatWSBatched(t *testing.T) {
 		}
 	})
 }
+
+func unionSourceForTest(t *testing.T) TableSource {
+	t.Helper()
+	src, err := UnionTableSource("s", "parent",
+		[]RelationInfo{{Schema: "s", Name: "parent", RelKind: "r"}, {Schema: "s", Name: "child_heap", RelKind: "r"}},
+		[]string{"id", "val"}, 100)
+	if err != nil {
+		t.Fatalf("UnionTableSource: %v", err)
+	}
+	return src
+}
+
+func TestBlockHashSQLFromSource_Union(t *testing.T) {
+	src := unionSourceForTest(t)
+	got, err := BlockHashSQLFromSource(src, []string{"id"}, "TD_BLOCK_HASH", true, true, "", []string{"id", "val"}, map[string]string{"id": "integer", "val": "text"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	for _, want := range []string{
+		`FROM ((SELECT "id", "val", xmin, tableoid FROM ONLY "s"."parent" UNION ALL SELECT "id", "val", xmin, tableoid FROM ONLY "s"."child_heap")) AS _tbl_`,
+		`WHERE "id" >= $1 AND "id" < $2`,
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("query missing %q\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, `FROM "s"."parent"`) {
+		t.Errorf("union source must not reference the parent directly\n%s", got)
+	}
+}
+
+func TestBlockHashSQLFromSource_UnionRejectsNilCols(t *testing.T) {
+	src := unionSourceForTest(t)
+	if _, err := BlockHashSQLFromSource(src, []string{"id"}, "TD_BLOCK_HASH", true, true, "", nil, nil); err == nil {
+		t.Fatal("expected an error: a union source hashed via the alias cast would include xmin and tableoid")
+	}
+}
+
+func TestBlockHashSQL_PlainUnchanged(t *testing.T) {
+	got, err := BlockHashSQL("public", "events", []string{"event_id"}, "TD_BLOCK_HASH", true, true, "", nil, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(got, `FROM "public"."events" AS _tbl_`) {
+		t.Errorf("plain rendering changed:\n%s", got)
+	}
+}
+
+func TestGeneratePkeyOffsetsQueryFromSource_UnionSamplesEveryBranch(t *testing.T) {
+	src := unionSourceForTest(t)
+	got, err := GeneratePkeyOffsetsQueryFromSource(src, []string{"id"}, "BERNOULLI", 10, 100, "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	// sampled_data samples each of the two branches once; first_row and
+	// last_row read the union without sampling.
+	if n := strings.Count(got, `TABLESAMPLE BERNOULLI(10)`); n != 2 {
+		t.Errorf("want 2 TABLESAMPLE clauses, got %d\n%s", n, got)
+	}
+	if n := strings.Count(got, `FROM ONLY "s"."child_heap"`); n != 3 {
+		t.Errorf("want child_heap in all three CTEs, got %d\n%s", n, got)
+	}
+	if strings.Contains(got, `FROM "s"."parent"`) {
+		t.Errorf("union source must not reference the parent directly\n%s", got)
+	}
+}
+
+func TestGeneratePkeyOffsetsQuery_PlainUnchanged(t *testing.T) {
+	got, err := GeneratePkeyOffsetsQuery("public", "users", []string{"id"}, "BERNOULLI", 10, 100, "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	for _, want := range []string{`FROM "public"."users" TABLESAMPLE BERNOULLI(10)`, `FROM "public"."users"`} {
+		if !strings.Contains(got, want) {
+			t.Errorf("query missing %q\n%s", want, got)
+		}
+	}
+}

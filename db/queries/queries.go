@@ -66,34 +66,36 @@ func RenderSQL(t *template.Template, data any) (string, error) {
 	return buf.String(), nil
 }
 
-func MaxColumnSize(ctx context.Context, db DBQuerier, schema, table, column string) (int64, error) {
+// MaxColumnSizeFromSource returns the largest octet_length of column across
+// the rows the source reads.
+func MaxColumnSizeFromSource(ctx context.Context, db DBQuerier, source TableSource, column string) (int64, error) {
 	data := map[string]interface{}{
-		"SchemaIdent": pgx.Identifier{schema}.Sanitize(),
-		"TableIdent":  pgx.Identifier{table}.Sanitize(),
+		"From":        source.FromClause(""),
 		"ColumnIdent": pgx.Identifier{column}.Sanitize(),
 	}
-
 	query, err := RenderSQL(SQLTemplates.GetMaxColumnSize, data)
 	if err != nil {
 		return 0, fmt.Errorf("failed to render MaxColumnSize SQL: %w", err)
 	}
-
 	var maxSize int64
 	if err := db.QueryRow(ctx, query).Scan(&maxSize); err != nil {
-		return 0, fmt.Errorf(
-			"MaxColumnSize query failed for %s.%s.%s: %w",
-			schema,
-			table,
-			column,
-			err,
-		)
+		return 0, fmt.Errorf("MaxColumnSize query failed for %s.%s.%s: %w", source.Schema, source.Table, column, err)
 	}
-
 	return maxSize, nil
 }
 
-func GeneratePkeyOffsetsQuery(
-	schema, table string,
+func MaxColumnSize(ctx context.Context, db DBQuerier, schema, table, column string) (int64, error) {
+	return MaxColumnSizeFromSource(ctx, db, PlainTableSource(schema, table), column)
+}
+
+// GeneratePkeyOffsetsQuery renders the block boundary sampling query for an
+// ordinary table.
+func GeneratePkeyOffsetsQuery(schema, table string, keyColumns []string, tableSampleMethod string, samplePercent float64, ntileCount int, filter string) (string, error) {
+	return GeneratePkeyOffsetsQueryFromSource(PlainTableSource(schema, table), keyColumns, tableSampleMethod, samplePercent, ntileCount, filter)
+}
+
+func GeneratePkeyOffsetsQueryFromSource(
+	source TableSource,
 	keyColumns []string,
 	tableSampleMethod string,
 	samplePercent float64,
@@ -103,13 +105,11 @@ func GeneratePkeyOffsetsQuery(
 	if len(keyColumns) == 0 {
 		return "", fmt.Errorf("keyColumns cannot be empty")
 	}
-	for _, ident := range append([]string{schema, table}, keyColumns...) {
+	for _, ident := range append([]string{source.Schema, source.Table}, keyColumns...) {
 		if err := SanitiseIdentifier(ident); err != nil {
 			return "", fmt.Errorf("invalid identifier %q: %w", ident, err)
 		}
 	}
-	schemaIdent := pgx.Identifier{schema}.Sanitize()
-	tableIdent := pgx.Identifier{table}.Sanitize()
 
 	quotedKeyColsOriginal := make([]string, len(keyColumns))
 	for i, c := range keyColumns {
@@ -166,10 +166,8 @@ func GeneratePkeyOffsetsQuery(
 	selectOutputCols := append(startComponentCols, endComponentCols...)
 
 	data := map[string]any{
-		"SchemaIdent":          schemaIdent,
-		"TableIdent":           tableIdent,
-		"TableSampleMethod":    tableSampleMethod,
-		"SamplePercent":        samplePercent,
+		"From":                 source.FromClause(""),
+		"SampledFrom":          source.FromClauseSampled("", fmt.Sprintf("TABLESAMPLE %s(%v)", tableSampleMethod, samplePercent)),
 		"NtileCount":           ntileCount,
 		"KeyColumnsSelect":     keyColsSelect,
 		"KeyColumnsOrder":      keyColsOrder,
@@ -610,15 +608,23 @@ func concatWSBatched(exprs []string) string {
 	return fmt.Sprintf("concat_ws('|', %s)", strings.Join(batches, ", "))
 }
 
+// BlockHashSQL renders the block hash query for an ordinary table.
 func BlockHashSQL(schema, table string, primaryKeyCols []string, mode string, includeLower, includeUpper bool, filter string, allCols []string, colTypes map[string]string) (string, error) {
+	return BlockHashSQLFromSource(PlainTableSource(schema, table), primaryKeyCols, mode, includeLower, includeUpper, filter, allCols, colTypes)
+}
+
+func BlockHashSQLFromSource(source TableSource, primaryKeyCols []string, mode string, includeLower, includeUpper bool, filter string, allCols []string, colTypes map[string]string) (string, error) {
 	if len(primaryKeyCols) == 0 {
 		return "", fmt.Errorf("primaryKeyCols cannot be empty")
 	}
-	if err := SanitiseIdentifier(schema); err != nil {
+	if err := SanitiseIdentifier(source.Schema); err != nil {
 		return "", err
 	}
-	if err := SanitiseIdentifier(table); err != nil {
+	if err := SanitiseIdentifier(source.Table); err != nil {
 		return "", err
+	}
+	if source.IsUnion() && len(allCols) == 0 {
+		return "", fmt.Errorf("hashing a UNION ALL source needs the column list; the alias cast would include xmin and tableoid")
 	}
 
 	for _, pkCol := range primaryKeyCols {
@@ -630,8 +636,6 @@ func BlockHashSQL(schema, table string, primaryKeyCols []string, mode string, in
 		}
 	}
 
-	schemaIdent := pgx.Identifier{schema}.Sanitize()
-	tableIdent := pgx.Identifier{table}.Sanitize()
 	tableAlias := "_tbl_"
 
 	quotedPKColIdents := make([]string, len(primaryKeyCols))
@@ -707,9 +711,7 @@ func BlockHashSQL(schema, table string, primaryKeyCols []string, mode string, in
 	rowTextExpr := buildRowTextExpr(tableAlias, allCols, colTypes)
 
 	data := map[string]any{
-		"SchemaIdent":  schemaIdent,
-		"TableIdent":   tableIdent,
-		"TableAlias":   tableAlias,
+		"FromClause":   source.FromClause(tableAlias),
 		"PkOrderByStr": pkOrderByStr,
 		"WhereClause":  strings.Join(whereParts, " AND "),
 		"RowTextExpr":  rowTextExpr,
