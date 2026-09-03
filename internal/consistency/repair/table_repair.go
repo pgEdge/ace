@@ -459,6 +459,24 @@ func (t *TableRepairTask) ValidateAndPrepare() error {
 			}
 			t.Pools[nodeName] = connPool
 
+			tree, err := queries.GetRelationTree(t.Ctx, connPool, t.Schema, t.Table)
+			if err != nil {
+				return fmt.Errorf("failed to read inheritance tree for %s.%s on node %s: %w", t.Schema, t.Table, nodeName, err)
+			}
+			if tree == nil {
+				return fmt.Errorf("table '%s.%s' not found on node %s, or the current user does not have adequate privileges", t.Schema, t.Table, nodeName)
+			}
+			if reason := tree.UnsupportedReason(); reason != "" {
+				hint := ""
+				if tree.Root.RelKind == "v" || tree.Root.RelKind == "m" {
+					hint, err = queries.HotTableHint(t.Ctx, connPool, t.Schema, t.Table)
+					if err != nil {
+						return fmt.Errorf("failed to look up the hot table for view %s.%s on node %s: %w", t.Schema, t.Table, nodeName, err)
+					}
+				}
+				return fmt.Errorf("'%s.%s' %s (node %s).%s", t.Schema, t.Table, reason, nodeName, hint)
+			}
+
 			cols, err := queries.GetColumns(t.Ctx, connPool, t.Schema, t.Table)
 			if err != nil {
 				return fmt.Errorf("failed to get columns for %s.%s on node %s: %w", t.Schema, t.Table, nodeName, err)
