@@ -14,6 +14,7 @@ package queries
 import (
 	"context"
 	"fmt"
+	"strings"
 )
 
 // RelationInfo is one relation in an inheritance tree.
@@ -150,4 +151,39 @@ func buildRelationTree(relations []RelationInfo) (*RelationTree, error) {
 		tree.Descendants = append(tree.Descendants, r)
 	}
 	return tree, nil
+}
+
+// UnsupportedReason says why ACE cannot compare the tree's root relation, or
+// returns "" for an ordinary heap or partitioned table whose tree holds no
+// foreign relations. The text reads as a predicate on the table name, e.g.
+// "'s.t' is a foreign table; ...".
+func (t *RelationTree) UnsupportedReason() string {
+	switch t.Root.RelKind {
+	case "f":
+		return "is a foreign table; ACE does not compare foreign tables"
+	case "v", "m":
+		return "is a view; ACE compares tables"
+	}
+	if t.HasForeign() {
+		return fmt.Sprintf("has foreign relations in its inheritance tree (%s); ACE does not yet compare tables with foreign children or partitions",
+			strings.Join(t.ForeignRelations(), ", "))
+	}
+	return ""
+}
+
+// HotTableHint looks for a table named "_<table>" next to a view. Some
+// tiering extensions, coldfront among them, rename the real table that way
+// and put a view in its place, so the underscore table may be the data the
+// user meant to compare. When found, it returns a sentence mentioning that
+// table; otherwise "".
+func HotTableHint(ctx context.Context, db DBQuerier, schema, table string) (string, error) {
+	hot, err := GetRelationTree(ctx, db, schema, "_"+table)
+	if err != nil {
+		return "", err
+	}
+	if hot == nil || (hot.Root.RelKind != "r" && hot.Root.RelKind != "p") {
+		return "", nil
+	}
+	return fmt.Sprintf(" A table named '%s' also exists. It may be the table behind this view (tiering extensions such as coldfront use this layout); if so, compare '%s' instead.",
+		hot.Root.Qualified(), hot.Root.Qualified()), nil
 }

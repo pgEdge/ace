@@ -69,6 +69,30 @@ func TestRelationTree_IsInherited(t *testing.T) {
 	assert.True(t, sampleTree().IsInherited())
 	assert.False(t, (&RelationTree{Root: RelationInfo{RelKind: "r"}}).IsInherited())
 }
+
+func TestRelationTree_UnsupportedReason(t *testing.T) {
+	cases := []struct {
+		name string
+		tree *RelationTree
+		want string
+	}{
+		{"heap table", &RelationTree{Root: RelationInfo{Schema: "s", Name: "t", RelKind: "r"}}, ""},
+		{"partitioned, heap partitions only", &RelationTree{
+			Root:        RelationInfo{Schema: "s", Name: "p", RelKind: "p"},
+			Descendants: []RelationInfo{{Schema: "s", Name: "p1", RelKind: "r"}},
+		}, ""},
+		{"foreign table", &RelationTree{Root: RelationInfo{Schema: "s", Name: "f", RelKind: "f"}}, "is a foreign table; ACE does not compare foreign tables"},
+		{"view", &RelationTree{Root: RelationInfo{Schema: "s", Name: "v", RelKind: "v"}}, "is a view; ACE compares tables"},
+		{"materialized view", &RelationTree{Root: RelationInfo{Schema: "s", Name: "mv", RelKind: "m"}}, "is a view; ACE compares tables"},
+		{"heap parent with foreign child", sampleTree(),
+			"has foreign relations in its inheritance tree (s.child_fdw); ACE does not yet compare tables with foreign children or partitions"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			assert.Equal(t, c.want, c.tree.UnsupportedReason())
+		})
+	}
+}
 func TestBuildRelationTree_KeysBySchemaAndNameSeparately(t *testing.T) {
 	// "a"."b.c" and "a.b"."c" both render as a.b.c. They must stay two
 	// relations, so a foreign one among them is not dropped.
