@@ -28,7 +28,6 @@ import (
 	"github.com/pgedge/ace/db/queries"
 	"github.com/pgedge/ace/internal/infra/db"
 	utils "github.com/pgedge/ace/pkg/common"
-	"github.com/pgedge/ace/pkg/config"
 	"github.com/pgedge/ace/pkg/logger"
 	"github.com/pgedge/ace/pkg/types"
 )
@@ -114,7 +113,7 @@ func (t *TableDiffTask) ExecuteRerunTask() error {
 		go func(n string) {
 			defer wg.Done()
 			pool := t.Pools[n]
-			rows, fErr := fetchRowsByPkeys(t.Ctx, pool, t, pkeyValues)
+			rows, fErr := fetchRowsByPkeys(t.Ctx, pool, t, n, pkeyValues)
 			if fErr != nil {
 				errs <- fmt.Errorf("failed to fetch rows for node %s: %w", n, fErr)
 				return
@@ -228,7 +227,7 @@ func (t *TableDiffTask) collectPkeysFromDiff() (map[string]map[string]any, error
 // fetchRowsByPkeys efficiently fetches a list of rows from a node by their primary keys.
 // It uses a temporary table and a JOIN for high performance with large numbers of keys.
 // TODO: Can this be separated out into a common function that can be used by other tasks?
-func fetchRowsByPkeys(ctx context.Context, pool *pgxpool.Pool, t *TableDiffTask, pkeyVals [][]any) (map[string]types.OrderedMap, error) {
+func fetchRowsByPkeys(ctx context.Context, pool *pgxpool.Pool, t *TableDiffTask, nodeName string, pkeyVals [][]any) (map[string]types.OrderedMap, error) {
 	if len(pkeyVals) == 0 {
 		return make(map[string]types.OrderedMap), nil
 	}
@@ -269,20 +268,11 @@ func fetchRowsByPkeys(ctx context.Context, pool *pgxpool.Pool, t *TableDiffTask,
 		return nil, fmt.Errorf("failed to copy primary keys to temporary table: %w", err)
 	}
 
-	source := queries.PlainTableSource(t.Schema, t.Table)
-	tree, err := queries.GetRelationTree(ctx, tx, t.Schema, t.Table)
-	if err != nil {
-		return nil, fmt.Errorf("could not read inheritance tree: %w", err)
-	}
-	if tree != nil && tree.HasForeign() {
-		cfgMax := config.Get().TableDiff.MaxInheritanceBranches
-		source, err = queries.UnionTableSource(t.Schema, t.Table, tree.HeapLeaves(), t.Cols, cfgMax)
-		if err != nil {
-			return nil, err
-		}
-		logger.Warn("Skipping foreign relations in the inheritance tree of %s.%s: %s",
-			t.Schema, t.Table, strings.Join(tree.ForeignRelations(), ", "))
-	}
+	// ExecuteRerunTask already ran RunChecks(true), which built t.Sources for
+	// every node whose tree has a foreign relation (honouring
+	// t.MaxInheritanceBranches there); reuse that instead of re-deriving the
+	// tree and re-reading config here.
+	source := t.sourceFor(nodeName)
 
 	var joinConditions []string
 	for _, pkCol := range t.Key {

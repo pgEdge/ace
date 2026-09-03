@@ -33,6 +33,7 @@ func placementTask() *TableRepairTask {
 		"n1": {"1": "s.parent", "12": "s.child_heap", "50": "s.child_only_on_n1"},
 		"n2": {"1": "s.parent"},
 	}
+	t.treeHasForeign = map[string]bool{"n1": true, "n2": true}
 	return t
 }
 
@@ -60,6 +61,71 @@ func TestTargetRelation_MissingRowFallsBackToParent(t *testing.T) {
 	assert.Equal(t, pgx.Identifier{"s", "parent"}, task.targetRelation("n2", "50"))
 	// unknown everywhere
 	assert.Equal(t, pgx.Identifier{"s", "parent"}, task.targetRelation("n2", "999"))
+}
+
+// TestTargetRelation_OwnStalePlacementFallsThroughToParent guards step 2 of
+// targetRelation: a row's own recorded relation on nodeName must be one of
+// nodeName's current heap leaves before it's trusted. A stale or hand-edited
+// diff can record a relation nodeName no longer has, or never had.
+func TestTargetRelation_OwnStalePlacementFallsThroughToParent(t *testing.T) {
+	task := placementTask()
+	task.rowPlacement["n1"]["77"] = "s.not_a_leaf_on_n1"
+	assert.Equal(t, pgx.Identifier{"s", "parent"}, task.targetRelation("n1", "77"))
+}
+
+// TestTargetRelation_OwnStalePlacementFallsThroughToPeerLeaf is the same
+// guard, but a peer's placement for the same row names a relation nodeName
+// does have, so the fallback still finds it.
+func TestTargetRelation_OwnStalePlacementFallsThroughToPeerLeaf(t *testing.T) {
+	task := placementTask()
+	task.rowPlacement["n1"]["77"] = "s.not_a_leaf_on_n1"
+	task.rowPlacement["n2"]["77"] = "s.child_heap"
+	assert.Equal(t, pgx.Identifier{"s", "child_heap"}, task.targetRelation("n1", "77"))
+}
+
+func TestKeyColumnsMatch_Equal(t *testing.T) {
+	assert.True(t, keyColumnsMatch([]string{"a", "b"}, []string{"a", "b"}))
+}
+
+func TestKeyColumnsMatch_Reordered(t *testing.T) {
+	assert.True(t, keyColumnsMatch([]string{"a", "b"}, []string{"b", "a"}))
+}
+
+func TestKeyColumnsMatch_Missing(t *testing.T) {
+	assert.False(t, keyColumnsMatch([]string{"a", "b"}, []string{"a"}))
+}
+
+func TestKeyColumnsMatch_Extra(t *testing.T) {
+	assert.False(t, keyColumnsMatch([]string{"a"}, []string{"a", "b"}))
+}
+
+// TestGroupByTargetRelation_HeapLeavesWithoutForeignGetsSameNamedLeafAndOnlyFalse
+// covers a node whose own tree has no foreign relation (so Only must be
+// false) but which does have heapLeaves recorded (because its tree is
+// inherited): a missing row still finds the same-named leaf via a peer's
+// placement.
+func TestGroupByTargetRelation_HeapLeavesWithoutForeignGetsSameNamedLeafAndOnlyFalse(t *testing.T) {
+	task := placementTask()
+	task.treeHasForeign = map[string]bool{"n1": true} // n2 has no foreign relation of its own
+	groups := task.groupByTargetRelation("n2", map[string]map[string]any{"12": {"id": 12}})
+	require.Len(t, groups, 1)
+	g := groups[`"s"."child_heap"`]
+	assert.False(t, g.Only)
+	assert.Len(t, g.Rows, 1)
+}
+
+// TestGroupByTargetRelation_TreeHasForeignTrueNoPlacementGetsParentWithOnlyTrue
+// covers a node whose tree has a foreign relation (Only must be true) but
+// where a row carries no placement anywhere: it routes to the parent with
+// Only true, which is exactly the case the log warning in
+// groupByTargetRelation is meant to flag (not asserted here).
+func TestGroupByTargetRelation_TreeHasForeignTrueNoPlacementGetsParentWithOnlyTrue(t *testing.T) {
+	task := placementTask()
+	groups := task.groupByTargetRelation("n2", map[string]map[string]any{"999": {"id": 999}})
+	require.Len(t, groups, 1)
+	g := groups[`"s"."parent"`]
+	assert.True(t, g.Only)
+	assert.Len(t, g.Rows, 1)
 }
 
 func TestGroupByTargetRelation_NodeWithoutForeignRelationsKeepsParentWithoutOnly(t *testing.T) {
@@ -141,6 +207,7 @@ func TestTargetRelation_UnquotedSchemaVisibleThroughSearchPathMatches(t *testing
 	task.rowPlacement = map[string]map[string]string{
 		"n1": {"11": "public.ptree_child"},
 	}
+	task.treeHasForeign = map[string]bool{"n1": true, "n2": true}
 	assert.Equal(t, pgx.Identifier{"public", "ptree_child"}, task.targetRelation("n2", "11"))
 }
 

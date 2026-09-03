@@ -107,10 +107,15 @@ type TableRepairTask struct {
 
 	spockPerNode map[string]bool
 
-	// heapLeaves: node -> qualified heap relation -> true, for tables whose
-	// inheritance tree contains foreign relations on at least one node. nil
-	// otherwise, and every repair statement then targets schema.table.
+	// heapLeaves: node -> qualified heap relation -> true, recorded for every
+	// connected node whose inheritance tree has descendants (IsInherited()),
+	// whether or not any relation in that tree is foreign.
 	heapLeaves map[string]map[string]bool
+	// treeHasForeign: node -> whether that node's inheritance tree currently
+	// has a foreign relation in it. inheritanceActive() is true iff this is
+	// true for at least one node; that, not heapLeaves, is what a group's
+	// Only flag is derived from.
+	treeHasForeign map[string]bool
 	// rowPlacement: node -> pkey string -> qualified relation the row lives
 	// in on that node, read from storage_relation in the diff file.
 	rowPlacement map[string]map[string]string
@@ -493,9 +498,27 @@ func (t *TableRepairTask) ValidateAndPrepare() error {
 				}
 				return fmt.Errorf("'%s.%s' %s (node %s).%s", t.Schema, t.Table, reason, nodeName, hint)
 			}
-			if tree.HasForeign() {
+			// The parent's own key is needed below to validate heap leaves
+			// against it, so it's fetched before that loop rather than after,
+			// unlike table-diff's equivalent pass.
+			pKey, err := queries.GetPrimaryKey(t.Ctx, connPool, t.Schema, t.Table)
+			if err != nil {
+				return fmt.Errorf("failed to get primary key for %s.%s on node %s: %w", t.Schema, t.Table, nodeName, err)
+			}
+			if len(pKey) == 0 {
+				return fmt.Errorf("no primary key found for %s.%s on node %s", t.Schema, t.Table, nodeName)
+			}
+
+			if t.treeHasForeign == nil {
+				t.treeHasForeign = make(map[string]bool)
+			}
+			t.treeHasForeign[nodeName] = tree.HasForeign()
+
+			if tree.IsInherited() {
 				if t.heapLeaves == nil {
 					t.heapLeaves = make(map[string]map[string]bool)
+				}
+				if tree.HasForeign() && t.Sources == nil {
 					t.Sources = make(map[string]queries.TableSource)
 				}
 				leaves := tree.HeapLeaves()
@@ -509,10 +532,16 @@ func (t *TableRepairTask) ValidateAndPrepare() error {
 					if len(pk) == 0 {
 						return fmt.Errorf("%s on node %s has no primary key; repair of an inheritance tree needs one on every heap relation so that upserts can use ON CONFLICT", l.Qualified(), nodeName)
 					}
+					if !keyColumnsMatch(pKey, pk) {
+						return fmt.Errorf("%s on node %s has primary key %v, which does not match %s.%s's primary key %v; repair of an inheritance tree needs every heap relation's key to match the parent's",
+							l.Qualified(), nodeName, pk, t.Schema, t.Table, pKey)
+					}
 				}
 				t.heapLeaves[nodeName] = set
-				logger.Warn("Repair will skip foreign relations in the inheritance tree of %s.%s on node %s: %s",
-					t.Schema, t.Table, nodeName, strings.Join(tree.ForeignRelations(), ", "))
+				if tree.HasForeign() {
+					logger.Warn("Repair will skip foreign relations in the inheritance tree of %s.%s on node %s: %s",
+						t.Schema, t.Table, nodeName, strings.Join(tree.ForeignRelations(), ", "))
+				}
 			}
 
 			cols, err := queries.GetColumns(t.Ctx, connPool, t.Schema, t.Table)
@@ -521,7 +550,7 @@ func (t *TableRepairTask) ValidateAndPrepare() error {
 			}
 			t.Cols = cols
 
-			if tree != nil && tree.HasForeign() {
+			if tree.HasForeign() {
 				src, serr := queries.UnionTableSource(t.Schema, t.Table, tree.HeapLeaves(), cols, config.Get().TableDiff.MaxInheritanceBranches)
 				if serr != nil {
 					return fmt.Errorf("node %s: %w", nodeName, serr)
@@ -529,13 +558,6 @@ func (t *TableRepairTask) ValidateAndPrepare() error {
 				t.Sources[nodeName] = src
 			}
 
-			pKey, err := queries.GetPrimaryKey(t.Ctx, connPool, t.Schema, t.Table)
-			if err != nil {
-				return fmt.Errorf("failed to get primary key for %s.%s on node %s: %w", t.Schema, t.Table, nodeName, err)
-			}
-			if len(pKey) == 0 {
-				return fmt.Errorf("no primary key found for %s.%s on node %s", t.Schema, t.Table, nodeName)
-			}
 			t.Key = pKey
 			t.SimplePrimaryKey = len(pKey) == 1
 
@@ -623,6 +645,9 @@ func (t *TableRepairTask) ValidateAndPrepare() error {
 			return err
 		}
 		t.rowPlacement = placement
+	} else if t.RawDiffs.Summary.ForeignLayoutMismatch {
+		logger.Warn("table-repair: the diff file for %s.%s recorded a foreign-relation layout mismatch (excluded_relations: %v), but no connected node's inheritance tree currently has a foreign relation; the recorded mismatch is being ignored",
+			t.Schema, t.Table, t.RawDiffs.Summary.ExcludedRelations)
 	}
 
 	logger.Debug("Table repair task validated and prepared successfully.")
