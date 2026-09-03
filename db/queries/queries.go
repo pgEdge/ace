@@ -1137,6 +1137,29 @@ func GetTablesInSchema(ctx context.Context, db DBQuerier, schema string) ([]stri
 	return tables, nil
 }
 
+// GetForeignTablesInSchema lists the foreign tables in a schema so callers
+// can say which tables a schema diff skipped.
+func GetForeignTablesInSchema(ctx context.Context, db DBQuerier, schema string) ([]string, error) {
+	sql, err := RenderSQL(SQLTemplates.GetForeignTablesInSchema, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to render GetForeignTablesInSchema SQL: %w", err)
+	}
+	rows, err := db.Query(ctx, sql, schema)
+	if err != nil {
+		return nil, fmt.Errorf("query to get foreign tables in schema %s failed: %w", schema, err)
+	}
+	defer rows.Close()
+	var tables []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return nil, fmt.Errorf("failed to scan foreign table name: %w", err)
+		}
+		tables = append(tables, name)
+	}
+	return tables, rows.Err()
+}
+
 func GetViewsInSchema(ctx context.Context, db DBQuerier, schema string) ([]string, error) {
 	sql, err := RenderSQL(SQLTemplates.GetViewsInSchema, nil)
 	if err != nil {
