@@ -25,72 +25,74 @@ var aceTemplateFuncs = template.FuncMap{
 }
 
 type Templates struct {
-	EstimateRowCount     *template.Template
-	GetPrimaryKey        *template.Template
-	GetColumnTypes       *template.Template
-	GetColumns           *template.Template
-	CheckUserPrivileges  *template.Template
-	SpockNodeAndSubInfo  *template.Template
-	SpockRepSetInfo      *template.Template
-	EnsurePgcrypto       *template.Template
-	GetSpockNodeNames    *template.Template
-	CheckSchemaExists    *template.Template
-	GetTablesInSchema    *template.Template
-	GetViewsInSchema     *template.Template
-	GetFunctionsInSchema *template.Template
-	GetIndicesInSchema   *template.Template
-	CheckRepSetExists    *template.Template
-	GetTablesInRepSet    *template.Template
-	GetPkeyColumnTypes   *template.Template
+	EstimateRowCount         *template.Template
+	GetPrimaryKey            *template.Template
+	GetColumnTypes           *template.Template
+	GetColumns               *template.Template
+	CheckUserPrivileges      *template.Template
+	SpockNodeAndSubInfo      *template.Template
+	SpockRepSetInfo          *template.Template
+	EnsurePgcrypto           *template.Template
+	GetSpockNodeNames        *template.Template
+	CheckSchemaExists        *template.Template
+	GetTablesInSchema        *template.Template
+	GetForeignTablesInSchema *template.Template
+	GetViewsInSchema         *template.Template
+	GetFunctionsInSchema     *template.Template
+	GetIndicesInSchema       *template.Template
+	CheckRepSetExists        *template.Template
+	GetTablesInRepSet        *template.Template
+	GetPkeyColumnTypes       *template.Template
+	GetRelationTree          *template.Template
 
-	CreateMetadataTable              *template.Template
-	GetPkeyOffsets                   *template.Template
-	CreateSimpleMtreeTable           *template.Template
-	CreateIndex                      *template.Template
-	CreateCompositeType              *template.Template
-	DropCompositeType                *template.Template
-	CreateCompositeMtreeTable        *template.Template
-	InsertCompositeBlockRanges       *template.Template
-	CreateXORFunction                *template.Template
-	GetPkeyType                      *template.Template
-	UpdateMetadata                   *template.Template
-	InsertBlockRanges                *template.Template
-	InsertBlockRangesBatchSimple     *template.Template
-	InsertBlockRangesBatchComposite  *template.Template
-	TDBlockHashSQL                   *template.Template
-	MtreeLeafHashSQL                 *template.Template
-	UpdateLeafHashes                 *template.Template
-	UpdateLeafHashesBatch            *template.Template
+	CreateMetadataTable             *template.Template
+	GetPkeyOffsets                  *template.Template
+	CreateSimpleMtreeTable          *template.Template
+	CreateIndex                     *template.Template
+	CreateCompositeType             *template.Template
+	DropCompositeType               *template.Template
+	CreateCompositeMtreeTable       *template.Template
+	InsertCompositeBlockRanges      *template.Template
+	CreateXORFunction               *template.Template
+	GetPkeyType                     *template.Template
+	UpdateMetadata                  *template.Template
+	InsertBlockRanges               *template.Template
+	InsertBlockRangesBatchSimple    *template.Template
+	InsertBlockRangesBatchComposite *template.Template
+	TDBlockHashSQL                  *template.Template
+	MtreeLeafHashSQL                *template.Template
+	UpdateLeafHashes                *template.Template
+	UpdateLeafHashesBatch           *template.Template
 
-	GetDirtyAndNewBlocks             *template.Template
-	ClearDirtyFlags                  *template.Template
-	MarkLeavesDirtyByPositions       *template.Template
-	BuildParentNodes                 *template.Template
-	GetRootNode                      *template.Template
-	GetNodeChildren                  *template.Template
-	GetLeafRanges                    *template.Template
-	GetLeafRangesExpanded            *template.Template
-	GetRowCountEstimate              *template.Template
-	GetMaxValComposite               *template.Template
-	UpdateMaxVal                     *template.Template
-	GetMaxValSimple                  *template.Template
-	GetCountComposite                *template.Template
-	GetCountSimple                   *template.Template
+	GetDirtyAndNewBlocks       *template.Template
+	ClearDirtyFlags            *template.Template
+	MarkLeavesDirtyByPositions *template.Template
+	BuildParentNodes           *template.Template
+	GetRootNode                *template.Template
+	GetNodeChildren            *template.Template
+	GetLeafRanges              *template.Template
+	GetLeafRangesExpanded      *template.Template
+	GetRowCountEstimate        *template.Template
+	GetMaxValComposite         *template.Template
+	UpdateMaxVal               *template.Template
+	GetMaxValSimple            *template.Template
+	GetCountComposite          *template.Template
+	GetCountSimple             *template.Template
 
-	DeleteParentNodes                *template.Template
-	GetMaxNodePosition               *template.Template
-	UpdateBlockRangeEnd              *template.Template
-	UpdateNodePositionsTemp          *template.Template
-	DeleteBlock                      *template.Template
-	UpdateNodePositionsSequential    *template.Template
-	FindBlocksToSplit                *template.Template
-	FindBlocksToMerge                *template.Template
-	FindBlocksToMergeExpanded        *template.Template
-	GetBlockCountComposite           *template.Template
-	GetBlockCountSimple              *template.Template
-	GetBlockSizeFromMetadata         *template.Template
-	GetMaxNodeLevel                  *template.Template
-	CompareBlocksSQL                 *template.Template
+	DeleteParentNodes             *template.Template
+	GetMaxNodePosition            *template.Template
+	UpdateBlockRangeEnd           *template.Template
+	UpdateNodePositionsTemp       *template.Template
+	DeleteBlock                   *template.Template
+	UpdateNodePositionsSequential *template.Template
+	FindBlocksToSplit             *template.Template
+	FindBlocksToMerge             *template.Template
+	FindBlocksToMergeExpanded     *template.Template
+	GetBlockCountComposite        *template.Template
+	GetBlockCountSimple           *template.Template
+	GetBlockSizeFromMetadata      *template.Template
+	GetMaxNodeLevel               *template.Template
+	CompareBlocksSQL              *template.Template
 
 	DropXORFunction                  *template.Template
 	DropMetadataTable                *template.Template
@@ -147,8 +149,8 @@ type Templates struct {
 	SetupReplicationOriginXact       *template.Template
 	ResetReplicationOriginXact       *template.Template
 
-	InitCDCMetadata           *template.Template
-	CurrentWalInsertLSN       *template.Template
+	InitCDCMetadata     *template.Template
+	CurrentWalInsertLSN *template.Template
 }
 
 var SQLTemplates = Templates{
@@ -652,6 +654,34 @@ var SQLTemplates = Templates{
 	CheckSchemaExists: template.Must(template.New("checkSchemaExists").Parse(
 		`SELECT EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = $1);`,
 	)),
+	// GetRelationTree walks pg_inherits from one table down to every
+	// descendant in a single query. Depth 0 is the table itself. relkind
+	// tells heap (r), partitioned (p), and foreign (f) relations apart.
+	GetRelationTree: template.Must(template.New("getRelationTree").Parse(`
+		WITH RECURSIVE tree AS (
+			SELECT c.oid, c.relkind, 0 AS depth, NULL::oid AS parent_oid
+			FROM pg_catalog.pg_class c
+			JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+			WHERE n.nspname = $1 AND c.relname = $2
+		  UNION ALL
+			SELECT c.oid, c.relkind, t.depth + 1, i.inhparent
+			FROM tree t
+			JOIN pg_catalog.pg_inherits i ON i.inhparent = t.oid
+			JOIN pg_catalog.pg_class c ON c.oid = i.inhrelid
+		)
+		SELECT
+			n.nspname,
+			c.relname,
+			t.relkind::text,
+			t.depth,
+			COALESCE(pn.nspname || '.' || pc.relname, '') AS parent
+		FROM tree t
+		JOIN pg_catalog.pg_class c ON c.oid = t.oid
+		JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+		LEFT JOIN pg_catalog.pg_class pc ON pc.oid = t.parent_oid
+		LEFT JOIN pg_catalog.pg_namespace pn ON pn.oid = pc.relnamespace
+		ORDER BY t.depth, n.nspname, c.relname;
+	`)),
 	GetTablesInSchema: template.Must(template.New("getTablesInSchema").Parse(`
 		SELECT
 			table_name
@@ -660,6 +690,16 @@ var SQLTemplates = Templates{
 		WHERE
 			table_schema = $1
 			AND table_type = 'BASE TABLE';
+	`)),
+	GetForeignTablesInSchema: template.Must(template.New("getForeignTablesInSchema").Parse(`
+		SELECT
+			table_name
+		FROM
+			information_schema.tables
+		WHERE
+			table_schema = $1
+			AND table_type = 'FOREIGN'
+		ORDER BY table_name;
 	`)),
 	GetViewsInSchema: template.Must(template.New("getViewsInSchema").Parse(`
 		SELECT

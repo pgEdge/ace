@@ -74,6 +74,42 @@ ACE optimises comparisons with multiprocessing and block hashing:
 - It splits work into blocks (`--block-size`) and uses multiple workers per node (`--concurrency-factor`) to compute hashes. If hashes mismatch for a block, rows are materialised and, if necessary, recursively split using `--compare-unit-size`.
 - Runtime factors include host resources (CPU/memory), allowed parallelism, table size and row width (e.g., large JSON/bytea/embedding columns can slow hashing), distribution of differences (widely scattered diffs trigger more block fetches), and network latency to database nodes.
 
+### Relations ACE does not compare
+
+ACE compares heap tables, including partitioned tables whose partitions are
+all heap tables. It refuses everything else in the pre-checks, with a message
+saying why:
+
+- **Foreign tables** (`file_fdw`, `postgres_fdw`, and so on) are refused.
+  `schema-diff` and `repset-diff` list the foreign tables they skip.
+- **Views and materialized views** are refused. `schema-diff` compares views
+  as DDL only and lists the ones it skipped for data comparison. When a table
+  with the same name and a leading underscore exists next to the view (for
+  example `public._events` beside `public.events`), the message mentions it.
+  That table may be the one behind the view: tiering extensions such as
+  [coldfront](https://github.com/pgEdge/coldfront) rename the real table this
+  way and put a view in its place. If that is the case, compare the underscore
+  table. The cold tier behind a coldfront view is a shared Iceberg catalog, so
+  it has no per-node copies to compare, and a coldfront decoupled table has no
+  PostgreSQL data at all.
+- **Partitioned tables with foreign partitions**, and inheritance parents with
+  foreign children, are refused, naming the foreign relations. Comparing the
+  heap parts of such a table while skipping the foreign parts is future work.
+- **Sequences, indexes, composite types, and TOAST tables** are refused with a
+  message naming what the relation is.
+
+If a view does stand in front of a coldfront tiered table, note that the
+archiver moves rows from the hot table into Iceberg on a schedule, and the drop
+of an archived partition reaches the other nodes through replicated DDL. In
+that window the hot table legitimately differs between nodes. To compare only
+rows still above the archive watermark, filter on the replicated watermark
+table:
+
+```sh
+ace table-diff my-cluster public._events \
+  --table-filter "ts >= (SELECT cutoff_time FROM coldfront.archive_watermark WHERE schema_name = 'public' AND table_name = 'events')"
+```
+
 ### Tuning tips
 
 1. Tune `--block-size` and `--concurrency-factor` for your hardware and data
