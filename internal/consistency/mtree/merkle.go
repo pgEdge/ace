@@ -1583,17 +1583,18 @@ func (m *MerkleTreeTask) RunChecks(skipValidation bool) error {
 		if err != nil {
 			return fmt.Errorf("failed to read inheritance tree on node %s: %w", nodeInfo["Name"], err)
 		}
-		if tree != nil {
-			if reason := tree.UnsupportedReason(); reason != "" {
-				hint := ""
-				if tree.Root.RelKind == "v" || tree.Root.RelKind == "m" {
-					hint, err = queries.HotTableHint(m.Ctx, tx, m.Schema, m.Table)
-					if err != nil {
-						return fmt.Errorf("failed to look up the hot table for view %s on node %s: %w", m.QualifiedTableName, nodeInfo["Name"], err)
-					}
+		if tree == nil {
+			return fmt.Errorf("table '%s' not found on %s, or the current user does not have adequate privileges", m.QualifiedTableName, nodeInfo["Name"])
+		}
+		if reason := tree.UnsupportedReason(); reason != "" {
+			hint := ""
+			if tree.Root.RelKind == "v" || tree.Root.RelKind == "m" {
+				hint, err = queries.HotTableHint(m.Ctx, tx, m.Schema, m.Table)
+				if err != nil {
+					return fmt.Errorf("failed to look up the hot table for view %s on node %s: %w", m.QualifiedTableName, nodeInfo["Name"], err)
 				}
-				return fmt.Errorf("'%s' %s (node %s).%s", m.QualifiedTableName, reason, nodeInfo["Name"], hint)
 			}
+			return fmt.Errorf("'%s' %s (node %s).%s", m.QualifiedTableName, reason, nodeInfo["Name"], hint)
 		}
 
 		currentColsSlice, err := queries.GetColumns(m.Ctx, tx, m.Schema, m.Table)

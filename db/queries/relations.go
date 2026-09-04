@@ -154,15 +154,28 @@ func buildRelationTree(relations []RelationInfo) (*RelationTree, error) {
 }
 
 // UnsupportedReason says why ACE cannot compare the tree's root relation, or
-// returns "" for an ordinary heap or partitioned table whose tree holds no
-// foreign relations. The text reads as a predicate on the table name, e.g.
-// "'s.t' is a foreign table; ...".
+// returns "" for a heap or partitioned table whose tree holds no foreign
+// relations. Only relkinds r and p are comparable; every other kind gets a
+// message naming what it is. The text reads as a predicate on the table
+// name, e.g. "'s.t' is a foreign table; ...".
 func (t *RelationTree) UnsupportedReason() string {
 	switch t.Root.RelKind {
+	case "r", "p":
+		// comparable; fall through to the foreign-descendant check below
 	case "f":
-		return "is a foreign table; ACE does not compare foreign tables"
+		return "is a foreign table; its rows live outside PostgreSQL and it cannot have a primary key, so ACE has nothing to compare"
 	case "v", "m":
 		return "is a view; ACE compares tables"
+	case "S":
+		return "is a sequence; ACE compares tables"
+	case "c":
+		return "is a composite type; ACE compares tables"
+	case "i", "I":
+		return "is an index; ACE compares tables"
+	case "t":
+		return "is a TOAST table; ACE compares tables"
+	default:
+		return fmt.Sprintf("is not a table (relkind %q); ACE compares tables", t.Root.RelKind)
 	}
 	if t.HasForeign() {
 		return fmt.Sprintf("has foreign relations in its inheritance tree (%s); ACE does not yet compare tables with foreign children or partitions",

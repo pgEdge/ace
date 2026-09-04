@@ -95,6 +95,8 @@ saying why:
 - **Partitioned tables with foreign partitions**, and inheritance parents with
   foreign children, are refused, naming the foreign relations. Comparing the
   heap parts of such a table while skipping the foreign parts is future work.
+- **Sequences, indexes, composite types, and TOAST tables** are refused with a
+  message naming what the relation is.
 
 If a view does stand in front of a coldfront tiered table, note that the
 archiver moves rows from the hot table into Iceberg on a schedule, and the drop
@@ -103,7 +105,7 @@ that window the hot table legitimately differs between nodes. To compare only
 rows still above the archive watermark, filter on the replicated watermark
 table:
 
-```
+```sh
 ace table-diff my-cluster public._events \
   --table-filter "ts >= (SELECT cutoff_time FROM coldfront.archive_watermark WHERE schema_name = 'public' AND table_name = 'events')"
 ```
