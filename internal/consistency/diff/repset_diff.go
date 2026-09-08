@@ -137,7 +137,12 @@ func (c *RepsetDiffCmd) RunChecks(skipValidation bool) error {
 	// In a uni-directional setup the repset may only exist on the publisher, but
 	// the tables themselves exist on all nodes, so we still diff them across
 	// every node.
-	tablePresence := make(map[string]map[string]bool) // table -> {nodeName: true}
+	tablePresence := make(map[string]map[string]bool)
+	// unsupported records relations refused by the pre-check on any node,
+	// keyed by qualified name, with the node and reason. A relation that is
+	// a plain heap table on one node but has a foreign child on another must
+	// be left out everywhere, or table-diff fails the run on the second node.
+	unsupported := make(map[string]string) // table -> {nodeName: true}
 	var repsetNodeNames []string
 
 	for _, nodeInfo := range c.clusterNodes {
@@ -201,6 +206,9 @@ func (c *RepsetDiffCmd) RunChecks(skipValidation bool) error {
 				logger.Warn("Table %s is in repset %s on node %s but was not found in the catalog", t, c.RepsetName, nodeName)
 			} else if reason := tree.UnsupportedReason(); reason != "" {
 				logger.Info("Skipping %s in repset %s on node %s: %s", t, c.RepsetName, nodeName, reason)
+				if _, seen := unsupported[t]; !seen {
+					unsupported[t] = fmt.Sprintf("%s on node %s", reason, nodeName)
+				}
 				continue
 			}
 			if tablePresence[t] == nil {
@@ -213,6 +221,15 @@ func (c *RepsetDiffCmd) RunChecks(skipValidation bool) error {
 
 	if len(repsetNodeNames) == 0 {
 		return fmt.Errorf("repset %s not found on any node", c.RepsetName)
+	}
+
+	// A relation refused on one node is dropped from the run entirely, even
+	// where other nodes hold it as an ordinary table.
+	for t, why := range unsupported {
+		if _, present := tablePresence[t]; present {
+			logger.Warn("Leaving %s out of the repset diff on every node: %s", t, why)
+			delete(tablePresence, t)
+		}
 	}
 
 	// Build the full table list (union) and track tables not in the repset
