@@ -377,3 +377,56 @@ func TestRepsetDiff_SkipsForeignRelations(t *testing.T) {
 	assert.Empty(t, repsetDiffFilesForTable(t, "rs_part_parent"), "the parent must be skipped, not diffed")
 	assert.Empty(t, repsetDiffFilesForTable(t, "rs_part_fdw"), "the foreign partition must be skipped, not diffed")
 }
+
+// TestRepsetDiff_SkipsRelationUnsupportedOnOneNode covers a layout that
+// differs between nodes: the partitioned parent has a foreign partition on
+// node 1 only, and a heap partition alone on node 2. Discovery on node 2
+// sees an ordinary partitioned table; discovery on node 1 refuses it. The
+// relation must be left out everywhere, not diffed across both nodes and
+// failed by the pre-check on node 1.
+func TestRepsetDiff_SkipsRelationUnsupportedOnOneNode(t *testing.T) {
+	ctx := context.Background()
+	const repsetName = "default_insert_only"
+	parent := fmt.Sprintf("%s.rs_mixed_parent", testSchema)
+	heapPart := fmt.Sprintf("%s.rs_mixed_heap", testSchema)
+	fdwPart := fmt.Sprintf("%s.rs_mixed_fdw", testSchema)
+
+	pools := []*pgxpool.Pool{pgCluster.Node1Pool, pgCluster.Node2Pool}
+	for i, pool := range pools {
+		stmts := []string{
+			"CREATE EXTENSION IF NOT EXISTS file_fdw",
+			"CREATE SERVER IF NOT EXISTS ace_test_csv FOREIGN DATA WRAPPER file_fdw",
+			"COPY (SELECT * FROM (VALUES (101,'c1')) v(id, val)) TO '/tmp/ace_rs_mixed.csv' CSV",
+			fmt.Sprintf("CREATE TABLE IF NOT EXISTS %s (id int, val text) PARTITION BY RANGE (id)", parent),
+			fmt.Sprintf("CREATE TABLE IF NOT EXISTS %s PARTITION OF %s FOR VALUES FROM (0) TO (100)", heapPart, parent),
+			fmt.Sprintf("ALTER TABLE %s ADD PRIMARY KEY (id)", heapPart),
+			fmt.Sprintf("INSERT INTO %s VALUES (1, 'same') ON CONFLICT DO NOTHING", heapPart),
+		}
+		if i == 0 {
+			// Only node 1 gets the foreign partition.
+			stmts = append(stmts, fmt.Sprintf("CREATE FOREIGN TABLE IF NOT EXISTS %s PARTITION OF %s FOR VALUES FROM (100) TO (200) SERVER ace_test_csv OPTIONS (filename '/tmp/ace_rs_mixed.csv', format 'csv')", fdwPart, parent))
+		}
+		for _, s := range stmts {
+			_, err := pool.Exec(ctx, s)
+			require.NoError(t, err, "statement: %s", s)
+		}
+		_, err := pool.Exec(ctx, fmt.Sprintf(`SELECT spock.repset_add_table('%s', '%s');`, repsetName, parent))
+		require.NoError(t, err, "add partitioned parent to repset")
+	}
+	t.Cleanup(func() {
+		for _, pool := range pools {
+			for _, rel := range []string{parent, heapPart, fdwPart} {
+				pool.Exec(ctx, fmt.Sprintf(`SELECT spock.repset_remove_table('%s', '%s');`, repsetName, rel))
+			}
+			pool.Exec(ctx, fmt.Sprintf(`DROP TABLE IF EXISTS %s CASCADE`, parent))
+		}
+	})
+
+	control := createRepsetDiffTable(t, "rs_mixed_control", repsetName, true)
+
+	task := newTestRepsetDiffTask(repsetName)
+	require.NoError(t, diff.RepsetDiff(task), "a relation refused on one node must be left out, not fail the run")
+
+	require.Len(t, repsetDiffFilesForTable(t, "rs_mixed_control"), 1, "the control table should still be diffed: %s", control)
+	assert.Empty(t, repsetDiffFilesForTable(t, "rs_mixed_parent"), "the parent must be skipped on every node")
+}
