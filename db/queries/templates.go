@@ -725,7 +725,7 @@ var SQLTemplates = Templates{
 		`SELECT EXISTS(SELECT 1 FROM spock.replication_set WHERE set_name = $1);`,
 	)),
 	GetTablesInRepSet: template.Must(template.New("getTablesInRepSet").Parse(
-		`SELECT concat_ws('.', nspname, relname) FROM spock.tables where set_name = $1;`,
+		`SELECT nspname, relname FROM spock.tables WHERE set_name = $1;`,
 	)),
 	GetPkeyColumnTypes: template.Must(template.New("getPkeyColumnTypes").Parse(`
 		SELECT

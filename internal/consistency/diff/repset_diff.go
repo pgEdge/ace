@@ -186,18 +186,22 @@ func (c *RepsetDiffCmd) RunChecks(skipValidation bool) error {
 			return fmt.Errorf("could not get tables in repset on node %s: %w", nodeName, err)
 		}
 
-		for _, t := range tables {
-			parts := strings.SplitN(t, ".", 2)
-			if len(parts) == 2 {
-				tree, terr := queries.GetRelationTree(c.Ctx, pool, parts[0], parts[1])
-				if terr != nil {
-					pool.Close()
-					return fmt.Errorf("could not read relation kind for %s on node %s: %w", t, nodeName, terr)
-				}
-				if tree != nil && tree.Root.RelKind == "f" {
-					logger.Info("Skipping foreign table %s in repset %s on node %s", t, c.RepsetName, nodeName)
-					continue
-				}
+		for _, rel := range tables {
+			t := rel.String()
+			// Spock lets foreign tables into a set, directly or as partitions
+			// of a partitioned table it adds. Skip whatever the table-diff
+			// pre-check would refuse, so one such relation does not fail the
+			// whole run.
+			tree, terr := queries.GetRelationTree(c.Ctx, pool, rel.Schema, rel.Name)
+			if terr != nil {
+				pool.Close()
+				return fmt.Errorf("could not read relation kind for %s on node %s: %w", t, nodeName, terr)
+			}
+			if tree == nil {
+				logger.Warn("Table %s is in repset %s on node %s but was not found in the catalog", t, c.RepsetName, nodeName)
+			} else if reason := tree.UnsupportedReason(); reason != "" {
+				logger.Info("Skipping %s in repset %s on node %s: %s", t, c.RepsetName, nodeName, reason)
+				continue
 			}
 			if tablePresence[t] == nil {
 				tablePresence[t] = make(map[string]bool)

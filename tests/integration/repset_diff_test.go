@@ -301,3 +301,79 @@ func TestRepsetDiff_MultipleTables(t *testing.T) {
 		assert.Equal(t, json.Number("99"), id)
 	}
 }
+
+// TestRepsetDiff_SkipsForeignRelations covers a partitioned table with a
+// file_fdw partition in the replication set. spock.repset_add_table on the
+// parent adds the parent and every partition, so the set holds a partitioned
+// parent whose tree contains a foreign relation, the foreign partition itself,
+// and a heap partition. repset-diff must skip the first two and diff the
+// rest, instead of failing the whole run on the parent.
+func TestRepsetDiff_SkipsForeignRelations(t *testing.T) {
+	ctx := context.Background()
+	// The default set replicates UPDATE and DELETE and so demands a replica
+	// identity, which a partitioned table with a foreign partition cannot
+	// have. The insert-only set has no such requirement.
+	const repsetName = "default_insert_only"
+	parent := fmt.Sprintf("%s.rs_part_parent", testSchema)
+	heapPart := fmt.Sprintf("%s.rs_part_heap", testSchema)
+	fdwPart := fmt.Sprintf("%s.rs_part_fdw", testSchema)
+
+	pools := []*pgxpool.Pool{pgCluster.Node1Pool, pgCluster.Node2Pool}
+	for _, pool := range pools {
+		for _, s := range []string{
+			"CREATE EXTENSION IF NOT EXISTS file_fdw",
+			"CREATE SERVER IF NOT EXISTS ace_test_csv FOREIGN DATA WRAPPER file_fdw",
+			"COPY (SELECT * FROM (VALUES (101,'c1'),(102,'c2')) v(id, val)) TO '/tmp/ace_rs_rows.csv' CSV",
+			fmt.Sprintf("CREATE TABLE IF NOT EXISTS %s (id int, val text) PARTITION BY RANGE (id)", parent),
+			fmt.Sprintf("CREATE TABLE IF NOT EXISTS %s PARTITION OF %s FOR VALUES FROM (0) TO (100)", heapPart, parent),
+			// A leaf partition may carry its own key even though the parent
+			// cannot; ACE needs it to diff the partition on its own.
+			fmt.Sprintf("ALTER TABLE %s ADD PRIMARY KEY (id)", heapPart),
+			fmt.Sprintf("CREATE FOREIGN TABLE IF NOT EXISTS %s PARTITION OF %s FOR VALUES FROM (100) TO (200) SERVER ace_test_csv OPTIONS (filename '/tmp/ace_rs_rows.csv', format 'csv')", fdwPart, parent),
+			fmt.Sprintf("INSERT INTO %s VALUES (1, 'same') ON CONFLICT DO NOTHING", heapPart),
+		} {
+			_, err := pool.Exec(ctx, s)
+			require.NoError(t, err, "statement: %s", s)
+		}
+		// Try the parent first (Spock adds its partitions with it). If Spock
+		// refuses, add the foreign partition directly; the test only needs
+		// one non-heap relation in the set, and the log says which way got it in.
+		if _, err := pool.Exec(ctx, fmt.Sprintf(`SELECT spock.repset_add_table('%s', '%s');`, repsetName, parent)); err != nil {
+			t.Logf("repset_add_table(%s) refused the partitioned parent: %v", repsetName, err)
+			_, err = pool.Exec(ctx, fmt.Sprintf(`SELECT spock.repset_add_table('%s', '%s');`, repsetName, fdwPart))
+			require.NoError(t, err, "add foreign partition to repset directly")
+			_, err = pool.Exec(ctx, fmt.Sprintf(`SELECT spock.repset_add_table('%s', '%s');`, repsetName, heapPart))
+			require.NoError(t, err, "add heap partition to repset")
+		} else {
+			t.Logf("repset_add_table(%s) accepted the partitioned parent", repsetName)
+		}
+	}
+	t.Cleanup(func() {
+		for _, pool := range pools {
+			for _, rel := range []string{parent, heapPart, fdwPart} {
+				pool.Exec(ctx, fmt.Sprintf(`SELECT spock.repset_remove_table('%s', '%s');`, repsetName, rel))
+			}
+			pool.Exec(ctx, fmt.Sprintf(`DROP TABLE IF EXISTS %s CASCADE`, parent))
+		}
+	})
+
+	// Confirm the premise: the set now holds a relation that is not a heap table.
+	var nonHeap int
+	err := pgCluster.Node1Pool.QueryRow(ctx,
+		`SELECT count(*) FROM spock.tables s JOIN pg_class c ON c.relname = s.relname
+		   JOIN pg_namespace n ON n.oid = c.relnamespace AND n.nspname = s.nspname
+		  WHERE s.set_name = $1 AND c.relkind IN ('f', 'p')`, repsetName).Scan(&nonHeap)
+	require.NoError(t, err)
+	require.Greater(t, nonHeap, 0, "repset_add_table on a partitioned parent should put non-heap relations in the set")
+
+	// A control table proves ordinary tables are still diffed.
+	control := createRepsetDiffTable(t, "rs_fdw_control", repsetName, true)
+
+	task := newTestRepsetDiffTask(repsetName)
+	require.NoError(t, diff.RepsetDiff(task), "repset-diff must not fail because the set contains a partitioned parent with a foreign partition")
+
+	files := repsetDiffFilesForTable(t, "rs_fdw_control")
+	require.Len(t, files, 1, "the control table should still be diffed: %s", control)
+	assert.Empty(t, repsetDiffFilesForTable(t, "rs_part_parent"), "the parent must be skipped, not diffed")
+	assert.Empty(t, repsetDiffFilesForTable(t, "rs_part_fdw"), "the foreign partition must be skipped, not diffed")
+}

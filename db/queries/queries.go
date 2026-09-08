@@ -1259,7 +1259,21 @@ func CheckRepSetExists(ctx context.Context, db DBQuerier, repSet string) (bool, 
 	return exists, nil
 }
 
-func GetTablesInRepSet(ctx context.Context, db DBQuerier, repSet string) ([]string, error) {
+// QualifiedName is a relation's schema and name kept apart, so a schema or
+// name containing a dot cannot be mistaken for the separator.
+type QualifiedName struct {
+	Schema string
+	Name   string
+}
+
+// String renders schema.name without quoting, the form the rest of ACE
+// passes around as a qualified table name.
+func (q QualifiedName) String() string {
+	return q.Schema + "." + q.Name
+}
+
+// GetTablesInRepSet lists the relations Spock has in a replication set.
+func GetTablesInRepSet(ctx context.Context, db DBQuerier, repSet string) ([]QualifiedName, error) {
 	sql, err := RenderSQL(SQLTemplates.GetTablesInRepSet, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to render GetTablesInRepSet SQL: %w", err)
@@ -1271,13 +1285,13 @@ func GetTablesInRepSet(ctx context.Context, db DBQuerier, repSet string) ([]stri
 	}
 	defer rows.Close()
 
-	var tables []string
+	var tables []QualifiedName
 	for rows.Next() {
-		var tableName string
-		if err := rows.Scan(&tableName); err != nil {
+		var q QualifiedName
+		if err := rows.Scan(&q.Schema, &q.Name); err != nil {
 			return nil, fmt.Errorf("failed to scan table name: %w", err)
 		}
-		tables = append(tables, tableName)
+		tables = append(tables, q)
 	}
 
 	if err := rows.Err(); err != nil {
