@@ -377,7 +377,7 @@ func TestMain(m *testing.M) {
 	)
 	tcLog.SetDefault(log.New(io.Discard, "", 0))
 
-	if err := config.Init("../../ace.yaml"); err != nil {
+	if err := config.Init("../../ace.example.yaml"); err != nil {
 		log.Fatalf("Failed to load config: %v", err)
 	}
 

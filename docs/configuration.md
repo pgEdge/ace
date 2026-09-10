@@ -16,7 +16,7 @@ ACE first attempts to use the Postgres service file to resolve connection inform
 
 ## The ace.yaml file
 
-The [`ace.yaml` file](https://github.com/pgEdge/ace/blob/main/ace.yaml) defines default values used when calling the ACE commands.  The file contains properties that control the resources used by ACE commands; after creating the `ace.yaml` file, use your choice of editor to customize the properties for your system:
+The [`ace.example.yaml` file](https://github.com/pgEdge/ace/blob/main/ace.example.yaml) is a reference copy of the configuration that ACE ships, showing the default values used when calling the ACE commands.  The file contains properties that control the resources used by ACE commands; after creating your own `ace.yaml` file, use your choice of editor to customize the properties for your system:
 
 
 <!-- TODO: Remove and/or update inapplicable fields -->
