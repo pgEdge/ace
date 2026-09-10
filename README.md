@@ -45,7 +45,7 @@ Set the `default_cluster` key in `ace.yaml` to the cluster name you most frequen
 
     For detailed information about creating and modifying ACE configuration files, visit [here](/docs/configuration.md).
 
-The [`ace.yaml` file](ace.yaml) defines default values used when executing ACE commands like `table-diff` or `mtree table-diff`.  You can modify properties that influence ACE performance and execution like timeout values and certificate information.
+The [`ace.example.yaml` file](ace.example.yaml) is a reference copy of the configuration, showing the default values used when executing ACE commands like `table-diff` or `mtree table-diff`.  In your own `ace.yaml`, you can modify properties that influence ACE performance and execution like timeout values and certificate information.
 
 The `pg_service.conf` file contains cluster connection details that help ACE locate nodes.  After creating the file: 
 
