@@ -1534,7 +1534,7 @@ func WriteDiffReport(diffResult types.DiffOutput, schema, table, format string) 
 	jsonFileName := outputPrefix + ".json"
 
 	// Stream JSON directly to file — avoids holding a second full copy in memory
-	f, err := os.Create(jsonFileName)
+	f, err := CreateFileSecure(jsonFileName)
 	if err != nil {
 		logger.Error("ERROR creating diff output file %s: %v", jsonFileName, err)
 		return "", "", fmt.Errorf("failed to create diffs file: %w", err)

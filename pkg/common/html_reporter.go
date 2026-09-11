@@ -17,7 +17,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"html/template"
-	"os"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -364,7 +363,7 @@ func writeHTMLDiffReport(diffResult types.DiffOutput, jsonFilePath string) (stri
 		return "", fmt.Errorf("failed to render HTML diff report: %w", err)
 	}
 
-	if err := os.WriteFile(htmlPath, buf.Bytes(), 0644); err != nil {
+	if err := WriteFileSecure(htmlPath, buf.Bytes()); err != nil {
 		return "", fmt.Errorf("failed to write HTML diff report: %w", err)
 	}
 

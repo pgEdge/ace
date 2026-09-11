@@ -633,7 +633,7 @@ func writeReportToFile(report *RepairReport) error {
 	dateFolderName := now.Format("2006-01-02")
 	reportDir := filepath.Join(reportFolder, dateFolderName)
 
-	if err := os.MkdirAll(reportDir, 0755); err != nil {
+	if err := utils.MkdirAllSecure(reportDir); err != nil {
 		return fmt.Errorf("failed to create report directory %s: %w", reportDir, err)
 	}
 
@@ -652,7 +652,7 @@ func writeReportToFile(report *RepairReport) error {
 		return fmt.Errorf("failed to marshal report to JSON: %w", err)
 	}
 
-	if err := os.WriteFile(filePath, reportData, 0644); err != nil {
+	if err := utils.WriteFileSecure(filePath, reportData); err != nil {
 		return fmt.Errorf("failed to write report to file %s: %w", filePath, err)
 	}
 
@@ -3158,4 +3158,3 @@ func (t *TableRepairTask) setupReplicationOriginXact(tx pgx.Tx, originLSN *uint6
 
 	return nil
 }
-

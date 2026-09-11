@@ -154,7 +154,7 @@ func (t *TableDiffTask) ExecuteRerunTask() error {
 		if mErr != nil {
 			return fmt.Errorf("failed to marshal new diff report: %w", mErr)
 		}
-		if wErr := os.WriteFile(outputFileName, jsonData, 0644); wErr != nil {
+		if wErr := utils.WriteFileSecure(outputFileName, jsonData); wErr != nil {
 			return fmt.Errorf("failed to write new diff report: %w", wErr)
 		}
 	} else {
