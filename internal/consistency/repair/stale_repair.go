@@ -414,12 +414,12 @@ func (l *staleSkipLogger) ensureOpen() error {
 	}
 	now := time.Now()
 	reportDir := filepath.Join("reports", now.Format("2006-01-02"))
-	if err := os.MkdirAll(reportDir, 0755); err != nil {
+	if err := utils.MkdirAllSecure(reportDir); err != nil {
 		return fmt.Errorf("create stale skip log directory %s: %w", reportDir, err)
 	}
 	fileName := fmt.Sprintf("stale_repair_skips_%s.json", now.Format("150405")+fmt.Sprintf(".%03d", now.Nanosecond()/1e6))
 	path := filepath.Join(reportDir, fileName)
-	file, err := os.Create(path)
+	file, err := utils.CreateFileSecure(path)
 	if err != nil {
 		return fmt.Errorf("create stale skip log file %s: %w", path, err)
 	}

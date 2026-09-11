@@ -1802,7 +1802,7 @@ func (m *MerkleTreeTask) BuildMtree() (err error) {
 			if err != nil {
 				return fmt.Errorf("failed to marshal block ranges: %w", err)
 			}
-			if err := os.WriteFile(filename, data, 0644); err != nil {
+			if err := utils.WriteFileSecure(filename, data); err != nil {
 				return fmt.Errorf("failed to write block ranges to file: %w", err)
 			}
 			logger.Info("Block ranges written to %s", filename)

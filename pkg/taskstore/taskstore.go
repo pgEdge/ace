@@ -157,6 +157,13 @@ func New(path string) (*Store, error) {
 		return nil, fmt.Errorf("create sqlite directory: %w", err)
 	}
 
+	// The driver would create the database 0666&^umask, i.e. 0644 in practice.
+	// ace_tasks.db holds task context and diff paths, so claim it owner-only
+	// first, and tighten one an older build left readable.
+	if err := secureDBFile(sqlitePath); err != nil {
+		return nil, err
+	}
+
 	db, err := sql.Open("sqlite", sqlitePath)
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite database: %w", err)
@@ -169,7 +176,32 @@ func New(path string) (*Store, error) {
 		db.Close()
 		return nil, err
 	}
+
+	// WAL mode leaves -wal/-shm sidecars with the same permissive default.
+	// Best effort: they are absent outside WAL mode, and failing to tighten
+	// one must not stop ACE recording tasks.
+	for _, suffix := range []string{"-wal", "-shm"} {
+		_ = os.Chmod(sqlitePath+suffix, secureDBMode)
+	}
+
 	return s, nil
+}
+
+const secureDBMode os.FileMode = 0o600
+
+// secureDBFile creates path if missing and restricts it to the owner. The
+// Chmod is not redundant: O_CREATE's mode is umask-masked, and ignored
+// altogether when the file already exists.
+func secureDBFile(path string) error {
+	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, secureDBMode)
+	if err != nil {
+		return fmt.Errorf("create sqlite database %s: %w", path, err)
+	}
+	if err := f.Chmod(secureDBMode); err != nil {
+		f.Close()
+		return fmt.Errorf("restrict permissions on %s: %w", path, err)
+	}
+	return f.Close()
 }
 
 func (s *Store) Close() error {

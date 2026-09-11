@@ -13,6 +13,8 @@ package cli
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -169,5 +171,39 @@ func TestInterspersedFlags(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// `ace cluster init` writes database credentials, so pg_service.conf must end
+// up owner-only even when --force overwrites a world-readable file:
+// os.WriteFile's mode is umask-masked, and ignored for an existing file.
+func TestClusterInitWritesOwnerOnlyServiceFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "pg_service.conf")
+	if err := os.WriteFile(path, []byte("stale"), 0o644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	if err := os.Chmod(path, 0o644); err != nil {
+		t.Fatalf("seed mode: %v", err)
+	}
+
+	cmd := &cli.Command{
+		Name: "init",
+		Flags: []cli.Flag{
+			&cli.StringFlag{Name: "path", Value: path},
+			&cli.BoolFlag{Name: "force", Value: true},
+			&cli.BoolFlag{Name: "stdout"},
+		},
+		Action: ClusterInitCLI,
+	}
+	if err := cmd.Run(context.Background(), []string{"init"}); err != nil {
+		t.Fatalf("cluster init: %v", err)
+	}
+
+	st, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	if st.Mode().Perm()&0o077 != 0 {
+		t.Errorf("%s has mode %v, want owner-only for a credentials file", path, st.Mode().Perm())
 	}
 }

@@ -16,7 +16,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"maps"
-	"os"
 	"reflect"
 	"sort"
 	"strings"
@@ -473,7 +472,7 @@ func (t *SpockDiffTask) ExecuteTask() (err error) {
 			return fmt.Errorf("failed to marshal diffs: %w", err)
 		}
 
-		if err = os.WriteFile(outputFileName, jsonData, 0644); err != nil {
+		if err = utils.WriteFileSecure(outputFileName, jsonData); err != nil {
 			logger.Info("ERROR writing diff output to file %s: %v", outputFileName, err)
 			return fmt.Errorf("failed to write diffs file: %w", err)
 		}

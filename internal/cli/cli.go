@@ -851,6 +851,13 @@ func initTemplateFile(cmd *cli.Command, content string, defaultPath string, labe
 		return fmt.Errorf("failed to write %s to %s: %w", label, outputPath, err)
 	}
 
+	// WriteFile's mode is masked by the umask and ignored outright when the
+	// file already exists (--force), so enforce it. This matters most for
+	// pg_service.conf, which holds database credentials at 0600.
+	if err := os.Chmod(outputPath, perm); err != nil {
+		return fmt.Errorf("failed to set permissions on %s: %w", outputPath, err)
+	}
+
 	fmt.Printf("Wrote %s to %s\n", label, outputPath)
 	return nil
 }
