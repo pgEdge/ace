@@ -370,6 +370,9 @@ func teardownPostgresCluster(t *testing.T) {
 	}
 }
 
+// TestMain loads the ACE config, then brings up the three-node spock cluster
+// and the shared customers tables that every test in this package compares
+// against, and tears the cluster down once the run finishes.
 func TestMain(m *testing.M) {
 	os.Setenv(
 		"TESTCONTAINERS_RYUK_DISABLED",
