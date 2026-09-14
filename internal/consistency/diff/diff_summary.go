@@ -20,9 +20,9 @@ import (
 
 // MissingTableInfo records a table that was not found on every node.
 type MissingTableInfo struct {
-	Table       string   // schema-qualified table name
-	PresentOn   []string // node names where the table exists
-	MissingFrom []string // node names where the table does not exist
+	Table       string   `json:"table"`        // schema-qualified table name
+	PresentOn   []string `json:"present_on"`   // node names where the table exists
+	MissingFrom []string `json:"missing_from"` // node names where the table does not exist
 }
 
 // FailedTableInfo records a table whose diff failed along with the reason.

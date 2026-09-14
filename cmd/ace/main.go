@@ -13,6 +13,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -69,6 +70,15 @@ func main() {
 	err := app.Run(context.Background(), os.Args)
 	if err != nil {
 		logger.Error("%v", err)
+
+		// Default exit code is 1. A command can carry a more specific
+		// code by wrapping its error in pkg/common.ExitCodeError.
+		code := 1
+		var withCode interface{ ExitCode() int }
+		if errors.As(err, &withCode) {
+			code = withCode.ExitCode()
+		}
+		os.Exit(code)
 	}
 }
 
