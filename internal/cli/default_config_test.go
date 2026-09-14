@@ -20,25 +20,25 @@ import (
 	"github.com/pgedge/ace/pkg/config"
 )
 
-// exampleConfigPath is the repo-root reference copy that the README and
+// sampleConfigPath is the repo-root reference copy that the README and
 // docs/configuration.md link to. It must stay byte-identical to the template
 // embedded in ConfigInitCLI, otherwise the documented defaults are not the
 // defaults users actually get from `ace config init`.
-const exampleConfigPath = "../../ace.example.yaml"
+const sampleConfigPath = "../../ace.sample.yaml"
 
-func TestExampleConfigMatchesEmbeddedTemplate(t *testing.T) {
-	example, err := os.ReadFile(exampleConfigPath)
+func TestSampleConfigMatchesEmbeddedTemplate(t *testing.T) {
+	sample, err := os.ReadFile(sampleConfigPath)
 	if err != nil {
-		t.Fatalf("read %s: %v", exampleConfigPath, err)
+		t.Fatalf("read %s: %v", sampleConfigPath, err)
 	}
 
-	if string(example) != defaultConfigYAML {
+	if string(sample) != defaultConfigYAML {
 		t.Errorf(
 			"%s has drifted from internal/cli/default_config.yaml.\n"+
 				"`ace config init` writes the embedded template, so the two must "+
 				"match or the documented defaults are wrong.\n"+
-				"Run: cp internal/cli/default_config.yaml ace.example.yaml",
-			exampleConfigPath,
+				"Run: cp internal/cli/default_config.yaml ace.sample.yaml",
+			sampleConfigPath,
 		)
 	}
 }
