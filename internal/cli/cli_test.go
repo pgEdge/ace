@@ -175,15 +175,22 @@ func TestInterspersedFlags(t *testing.T) {
 }
 
 // `ace cluster init` writes database credentials, so pg_service.conf must end
-// up owner-only even when --force overwrites a world-readable file:
-// os.WriteFile's mode is umask-masked, and ignored for an existing file.
+// up owner-only even when --force overwrites a world-readable file, and must
+// not leave a byte of the file it replaced behind.
+//
+// The seed is deliberately longer than the template: if the write ever stops
+// truncating, the tail of the old file survives and this catches it.
 func TestClusterInitWritesOwnerOnlyServiceFile(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "pg_service.conf")
-	if err := os.WriteFile(path, []byte("stale"), 0o644); err != nil {
+	stale := strings.Repeat("stale credentials\n", 500)
+	if err := os.WriteFile(path, []byte(stale), 0o644); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
 	if err := os.Chmod(path, 0o644); err != nil {
 		t.Fatalf("seed mode: %v", err)
+	}
+	if len(stale) <= len(defaultPgServiceConf) {
+		t.Fatalf("seed must be longer than the template to detect a missing truncate")
 	}
 
 	cmd := &cli.Command{
@@ -205,5 +212,13 @@ func TestClusterInitWritesOwnerOnlyServiceFile(t *testing.T) {
 	}
 	if st.Mode().Perm()&0o077 != 0 {
 		t.Errorf("%s has mode %v, want owner-only for a credentials file", path, st.Mode().Perm())
+	}
+
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	if string(got) != defaultPgServiceConf {
+		t.Errorf("file was not fully replaced: got %d bytes, want %d", len(got), len(defaultPgServiceConf))
 	}
 }
