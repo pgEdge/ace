@@ -157,12 +157,19 @@ func (c *SchemaDiffCmd) parseSkipList() error {
 	return nil
 }
 
+// coldFrontSchemaName holds the internal state of the pgEdge ColdFront
+// extension, not user data. ACE never diffs or repairs it.
+const coldFrontSchemaName = "coldfront"
+
 func (c *SchemaDiffCmd) Validate() error {
 	if c.ClusterName == "" {
 		return fmt.Errorf("cluster name is required")
 	}
 	if c.SchemaName == "" {
 		return fmt.Errorf("schema name is required")
+	}
+	if c.SchemaName == coldFrontSchemaName {
+		return fmt.Errorf("schema %q is reserved for the pgEdge ColdFront extension; ACE does not diff it", coldFrontSchemaName)
 	}
 
 	nodeList, err := utils.ParseNodes(c.Nodes)
