@@ -12,10 +12,13 @@
 package diff
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/pgedge/ace/internal/consistency/schema"
 )
 
 // writeSkipFile is a helper that writes lines to a temp file and returns its path.
@@ -257,5 +260,187 @@ func TestParseSkipList_EmptyTableAfterSchema(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "missing table name") {
 		t.Errorf("error = %q, want it to mention missing table name", err.Error())
+	}
+}
+
+// TestValidate_StructureModeRejectsExplicitHTMLOutput verifies that
+// --output=html is rejected for --compare=structure when the user actually
+// passed --output: structure mode has no per-table diff files to render as
+// html, only findings.
+func TestValidate_StructureModeRejectsExplicitHTMLOutput(t *testing.T) {
+	cmd := &SchemaDiffCmd{
+		ClusterName:    "c1",
+		SchemaName:     "public",
+		Nodes:          "n1,n2",
+		Compare:        CompareStructure,
+		Output:         "html",
+		OutputExplicit: true,
+	}
+	err := cmd.Validate()
+	if err == nil {
+		t.Fatal("expected an error for --output=html with --compare=structure, got nil")
+	}
+	if !strings.Contains(err.Error(), "not supported with --compare=structure") {
+		t.Errorf("error = %q, want it to mention --compare=structure", err.Error())
+	}
+}
+
+// TestValidate_StructureModeRejectsAnyExplicitNonJSONOutput verifies the
+// guard is not special-cased to "html" alone: any explicit value other than
+// "json" is rejected, matching the docs' claim that structure mode only
+// accepts json.
+func TestValidate_StructureModeRejectsAnyExplicitNonJSONOutput(t *testing.T) {
+	cmd := &SchemaDiffCmd{
+		ClusterName:    "c1",
+		SchemaName:     "public",
+		Nodes:          "n1,n2",
+		Compare:        CompareStructure,
+		Output:         "xml",
+		OutputExplicit: true,
+	}
+	err := cmd.Validate()
+	if err == nil {
+		t.Fatal("expected an error for --output=xml with --compare=structure, got nil")
+	}
+	if !strings.Contains(err.Error(), "not supported with --compare=structure") {
+		t.Errorf("error = %q, want it to mention --compare=structure", err.Error())
+	}
+}
+
+// TestValidate_StructureModeAllowsDefaultOutputValue verifies the guard only
+// fires when the user actually passed --output: the flag's own default value
+// reaching Output with OutputExplicit left false must not trip it, or every
+// --compare=structure run that never mentions --output would fail.
+func TestValidate_StructureModeAllowsDefaultOutputValue(t *testing.T) {
+	cmd := &SchemaDiffCmd{
+		ClusterName: "c1",
+		SchemaName:  "public",
+		Nodes:       "n1,n2",
+		Compare:     CompareStructure,
+		Output:      "html", // the flag's default value, not user-chosen here
+		// OutputExplicit intentionally left false.
+	}
+	if err := cmd.Validate(); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+// TestValidate_StructureModeAllowsExplicitJSONOutput verifies the one
+// explicit value structure mode does support.
+func TestValidate_StructureModeAllowsExplicitJSONOutput(t *testing.T) {
+	cmd := &SchemaDiffCmd{
+		ClusterName:    "c1",
+		SchemaName:     "public",
+		Nodes:          "n1,n2",
+		Compare:        CompareStructure,
+		Output:         "json",
+		OutputExplicit: true,
+	}
+	if err := cmd.Validate(); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+// TestValidate_DataModeIgnoresOutputCompareGuard verifies the guard is
+// specific to --compare=structure: the default per-table data diff has
+// always accepted --output=html and must keep doing so.
+func TestValidate_DataModeIgnoresOutputCompareGuard(t *testing.T) {
+	cmd := &SchemaDiffCmd{
+		ClusterName:    "c1",
+		SchemaName:     "public",
+		Nodes:          "n1,n2",
+		Compare:        CompareData,
+		Output:         "html",
+		OutputExplicit: true,
+	}
+	if err := cmd.Validate(); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+// TestStructureDiffReport_JSONFieldNames pins the --output=json wire format:
+// a script parsing this depends on these exact key names, so a rename here
+// would be a breaking change that should show up as a failing test, not
+// silently ship.
+func TestStructureDiffReport_JSONFieldNames(t *testing.T) {
+	report := StructureDiffReport{
+		Schema: "public",
+		Nodes:  []string{"n1", "n2"},
+		MissingTables: []MissingTableInfo{
+			{Table: "public.foo", PresentOn: []string{"n1"}, MissingFrom: []string{"n2"}},
+		},
+		Comparisons: []StructureComparisonReport{
+			{
+				NodeA: "n1", NodeB: "n2",
+				Divergences: []schema.Divergence{
+					{
+						Object: "public.t.x", Kind: "column", Property: "type",
+						NodeA: "n1", NodeB: "n2", ValueOnA: "integer", ValueOnB: "bigint",
+						Rank: schema.RankNarrowed, NarrowSide: "n1",
+					},
+				},
+			},
+		},
+		ExitCode: schema.ExitNarrowed,
+	}
+
+	encoded, err := json.Marshal(report)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+
+	var decoded map[string]any
+	if err := json.Unmarshal(encoded, &decoded); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	for _, key := range []string{"schema", "nodes", "missing_tables", "comparisons", "exit_code"} {
+		if _, ok := decoded[key]; !ok {
+			t.Errorf("encoded report is missing top-level key %q: %s", key, encoded)
+		}
+	}
+
+	comparisons, _ := decoded["comparisons"].([]any)
+	if len(comparisons) != 1 {
+		t.Fatalf("comparisons = %v, want 1 entry", comparisons)
+	}
+	comparison, _ := comparisons[0].(map[string]any)
+	for _, key := range []string{"node_a", "node_b", "divergences"} {
+		if _, ok := comparison[key]; !ok {
+			t.Errorf("comparison entry is missing key %q: %s", key, encoded)
+		}
+	}
+
+	divs, _ := comparison["divergences"].([]any)
+	if len(divs) != 1 {
+		t.Fatalf("divergences = %v, want 1 entry", divs)
+	}
+	div, _ := divs[0].(map[string]any)
+	for _, key := range []string{
+		"object", "kind", "property", "node_a", "node_b",
+		"value_on_a", "value_on_b", "rank", "narrow_side",
+	} {
+		if _, ok := div[key]; !ok {
+			t.Errorf("divergence entry is missing key %q: %s", key, encoded)
+		}
+	}
+}
+
+// TestStructureDiffReport_OmitsEmptyMissingTables verifies missing_tables is
+// left out entirely (not printed as null or []) when nothing was missing -
+// the common case, and the one that should read as clean JSON.
+func TestStructureDiffReport_OmitsEmptyMissingTables(t *testing.T) {
+	report := StructureDiffReport{
+		Schema:      "public",
+		Nodes:       []string{"n1", "n2"},
+		Comparisons: []StructureComparisonReport{{NodeA: "n1", NodeB: "n2"}},
+		ExitCode:    schema.ExitIdentical,
+	}
+	encoded, err := json.Marshal(report)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if strings.Contains(string(encoded), "missing_tables") {
+		t.Errorf("expected missing_tables to be omitted when empty, got: %s", encoded)
 	}
 }
