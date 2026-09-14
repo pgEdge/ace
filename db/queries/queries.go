@@ -671,11 +671,9 @@ func BlockHashSQL(schema, table string, primaryKeyCols []string, mode string, in
 			endPlaceholders[i] = fmt.Sprintf("$%d", paramIndex)
 			paramIndex++
 		}
-		// Upper bound is always EXCLUSIVE: a block's range_end is the next
-		// block's range_start (from LEAD in the build offsets and from split
-		// points), so a closed "<=" would hash boundary rows into two adjacent
-		// leaves. XOR parent hashing then cancels the duplicate siblings, letting
-		// divergent data produce matching root hashes and hiding real conflicts.
+		// Upper bound is exclusive: range_end is the next block's range_start
+		// (from LEAD in the build offsets and from split points), so each row
+		// belongs to exactly one leaf.
 		operator := "<"
 		var upperExpr string
 		if len(primaryKeyCols) == 1 {
@@ -821,7 +819,7 @@ func GetColumnTypes(ctx context.Context, db DBQuerier, schema, table string) (ma
 	return types, nil
 }
 
-// TODO: Need to add Spock privilege checks!!
+// TODO: add Spock privilege checks.
 func CheckUserPrivileges(ctx context.Context, db DBQuerier, username, schema, table string) (*types.UserPrivileges, error) {
 	sql, err := RenderSQL(SQLTemplates.CheckUserPrivileges, nil)
 	if err != nil {
@@ -1344,6 +1342,558 @@ func GetPkeyColumnTypes(ctx context.Context, db DBQuerier, schema, table string,
 	return types, nil
 }
 
+// ColumnDescriptor is one column's structural properties for schema
+// structure comparison. It excludes attnum: column order is not part of
+// structural identity, and callers must not rely on row order for anything
+// but display.
+type ColumnDescriptor struct {
+	Table    string
+	Name     string
+	TypeOID  uint32 // this node's own type OID; local-only lookup key for domain/range/composite/enum descriptors, see GetColumnDescriptors
+	TypeMod  int32
+	TypeText string
+	// TypeNamespace/TypeName/TypeKind are the portable identity of the
+	// column's type (namespace.typname plus typtype); structural comparison
+	// keys on these fields.
+	TypeNamespace string
+	TypeName      string
+	TypeKind      string // 'b' base | 'd' domain | 'e' enum | 'r' range | 'c' composite
+	NotNull       bool
+	Identity      string // '' | 'a' (always) | 'd' (by default)
+	Generated     string // '' | 's' (stored)
+	Options       string // raw attoptions, as PostgreSQL prints the array; opaque to this layer
+	CollNamespace string
+	CollName      string
+	CollProvider  string
+	// CollVersion is the version the catalog recorded for this collation,
+	// not the version of the collation library in use now; see
+	// GetColumnDescriptors' SQL and GetDatabaseLocale.
+	CollVersion string
+	DefaultExpr string
+}
+
+// GetColumnDescriptors reads the structural properties of every live column
+// of the given tables in one round trip. See the GetColumnDescriptors SQL
+// template for exactly which catalog fields are read and why.
+func GetColumnDescriptors(ctx context.Context, db DBQuerier, schema string, tables []string) (map[string][]ColumnDescriptor, error) {
+	sql, err := RenderSQL(SQLTemplates.GetColumnDescriptors, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to render GetColumnDescriptors SQL: %w", err)
+	}
+
+	rows, err := db.Query(ctx, sql, schema, tables)
+	if err != nil {
+		return nil, fmt.Errorf("query to get column descriptors for schema %q failed: %w", schema, err)
+	}
+	defer rows.Close()
+
+	result := make(map[string][]ColumnDescriptor)
+	for rows.Next() {
+		var c ColumnDescriptor
+		if err := rows.Scan(&c.Table, &c.Name, &c.TypeOID, &c.TypeMod, &c.TypeText,
+			&c.TypeNamespace, &c.TypeName, &c.TypeKind,
+			&c.NotNull, &c.Identity, &c.Generated, &c.Options,
+			&c.CollNamespace, &c.CollName, &c.CollProvider, &c.CollVersion,
+			&c.DefaultExpr); err != nil {
+			return nil, fmt.Errorf("failed to scan column descriptor: %w", err)
+		}
+		result[c.Table] = append(result[c.Table], c)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("error iterating over column descriptors: %w", err)
+	}
+	return result, nil
+}
+
+// ReplicaIdentityDescriptor is the table's row-identity mode together with
+// the key the mode resolves to. KeyColumns/KeyOpclasses describe the primary
+// key when ReplicaIdentity is "d" and the designated index when it is "i";
+// both are empty for "f" (the whole row is the identity) and "n" (there is
+// none), which ReplicaIdentity itself already says.
+type ReplicaIdentityDescriptor struct {
+	Table           string
+	ReplicaIdentity string // "d" default | "n" nothing | "f" full | "i" specific index
+	KeyColumns      []string
+	KeyOpclasses    []string
+	// KeyLength is the designated index's indnkeyatts. It must equal
+	// len(KeyColumns): the query joins each key column to pg_attribute and
+	// pg_opclass, and a join that fails would drop a column from the key
+	// silently, turning a real key difference into an apparent match.
+	KeyLength int
+}
+
+// GetReplicaIdentityKey reads each table's replica identity mode and, when
+// it names an explicit index, that index's key columns and operator
+// classes, in index-column order.
+func GetReplicaIdentityKey(ctx context.Context, db DBQuerier, schema string, tables []string) (map[string]ReplicaIdentityDescriptor, error) {
+	sql, err := RenderSQL(SQLTemplates.GetReplicaIdentityKey, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to render GetReplicaIdentityKey SQL: %w", err)
+	}
+
+	rows, err := db.Query(ctx, sql, schema, tables)
+	if err != nil {
+		return nil, fmt.Errorf("query to get replica identity keys for schema %q failed: %w", schema, err)
+	}
+	defer rows.Close()
+
+	result := make(map[string]ReplicaIdentityDescriptor)
+	for rows.Next() {
+		var d ReplicaIdentityDescriptor
+		if err := rows.Scan(&d.Table, &d.ReplicaIdentity, &d.KeyColumns, &d.KeyOpclasses, &d.KeyLength); err != nil {
+			return nil, fmt.Errorf("failed to scan replica identity descriptor: %w", err)
+		}
+		// A short key is a wrong key, and a wrong key that still compares
+		// equal to the other node's is worse than an error. See KeyLength.
+		if len(d.KeyColumns) != d.KeyLength || len(d.KeyOpclasses) != d.KeyLength {
+			return nil, fmt.Errorf(
+				"replica identity key for table %q resolved to %d column(s) and %d operator class(es), but the index declares %d key column(s)",
+				d.Table, len(d.KeyColumns), len(d.KeyOpclasses), d.KeyLength)
+		}
+		result[d.Table] = d
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("error iterating over replica identity descriptors: %w", err)
+	}
+	return result, nil
+}
+
+// ConstraintDescriptor is one PRIMARY KEY, UNIQUE, CHECK, FOREIGN KEY or
+// EXCLUDE constraint. It deliberately has no Name field: PostgreSQL invents
+// names for unnamed constraints, so identical constraints on two nodes can
+// carry different names with no structural difference at all. Comparison
+// must go by Definition.
+type ConstraintDescriptor struct {
+	Table      string
+	Type       string // "p" | "u" | "c" | "f" | "x"
+	Definition string
+	Deferrable bool
+	Validated  bool
+}
+
+// GetConstraintDescriptors reads every PRIMARY KEY, UNIQUE, CHECK, FOREIGN
+// KEY and EXCLUDE constraint on the given tables.
+func GetConstraintDescriptors(ctx context.Context, db DBQuerier, schema string, tables []string) (map[string][]ConstraintDescriptor, error) {
+	sql, err := RenderSQL(SQLTemplates.GetConstraintDescriptors, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to render GetConstraintDescriptors SQL: %w", err)
+	}
+
+	rows, err := db.Query(ctx, sql, schema, tables)
+	if err != nil {
+		return nil, fmt.Errorf("query to get constraint descriptors for schema %q failed: %w", schema, err)
+	}
+	defer rows.Close()
+
+	result := make(map[string][]ConstraintDescriptor)
+	for rows.Next() {
+		var c ConstraintDescriptor
+		if err := rows.Scan(&c.Table, &c.Type, &c.Definition, &c.Deferrable, &c.Validated); err != nil {
+			return nil, fmt.Errorf("failed to scan constraint descriptor: %w", err)
+		}
+		result[c.Table] = append(result[c.Table], c)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("error iterating over constraint descriptors: %w", err)
+	}
+	return result, nil
+}
+
+// PartitionDescriptor says whether a table is itself a partition (and of
+// what bound) and/or is itself partitioned (and by what key). Empty strings
+// mean "not applicable", not "unknown".
+type PartitionDescriptor struct {
+	Table          string
+	PartitionBound string
+	PartitionKey   string
+}
+
+// GetPartitionDescriptors reads partition bound and partition key
+// information for the given tables.
+func GetPartitionDescriptors(ctx context.Context, db DBQuerier, schema string, tables []string) (map[string]PartitionDescriptor, error) {
+	sql, err := RenderSQL(SQLTemplates.GetPartitionDescriptors, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to render GetPartitionDescriptors SQL: %w", err)
+	}
+
+	rows, err := db.Query(ctx, sql, schema, tables)
+	if err != nil {
+		return nil, fmt.Errorf("query to get partition descriptors for schema %q failed: %w", schema, err)
+	}
+	defer rows.Close()
+
+	result := make(map[string]PartitionDescriptor)
+	for rows.Next() {
+		var d PartitionDescriptor
+		if err := rows.Scan(&d.Table, &d.PartitionBound, &d.PartitionKey); err != nil {
+			return nil, fmt.Errorf("failed to scan partition descriptor: %w", err)
+		}
+		result[d.Table] = d
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("error iterating over partition descriptors: %w", err)
+	}
+	return result, nil
+}
+
+// DomainDescriptor is what a domain (pg_type.typtype = 'd') constrains,
+// resolved one level of typbasetype deep. BaseTypeNamespace/BaseTypeName/
+// BaseTypeMod carry the same portable (namespace, name, typmod) shape as a
+// column's own type, so the same comparison logic applies to both. OID
+// appears only as the map key (see GetDomainDescriptors); it is local to
+// this node.
+type DomainDescriptor struct {
+	Namespace         string
+	Name              string
+	BaseTypeNamespace string
+	BaseTypeName      string
+	// BaseTypeKind is the base type's typtype, part of its identity: see
+	// GetDomainDescriptors' base_kind.
+	BaseTypeKind string
+	BaseTypeMod  int32
+	// BaseTypeText is the base type as format_type prints it, modifier
+	// included, for display (e.g. "character varying(20)"); nothing
+	// compares it (see GetDomainDescriptors).
+	BaseTypeText string
+	NotNull      bool
+	Default      string
+	Checks       []string // CHECK definitions, sorted by definition text (see GetDomainDescriptors)
+}
+
+// GetDomainDescriptors resolves every domain named by oids, keyed by that
+// OID. oids must come from this node's own GetColumnDescriptors result
+// (or a recursive domain-of-domain lookup on this node); the map keys are
+// local to this node — DomainDescriptor's fields are what get compared
+// across nodes.
+func GetDomainDescriptors(ctx context.Context, db DBQuerier, oids []uint32) (map[uint32]DomainDescriptor, error) {
+	result := make(map[uint32]DomainDescriptor)
+	if len(oids) == 0 {
+		return result, nil
+	}
+
+	sql, err := RenderSQL(SQLTemplates.GetDomainDescriptors, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to render GetDomainDescriptors SQL: %w", err)
+	}
+
+	rows, err := db.Query(ctx, sql, oids)
+	if err != nil {
+		return nil, fmt.Errorf("query to get domain descriptors failed: %w", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var oid uint32
+		var d DomainDescriptor
+		if err := rows.Scan(&oid, &d.Namespace, &d.Name, &d.BaseTypeNamespace, &d.BaseTypeName,
+			&d.BaseTypeKind, &d.BaseTypeMod, &d.BaseTypeText, &d.NotNull, &d.Default,
+			&d.Checks); err != nil {
+			return nil, fmt.Errorf("failed to scan domain descriptor: %w", err)
+		}
+		result[oid] = d
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("error iterating over domain descriptors: %w", err)
+	}
+	return result, nil
+}
+
+// RangeDescriptor is what makes a range type (pg_type.typtype = 'r') mean
+// what it means: its element type and the collation/opclass/functions that
+// order and canonicalise it. Canonical/SubtypeDiff are already portable
+// text (see GetRangeDescriptors — printed via ::regprocedure::text), not
+// OIDs.
+type RangeDescriptor struct {
+	Namespace        string
+	Name             string
+	SubtypeNamespace string
+	SubtypeName      string
+	// SubtypeKind is the subtype's typtype, part of its identity: see
+	// GetDomainDescriptors' base_kind.
+	SubtypeKind string
+	// Collation and Opclass are schema-qualified, or empty when the range
+	// has none.
+	Collation   string
+	Opclass     string
+	Canonical   string
+	SubtypeDiff string
+}
+
+// GetRangeDescriptors resolves every range type named by oids, keyed by
+// that OID (this node's own — see GetDomainDescriptors' same caveat).
+func GetRangeDescriptors(ctx context.Context, db DBQuerier, oids []uint32) (map[uint32]RangeDescriptor, error) {
+	result := make(map[uint32]RangeDescriptor)
+	if len(oids) == 0 {
+		return result, nil
+	}
+
+	sql, err := RenderSQL(SQLTemplates.GetRangeDescriptors, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to render GetRangeDescriptors SQL: %w", err)
+	}
+
+	rows, err := db.Query(ctx, sql, oids)
+	if err != nil {
+		return nil, fmt.Errorf("query to get range descriptors failed: %w", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var oid uint32
+		var d RangeDescriptor
+		if err := rows.Scan(&oid, &d.Namespace, &d.Name, &d.SubtypeNamespace, &d.SubtypeName,
+			&d.SubtypeKind, &d.Collation, &d.Opclass, &d.Canonical, &d.SubtypeDiff); err != nil {
+			return nil, fmt.Errorf("failed to scan range descriptor: %w", err)
+		}
+		result[oid] = d
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("error iterating over range descriptors: %w", err)
+	}
+	return result, nil
+}
+
+// CompositeAttribute is one field of a composite type (pg_type.typtype =
+// 'c'), in attnum order: attribute order is part of a composite type's
+// structural identity (see GetCompositeAttributes).
+type CompositeAttribute struct {
+	// AttNum is the attribute's own pg_attribute.attnum, not its position
+	// in Attributes: DROP ATTRIBUTE leaves the surviving attributes'
+	// attnums alone, so this is the ordinal that stays comparable across
+	// nodes. See GetCompositeAttributes.
+	AttNum        int16
+	Name          string
+	TypeNamespace string
+	TypeName      string
+	// TypeKind is the attribute type's typtype, part of its identity: see
+	// GetDomainDescriptors' base_kind.
+	TypeKind string
+	TypeMod  int32
+	// TypeText is the attribute's type as format_type prints it. Display
+	// only, never compared (see BaseTypeText).
+	TypeText string
+	// Collation is schema-qualified, or empty when the attribute has none.
+	Collation string
+}
+
+// CompositeDescriptor is one composite type's own portable identity plus
+// its attributes, in declaration order.
+type CompositeDescriptor struct {
+	Namespace  string
+	Name       string
+	Attributes []CompositeAttribute
+}
+
+// GetCompositeAttributes resolves every composite type named by oids,
+// keyed by that OID (this node's own), each with its attributes in
+// declaration order.
+func GetCompositeAttributes(ctx context.Context, db DBQuerier, oids []uint32) (map[uint32]CompositeDescriptor, error) {
+	result := make(map[uint32]CompositeDescriptor)
+	if len(oids) == 0 {
+		return result, nil
+	}
+
+	sql, err := RenderSQL(SQLTemplates.GetCompositeAttributes, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to render GetCompositeAttributes SQL: %w", err)
+	}
+
+	rows, err := db.Query(ctx, sql, oids)
+	if err != nil {
+		return nil, fmt.Errorf("query to get composite attributes failed: %w", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var oid uint32
+		var namespace, name string
+		var a CompositeAttribute
+		if err := rows.Scan(&oid, &namespace, &name, &a.AttNum, &a.Name,
+			&a.TypeNamespace, &a.TypeName, &a.TypeKind, &a.TypeMod, &a.TypeText,
+			&a.Collation); err != nil {
+			return nil, fmt.Errorf("failed to scan composite attribute: %w", err)
+		}
+		d := result[oid]
+		d.Namespace, d.Name = namespace, name
+		d.Attributes = append(d.Attributes, a)
+		result[oid] = d
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("error iterating over composite attributes: %w", err)
+	}
+	return result, nil
+}
+
+// EnumDescriptor is one enum type's own portable identity plus its labels,
+// in enumsortorder.
+type EnumDescriptor struct {
+	Namespace string
+	Name      string
+	Labels    []string
+}
+
+// GetEnumLabels resolves every enum type named by oids, keyed by that OID
+// (this node's own), each with its labels in enumsortorder — order is the
+// entire point of an enum.
+func GetEnumLabels(ctx context.Context, db DBQuerier, oids []uint32) (map[uint32]EnumDescriptor, error) {
+	result := make(map[uint32]EnumDescriptor)
+	if len(oids) == 0 {
+		return result, nil
+	}
+
+	sql, err := RenderSQL(SQLTemplates.GetEnumLabels, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to render GetEnumLabels SQL: %w", err)
+	}
+
+	rows, err := db.Query(ctx, sql, oids)
+	if err != nil {
+		return nil, fmt.Errorf("query to get enum labels failed: %w", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var oid uint32
+		var namespace, name, label string
+		if err := rows.Scan(&oid, &namespace, &name, &label); err != nil {
+			return nil, fmt.Errorf("failed to scan enum label: %w", err)
+		}
+		d := result[oid]
+		d.Namespace, d.Name = namespace, name
+		d.Labels = append(d.Labels, label)
+		result[oid] = d
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("error iterating over enum labels: %w", err)
+	}
+	return result, nil
+}
+
+// TypeReference is one type's kind plus the OIDs of the types it is built
+// out of. Every OID here is local to the node it was read from.
+type TypeReference struct {
+	OID  uint32
+	Kind string // typtype: 'b' base | 'd' domain | 'e' enum | 'r' range | 'm' multirange | 'c' composite | 'p' pseudo
+	// Refs holds each referenced type, with zeroes dropped: an array's
+	// element type, a domain's base type, a range's subtype, a
+	// multirange's range, and a composite's attribute types.
+	Refs []uint32
+}
+
+// GetTypeReferences reads the kind of every type in oids and the types each
+// of them refers to, for a caller resolving the full set of types a schema
+// depends on. See the GetTypeReferences SQL template for which catalog
+// edges are followed and why a single pass over a column's own typtype is
+// not enough.
+func GetTypeReferences(ctx context.Context, db DBQuerier, oids []uint32) (map[uint32]TypeReference, error) {
+	result := make(map[uint32]TypeReference)
+	if len(oids) == 0 {
+		return result, nil
+	}
+
+	sql, err := RenderSQL(SQLTemplates.GetTypeReferences, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to render GetTypeReferences SQL: %w", err)
+	}
+
+	rows, err := db.Query(ctx, sql, oids)
+	if err != nil {
+		return nil, fmt.Errorf("query to get type references failed: %w", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var (
+			ref                                          TypeReference
+			element, base, rangeSubtype, multirangeRange uint32
+			attributes                                   []uint32
+		)
+		if err := rows.Scan(&ref.OID, &ref.Kind, &element, &base,
+			&rangeSubtype, &multirangeRange, &attributes); err != nil {
+			return nil, fmt.Errorf("failed to scan type reference: %w", err)
+		}
+		for _, candidate := range append([]uint32{element, base, rangeSubtype, multirangeRange}, attributes...) {
+			if candidate != 0 {
+				ref.Refs = append(ref.Refs, candidate)
+			}
+		}
+		result[ref.OID] = ref
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("error iterating over type references: %w", err)
+	}
+	return result, nil
+}
+
+// DatabaseLocale is the collation configuration of one database.
+type DatabaseLocale struct {
+	Name     string // datname, for a report that has to say which database
+	Collate  string // datcollate
+	Ctype    string // datctype
+	Provider string // datlocprovider: 'c' libc | 'i' icu | 'b' builtin; empty before PostgreSQL 15
+	Locale   string // datlocale, or daticulocale before PostgreSQL 17; empty when unset
+}
+
+// GetDatabaseLocale reads the connected database's collation settings.
+//
+// A column that does not name a collation of its own inherits these, and
+// inherits them invisibly: pg_attribute records the "default" collation on
+// every node whatever the database was created with. Comparing this is the
+// only way to notice that two nodes holding the same rows disagree about
+// how those rows sort. See the GetDatabaseLocale SQL template.
+func GetDatabaseLocale(ctx context.Context, db DBQuerier) (DatabaseLocale, error) {
+	var locale DatabaseLocale
+
+	sql, err := RenderSQL(SQLTemplates.GetDatabaseLocale, nil)
+	if err != nil {
+		return locale, fmt.Errorf("failed to render GetDatabaseLocale SQL: %w", err)
+	}
+
+	row := db.QueryRow(ctx, sql)
+	if err := row.Scan(&locale.Name, &locale.Collate, &locale.Ctype,
+		&locale.Provider, &locale.Locale); err != nil {
+		return locale, fmt.Errorf("failed to scan database locale: %w", err)
+	}
+	return locale, nil
+}
+
+// QuoteIdentifiers renders every distinct name in names the way this node's
+// own PostgreSQL would write it back via quote_ident(), so identifiers
+// round-trip unambiguously.
+//
+// The returned map has one entry per distinct input name. A name that does
+// not come back is absent; callers should treat that as "print the raw
+// name" for display.
+func QuoteIdentifiers(ctx context.Context, db DBQuerier, names []string) (map[string]string, error) {
+	result := make(map[string]string, len(names))
+	if len(names) == 0 {
+		return result, nil
+	}
+
+	sql, err := RenderSQL(SQLTemplates.QuoteIdentifiers, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to render QuoteIdentifiers SQL: %w", err)
+	}
+
+	rows, err := db.Query(ctx, sql, names)
+	if err != nil {
+		return nil, fmt.Errorf("query to quote identifiers failed: %w", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var raw, quoted string
+		if err := rows.Scan(&raw, &quoted); err != nil {
+			return nil, fmt.Errorf("failed to scan quoted identifier: %w", err)
+		}
+		result[raw] = quoted
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("error iterating over quoted identifiers: %w", err)
+	}
+	return result, nil
+}
+
 func GetPkeyType(ctx context.Context, db DBQuerier, schema, table, pkey string) (string, error) {
 	sql, err := RenderSQL(SQLTemplates.GetPkeyType, nil)
 	if err != nil {
@@ -1454,7 +2004,6 @@ func UpdateLeafHashesBatch(ctx context.Context, db DBQuerier, mtreeTable string,
 
 	return nil
 }
-
 
 // MarkLeavesDirtyByPositions flags the given leaf blocks for rehash. Used to
 // refresh leaves whose stored hash is stale relative to the live table data
@@ -2163,7 +2712,6 @@ func UpdateBlockRangeStartComposite(ctx context.Context, db DBQuerier, mtreeTabl
 	}
 	return nil
 }
-
 
 func GetMinValComposite(ctx context.Context, db DBQuerier, schema, table string, pkeyCols []string) ([]interface{}, error) {
 	cols := make([]string, len(pkeyCols))
@@ -2986,9 +3534,10 @@ func DropCDCMetadataTable(ctx context.Context, db DBQuerier) error {
 	return nil
 }
 
-// pubCommitLSN is empty for legacy metadata rows that pre-date the
-// pub_commit_lsn column; callers must treat empty as "invariant
-// uncheckable" and skip the publication-commit guard with a warning.
+// GetCDCMetadata reads cdc metadata for a publication. pubCommitLSN is
+// empty for legacy rows that pre-date that column; callers must treat
+// empty as uncheckable and skip the publication-commit guard with a
+// warning.
 func GetCDCMetadata(ctx context.Context, db DBQuerier, publicationName string) (slotName, startLSN string, tables []string, pubCommitLSN string, err error) {
 	sql, err := RenderSQL(SQLTemplates.GetCDCMetadata, nil)
 	if err != nil {
@@ -3001,9 +3550,9 @@ func GetCDCMetadata(ctx context.Context, db DBQuerier, publicationName string) (
 	return slotName, startLSN, tables, pubCommitLSN, nil
 }
 
-// Init path only. Ongoing flushes use UpdateCDCMetadata, which deliberately
-// leaves pub_commit_lsn untouched so the listen.go guard always compares
-// against the LSN captured at the matching init.
+// InitCDCMetadata sets cdc metadata at init time, including pub_commit_lsn.
+// Ongoing flushes use UpdateCDCMetadata, which leaves pub_commit_lsn
+// untouched so it always reflects the LSN captured at init.
 func InitCDCMetadata(ctx context.Context, db DBQuerier, publicationName, slotName, startLSN, pubCommitLSN string, tables []string) error {
 	sql, err := RenderSQL(SQLTemplates.InitCDCMetadata, nil)
 	if err != nil {
@@ -3019,10 +3568,11 @@ func InitCDCMetadata(ctx context.Context, db DBQuerier, publicationName, slotNam
 	return nil
 }
 
-// Called mid-Phase-A, after CREATE PUBLICATION, so the captured value is
-// strictly less than Phase A's commit LSN. The slot created in Phase B
-// has consistent_point >= that commit LSN, hence consistent_point >
-// captured value: a safe lower bound for any valid replication start LSN.
+// CurrentWalInsertLSN returns the current WAL insert LSN. Called mid Phase
+// A, after CREATE PUBLICATION, so the value is strictly less than Phase
+// A's commit LSN; since Phase B's slot has consistent_point >= that commit
+// LSN, the returned value is a safe lower bound for any valid replication
+// start LSN.
 func CurrentWalInsertLSN(ctx context.Context, db DBQuerier) (string, error) {
 	sql, err := RenderSQL(SQLTemplates.CurrentWalInsertLSN, nil)
 	if err != nil {
