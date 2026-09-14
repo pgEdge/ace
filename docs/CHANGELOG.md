@@ -5,6 +5,26 @@ All notable changes to ACE will be captured in this document. This project follo
 ## [v2.1.1]
 
 ### Added
+- **`schema-diff --compare=structure` checks table definitions directly,
+  without reading any data.** This new mode checks column type, `NOT NULL`,
+  identity, generated, storage options, default, and collation; the replica
+  identity key and its operator classes; `PRIMARY KEY`, `UNIQUE`, `CHECK`,
+  `FOREIGN KEY`, and `EXCLUDE` constraints; partition bounds; and the full
+  definition of every domain, range, composite, and enum type used by a
+  compared column, not just its name. Types are matched by name and
+  definition, never by OID, because two nodes set up on their own can give
+  the same user-defined type a different OID. Each difference found gets one
+  of five ranks (`cosmetic`, `equivalent-differing`, `narrowed`,
+  `incompatible`, `absent`), and the process exits with the code of the
+  single worst rank found (`0`, `16`, `32`, `48`, or `64`). `--skip-tables`
+  and `--skip-file` work the same way as they do for the default data diff.
+  `--output=json` prints a structured report instead of text, but only when
+  `--output` is given by hand on the command line, since `json` is also
+  `--output`'s default value for every other mode. Not yet supported:
+  `--schedule` and `--output=html`. Not checked by this mode:
+  non-constraint indexes, triggers, rules, sequences, views, materialized
+  views, storage parameters, column order, comments, and ACLs. See the
+  `schema-diff` command docs for the full list of findings and exit codes.
 - **Foreign tables, views, and partitioned tables with foreign partitions
   are refused with a clear message.** `table-diff`, `table-repair`, and
   `mtree` previously failed on these with "no primary key found", or in the
