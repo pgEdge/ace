@@ -847,15 +847,30 @@ func initTemplateFile(cmd *cli.Command, content string, defaultPath string, labe
 		}
 	}
 
-	if err := os.WriteFile(outputPath, []byte(content), perm); err != nil {
+	// Restrict the file before any content reaches it. pg_service.conf holds
+	// database credentials, and with --force over an existing world-readable
+	// copy, writing first and chmod'ing after would leave them exposed in
+	// between. Opening without O_TRUNC lets us fix the mode, then empty the
+	// file, then write. The Chmod is not redundant: O_CREATE's mode is
+	// umask-masked, and ignored outright for a file that already exists.
+	f, err := os.OpenFile(outputPath, os.O_WRONLY|os.O_CREATE, perm)
+	if err != nil {
+		return fmt.Errorf("failed to create %s at %s: %w", label, outputPath, err)
+	}
+	if err := f.Chmod(perm); err != nil {
+		f.Close()
+		return fmt.Errorf("failed to set permissions on %s: %w", outputPath, err)
+	}
+	if err := f.Truncate(0); err != nil {
+		f.Close()
+		return fmt.Errorf("failed to truncate %s: %w", outputPath, err)
+	}
+	if _, err := f.WriteString(content); err != nil {
+		f.Close()
 		return fmt.Errorf("failed to write %s to %s: %w", label, outputPath, err)
 	}
-
-	// WriteFile's mode is masked by the umask and ignored outright when the
-	// file already exists (--force), so enforce it. This matters most for
-	// pg_service.conf, which holds database credentials at 0600.
-	if err := os.Chmod(outputPath, perm); err != nil {
-		return fmt.Errorf("failed to set permissions on %s: %w", outputPath, err)
+	if err := f.Close(); err != nil {
+		return fmt.Errorf("failed to write %s to %s: %w", label, outputPath, err)
 	}
 
 	fmt.Printf("Wrote %s to %s\n", label, outputPath)
