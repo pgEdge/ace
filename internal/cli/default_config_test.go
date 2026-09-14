@@ -20,12 +20,14 @@ import (
 	"github.com/pgedge/ace/pkg/config"
 )
 
-// sampleConfigPath is the repo-root reference copy that the README and
-// docs/configuration.md link to. It must stay byte-identical to the template
-// embedded in ConfigInitCLI, otherwise the documented defaults are not the
-// defaults users actually get from `ace config init`.
+// sampleConfigPath is the repo-root reference copy the README and
+// docs/configuration.md link to.
 const sampleConfigPath = "../../ace.sample.yaml"
 
+// TestSampleConfigMatchesEmbeddedTemplate keeps ace.sample.yaml byte-identical
+// to the template embedded in ConfigInitCLI. `ace config init` writes the
+// template, so any drift means the documented defaults are not the ones users
+// actually get.
 func TestSampleConfigMatchesEmbeddedTemplate(t *testing.T) {
 	sample, err := os.ReadFile(sampleConfigPath)
 	if err != nil {
