@@ -34,6 +34,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/pgedge/ace/db/queries"
+	"github.com/pgedge/ace/internal/consistency/schema"
 	auth "github.com/pgedge/ace/internal/infra/db"
 	utils "github.com/pgedge/ace/pkg/common"
 	"github.com/pgedge/ace/pkg/config"
@@ -108,14 +109,13 @@ type TableDiffTask struct {
 	DiffResult types.DiffOutput
 	diffMutex  sync.Mutex
 
-	firstError      error
-	firstErrorMu    sync.Mutex
-	errorRecorded   atomic.Bool
+	firstError    error
+	firstErrorMu  sync.Mutex
+	errorRecorded atomic.Bool
 
 	// pairDiffRows enforces max_diff_rows per node pair, keyed by pairKey ->
-	// *atomic.Int64. A single shared counter would make the cap a budget split
-	// across all C(n,2) pairs on clusters with more than two nodes, truncating
-	// the report and requiring multiple repair passes.
+	// *atomic.Int64, so one pair's divergence cannot exhaust the row budget
+	// on clusters with more than two nodes.
 	pairDiffRows       sync.Map
 	diffLimitTriggered atomic.Bool
 
@@ -181,16 +181,15 @@ func (t *TableDiffTask) pairCounter(pairKey string) *atomic.Int64 {
 }
 
 // shouldStopPair returns true if enumeration for this node pair should cease,
-// either because the pair reached max_diff_rows or because a node error has been
-// recorded (circuit breaker that prevents OOM when a node starts failing). The
-// row limit is per pair so one pair's divergence cannot exhaust another pair's
-// budget on clusters with more than two nodes.
+// either because the pair reached max_diff_rows or because a node error has
+// been recorded (a circuit breaker that prevents OOM when a node starts
+// failing). The row limit is per pair so one pair's divergence cannot
+// exhaust another pair's budget on clusters with more than two nodes.
 //
-// The cap is best-effort, not exact: this gate is checked before the diffMutex
-// is taken, so several concurrent comparisons for the same pair can each pass it
-// just under the limit and then append their batches, leaving the pair a few
-// rows over max_diff_rows. That is acceptable for a report-size bound and
-// matches the prior global-counter behaviour.
+// The cap is best-effort: this gate is checked before diffMutex is taken,
+// so concurrent comparisons for the same pair can each pass it just under
+// the limit, leaving the pair a few rows over max_diff_rows. That is
+// acceptable for a report-size bound.
 func (t *TableDiffTask) shouldStopPair(pairKey string) bool {
 	if t.hasError() {
 		return true
@@ -201,7 +200,7 @@ func (t *TableDiffTask) shouldStopPair(pairKey string) bool {
 	return t.pairCounter(pairKey).Load() >= t.MaxDiffRows
 }
 
-// It's imperative for the caller to hold the diffMutex while calling this function
+// incrementPairDiffRowsLocked requires the caller to hold diffMutex.
 func (t *TableDiffTask) incrementPairDiffRowsLocked(pairKey string, delta int) bool {
 	if delta <= 0 || t.MaxDiffRows <= 0 {
 		return false
@@ -243,9 +242,8 @@ func (t *TableDiffTask) loadNodeOriginNames() error {
 
 // flatNodeOriginNames merges all per-node origin maps into a single map for
 // lookup purposes (e.g. resolving --against-origin). If the same roident
-// appears on multiple nodes, the last one wins — this is acceptable because
-// resolveAgainstOrigin is only used with spock (where roidents are global)
-// or for user-facing name resolution where any match suffices.
+// appears on multiple nodes, the last one wins: roidents are global under
+// spock, and any match suffices for user-facing name resolution.
 func (t *TableDiffTask) flatNodeOriginNames() map[string]string {
 	flat := make(map[string]string)
 	for _, nodeMap := range t.NodeOriginNames {
@@ -791,6 +789,8 @@ func (t *TableDiffTask) RunChecks(skipValidation bool) (err error) {
 	}
 
 	var cols, key []string
+	var refHostname string
+	var refNodeInfo map[string]any
 	hostMap := make(map[string]string)
 
 	schema := t.Schema
@@ -856,10 +856,12 @@ func (t *TableDiffTask) RunChecks(skipValidation bool) (err error) {
 			if len(cols) == 0 && len(key) == 0 {
 				cols = currCols
 				key = currKey
+				refHostname = hostname
+				refNodeInfo = nodeInfo
 			}
 
 			if !reflect.DeepEqual(currCols, cols) || !reflect.DeepEqual(currKey, key) {
-				return fmt.Errorf("table schemas don't match between nodes")
+				return t.diagnoseSchemaMismatch(schema, table, refNodeInfo, refHostname, cols, key, hostname, conn, currCols, currKey)
 			}
 
 			cols = currCols
@@ -945,6 +947,60 @@ func (t *TableDiffTask) RunChecks(skipValidation bool) (err error) {
 	}
 
 	return nil
+}
+
+// diagnoseSchemaMismatch runs after RunChecks' cheap column/key-name
+// comparison finds a mismatch. It names the actual difference by reusing
+// internal/consistency/schema's structural comparison, the same one
+// schema-diff itself uses.
+//
+// It re-reads both nodes' full structural descriptors in a fresh
+// REPEATABLE READ transaction each, reconnecting to the reference node
+// since RunChecks already closed that connection. This cost is paid only
+// on the error path.
+func (t *TableDiffTask) diagnoseSchemaMismatch(
+	schemaName, table string,
+	refNodeInfo map[string]any, refHostname string, refCols, refKey []string,
+	curHostname string, curConn *pgxpool.Pool, curCols, curKey []string,
+) error {
+	fallback := fmt.Errorf("table schemas don't match between nodes %s and %s: columns %v vs %v, key %v vs %v",
+		refHostname, curHostname, refCols, curCols, refKey, curKey)
+
+	refConn, err := auth.GetClusterNodeConnection(t.Ctx, refNodeInfo, t.connOpts())
+	if err != nil {
+		return fmt.Errorf("%w (could not reconnect to %s for a detailed diff: %v)", fallback, refHostname, err)
+	}
+	defer refConn.Close()
+
+	refSnap, err := schema.CollectSnapshot(t.Ctx, refConn, refHostname, schemaName, []string{table})
+	if err != nil {
+		return fmt.Errorf("%w (could not collect a detailed diff from %s: %v)", fallback, refHostname, err)
+	}
+	curSnap, err := schema.CollectSnapshot(t.Ctx, curConn, curHostname, schemaName, []string{table})
+	if err != nil {
+		return fmt.Errorf("%w (could not collect a detailed diff from %s: %v)", fallback, curHostname, err)
+	}
+
+	divergences := schema.Compare(schemaName, []string{table}, refSnap, curSnap)
+	if len(divergences) == 0 {
+		// The name-only check disagreed but the structural comparison found
+		// nothing reportable; fall back to what table-diff itself saw.
+		return fallback
+	}
+
+	var b strings.Builder
+	fmt.Fprintf(&b, "table '%s.%s' schema differs between nodes %s and %s:\n", schemaName, table, refHostname, curHostname)
+	for _, d := range divergences {
+		if d.Property != "" {
+			fmt.Fprintf(&b, "  - %s.%s: on %s = %q, on %s = %q [%s]\n", d.Object, d.Property, d.NodeA, d.ValueOnA, d.NodeB, d.ValueOnB, d.Rank)
+		} else {
+			fmt.Fprintf(&b, "  - %s (%s): on %s = %q, on %s = %q [%s]\n", d.Object, d.Kind, d.NodeA, d.ValueOnA, d.NodeB, d.ValueOnB, d.Rank)
+		}
+		if d.Note != "" {
+			fmt.Fprintf(&b, "    (%s)\n", d.Note)
+		}
+	}
+	return errors.New(strings.TrimRight(b.String(), "\n"))
 }
 
 func (t *TableDiffTask) cleanupFilteredView() {
@@ -1405,7 +1461,6 @@ func (t *TableDiffTask) ExecuteTask() (err error) {
 		newInitialRange := Range{Start: nil, End: firstOriginalStart}
 		ranges = append([]Range{newInitialRange}, ranges...)
 	}
-	// }
 
 	logger.Debug("Created %d initial ranges to compare", len(ranges))
 	logger.Debug("Ranges: %v", ranges)
@@ -1550,17 +1605,17 @@ func (t *TableDiffTask) ExecuteTask() (err error) {
 			}
 			diffWg.Add(1)
 			go func(task RecursiveDiffTask) {
-				// Wait for a semaphore slot — blocks here if maxConcurrent goroutines
-				// are already doing diff work. This prevents OOM from unbounded fan-out.
-				// Uses select so that context cancellation unblocks the wait and avoids
-				// hanging diffWg.Wait() indefinitely.
+				// Wait for a semaphore slot; blocks if maxConcurrent goroutines
+				// are already doing diff work, preventing OOM from unbounded
+				// fan-out. select lets context cancellation unblock the wait
+				// so diffWg.Wait() cannot hang.
 				select {
 				case t.diffSem <- struct{}{}:
 					// Got a slot — release it when this goroutine finishes.
 					defer func() { <-t.diffSem }()
 				case <-ctx.Done():
-					// Context was cancelled while waiting for a slot. Decrement the
-					// WaitGroup so the caller's diffWg.Wait() can return.
+					// Context cancelled while waiting for a slot; decrement so
+					// diffWg.Wait() can return.
 					diffWg.Done()
 					diffBar.Increment()
 					return
@@ -1758,9 +1813,8 @@ func (t *TableDiffTask) generateSubRanges(
 	if parentRange.End != nil {
 		endVal := parentRange.End
 		if len(t.Key) == 1 {
-			// In hashRange, the end is exclusive (<), but here for counting and splitting
-			// we use inclusive (<=) to match fetchRows. This is acceptable because
-			// we are splitting a mismatched range, and slight overlap is okay.
+			// Uses inclusive (<=) to match fetchRows; slight overlap from
+			// splitting a mismatched range is acceptable.
 			conditions = append(conditions, fmt.Sprintf("%s <= $%d", quotedKeyCols[0], paramIdx))
 			args = append(args, endVal)
 			paramIdx++
@@ -2002,8 +2056,7 @@ func (t *TableDiffTask) recursiveDiff(
 	if len(subRanges) == 0 {
 		logger.Debug("[%s vs %s] Range %v-%v could not be split further (generateSubRangesViaNtile returned empty). Treating as unit.",
 			node1Name, node2Name, currentRange.Start, currentRange.End)
-		// Fallback: treat current range as the smallest unit and compare.
-		// Call self with current range but force small enough size
+		// Fallback: treat the range as the smallest unit and compare it.
 		task.CurrentEstimatedBlockSize = finalCompareUnitSize
 		newWg := &sync.WaitGroup{}
 		newWg.Add(1)
@@ -2075,17 +2128,17 @@ func (t *TableDiffTask) recursiveDiff(
 
 			wg.Add(1)
 			go func(sr Range, newEstimatedBlockSize int) {
-				// Wait for a semaphore slot — blocks here if maxConcurrent goroutines
-				// are already doing diff work. This prevents OOM from unbounded fan-out.
-				// Uses select so that context cancellation unblocks the wait and avoids
-				// hanging wg.Wait() indefinitely.
+				// Wait for a semaphore slot; blocks if maxConcurrent goroutines
+				// are already doing diff work, preventing OOM from unbounded
+				// fan-out. select lets context cancellation unblock the wait
+				// so wg.Wait() cannot hang.
 				select {
 				case t.diffSem <- struct{}{}:
 					// Got a slot — release it when this goroutine finishes.
 					defer func() { <-t.diffSem }()
 				case <-ctx.Done():
-					// Context was cancelled while waiting for a slot. Decrement the
-					// WaitGroup so the caller's wg.Wait() can return.
+					// Context cancelled while waiting for a slot; decrement so
+					// wg.Wait() can return.
 					wg.Done()
 					return
 				}
