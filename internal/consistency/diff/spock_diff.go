@@ -25,6 +25,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/pgedge/ace/db/queries"
+	"github.com/pgedge/ace/internal/consistency/topology"
 	"github.com/pgedge/ace/internal/infra/db"
 	utils "github.com/pgedge/ace/pkg/common"
 	"github.com/pgedge/ace/pkg/logger"
@@ -32,13 +33,13 @@ import (
 	"github.com/pgedge/ace/pkg/types"
 )
 
-// SpockNodeConfig aggregates all spock configuration for a single node.
-type SpockNodeConfig struct {
-	NodeName      string                    `json:"node_name"`
-	Subscriptions []types.SpockSubscription `json:"subscriptions"`
-	RepSetInfo    []types.SpockRepSetInfo   `json:"rep_set_info"`
-	Hints         []string                  `json:"hints"`
-}
+// SpockNodeConfig aggregates spock configuration for a single node.
+//
+// It aliases topology.NodeConfig, which holds the single implementation of
+// reading a node's Spock topology (subscriptions, replication sets, hints)
+// for reuse by anything needing node replication relationships, while
+// keeping this package's public surface and tests unchanged.
+type SpockNodeConfig = topology.NodeConfig
 
 // SpockDiffTask defines the task for comparing spock metadata across nodes.
 type SpockDiffTask struct {
@@ -328,60 +329,12 @@ func (t *SpockDiffTask) ExecuteTask() (err error) {
 
 	for _, nodeName := range nodeNames {
 		pool := pools[nodeName]
-		config := SpockNodeConfig{NodeName: nodeName, Hints: []string{}}
 
 		logger.Debug("Fetching Spock config for node: %s", nodeName)
 
-		// Fetch node and subscription info
-		nodeInfos, err := queries.GetSpockNodeAndSubInfo(t.Ctx, pool)
+		config, err := topology.FetchSpockNodeConfig(t.Ctx, pool, nodeName)
 		if err != nil {
-			return fmt.Errorf("querying spock.node and spock.subscription on node %s failed: %w", nodeName, err)
-		}
-
-		if len(nodeInfos) > 0 {
-			config.NodeName = nodeInfos[0].NodeName
-			for _, ni := range nodeInfos {
-				sub := types.SpockSubscription{}
-				if ni.SubName != "" {
-					sub.SubName = ni.SubName
-					sub.ProviderNode = ni.SubOriginName
-					sub.SubEnabled = ni.SubEnabled
-					sub.ReplicationSets = ni.SubReplicationSets
-					if ni.SubOriginName == "" {
-						hint := fmt.Sprintf("Subscription '%s' has an unresolved origin node; its reciprocal peer cannot be determined and it may be reported below as a missing subscription.", sub.SubName)
-						if !utils.Contains(config.Hints, hint) {
-							config.Hints = append(config.Hints, hint)
-						}
-					}
-					if len(ni.SubReplicationSets) == 0 {
-						hint := fmt.Sprintf("Subscription '%s' has no replication sets.", sub.SubName)
-						if !utils.Contains(config.Hints, hint) {
-							config.Hints = append(config.Hints, hint)
-						}
-					}
-				}
-				config.Subscriptions = append(config.Subscriptions, sub)
-			}
-		} else {
-			config.Hints = append(config.Hints, "Hint: No subscriptions have been created on this node.")
-		}
-
-		// Fetch replication set info
-		repRows, err := queries.GetSpockRepSetInfo(t.Ctx, pool)
-		if err != nil {
-			return fmt.Errorf("querying spock.tables on node %s failed: %w", nodeName, err)
-		}
-
-		config.RepSetInfo = repRows
-
-		var tablesInRepSets []string
-		for _, rs := range repRows {
-			if rs.SetName != "" {
-				tablesInRepSets = append(tablesInRepSets, rs.RelName...)
-			}
-		}
-		if len(repRows) > 0 && len(tablesInRepSets) == 0 {
-			config.Hints = append(config.Hints, "Hint: Tables not in replication set might not have primary keys, or you need to run repset-add-table.")
+			return err
 		}
 
 		allNodeConfigs[nodeName] = config
@@ -515,10 +468,10 @@ func compareSubscriptions(c1, c2 SpockNodeConfig) types.SubscriptionDiff {
 	n1Name := c1.NodeName
 	n2Name := c2.NodeName
 
-	// A healthy pair requires n1 to subscribe from n2 and n2 from n1. Match on the
-	// provider node identity, not the subscription name (which users may override).
-	subsFromOnN1 := subscriptionsByProvider(c1.Subscriptions)
-	subsFromOnN2 := subscriptionsByProvider(c2.Subscriptions)
+	// A healthy pair requires n1 to subscribe from n2 and n2 from n1, matched
+	// by provider node identity since users may rename subscriptions.
+	subsFromOnN1 := topology.SubscriptionsByProvider(c1.Subscriptions)
+	subsFromOnN2 := topology.SubscriptionsByProvider(c2.Subscriptions)
 
 	s1, n1SubsFromN2 := subsFromOnN1[n2Name] // subscription on n1 receiving from n2
 	s2, n2SubsFromN1 := subsFromOnN2[n1Name] // subscription on n2 receiving from n1
@@ -531,8 +484,8 @@ func compareSubscriptions(c1, c2 SpockNodeConfig) types.SubscriptionDiff {
 	}
 
 	if n1SubsFromN2 && n2SubsFromN1 {
-		// Compare order-insensitively without mutating the originals: these slices
-		// are shared with the SpockConfigs JSON output, which keeps DB order.
+		// Copy before sorting: these slices are shared with the SpockConfigs
+		// JSON output, which preserves DB order.
 		sets1 := append([]string(nil), s1.ReplicationSets...)
 		sets2 := append([]string(nil), s2.ReplicationSets...)
 		sort.Strings(sets1)
@@ -549,17 +502,6 @@ func compareSubscriptions(c1, c2 SpockNodeConfig) types.SubscriptionDiff {
 	}
 
 	return diff
-}
-
-// subscriptionsByProvider indexes subscriptions by the node they replicate from.
-func subscriptionsByProvider(subs []types.SpockSubscription) map[string]types.SpockSubscription {
-	byProvider := make(map[string]types.SpockSubscription, len(subs))
-	for _, s := range subs {
-		if s.ProviderNode != "" {
-			byProvider[s.ProviderNode] = s
-		}
-	}
-	return byProvider
 }
 
 func compareReplicationSets(c1, c2 SpockNodeConfig) types.ReplicationSetDiff {
