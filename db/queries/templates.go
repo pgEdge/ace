@@ -19,7 +19,7 @@ import (
 )
 
 // aceTemplateFuncs provides the {{aceSchema}} function to SQL templates.
-// The function is evaluated at render time (after config is loaded), not at parse time.
+// It runs at render time, after config is loaded.
 var aceTemplateFuncs = template.FuncMap{
 	"aceSchema": func() string { return pgx.Identifier{config.Get().MTree.Schema}.Sanitize() },
 }
@@ -44,6 +44,21 @@ type Templates struct {
 	GetTablesInRepSet        *template.Template
 	GetPkeyColumnTypes       *template.Template
 	GetRelationTree          *template.Template
+
+	// Structure-comparison descriptors. Each reads one aspect of table
+	// structure for every table named in $2, scoped to schema $1. Each
+	// query is small, independently readable, and testable.
+	GetColumnDescriptors     *template.Template
+	GetReplicaIdentityKey    *template.Template
+	GetConstraintDescriptors *template.Template
+	GetPartitionDescriptors  *template.Template
+	GetDomainDescriptors     *template.Template
+	GetRangeDescriptors      *template.Template
+	GetCompositeAttributes   *template.Template
+	GetEnumLabels            *template.Template
+	GetTypeReferences        *template.Template
+	GetDatabaseLocale        *template.Template
+	QuoteIdentifiers         *template.Template
 
 	CreateMetadataTable             *template.Template
 	GetPkeyOffsets                  *template.Template
@@ -154,7 +169,7 @@ type Templates struct {
 }
 
 var SQLTemplates = Templates{
-	// A template isn't needed for this query; just keeping the struct uniform
+	// A template isn't needed here; kept for struct uniformity.
 	CreateMetadataTable: template.Must(template.New("createMetadataTable").Funcs(aceTemplateFuncs).Parse(`
 		CREATE TABLE IF NOT EXISTS {{aceSchema}}.ace_mtree_metadata (
 			schema_name text,
@@ -227,10 +242,9 @@ var SQLTemplates = Templates{
 			last_updated = EXCLUDED.last_updated
 	`)),
 
-	// On conflict every column including pub_commit_lsn is refreshed:
-	// reaching this query path means a re-init, which created a fresh
-	// publication with a new commit LSN, and listen.go's guard must
-	// compare against that current LSN — not a stale prior one.
+	// On conflict every column including pub_commit_lsn is refreshed,
+	// since reaching this path means a re-init produced a fresh
+	// publication with a new commit LSN that later reads must see.
 	InitCDCMetadata: template.Must(template.New("initCdcMetadata").Funcs(aceTemplateFuncs).Parse(`
 		INSERT INTO
 			{{aceSchema}}.ace_cdc_metadata (
@@ -279,15 +293,12 @@ var SQLTemplates = Templates{
 		DROP TABLE IF EXISTS {{aceSchema}}.ace_cdc_metadata
 	`)),
 
-	// pub_commit_lsn is extracted via to_jsonb(row) ->> 'pub_commit_lsn'
-	// instead of a direct column reference so the query parses and runs
-	// against pre-migration ace_cdc_metadata tables that lack the column.
-	// On legacy 3-column rows the JSON object has no pub_commit_lsn key,
-	// ->> returns NULL, and COALESCE produces the empty string the
-	// listen.go guard treats as "invariant uncheckable, warn and skip".
-	// The additive ALTER TABLE in CreateCDCMetadataTable still backfills
-	// the column on the next MtreeInit so post-init reads use the real
-	// column path.
+	// pub_commit_lsn is extracted via to_jsonb(row) ->> 'pub_commit_lsn' so
+	// the query still works on pre-migration ace_cdc_metadata tables
+	// missing that column: ->> then returns NULL and COALESCE yields an
+	// empty string, treated as "invariant uncheckable, warn and skip".
+	// CreateCDCMetadataTable's additive ALTER TABLE backfills the column
+	// on the next MtreeInit so later reads use it directly.
 	GetCDCMetadata: template.Must(template.New("getCDCMetadata").Funcs(aceTemplateFuncs).Parse(`
 		SELECT
 			m.slot_name,
@@ -740,6 +751,411 @@ var SQLTemplates = Templates{
 			AND c.relname = $2
 			AND a.attname = ANY($3::text[])
 			AND a.attnum > 0 AND NOT a.attisdropped;
+	`)),
+	// GetColumnDescriptors reads every property of every live, non-dropped
+	// column of the given tables that structure comparison cares about:
+	// type, nullability, identity/generated-ness, any per-column options,
+	// the collation and its version, and the default expression. Ordered
+	// by column name, since column order carries no structural meaning.
+	//
+	// A column's type identity is carried as (type_namespace, type_name,
+	// atttypmod), which stays meaningful across independently initialized
+	// clusters even though object OIDs differ between them. atttypid is
+	// selected only so CollectSnapshot can use it, on this node's own
+	// connection, to fetch domain/range/composite/enum descriptors for
+	// the types actually in play.
+	//
+	// type_kind is pg_type.typtype: 'b' base, 'd' domain, 'e' enum,
+	// 'r' range, 'c' composite. It lets the comparison layer decide
+	// whether a type-name mismatch can be reasoned about via the
+	// built-in narrowing tables or must be treated as a plain difference.
+	GetColumnDescriptors: template.Must(template.New("getColumnDescriptors").Parse(`
+		SELECT
+			c.relname,
+			a.attname,
+			a.atttypid,
+			a.atttypmod,
+			pg_catalog.format_type(a.atttypid, a.atttypmod) AS type_text,
+			tn.nspname                                       AS type_namespace,
+			t.typname                                        AS type_name,
+			t.typtype::text                                  AS type_kind,
+			a.attnotnull,
+			a.attidentity::text,
+			a.attgenerated::text,
+			COALESCE(a.attoptions::text, '')                AS options,
+			-- A collation's identity is (namespace, name), for the same
+			-- reason a type's is: two schemas can each hold a collation
+			-- named "en_US" that resolve differently.
+			COALESCE(cn.nspname, '')                         AS collnamespace,
+			COALESCE(co.collname, '')                        AS collname,
+			COALESCE(co.collprovider::text, '')              AS collprovider,
+			-- collversion is what the catalog recorded when the collation
+			-- was created or last REFRESHed - NOT the version of the
+			-- collation library running now. An unrefreshed glibc upgrade
+			-- leaves this string matching on both nodes while the two nodes
+			-- actually sort differently, so GetDatabaseLocale is what
+			-- catches the common case; this field only catches a node whose
+			-- catalog was refreshed against a different library.
+			COALESCE(co.collversion, '')                     AS collversion,
+			COALESCE(pg_catalog.pg_get_expr(ad.adbin, ad.adrelid), '') AS default_expr
+		FROM pg_catalog.pg_class c
+		JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+		JOIN pg_catalog.pg_attribute a ON a.attrelid = c.oid
+		JOIN pg_catalog.pg_type t ON t.oid = a.atttypid
+		JOIN pg_catalog.pg_namespace tn ON tn.oid = t.typnamespace
+		LEFT JOIN pg_catalog.pg_attrdef ad ON ad.adrelid = a.attrelid AND ad.adnum = a.attnum
+		LEFT JOIN pg_catalog.pg_collation co ON co.oid = a.attcollation
+		LEFT JOIN pg_catalog.pg_namespace cn ON cn.oid = co.collnamespace
+		WHERE n.nspname = $1
+			AND c.relname = ANY($2::text[])
+			AND a.attnum > 0
+			AND NOT a.attisdropped
+		-- COLLATE "C" on every text ordering in this file. Row order is an
+		-- input to comparison wherever it is preserved rather than re-sorted
+		-- (array_agg of a domain's CHECKs, a composite's attributes), and a
+		-- database-default collation differing between two nodes would
+		-- otherwise reorder identical catalogs. Pinning the collation costs
+		-- nothing and removes the question.
+		ORDER BY c.relname COLLATE "C", a.attname COLLATE "C";
+	`)),
+	// GetDomainDescriptors resolves what a domain (typtype='d') actually
+	// constrains, for every domain OID in $1: one level of typbasetype,
+	// so a domain-over-domain's further narrowing is only caught when
+	// that inner domain is itself directly used by some compared column.
+	// The base type is named portably (namespace, name, typmod), like a
+	// column's own type. Constraints are aggregated as an array, one row
+	// per domain, sorted by definition text, since CHECK (VALUE ...)
+	// constraints on a domain get invented names like table constraints
+	// do.
+	//
+	// $1 is an oid[] gathered from this node's own GetColumnDescriptors
+	// result and stays local to this node; only the resolved names below
+	// are compared across nodes.
+	GetDomainDescriptors: template.Must(template.New("getDomainDescriptors").Parse(`
+		SELECT
+			t.oid,
+			n.nspname,
+			t.typname,
+			bn.nspname                                            AS base_namespace,
+			bt.typname                                            AS base_name,
+			-- typtype belongs to the base type's identity: dropping an enum
+			-- and recreating the name as a domain leaves (namespace, name)
+			-- untouched, so without this the substitution is invisible.
+			bt.typtype::text                                      AS base_kind,
+			t.typtypmod,
+			-- Display only, never compared: the base type as a person writes
+			-- it, modifier included ("character varying(20)"), so a report
+			-- about a domain narrowed from varchar(20) to varchar(10) shows
+			-- the length rather than printing "varchar" on both sides. The
+			-- comparison itself keys on (base_namespace, base_name,
+			-- typtypmod) above, exactly as a column's type does.
+			pg_catalog.format_type(t.typbasetype, t.typtypmod)    AS base_text,
+			t.typnotnull,
+			COALESCE(pg_catalog.pg_get_expr(t.typdefaultbin, 0), t.typdefault, '') AS default_expr,
+			COALESCE(chk.defs, '{}')                              AS check_defs
+		FROM pg_catalog.pg_type t
+		JOIN pg_catalog.pg_namespace n ON n.oid = t.typnamespace
+		JOIN pg_catalog.pg_type bt ON bt.oid = t.typbasetype
+		JOIN pg_catalog.pg_namespace bn ON bn.oid = bt.typnamespace
+		LEFT JOIN LATERAL (
+			SELECT array_agg(pg_catalog.pg_get_constraintdef(ct.oid, true) ORDER BY pg_catalog.pg_get_constraintdef(ct.oid, true) COLLATE "C") AS defs
+			FROM pg_catalog.pg_constraint ct
+			WHERE ct.contypid = t.oid AND ct.contype = 'c'
+		) chk ON true
+		WHERE t.oid = ANY($1::oid[]) AND t.typtype = 'd';
+	`)),
+	// GetRangeDescriptors resolves a range type's (typtype='r') subtype and
+	// the functions/collation/opclass that define its ordering, since any
+	// of these changes what "the same range" means. Functions are printed
+	// via ::regprocedure::text for a portable, schema-qualified signature
+	// (e.g. "public.my_canon(daterange)").
+	GetRangeDescriptors: template.Must(template.New("getRangeDescriptors").Parse(`
+		SELECT
+			t.oid,
+			n.nspname,
+			t.typname,
+			sn.nspname                                       AS subtype_namespace,
+			st.typname                                       AS subtype_name,
+			-- See base_kind in GetDomainDescriptors.
+			st.typtype::text                                 AS subtype_kind,
+			-- Collation and operator class are named (namespace, name) for
+			-- the same reason types are: an unqualified opcname is only
+			-- unique within one namespace and access method.
+			CASE WHEN co.oid IS NULL THEN ''
+				ELSE con.nspname || '.' || co.collname
+			END                                              AS collation,
+			CASE WHEN oc.oid IS NULL THEN ''
+				ELSE ocn.nspname || '.' || oc.opcname
+			END                                              AS opclass,
+			CASE WHEN r.rngcanonical = 0 THEN '' ELSE r.rngcanonical::pg_catalog.regprocedure::text END AS canonical,
+			CASE WHEN r.rngsubdiff = 0 THEN '' ELSE r.rngsubdiff::pg_catalog.regprocedure::text END     AS subtype_diff
+		FROM pg_catalog.pg_type t
+		JOIN pg_catalog.pg_namespace n ON n.oid = t.typnamespace
+		JOIN pg_catalog.pg_range r ON r.rngtypid = t.oid
+		JOIN pg_catalog.pg_type st ON st.oid = r.rngsubtype
+		JOIN pg_catalog.pg_namespace sn ON sn.oid = st.typnamespace
+		LEFT JOIN pg_catalog.pg_collation co ON co.oid = r.rngcollation
+		LEFT JOIN pg_catalog.pg_namespace con ON con.oid = co.collnamespace
+		LEFT JOIN pg_catalog.pg_opclass oc ON oc.oid = r.rngsubopc
+		LEFT JOIN pg_catalog.pg_namespace ocn ON ocn.oid = oc.opcnamespace
+		WHERE t.oid = ANY($1::oid[]) AND t.typtype = 'r';
+	`)),
+	// GetCompositeAttributes reads a composite type's (typtype='c') own
+	// attributes, one row per attribute, ordered by attnum: a composite
+	// type's attnum order is its wire/row-literal layout, fixed at
+	// CREATE TYPE time.
+	GetCompositeAttributes: template.Must(template.New("getCompositeAttributes").Parse(`
+		SELECT
+			t.oid,
+			n.nspname,
+			t.typname,
+			-- attnum, not a dense 1..n counter: DROP ATTRIBUTE leaves gaps,
+			-- and an ordinal that renumbers after a gap makes every later
+			-- attribute look changed when only one was dropped.
+			a.attnum,
+			a.attname,
+			an.nspname                                       AS attr_type_namespace,
+			at.typname                                       AS attr_type_name,
+			-- See base_kind in GetDomainDescriptors.
+			at.typtype::text                                 AS attr_type_kind,
+			a.atttypmod,
+			-- Display only, never compared (see base_text above).
+			pg_catalog.format_type(a.atttypid, a.atttypmod)  AS attr_type_text,
+			CASE WHEN co.oid IS NULL THEN ''
+				ELSE cn.nspname || '.' || co.collname
+			END                                              AS collation
+		FROM pg_catalog.pg_type t
+		JOIN pg_catalog.pg_namespace n ON n.oid = t.typnamespace
+		JOIN pg_catalog.pg_attribute a ON a.attrelid = t.typrelid
+		JOIN pg_catalog.pg_type at ON at.oid = a.atttypid
+		JOIN pg_catalog.pg_namespace an ON an.oid = at.typnamespace
+		LEFT JOIN pg_catalog.pg_collation co ON co.oid = a.attcollation
+		LEFT JOIN pg_catalog.pg_namespace cn ON cn.oid = co.collnamespace
+		WHERE t.oid = ANY($1::oid[]) AND t.typtype = 'c'
+			AND a.attnum > 0 AND NOT a.attisdropped
+		ORDER BY t.oid, a.attnum;
+	`)),
+	// GetEnumLabels reads an enum type's (typtype='e') labels in
+	// enumsortorder, since order is the defining property of an enum.
+	GetEnumLabels: template.Must(template.New("getEnumLabels").Parse(`
+		SELECT
+			t.oid,
+			n.nspname,
+			t.typname,
+			e.enumlabel
+		FROM pg_catalog.pg_type t
+		JOIN pg_catalog.pg_namespace n ON n.oid = t.typnamespace
+		JOIN pg_catalog.pg_enum e ON e.enumtypid = t.oid
+		WHERE t.oid = ANY($1::oid[]) AND t.typtype = 'e'
+		ORDER BY t.oid, e.enumsortorder;
+	`)),
+	// GetTypeReferences reports, for each type OID in $1, its typtype and
+	// every other type it is built out of. The caller walks this to a fixed
+	// point, so a type is compared however deeply it is buried.
+	//
+	// Looking only at a column's own typtype misses most of the interesting
+	// cases: an array type is itself a base type ('b'), so a "status[]"
+	// column hides the enum entirely, and a composite's attribute or a
+	// domain's base type can be a user-defined type that no column mentions
+	// directly. Every edge that can carry a user-defined type is reported:
+	//
+	//   typelem       array   -> element type (varlena arrays only, so that
+	//                            point/line, which also set typelem, are not
+	//                            mistaken for arrays)
+	//   typbasetype   domain  -> base type, including domain over domain
+	//   rngsubtype    range   -> subtype
+	//   rngtypid      multirange -> its range (typtype 'm', PostgreSQL 14+)
+	//   typrelid      composite -> each live attribute's type
+	//
+	// A zero OID means "no such edge". $1 and the OIDs returned are this
+	// node's own and never leave it; only the descriptors resolved from them
+	// are compared across nodes.
+	GetTypeReferences: template.Must(template.New("getTypeReferences").Parse(`
+		SELECT
+			t.oid,
+			t.typtype::text,
+			CASE WHEN t.typlen = -1 AND t.typelem <> 0
+				THEN t.typelem ELSE 0
+			END                                                    AS element_oid,
+			t.typbasetype                                          AS base_oid,
+			COALESCE((
+				SELECT r.rngsubtype FROM pg_catalog.pg_range r
+				WHERE r.rngtypid = t.oid
+			), 0)                                                  AS range_subtype_oid,
+			COALESCE((
+				SELECT r.rngtypid FROM pg_catalog.pg_range r
+				WHERE r.rngmultitypid = t.oid
+			), 0)                                                  AS multirange_range_oid,
+			COALESCE((
+				SELECT array_agg(a.atttypid ORDER BY a.attnum)
+				FROM pg_catalog.pg_attribute a
+				WHERE a.attrelid = t.typrelid
+					AND a.attnum > 0
+					AND NOT a.attisdropped
+			), '{}'::oid[])                                        AS attribute_type_oids
+		FROM pg_catalog.pg_type t
+		WHERE t.oid = ANY($1::oid[]);
+	`)),
+	// GetDatabaseLocale reads the collation settings of the database this
+	// connection is attached to.
+	//
+	// This is the collation fact that matters most for two nodes meant to
+	// hold the same rows, and the one a per-column check cannot see: a text
+	// column that does not name a collation resolves to the database
+	// default, which appears in pg_attribute as the "default" collation on
+	// every node regardless of what LC_COLLATE the database was actually
+	// created with. Two nodes, one initdb'd en_US.UTF-8 and one C, therefore
+	// agree column by column while sorting differently - and a unique index
+	// that disagrees about which strings are duplicates is a data-loss
+	// hazard, not a cosmetic one.
+	//
+	// The provider and locale columns are read through to_jsonb rather than
+	// named directly, because their names move: datlocprovider arrived in
+	// PostgreSQL 15, and the ICU locale is daticulocale in 15 and 16 but
+	// datlocale from 17 on. Naming a column that does not exist fails at
+	// parse time even on the branch that would not have executed, so the
+	// version differences cannot be handled with a CASE; ->> on a row
+	// converted to jsonb simply yields NULL for a key that is not there.
+	GetDatabaseLocale: template.Must(template.New("getDatabaseLocale").Parse(`
+		SELECT
+			d.datname,
+			d.datcollate,
+			d.datctype,
+			COALESCE(pg_catalog.to_jsonb(d) ->> 'datlocprovider', '') AS locale_provider,
+			COALESCE(
+				pg_catalog.to_jsonb(d) ->> 'datlocale',
+				pg_catalog.to_jsonb(d) ->> 'daticulocale',
+				''
+			)                                                          AS locale
+		FROM pg_catalog.pg_database d
+		WHERE d.datname = pg_catalog.current_database();
+	`)),
+	// QuoteIdentifiers renders every distinct identifier in $1 the way
+	// PostgreSQL itself would need to write it back to mean the same thing
+	// unambiguously, using quote_ident() — the same function pg_dump and
+	// this file's own deparse queries rely on, since correct quoting also
+	// requires case folding and a reserved-word list that varies across
+	// major versions. This keeps identifiers that collide when joined by
+	// a bare "." (table "a.b" column "c" vs. table "a" column "b.c") from
+	// colliding in a person-facing report either.
+	QuoteIdentifiers: template.Must(template.New("quoteIdentifiers").Parse(`
+		SELECT DISTINCT
+			raw,
+			pg_catalog.quote_ident(raw) AS quoted
+		FROM pg_catalog.unnest($1::text[]) AS raw;
+	`)),
+	// GetReplicaIdentityKey reads, per table, the replica identity mode
+	// (relreplident) and the key columns and operator classes of the index
+	// that mode actually designates, in index-column order, since (a,b) and
+	// (b,a) are not the same key.
+	//
+	// Which index that is depends on the mode: 'i' means the index flagged
+	// indisreplident, and 'd' - the default, and the common case - means the
+	// primary key. Resolving only the 'i' case would leave key_columns empty
+	// for almost every real table, so the comparison layer would compare ""
+	// against "" and report agreement no matter how the two nodes' primary
+	// keys differed. Modes 'f' (whole row) and 'n' (nothing) designate no
+	// index and come back empty; relreplident itself carries that.
+	//
+	// Exactly one index can match, so the aggregate is unambiguous: 'd'
+	// looks only at indisprimary and 'i' only at indisreplident, and
+	// PostgreSQL sets indisreplident on at most one index per table. The
+	// ORDER BY/LIMIT is belt and braces, preferring an explicitly designated
+	// index if a future PostgreSQL ever allows both flags at once.
+	//
+	// Expression index columns (indkey entry 0) have no pg_attribute row and
+	// would be dropped silently by the join below. PostgreSQL rejects
+	// expression indexes for both PRIMARY KEY and REPLICA IDENTITY USING
+	// INDEX, so no such column can reach here; key_length is returned so the
+	// caller can still verify that nothing was dropped.
+	GetReplicaIdentityKey: template.Must(template.New("getReplicaIdentityKey").Parse(`
+		SELECT
+			c.relname,
+			c.relreplident::text,
+			COALESCE(key_cols.key_columns, '{}')     AS key_columns,
+			COALESCE(key_cols.key_opclasses, '{}')   AS key_opclasses,
+			COALESCE(key_cols.key_length, 0)         AS key_length
+		FROM pg_catalog.pg_class c
+		JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+		LEFT JOIN LATERAL (
+			SELECT
+				array_agg(a.attname ORDER BY ik.ord)  AS key_columns,
+				-- Named (namespace, name), the same way GetRangeDescriptors
+				-- names a range's operator class: an unqualified opcname is
+				-- only unique within one namespace and access method, so two
+				-- nodes keying a column on same-named operator classes from
+				-- different schemas - one ordering text by collation, one by
+				-- byte pattern - would otherwise compare equal.
+				array_agg(ocn.nspname || '.' || oc.opcname ORDER BY ik.ord)
+					                                  AS key_opclasses,
+				i.indnkeyatts                         AS key_length
+			FROM pg_catalog.pg_index i
+			-- indkey holds indnatts entries, but only the first indnkeyatts
+			-- of them are key columns; the rest are INCLUDE payload, which
+			-- is not part of the row identity. They were previously dropped
+			-- only as a side effect of indclass being shorter than indkey -
+			-- an out-of-bounds array access doing the filtering. Say it.
+			JOIN LATERAL unnest(i.indkey) WITH ORDINALITY AS ik(attnum, ord)
+				ON ik.ord <= i.indnkeyatts
+			JOIN pg_catalog.pg_attribute a
+				ON a.attrelid = i.indrelid AND a.attnum = ik.attnum
+			-- int2vector/oidvector are 0-indexed by long-standing PostgreSQL
+			-- convention, and WITH ORDINALITY starts at 1, hence "ord - 1".
+			JOIN pg_catalog.pg_opclass oc ON oc.oid = i.indclass[(ik.ord - 1)::int]
+			JOIN pg_catalog.pg_namespace ocn ON ocn.oid = oc.opcnamespace
+			WHERE i.indrelid = c.oid
+				AND (
+					i.indisreplident
+					OR (c.relreplident = 'd' AND i.indisprimary)
+				)
+			GROUP BY i.indexrelid, i.indisreplident, i.indnkeyatts
+			ORDER BY i.indisreplident DESC
+			LIMIT 1
+		) key_cols ON true
+		WHERE n.nspname = $1
+			AND c.relname = ANY($2::text[]);
+	`)),
+	// GetConstraintDescriptors reads PRIMARY KEY, UNIQUE, CHECK, FOREIGN KEY
+	// and EXCLUDE constraints. Omits the constraint's own name (conname):
+	// PostgreSQL invents names for unnamed constraints, so the same
+	// constraint can be named differently on two nodes with no structural
+	// difference. Comparison goes by condef, so rows are ordered by
+	// condef too.
+	GetConstraintDescriptors: template.Must(template.New("getConstraintDescriptors").Parse(`
+		SELECT
+			c.relname,
+			ct.contype::text,
+			pg_catalog.pg_get_constraintdef(ct.oid, true) AS condef,
+			ct.condeferrable,
+			ct.convalidated
+		FROM pg_catalog.pg_constraint ct
+		JOIN pg_catalog.pg_class c ON c.oid = ct.conrelid
+		JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+		WHERE n.nspname = $1
+			AND c.relname = ANY($2::text[])
+			AND ct.contype IN ('p', 'u', 'c', 'f', 'x')
+		-- The ordering expression is spelled out rather than referring to the
+		-- "condef" output alias: an alias is only visible to ORDER BY when it
+		-- stands alone, and adding COLLATE makes it an expression, where it
+		-- is not.
+		ORDER BY c.relname COLLATE "C", pg_catalog.pg_get_constraintdef(ct.oid, true) COLLATE "C";
+	`)),
+	// GetPartitionDescriptors reads, per table, its own partition bound (if
+	// it is itself a partition of something) and its partitioning key (if
+	// it is itself partitioned). A table can be both, neither, or one of
+	// the two; empty strings mean "not applicable", not "unknown".
+	GetPartitionDescriptors: template.Must(template.New("getPartitionDescriptors").Parse(`
+		SELECT
+			c.relname,
+			COALESCE(pg_catalog.pg_get_expr(c.relpartbound, c.oid), '')  AS partition_bound,
+			CASE WHEN c.relkind = 'p'
+				THEN COALESCE(pg_catalog.pg_get_partkeydef(c.oid), '')
+				ELSE ''
+			END AS partition_key
+		FROM pg_catalog.pg_class c
+		JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+		WHERE n.nspname = $1
+			AND c.relname = ANY($2::text[]);
 	`)),
 	GetPkeyOffsets: template.Must(template.New("pkeyOffsets").Parse(`
 		WITH sampled_data AS (
