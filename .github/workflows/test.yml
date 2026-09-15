@@ -6,6 +6,14 @@ on:
   pull_request:
     branches: [ main ]
 
+permissions:
+  # Least-privilege default, as in release.yaml. This workflow only checks
+  # out the tree and runs tests, so it never needs to write. That matters
+  # more here than elsewhere: it runs on pull_request, so the test code it
+  # executes comes from the pull request itself, and a token that can write
+  # would be handed to code the repository has not merged yet.
+  contents: read
+
 jobs:
   test:
     runs-on: ubuntu-latest
