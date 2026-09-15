@@ -44,8 +44,8 @@ var defaultConfigYAML string
 var defaultPgServiceConf string
 
 func SetupCLI(version string) *cli.Command {
-	// Use -V (not the urfave default -v) for version, so -v stays reserved for
-	// the debug/verbose flag on subcommands (matching go tooling conventions).
+	// Use -V for version, so -v stays reserved for the debug/verbose flag on
+	// subcommands, matching go tooling conventions.
 	cli.VersionFlag = &cli.BoolFlag{
 		Name:    "version",
 		Aliases: []string{"V"},
@@ -284,6 +284,11 @@ func SetupCLI(version string) *cli.Command {
 		Usage:   "Compare only schema objects (tables, functions, etc.), not table data",
 		Value:   false,
 	},
+		&cli.StringFlag{
+			Name:  "compare",
+			Usage: "What to compare: \"data\" (default, per-table data diff) or \"structure\" (symmetric column/key/constraint comparison, exits nonzero with a severity-coded status when something differs)",
+			Value: diff.CompareData,
+		},
 		&cli.BoolFlag{
 			Name:    "schedule",
 			Aliases: []string{"S"},
@@ -897,10 +902,9 @@ func resolveClusterArg(cmd, missingUsage, argsUsage string, required int, args [
 		cluster := config.DefaultCluster()
 		if cluster == "" {
 			if required > 0 {
-				// The positional(s) supplied were consumed as the required
-				// entity (e.g. <repset>), leaving the cluster unset. Spell that
-				// out so a lone argument isn't silently misread as the cluster
-				// and reported back as a bare "cluster name is required".
+				// The positional(s) supplied were consumed as the required entity
+				// (e.g. <repset>), leaving the cluster unset. Spell that out so a
+				// lone argument isn't misread as the cluster.
 				return "", nil, fmt.Errorf(
 					"cluster name is required: %q was read as the %s argument (usage: %s %s); "+
 						"pass the cluster as the first argument or set default_cluster in ace.yaml",
@@ -1333,10 +1337,14 @@ func SchemaDiffCLI(cmd *cli.Command) error {
 	task.SkipFile = cmd.String("skip-file")
 	task.Quiet = cmd.Bool("quiet")
 	task.DDLOnly = cmd.Bool("ddl-only")
+	task.Compare = cmd.String("compare")
 	task.Ctx = context.Background()
 
 	if scheduleEnabled && task.DDLOnly {
 		return fmt.Errorf("scheduling is only supported when --ddl-only is false")
+	}
+	if scheduleEnabled && task.Compare == diff.CompareStructure {
+		return fmt.Errorf("scheduling is not yet supported with --compare=structure")
 	}
 
 	task.BlockSize = int(blockSizeInt)
@@ -1344,6 +1352,7 @@ func SchemaDiffCLI(cmd *cli.Command) error {
 	task.MaxConnections = cmd.Int("max-connections")
 	task.CompareUnitSize = cmd.Int("compare-unit-size")
 	task.Output = cmd.String("output")
+	task.OutputExplicit = cmd.IsSet("output")
 	task.OverrideBlockSize = cmd.Bool("override-block-size")
 
 	if err := task.Validate(); err != nil {
@@ -1496,8 +1505,8 @@ func StartSchedulerCLI(_ context.Context, cmd *cli.Command) error {
 	signal.Notify(sighupCh, syscall.SIGHUP)
 	defer signal.Stop(sighupCh)
 
-	// Start the API server once.  It does not need to restart on reload because
-	// it handles on-demand requests rather than reading scheduled job config.
+	// Start the API server once: it serves on-demand requests rather than
+	// reading scheduled job config, so a reload never needs to restart it.
 	var apiServer *server.APIServer
 	if runAPI {
 		if ok, apiErr := canStartAPIServer(cfg); ok {
@@ -1531,7 +1540,7 @@ func StartSchedulerCLI(_ context.Context, cmd *cli.Command) error {
 	return schedulerReloadLoop(runCtx, sighupCh, apiServer)
 }
 
-// schedulerReloadLoop is the heart of the SIGHUP feature.
+// schedulerReloadLoop implements SIGHUP-triggered config reload.
 //
 // Design:
 //  1. Build jobs from the current config and start the gocron scheduler.
@@ -1591,10 +1600,9 @@ func schedulerReloadLoop(
 				return nil
 
 			case err := <-schedDone:
-				// The scheduler exited on its own – without being told to via
-				// schedCancel.  This is unexpected (RunJobs normally blocks until
-				// its context is canceled).  Treat a real error as fatal; a nil
-				// or Canceled result means it exited cleanly and we just stop.
+				// The scheduler exited on its own, not via schedCancel — unexpected,
+				// since RunJobs normally blocks until canceled. Treat a real error
+				// as fatal; nil or Canceled means it exited cleanly.
 				schedCancel()
 				if err != nil && !errors.Is(err, context.Canceled) {
 					return err

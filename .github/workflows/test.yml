@@ -6,6 +6,14 @@ on:
   pull_request:
     branches: [ main ]
 
+permissions:
+  # Least-privilege default, as in release.yaml. This workflow only checks
+  # out the tree and runs tests, so it never needs to write. That matters
+  # more here than elsewhere: it runs on pull_request, so the test code it
+  # executes comes from the pull request itself, and a token that can write
+  # would be handed to code the repository has not merged yet.
+  contents: read
+
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -46,6 +54,9 @@ jobs:
     - name: Run query, diff, and repair unit tests
       run: go test -count=1 -v ./db/queries ./internal/consistency/diff ./internal/consistency/repair
 
+    - name: Run schema-structure comparison unit tests
+      run: go test -count=1 -v ./internal/consistency/schema
+
     - name: Run mtree missing-tree fail-fast test
       run: go test -count=1 -v ./tests/integration -run 'TestMtreeDiffFailsFastWhenTreeNotBuilt'
 
@@ -70,6 +81,12 @@ jobs:
 
     - name: Run schema-diff tests
       run: go test -count=1 -v ./tests/integration -run 'TestSchemaDiff_'
+
+    - name: Run schema-diff --compare=structure tests
+      run: go test -count=1 -v ./tests/integration -run 'TestSchemaDiffStructure_'
+
+    - name: Run scope resolution tests
+      run: go test -count=1 -v ./tests/integration -run 'TestSchemaProvider_'
 
     - name: Run spock-diff comparison unit tests
       run: go test -count=1 -v ./internal/consistency/diff -run 'TestCompareSubscriptions'
