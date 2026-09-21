@@ -679,13 +679,10 @@ func (task *SchemaDiffCmd) schemaStructureDiff() error {
 			divs := schema.Compare(task.SchemaName, compareTables, snapshots[a], snapshots[b])
 			comparisons = append(comparisons, StructureComparisonReport{NodeA: a, NodeB: b, Divergences: divs})
 			for _, d := range divs {
-				// Object+Kind+Property only, not the values: with three
-				// nodes and the odd one out in the middle of conns, that
-				// node is NodeA in one pair and NodeB in the other, so
-				// ValueOnA/ValueOnB swap sides between the two pairs. A key
-				// that included them would then treat one drifted property
-				// as two distinct findings instead of one.
-				distinctFindings[d.Object+"\x00"+d.Kind+"\x00"+d.Property] = true
+				// FindingKey, not a key built here: a table's constraint
+				// findings share one Object+Kind+Property and would
+				// otherwise collapse into a single count.
+				distinctFindings[d.FindingKey()] = true
 			}
 			if code := schema.WorstExitCode(divs); code > worst {
 				worst = code

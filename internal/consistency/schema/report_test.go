@@ -12,6 +12,7 @@
 package schema
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 )
@@ -112,5 +113,147 @@ func TestReportLeavesNonListPropertiesAlone(t *testing.T) {
 
 	if !strings.Contains(out, "CHECK (5:00:00 < start_time)") {
 		t.Fatalf("want the CHECK text printed verbatim, got: %s", out)
+	}
+}
+
+// TestDivergenceJSON_DecodesPackedListValues: the structured report must
+// not leak the packed form - the same enum drift once read "sad, ok, happy"
+// in text and "3:sad2:ok5:happy" in JSON.
+func TestDivergenceJSON_DecodesPackedListValues(t *testing.T) {
+	d := Divergence{
+		Object: "public.mood", Kind: "enum", Property: "labels",
+		NodeA: "n1", NodeB: "n2",
+		ValueOnA: joinList([]string{"sad", "ok", "happy"}),
+		ValueOnB: joinList([]string{"sad", "happy"}),
+		Rank:     RankIncompatible,
+	}
+
+	encoded, err := json.Marshal(d)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+
+	var decoded map[string]any
+	if err := json.Unmarshal(encoded, &decoded); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if got := decoded["value_on_a"]; got != "sad, ok, happy" {
+		t.Errorf("value_on_a = %q, want the decoded members", got)
+	}
+	if got := decoded["value_on_b"]; got != "sad, happy" {
+		t.Errorf("value_on_b = %q, want the decoded members", got)
+	}
+	if strings.Contains(string(encoded), "3:sad") {
+		t.Errorf("the packed form escaped into the report: %s", encoded)
+	}
+}
+
+// TestDivergenceJSON_KeyColumnsAreDecoded covers the other packed
+// properties, the ones a primary-key mismatch reports.
+func TestDivergenceJSON_KeyColumnsAreDecoded(t *testing.T) {
+	for _, property := range []string{"key_columns", "key_opclasses"} {
+		d := Divergence{
+			Object: "public.orders", Kind: "key", Property: property,
+			NodeA: "n1", NodeB: "n2",
+			ValueOnA: joinList([]string{"id"}),
+			ValueOnB: joinList([]string{"id", "tenant"}),
+			Rank:     RankIncompatible,
+		}
+		encoded, err := json.Marshal(d)
+		if err != nil {
+			t.Fatalf("%s: marshal: %v", property, err)
+		}
+		var decoded map[string]any
+		if err := json.Unmarshal(encoded, &decoded); err != nil {
+			t.Fatalf("%s: unmarshal: %v", property, err)
+		}
+		if got := decoded["value_on_b"]; got != "id, tenant" {
+			t.Errorf("%s: value_on_b = %q, want %q", property, got, "id, tenant")
+		}
+	}
+}
+
+// TestDivergenceJSON_LeavesNonListPropertiesAlone: a default expression is
+// not a packed list, even when it starts with a digit and a colon.
+func TestDivergenceJSON_LeavesNonListPropertiesAlone(t *testing.T) {
+	d := Divergence{
+		Object: "public.orders.note", Kind: "column", Property: "default",
+		NodeA: "n1", NodeB: "n2",
+		ValueOnA: "2:00", ValueOnB: "'x'::text",
+		Rank: RankEquivalentDiffering,
+	}
+
+	encoded, err := json.Marshal(d)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var decoded map[string]any
+	if err := json.Unmarshal(encoded, &decoded); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if got := decoded["value_on_a"]; got != "2:00" {
+		t.Errorf("value_on_a = %q, want it left alone", got)
+	}
+	if got := decoded["value_on_b"]; got != "'x'::text" {
+		t.Errorf("value_on_b = %q, want it left alone", got)
+	}
+}
+
+// TestDivergenceJSON_AgreesWithTheTextReport is the invariant the others
+// are instances of: one run, one description per finding.
+func TestDivergenceJSON_AgreesWithTheTextReport(t *testing.T) {
+	d := Divergence{
+		Object: "public.orders", Kind: "key", Property: "key_columns",
+		NodeA: "n1", NodeB: "n2",
+		ValueOnA: joinList([]string{"id"}),
+		ValueOnB: joinList([]string{"id", "tenant"}),
+		Rank:     RankIncompatible,
+	}
+
+	encoded, err := json.Marshal(d)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var decoded map[string]any
+	if err := json.Unmarshal(encoded, &decoded); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	text := FormatDivergences([]Divergence{d})
+	for _, field := range []string{"value_on_a", "value_on_b"} {
+		value, _ := decoded[field].(string)
+		if !strings.Contains(text, value) {
+			t.Errorf("json %s = %q does not appear in the text report:\n%s", field, value, text)
+		}
+	}
+}
+
+// TestDivergenceJSON_KeepsTheOtherFields checks the marshaller did not drop
+// anything while swapping the two values out.
+func TestDivergenceJSON_KeepsTheOtherFields(t *testing.T) {
+	d := Divergence{
+		Object: "public.orders.qty", Kind: "column", Property: "type",
+		NodeA: "n1", NodeB: "n2", ValueOnA: "integer", ValueOnB: "bigint",
+		Rank: RankNarrowed, NarrowSide: "n1", Note: "a note",
+	}
+
+	encoded, err := json.Marshal(d)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var decoded map[string]any
+	if err := json.Unmarshal(encoded, &decoded); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	want := map[string]string{
+		"object": "public.orders.qty", "kind": "column", "property": "type",
+		"node_a": "n1", "node_b": "n2", "value_on_a": "integer", "value_on_b": "bigint",
+		"rank": RankNarrowed, "narrow_side": "n1", "note": "a note",
+	}
+	for field, expected := range want {
+		if got := decoded[field]; got != expected {
+			t.Errorf("%s = %v, want %q", field, got, expected)
+		}
 	}
 }

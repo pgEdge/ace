@@ -88,6 +88,9 @@ jobs:
     - name: Run scope resolution tests
       run: go test -count=1 -v ./tests/integration -run 'TestSchemaProvider_'
 
+    - name: Run table-diff schema-mismatch diagnosis tests
+      run: go test -count=1 -v ./tests/integration -run 'TestTableDiffSchemaMismatch_'
+
     - name: Run spock-diff comparison unit tests
       run: go test -count=1 -v ./internal/consistency/diff -run 'TestCompareSubscriptions'
 

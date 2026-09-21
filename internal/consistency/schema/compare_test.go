@@ -1354,3 +1354,103 @@ func TestCompositeAttributeOrdinalsSurviveADrop(t *testing.T) {
 		t.Fatalf("want the finding to carry attnum 2, got %q", divs[0].Property)
 	}
 }
+
+// TestCompare_TableMissingFromSnapshotIsOneAbsentFinding pins what
+// CollectSnapshot's existence gate is for: a table absent from one snapshot
+// is one finding, on the table, not one per column.
+func TestCompare_TableMissingFromSnapshotIsOneAbsentFinding(t *testing.T) {
+	table := "public.orders"
+	a := newSnapshot("n1").table(table).
+		column(table, "id", baseColumnProps()...).
+		column(table, "discount", baseColumnProps()...).
+		column(table, "note", baseColumnProps()...).
+		key(table).constraints(table).build()
+	b := newSnapshot("n2").build()
+
+	divs := Compare("public", []string{"orders"}, a, b)
+
+	if len(divs) != 1 {
+		t.Fatalf("want exactly one finding for a table missing from a snapshot, got %d: %+v", len(divs), divs)
+	}
+	if divs[0].Kind != "table" {
+		t.Fatalf("want the finding on the table, got kind %q: %+v", divs[0].Kind, divs[0])
+	}
+	if divs[0].Rank != RankAbsent {
+		t.Fatalf("want RankAbsent, got %q", divs[0].Rank)
+	}
+	if divs[0].ValueOnA != "present" || divs[0].ValueOnB != "absent" {
+		t.Fatalf("want presence present/absent, got %q/%q", divs[0].ValueOnA, divs[0].ValueOnB)
+	}
+}
+
+// TestFindingKey_ConstraintsOnOneTableStayDistinct: every constraint
+// finding carries the table as Object and no Property, so Object+Kind+
+// Property alone would count several missing constraints as one.
+func TestFindingKey_ConstraintsOnOneTableStayDistinct(t *testing.T) {
+	divs := []Divergence{
+		{Object: "public.orders", Kind: "constraint", NodeA: "n1", NodeB: "n2",
+			ValueOnA: "c|deferrable=false|validated=true|CHECK (qty > 0)", ValueOnB: "(absent)"},
+		{Object: "public.orders", Kind: "constraint", NodeA: "n1", NodeB: "n2",
+			ValueOnA: "u|deferrable=false|validated=true|UNIQUE (code)", ValueOnB: "(absent)"},
+		{Object: "public.orders", Kind: "constraint", NodeA: "n1", NodeB: "n2",
+			ValueOnA: "f|deferrable=false|validated=true|FOREIGN KEY (cid) REFERENCES c(id)", ValueOnB: "(absent)"},
+	}
+
+	// The premise: all three look alike by object, kind and property, which
+	// is why those cannot be the whole key.
+	for _, d := range divs[1:] {
+		if d.Object != divs[0].Object || d.Kind != divs[0].Kind || d.Property != divs[0].Property {
+			t.Fatalf("this test needs all three findings to share object/kind/property, got %+v", d)
+		}
+	}
+
+	keys := make(map[string]bool)
+	for _, d := range divs {
+		keys[d.FindingKey()] = true
+	}
+	if len(keys) != len(divs) {
+		t.Fatalf("want %d distinct keys for %d different constraints, got %d", len(divs), len(divs), len(keys))
+	}
+}
+
+// TestFindingKey_ConstraintKeySurvivesASideSwap: the odd node out is NodeA
+// in one pair and NodeB in the next, so one missing constraint arrives with
+// its values on opposite sides. Still one finding.
+func TestFindingKey_ConstraintKeySurvivesASideSwap(t *testing.T) {
+	const def = "c|deferrable=false|validated=true|CHECK (qty > 0)"
+	onOneSide := Divergence{Object: "public.orders", Kind: "constraint",
+		NodeA: "n1", NodeB: "n3", ValueOnA: def, ValueOnB: "(absent)"}
+	onTheOther := Divergence{Object: "public.orders", Kind: "constraint",
+		NodeA: "n3", NodeB: "n2", ValueOnA: "(absent)", ValueOnB: def}
+
+	if onOneSide.FindingKey() != onTheOther.FindingKey() {
+		t.Fatalf("the same constraint counted twice across a side swap:\n  %q\n  %q",
+			onOneSide.FindingKey(), onTheOther.FindingKey())
+	}
+}
+
+// TestFindingKey_NonConstraintFindingsIgnoreTheirValues: folding values
+// into a key that does not need them would split one drifted column across
+// the pairs that see it.
+func TestFindingKey_NonConstraintFindingsIgnoreTheirValues(t *testing.T) {
+	onOneSide := Divergence{Object: "public.orders.qty", Kind: "column", Property: "type",
+		NodeA: "n1", NodeB: "n3", ValueOnA: "integer", ValueOnB: "bigint"}
+	onTheOther := Divergence{Object: "public.orders.qty", Kind: "column", Property: "type",
+		NodeA: "n3", NodeB: "n2", ValueOnA: "bigint", ValueOnB: "integer"}
+
+	if onOneSide.FindingKey() != onTheOther.FindingKey() {
+		t.Fatalf("one drifted column counted twice:\n  %q\n  %q",
+			onOneSide.FindingKey(), onTheOther.FindingKey())
+	}
+}
+
+// TestFindingKey_DistinguishesPropertiesOnOneObject is the guard in the
+// other direction: two properties of the same column are two findings.
+func TestFindingKey_DistinguishesPropertiesOnOneObject(t *testing.T) {
+	typeDrift := Divergence{Object: "public.orders.qty", Kind: "column", Property: "type"}
+	notNullDrift := Divergence{Object: "public.orders.qty", Kind: "column", Property: "notnull"}
+
+	if typeDrift.FindingKey() == notNullDrift.FindingKey() {
+		t.Fatalf("type and notnull on one column collapsed to one key: %q", typeDrift.FindingKey())
+	}
+}
