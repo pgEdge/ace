@@ -782,7 +782,15 @@ var SQLTemplates = Templates{
 			a.attnotnull,
 			a.attidentity::text,
 			a.attgenerated::text,
-			COALESCE(a.attoptions::text, '')                AS options,
+			-- attoptions keeps the order the options were applied in, so the
+			-- same options set in a different order would compare unequal.
+			-- Sorted here as GetDomainDescriptors sorts a domain's CHECKs.
+			-- Entries are keyword=value from a fixed set, so none holds a
+			-- comma.
+			COALESCE((
+				SELECT string_agg(opt, ',' ORDER BY opt)
+				FROM pg_catalog.unnest(a.attoptions) AS opt
+			), '')                                           AS options,
 			-- A collation's identity is (namespace, name), for the same
 			-- reason a type's is: two schemas can each hold a collation
 			-- named "en_US" that resolve differently.

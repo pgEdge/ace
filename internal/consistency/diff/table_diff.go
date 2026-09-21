@@ -988,19 +988,12 @@ func (t *TableDiffTask) diagnoseSchemaMismatch(
 		return fallback
 	}
 
+	// FormatDivergences, not a local copy of it: it decodes the packed
+	// values ("id, tenant", not "2:id6:tenant") and names the narrow side.
 	var b strings.Builder
 	fmt.Fprintf(&b, "table '%s.%s' schema differs between nodes %s and %s:\n", schemaName, table, refHostname, curHostname)
-	for _, d := range divergences {
-		if d.Property != "" {
-			fmt.Fprintf(&b, "  - %s.%s: on %s = %q, on %s = %q [%s]\n", d.Object, d.Property, d.NodeA, d.ValueOnA, d.NodeB, d.ValueOnB, d.Rank)
-		} else {
-			fmt.Fprintf(&b, "  - %s (%s): on %s = %q, on %s = %q [%s]\n", d.Object, d.Kind, d.NodeA, d.ValueOnA, d.NodeB, d.ValueOnB, d.Rank)
-		}
-		if d.Note != "" {
-			fmt.Fprintf(&b, "    (%s)\n", d.Note)
-		}
-	}
-	return errors.New(strings.TrimRight(b.String(), "\n"))
+	b.WriteString(schema.FormatDivergences(divergences))
+	return errors.New(b.String())
 }
 
 func (t *TableDiffTask) cleanupFilteredView() {

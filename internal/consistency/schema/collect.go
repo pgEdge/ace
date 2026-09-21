@@ -107,12 +107,22 @@ func CollectSnapshot(ctx context.Context, pool *pgxpool.Pool, nodeName, schemaNa
 	snap.Objects[DatabaseID()] = localeObj
 
 	for _, table := range tables {
+		// A table the catalog did not return was dropped between the caller
+		// resolving its scope and this snapshot. Writing no Object lets
+		// Compare report it once, as absent on the table, rather than once
+		// per column. partitionsByTable is the existence test:
+		// GetPartitionDescriptors filters on schema and name only, so it
+		// holds one row per relation that exists.
+		if _, exists := partitionsByTable[table]; !exists {
+			continue
+		}
+
 		tableID := TableID(schemaName, table)
 		qualified := qualify(quotedOf, schemaName, table)
 
-		// Table-level object: currently only carries partition information.
-		// Every table gets an Object here, even with empty properties, so a
-		// missing table is still detected as absent.
+		// Table-level object: partition information only, written even when
+		// that is empty so a table that exists is never taken for a missing
+		// one.
 		tableObj := Object{Kind: "table", Name: qualified}
 		if p, ok := partitionsByTable[table]; ok {
 			tableObj.Properties = append(tableObj.Properties,

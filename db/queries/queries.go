@@ -1361,7 +1361,7 @@ type ColumnDescriptor struct {
 	NotNull       bool
 	Identity      string // '' | 'a' (always) | 'd' (by default)
 	Generated     string // '' | 's' (stored)
-	Options       string // raw attoptions, as PostgreSQL prints the array; opaque to this layer
+	Options       string // attoptions, sorted and comma-joined so apply order cannot differ; opaque to this layer
 	CollNamespace string
 	CollName      string
 	CollProvider  string

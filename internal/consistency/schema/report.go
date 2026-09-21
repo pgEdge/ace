@@ -12,6 +12,7 @@
 package schema
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 )
@@ -108,6 +109,21 @@ func displayValue(property, value string) string {
 		return value
 	}
 	return strings.Join(values, ", ")
+}
+
+// MarshalJSON decodes ValueOnA/ValueOnB for the structured report the way
+// FormatDivergences does for the text one, so one run cannot describe the
+// same finding two ways. Only the rendering is decoded: the Divergence
+// keeps the packed form, which is what tells a key of the columns (a, b)
+// from a key of the one column named "a,b".
+func (d Divergence) MarshalJSON() ([]byte, error) {
+	// A local type has no methods, so json marshals it as a plain struct
+	// rather than calling this again.
+	type divergenceJSON Divergence
+	out := divergenceJSON(d)
+	out.ValueOnA = displayValue(d.Property, d.ValueOnA)
+	out.ValueOnB = displayValue(d.Property, d.ValueOnB)
+	return json.Marshal(out)
 }
 
 // rankText renders a Divergence's Rank, and for RankNarrowed names the node

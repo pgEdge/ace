@@ -45,6 +45,27 @@ type Divergence struct {
 	Note string `json:"note,omitempty"`
 }
 
+// FindingKey identifies one finding regardless of which side of a node
+// pair its values landed on, so a caller can count distinct findings across
+// every pair without counting one drift once per pair that sees it.
+//
+// Object+Kind+Property is enough for all but constraints, which
+// compareConstraints reports against the table with no Property: without
+// the definition text a table missing five would count as one. Their
+// values are sorted into the key because the odd node out is NodeA in one
+// pair and NodeB in the next.
+func (d Divergence) FindingKey() string {
+	key := d.Object + "\x00" + d.Kind + "\x00" + d.Property
+	if d.Kind != "constraint" {
+		return key
+	}
+	lo, hi := d.ValueOnA, d.ValueOnB
+	if hi < lo {
+		lo, hi = hi, lo
+	}
+	return key + "\x00" + lo + "\x00" + hi
+}
+
 // Compare finds every structural difference between two Snapshots, for the
 // given tables in schemaName.
 //

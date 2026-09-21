@@ -456,3 +456,137 @@ func indexOfCheck(stmt string) int {
 	}
 	return -1
 }
+
+// requireAttoptionsOrderDiffers pins the premise of the test below: the two
+// nodes really do hold the same options in a different order. Without it
+// the test could pass because PostgreSQL normalised the order itself.
+func requireAttoptionsOrderDiffers(t *testing.T, column string) {
+	t.Helper()
+	ctx := context.Background()
+	const q = `SELECT COALESCE(a.attoptions::text, '')
+	           FROM pg_attribute a
+	           JOIN pg_class c ON c.oid = a.attrelid
+	           JOIN pg_namespace ns ON ns.oid = c.relnamespace
+	           WHERE ns.nspname = $1 AND c.relname = $2 AND a.attname = $3`
+
+	var raw1, raw2 string
+	require.NoError(t, pgCluster.Node1Pool.QueryRow(ctx, q, structureSchema, structureTable, column).Scan(&raw1))
+	require.NoError(t, pgCluster.Node2Pool.QueryRow(ctx, q, structureSchema, structureTable, column).Scan(&raw2))
+	require.NotEqual(t, raw1, raw2,
+		"this test needs the two nodes to hold the same attoptions in a different order")
+}
+
+// TestSchemaDiffStructure_ColumnOptionOrderIsNotADifference: two nodes that
+// set the same two options in opposite orders hold different attoptions
+// strings for an identical column. Sorting in the query is what keeps that
+// from reading as drift.
+func TestSchemaDiffStructure_ColumnOptionOrderIsNotADifference(t *testing.T) {
+	setupStructureSchema(t)
+	ctx := context.Background()
+
+	node1First := []string{
+		fmt.Sprintf(`ALTER TABLE %s.%s ALTER COLUMN n SET (n_distinct = -0.5)`, structureSchema, structureTable),
+		fmt.Sprintf(`ALTER TABLE %s.%s ALTER COLUMN n SET (n_distinct_inherited = 100)`, structureSchema, structureTable),
+	}
+	for _, stmt := range node1First {
+		_, err := pgCluster.Node1Pool.Exec(ctx, stmt)
+		require.NoError(t, err)
+	}
+	for i := len(node1First) - 1; i >= 0; i-- {
+		_, err := pgCluster.Node2Pool.Exec(ctx, node1First[i])
+		require.NoError(t, err)
+	}
+
+	requireAttoptionsOrderDiffers(t, "n")
+
+	divs := compareStructureForTest(t)
+	require.Empty(t, divs,
+		"the same column options in a different order is not a difference: %+v", divs)
+}
+
+// TestSchemaDiffStructure_ColumnOptionValueDriftIsStillReported is the
+// guard in the other direction: sorting attoptions must not hide two nodes
+// that genuinely disagree about an option's value.
+func TestSchemaDiffStructure_ColumnOptionValueDriftIsStillReported(t *testing.T) {
+	setupStructureSchema(t)
+	ctx := context.Background()
+
+	_, err := pgCluster.Node1Pool.Exec(ctx,
+		fmt.Sprintf(`ALTER TABLE %s.%s ALTER COLUMN n SET (n_distinct = -0.5)`, structureSchema, structureTable))
+	require.NoError(t, err)
+	_, err = pgCluster.Node2Pool.Exec(ctx,
+		fmt.Sprintf(`ALTER TABLE %s.%s ALTER COLUMN n SET (n_distinct = -0.9)`, structureSchema, structureTable))
+	require.NoError(t, err)
+
+	divs := compareStructureForTest(t)
+
+	d := findDivergenceFor(t, divs, fmt.Sprintf("%s.%s.n", structureSchema, structureTable), "options")
+	require.Contains(t, d.ValueOnA, "-0.5")
+	require.Contains(t, d.ValueOnB, "-0.9")
+}
+
+// TestSchemaDiffStructure_TableDroppedBeforeCollectionIsOneFinding: a table
+// that disappears before CollectSnapshot reads the catalog is one finding,
+// on the table. Until the table Object was gated on the table existing,
+// both snapshots held one either way, so Compare never took its absent
+// branch and reported every column instead.
+func TestSchemaDiffStructure_TableDroppedBeforeCollectionIsOneFinding(t *testing.T) {
+	setupStructureSchema(t)
+	ctx := context.Background()
+
+	_, err := pgCluster.Node2Pool.Exec(ctx,
+		fmt.Sprintf(`DROP TABLE %s.%s`, structureSchema, structureTable))
+	require.NoError(t, err)
+
+	divs := compareStructureForTest(t)
+
+	require.Len(t, divs, 1,
+		"a table missing on one node is one finding, not one per column: %+v", divs)
+	require.Equal(t, "table", divs[0].Kind)
+	require.Equal(t, schema.RankAbsent, divs[0].Rank)
+	require.Equal(t, "present", divs[0].ValueOnA)
+	require.Equal(t, "absent", divs[0].ValueOnB)
+}
+
+// TestSchemaDiffStructure_ConstraintCountMatchesTheReport: constraint
+// findings all carry the table and no Property, so a summary keyed on
+// object+kind+property counted several as one, disagreeing with the report
+// printed right above it. FindingKey keeps the two in step.
+func TestSchemaDiffStructure_ConstraintCountMatchesTheReport(t *testing.T) {
+	setupStructureSchema(t)
+	ctx := context.Background()
+
+	// Three constraints on node1 only, all on the one table, so all three
+	// findings share an Object, a Kind, and an empty Property.
+	for _, stmt := range []string{
+		fmt.Sprintf(`ALTER TABLE %s.%s ADD CONSTRAINT n_positive CHECK (n > 0)`, structureSchema, structureTable),
+		fmt.Sprintf(`ALTER TABLE %s.%s ADD CONSTRAINT n_bounded CHECK (n < 1000)`, structureSchema, structureTable),
+		fmt.Sprintf(`ALTER TABLE %s.%s ADD CONSTRAINT code_unique UNIQUE (code)`, structureSchema, structureTable),
+	} {
+		_, err := pgCluster.Node1Pool.Exec(ctx, stmt)
+		require.NoError(t, err)
+	}
+
+	divs := compareStructureForTest(t)
+
+	var constraintFindings int
+	for _, d := range divs {
+		if d.Kind == "constraint" {
+			constraintFindings++
+		}
+	}
+	require.Equal(t, 3, constraintFindings,
+		"the three one-sided constraints are three findings: %+v", divs)
+
+	task := structureTaskForTest()
+	var runErr error
+	captureStdout(t, func() {
+		runErr = task.SchemaTableDiff()
+	})
+	require.Error(t, runErr)
+
+	// The summary counts distinct findings across node pairs, so it must
+	// agree with the three the report itself lists.
+	require.Contains(t, runErr.Error(), "3 divergence(s) found",
+		"the summary must count each constraint, not collapse them: %v", runErr)
+}
