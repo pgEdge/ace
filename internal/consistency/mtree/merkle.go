@@ -61,8 +61,10 @@ func (m *MerkleTreeTask) aceSchema() string {
 }
 
 const (
-	tableAlreadyInPublicationError = "42710"
-	TempOffset                     = 1000000
+	tableAlreadyInPublicationError  = "42710"
+	insufficientPrivilegeError      = "42501"
+	dependentObjectsStillExistError = "2BP01"
+	TempOffset                      = 1000000
 )
 
 type MerkleTreeTask struct {
@@ -1167,6 +1169,9 @@ func (m *MerkleTreeTask) initOneNode(nodeInfo map[string]any, publicationName, s
 
 		if err := queries.CreateXORFunction(m.Ctx, tx); err != nil {
 			return fmt.Errorf("create xor function: %w", err)
+		}
+		if err := m.dropLegacyXOROperators(tx, nodeInfo["Name"]); err != nil {
+			return err
 		}
 		if err := queries.CreateCDCMetadataTable(m.Ctx, tx); err != nil {
 			return fmt.Errorf("create cdc metadata table: %w", err)
@@ -3240,6 +3245,57 @@ func (m *MerkleTreeTask) insertBlockRanges(conn queries.DBQuerier, ranges []type
 		}
 	}
 
+	return nil
+}
+
+// dropLegacyXOROperators drops the # operator earlier ACE versions built on
+// bytea_xor. Their CREATE OPERATOR had no schema name, so it landed in the
+// first schema of search_path (usually public) while bytea_xor stayed in the
+// ACE schema. A pg_dump that excludes the ACE schema, as Spock's add_node
+// runs it, then keeps the operator but drops the function, and the dump
+// fails to restore. ACE now calls bytea_xor directly and never uses it.
+//
+// Failing to drop it must not fail init: another role may own it, or a user
+// object may have come to depend on it. Each drop runs in a savepoint so a
+// failure doesn't abort the surrounding transaction.
+func (m *MerkleTreeTask) dropLegacyXOROperators(tx pgx.Tx, nodeName any) error {
+	ops, err := queries.GetXOROperators(m.Ctx, tx, m.aceSchema())
+	if err != nil {
+		return fmt.Errorf("check for leftover xor operator: %w", err)
+	}
+
+	for _, op := range ops {
+		sp, err := tx.Begin(m.Ctx)
+		if err != nil {
+			return fmt.Errorf("savepoint before dropping operator %s: %w", op, err)
+		}
+		dropErr := queries.DropOperator(m.Ctx, sp, op)
+		if dropErr == nil {
+			if err := sp.Commit(m.Ctx); err != nil {
+				return fmt.Errorf("release savepoint after dropping operator %s: %w", op, err)
+			}
+			logger.Info("node %s: dropped operator %s left by an earlier ACE version", nodeName, op)
+			continue
+		}
+		if err := sp.Rollback(m.Ctx); err != nil {
+			return fmt.Errorf("roll back savepoint after failing to drop operator %s: %w", op, err)
+		}
+
+		var pgErr *pgconn.PgError
+		if !errors.As(dropErr, &pgErr) ||
+			(pgErr.Code != insufficientPrivilegeError && pgErr.Code != dependentObjectsStillExistError) {
+			return fmt.Errorf("drop operator %s: %w", op, dropErr)
+		}
+		reason, remedy := pgErr.Message, "As its owner or a superuser, run"
+		if pgErr.Code == dependentObjectsStillExistError {
+			// Detail lists the dependent objects.
+			reason += ": " + pgErr.Detail
+			remedy = "Remove the objects that depend on it, then run"
+		}
+		logger.Warn("node %s: could not drop operator %s left by an earlier ACE version (%s). "+
+			"ACE does not use it and keeps working, but a pg_dump that excludes the ACE schema will not restore while it exists. "+
+			"%s: DROP OPERATOR %s;", nodeName, op, reason, remedy, op)
+	}
 	return nil
 }
 

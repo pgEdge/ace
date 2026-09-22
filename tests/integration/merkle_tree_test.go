@@ -29,6 +29,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/pgedge/ace/db/queries"
 	"github.com/pgedge/ace/internal/infra/cdc"
 	"github.com/pgedge/ace/internal/infra/db"
 	"github.com/pgedge/ace/pkg/config"
@@ -249,8 +250,11 @@ func testMerkleTreeInit(t *testing.T, env *testEnv, tableName string) {
 	for _, pool := range []*pgxpool.Pool{env.N1Pool, env.N2Pool} {
 		require.True(t, schemaExists(t, ctx, pool, aceSchema), "Schema '%s' should exist", aceSchema)
 		require.True(t, functionExists(t, ctx, pool, "bytea_xor", aceSchema), "Function 'bytea_xor' should exist in schema '%s'", aceSchema)
-		require.Equal(t, []string{aceSchema}, xorOperatorSchemas(t, ctx, pool, aceSchema),
-			"the # operator must live in '%s' alongside bytea_xor, not in search_path", aceSchema)
+		ops, err := queries.GetXOROperators(ctx, pool, aceSchema)
+		require.NoError(t, err)
+		require.Empty(t, ops, "MtreeInit must not create a # operator on bytea_xor")
+		require.Empty(t, objectsDependingOnSchema(t, ctx, pool, aceSchema),
+			"nothing outside '%s' may depend on it, or a dump that excludes it will not restore", aceSchema)
 		require.True(t, tableExists(t, ctx, pool, "ace_cdc_metadata", aceSchema), "Table 'ace_cdc_metadata' should exist in schema '%s'", aceSchema)
 		require.True(t, publicationExists(t, ctx, pool, cdcPubName), "Publication '%s' should exist", cdcPubName)
 		require.True(t, replicationSlotExists(t, ctx, pool, cdcSlotName), "Replication slot '%s' should exist", cdcSlotName)
@@ -1390,36 +1394,36 @@ func functionExists(t *testing.T, ctx context.Context, pool *pgxpool.Pool, funct
 	return exists
 }
 
-// xorOperatorSchemas returns the schemas holding a #(bytea,bytea) operator
-// built on schemaName's bytea_xor.  It should only ever be schemaName: an
-// unqualified CREATE OPERATOR lands in search_path instead, leaving an
-// operator that depends on a schema it does not live in, which makes any
-// dump that excludes that schema unrestorable.
-func xorOperatorSchemas(t *testing.T, ctx context.Context, pool *pgxpool.Pool, schemaName string) []string {
+// objectsDependingOnSchema describes every object outside schemaName that
+// depends on an object inside it. pg_dump --exclude-schema, which Spock's
+// add_node uses to skip the ACE schema, keeps such an object but drops what
+// it points at, so the dump fails to restore. Only normal and automatic
+// dependencies count: internal ones (a table's TOAST table, which lives in
+// pg_toast) move with their owner. Objects with no schema of their own,
+// such as a column default, belong to something that has one, and are
+// dumped or skipped with it.
+func objectsDependingOnSchema(t *testing.T, ctx context.Context, pool *pgxpool.Pool, schemaName string) []string {
 	t.Helper()
 	rows, err := pool.Query(ctx, `
-		SELECT n.nspname
-		FROM pg_operator o
-		JOIN pg_namespace n ON n.oid = o.oprnamespace
-		JOIN pg_proc p ON p.oid = o.oprcode
-		JOIN pg_namespace fn ON fn.oid = p.pronamespace
-		WHERE o.oprname = '#'
-		  AND o.oprleft = 'bytea'::regtype
-		  AND o.oprright = 'bytea'::regtype
-		  AND p.proname = 'bytea_xor'
-		  AND fn.nspname = $1
-		ORDER BY n.nspname`, schemaName)
+		SELECT pg_describe_object(d.classid, d.objid, d.objsubid)
+		FROM pg_depend d,
+			pg_identify_object(d.classid, d.objid, d.objsubid) dep,
+			pg_identify_object(d.refclassid, d.refobjid, d.refobjsubid) ref
+		WHERE d.deptype IN ('n', 'a')
+		  AND ref.schema = $1
+		  AND dep.schema <> $1
+		ORDER BY 1`, schemaName)
 	require.NoError(t, err)
 	defer rows.Close()
 
-	var schemas []string
+	var objects []string
 	for rows.Next() {
-		var s string
-		require.NoError(t, rows.Scan(&s))
-		schemas = append(schemas, s)
+		var o string
+		require.NoError(t, rows.Scan(&o))
+		objects = append(objects, o)
 	}
 	require.NoError(t, rows.Err())
-	return schemas
+	return objects
 }
 
 func tableExists(t *testing.T, ctx context.Context, pool *pgxpool.Pool, tableName, schemaName string) bool {
@@ -1865,6 +1869,114 @@ func TestMtreeInitReapsOrphanedSlot(t *testing.T) {
 		slotName).Scan(&restartLSN)
 	require.NoError(t, err)
 	require.NotEmpty(t, restartLSN, "fresh slot should have a restart_lsn")
+}
+
+// TestMtreeInitDropsLegacyXOROperator covers a cluster set up by an ACE
+// version that created a # operator on bytea_xor. That CREATE OPERATOR had
+// no schema name, so the operator landed in public while bytea_xor stayed
+// in the ACE schema, and a pg_dump excluding the ACE schema (as Spock's
+// add_node runs it) produced a dump that failed to restore. Checks that:
+//   - BuildMtree works on such a cluster before init is re-run, since
+//     BuildParentNodes now calls bytea_xor directly;
+//   - re-running MtreeInit drops the old operator;
+//   - a # operator on some other function, and a differently named
+//     operator on bytea_xor, are left alone;
+//   - when something depends on the old operator, init still succeeds and
+//     leaves it in place.
+func TestMtreeInitDropsLegacyXOROperator(t *testing.T) {
+	ctx := context.Background()
+	tableName := "customers_mtree_legacy_op"
+	qualifiedTableName := fmt.Sprintf("%s.%s", testSchema, tableName)
+	aceSchema := config.Cfg.MTree.Schema
+	const otherSchema = "ace_test_other_xor"
+	const legacyOp = "public.#(bytea, bytea)"
+
+	setupCDCTestTable(t, ctx, tableName)
+
+	mtreeTask := newTestMerkleTreeTask(t, qualifiedTableName, []string{serviceN1})
+	require.NoError(t, mtreeTask.RunChecks(false))
+	require.NoError(t, mtreeTask.MtreeInit())
+
+	// An ACE connection, so Spock doesn't replicate the seeded DDL to n2.
+	pool, err := auth.GetClusterNodeConnection(ctx, pgCluster.ClusterNodes[0], auth.ConnectionOptions{})
+	require.NoError(t, err)
+
+	// Cleanups run after defers, so the pool is closed here, not deferred.
+	t.Cleanup(func() {
+		defer pool.Close()
+		for _, stmt := range []string{
+			"DROP OPERATOR IF EXISTS " + legacyOp + " CASCADE",
+			"DROP SCHEMA IF EXISTS " + otherSchema + " CASCADE",
+		} {
+			if _, err := pool.Exec(context.Background(), stmt); err != nil {
+				t.Logf("Warning: cleanup %q failed: %v", stmt, err)
+			}
+		}
+		if err := mtreeTask.MtreeTeardown(); err != nil {
+			t.Logf("Warning: MtreeTeardown failed during cleanup: %v", err)
+		}
+		dropCDCTestTable(t, tableName)
+	})
+
+	exec := func(stmt string) {
+		t.Helper()
+		_, err := pool.Exec(ctx, stmt)
+		require.NoError(t, err, stmt)
+	}
+	xorOps := func() []string {
+		t.Helper()
+		ops, err := queries.GetXOROperators(ctx, pool, aceSchema)
+		require.NoError(t, err)
+		return ops
+	}
+	operatorExists := func(op string) bool {
+		t.Helper()
+		var exists bool
+		require.NoError(t, pool.QueryRow(ctx, "SELECT to_regoperator($1) IS NOT NULL", op).Scan(&exists))
+		return exists
+	}
+
+	xorFunc := pgx.Identifier{aceSchema, "bytea_xor"}.Sanitize()
+	// What earlier ACE versions ran, with search_path pointing at public.
+	createLegacyOp := "CREATE OPERATOR public.# (LEFTARG = bytea, RIGHTARG = bytea, PROCEDURE = " + xorFunc + ")"
+	exec(createLegacyOp)
+	exec("CREATE SCHEMA " + otherSchema)
+	exec("CREATE FUNCTION " + otherSchema + ".xor(a bytea, b bytea) RETURNS bytea LANGUAGE sql IMMUTABLE AS 'SELECT a'")
+	exec("CREATE OPERATOR " + otherSchema + ".# (LEFTARG = bytea, RIGHTARG = bytea, PROCEDURE = " + otherSchema + ".xor)")
+	exec("CREATE OPERATOR " + otherSchema + ".^ (LEFTARG = bytea, RIGHTARG = bytea, PROCEDURE = " + xorFunc + ")")
+
+	require.Equal(t, []string{legacyOp}, xorOps(), "seeded legacy operator should be found")
+	// pg_describe_object includes the schema only when the operator isn't on
+	// search_path, so match on the signature. The other # doesn't depend on
+	// the ACE schema, so the only match is the legacy operator.
+	caught := false
+	for _, obj := range objectsDependingOnSchema(t, ctx, pool, aceSchema) {
+		caught = caught || strings.Contains(obj, "#(bytea,bytea)")
+	}
+	require.True(t, caught, "the dependency check should catch the legacy operator")
+
+	require.NoError(t, mtreeTask.BuildMtree(),
+		"BuildMtree must work before init is re-run on an upgraded cluster")
+
+	require.NoError(t, mtreeTask.MtreeInit())
+
+	require.Empty(t, xorOps(), "MtreeInit should drop the operator an earlier ACE left in public")
+	require.True(t, operatorExists(otherSchema+".#(bytea,bytea)"),
+		"a # operator on another function must be left alone")
+	require.True(t, operatorExists(otherSchema+".^(bytea,bytea)"),
+		"an operator with another name on bytea_xor must be left alone")
+
+	// With the ^ operator gone, nothing outside the ACE schema depends on it.
+	exec("DROP OPERATOR " + otherSchema + ".^(bytea, bytea)")
+	require.Empty(t, objectsDependingOnSchema(t, ctx, pool, aceSchema),
+		"nothing outside '%s' may depend on it once the legacy operator is gone", aceSchema)
+
+	// A view using the old operator blocks the drop. Init must warn and
+	// carry on rather than fail.
+	exec(createLegacyOp)
+	exec("CREATE VIEW " + otherSchema + ".uses_legacy_op AS SELECT '\\x01'::bytea OPERATOR(public.#) '\\x03'::bytea AS x")
+	require.NoError(t, mtreeTask.MtreeInit(), "MtreeInit must not fail when the old operator can't be dropped")
+	require.Equal(t, []string{legacyOp}, xorOps(), "the operator the view depends on should still be there")
 }
 
 // TestBuildMtreeConcurrentSpockNodes reproduces the original production

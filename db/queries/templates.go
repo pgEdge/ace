@@ -110,6 +110,8 @@ type Templates struct {
 	CompareBlocksSQL              *template.Template
 
 	DropXORFunction                  *template.Template
+	GetXOROperators                  *template.Template
+	DropOperator                     *template.Template
 	DropMetadataTable                *template.Template
 	DropMtreeTable                   *template.Template
 	GetBlockRowCount                 *template.Template
@@ -1325,44 +1327,6 @@ var SQLTemplates = Templates{
 			RETURN result;
 		END;
 		$$ LANGUAGE plpgsql IMMUTABLE STRICT;
-		DO $$
-		DECLARE
-			stray regoperator;
-		BEGIN
-			-- Create the operator inside the ACE schema, not wherever
-			-- search_path happens to point.  An unqualified CREATE OPERATOR
-			-- lands in the first schema of search_path, typically public, and
-			-- an operator there that depends on a function here is a dangling
-			-- reference for anything that copies one schema without the other:
-			-- pg_dump --exclude-schema drops the function but keeps the
-			-- operator, and the resulting dump cannot be restored.
-			IF to_regoperator('{{aceSchema}}.#(bytea,bytea)') IS NULL THEN
-			CREATE OPERATOR {{aceSchema}}.# (
-				LEFTARG = bytea,
-				RIGHTARG = bytea,
-				PROCEDURE = {{aceSchema}}.bytea_xor
-			);
-			END IF;
-
-			-- Reclaim the operator an earlier ACE stranded outside this
-			-- schema.  Matching on oprcode keeps this to the one we created:
-			-- an operator of the same name and signature built on somebody
-			-- else's function is left alone.
-			FOR stray IN
-				SELECT
-					o.oid::regoperator
-				FROM
-					pg_operator o
-				WHERE
-					o.oprname = '#'
-					AND o.oprleft = 'bytea'::regtype
-					AND o.oprright = 'bytea'::regtype
-					AND o.oprcode = '{{aceSchema}}.bytea_xor(bytea,bytea)'::regprocedure
-					AND o.oprnamespace <> '{{aceSchema}}'::regnamespace
-			LOOP
-				EXECUTE format('DROP OPERATOR %s', stray);
-			END LOOP;
-		END $$;
 	`)),
 	EstimateRowCount: template.Must(template.New("estimateRowCount").Parse(`
 		SELECT
@@ -1555,7 +1519,7 @@ var SQLTemplates = Templates{
 				parent_position,
 				CASE
 					WHEN array_length(child_hashes, 1) = 1 THEN child_hashes[1]
-					ELSE child_hashes[1] OPERATOR({{aceSchema}}.#) child_hashes[2]
+					ELSE {{aceSchema}}.bytea_xor(child_hashes[1], child_hashes[2])
 				END,
 				current_timestamp
 			FROM
@@ -1883,6 +1847,29 @@ var SQLTemplates = Templates{
 	`)),
 	DropXORFunction: template.Must(template.New("dropXORFunction").Funcs(aceTemplateFuncs).Parse(`
 		DROP FUNCTION IF EXISTS {{aceSchema}}.bytea_xor(bytea, bytea) CASCADE
+	`)),
+	// Earlier ACE versions created #(bytea,bytea) on bytea_xor; see
+	// dropLegacyXOROperators. $1 is bytea_xor's signature, passed as a
+	// parameter so the schema name never sits inside a SQL literal.
+	// Returns each operator's schema-qualified signature, ready for DROP
+	// OPERATOR; oid::regoperator would leave the schema out whenever the
+	// operator is visible on search_path.
+	GetXOROperators: template.Must(template.New("getXOROperators").Parse(`
+		SELECT
+			format('%I.%s(%s, %s)', n.nspname, o.oprname, o.oprleft::regtype, o.oprright::regtype)
+		FROM
+			pg_operator o
+			JOIN pg_namespace n ON n.oid = o.oprnamespace
+		WHERE
+			o.oprname = '#'
+			AND o.oprleft = 'bytea'::regtype
+			AND o.oprright = 'bytea'::regtype
+			AND o.oprcode = to_regprocedure($1)
+		ORDER BY
+			1
+	`)),
+	DropOperator: template.Must(template.New("dropOperator").Parse(`
+		DROP OPERATOR IF EXISTS {{.Operator}}
 	`)),
 	DropMetadataTable: template.Must(template.New("dropMetadataTable").Funcs(aceTemplateFuncs).Parse(`
 		DROP TABLE IF EXISTS {{aceSchema}}.ace_mtree_metadata CASCADE

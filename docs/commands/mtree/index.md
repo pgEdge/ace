@@ -23,7 +23,7 @@ While powerful, Merkle trees are not always the optimal solution. A traditional 
 
 ### Using Merkle Trees
 
-You must perform two setup steps before using Merkle trees effectively. The first command adds cluster-level operators used by Merkle trees:
+You must perform two setup steps before using Merkle trees effectively. The first command creates the ACE schema, the helper function, and the change-tracking publication and replication slot that Merkle trees use:
 
 `./ace mtree init cluster_name`
 
