@@ -249,6 +249,8 @@ func testMerkleTreeInit(t *testing.T, env *testEnv, tableName string) {
 	for _, pool := range []*pgxpool.Pool{env.N1Pool, env.N2Pool} {
 		require.True(t, schemaExists(t, ctx, pool, aceSchema), "Schema '%s' should exist", aceSchema)
 		require.True(t, functionExists(t, ctx, pool, "bytea_xor", aceSchema), "Function 'bytea_xor' should exist in schema '%s'", aceSchema)
+		require.Equal(t, []string{aceSchema}, xorOperatorSchemas(t, ctx, pool, aceSchema),
+			"the # operator must live in '%s' alongside bytea_xor, not in search_path", aceSchema)
 		require.True(t, tableExists(t, ctx, pool, "ace_cdc_metadata", aceSchema), "Table 'ace_cdc_metadata' should exist in schema '%s'", aceSchema)
 		require.True(t, publicationExists(t, ctx, pool, cdcPubName), "Publication '%s' should exist", cdcPubName)
 		require.True(t, replicationSlotExists(t, ctx, pool, cdcSlotName), "Replication slot '%s' should exist", cdcSlotName)
@@ -1386,6 +1388,38 @@ func functionExists(t *testing.T, ctx context.Context, pool *pgxpool.Pool, funct
 		)`, functionName, schemaName).Scan(&exists)
 	require.NoError(t, err)
 	return exists
+}
+
+// xorOperatorSchemas returns the schemas holding a #(bytea,bytea) operator
+// built on schemaName's bytea_xor.  It should only ever be schemaName: an
+// unqualified CREATE OPERATOR lands in search_path instead, leaving an
+// operator that depends on a schema it does not live in, which makes any
+// dump that excludes that schema unrestorable.
+func xorOperatorSchemas(t *testing.T, ctx context.Context, pool *pgxpool.Pool, schemaName string) []string {
+	t.Helper()
+	rows, err := pool.Query(ctx, `
+		SELECT n.nspname
+		FROM pg_operator o
+		JOIN pg_namespace n ON n.oid = o.oprnamespace
+		JOIN pg_proc p ON p.oid = o.oprcode
+		JOIN pg_namespace fn ON fn.oid = p.pronamespace
+		WHERE o.oprname = '#'
+		  AND o.oprleft = 'bytea'::regtype
+		  AND o.oprright = 'bytea'::regtype
+		  AND p.proname = 'bytea_xor'
+		  AND fn.nspname = $1
+		ORDER BY n.nspname`, schemaName)
+	require.NoError(t, err)
+	defer rows.Close()
+
+	var schemas []string
+	for rows.Next() {
+		var s string
+		require.NoError(t, rows.Scan(&s))
+		schemas = append(schemas, s)
+	}
+	require.NoError(t, rows.Err())
+	return schemas
 }
 
 func tableExists(t *testing.T, ctx context.Context, pool *pgxpool.Pool, tableName, schemaName string) bool {
