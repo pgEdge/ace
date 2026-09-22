@@ -201,6 +201,50 @@ func CreateXORFunction(ctx context.Context, db DBQuerier) error {
 	return nil
 }
 
+// GetXOROperators lists the #(bytea,bytea) operators built on aceSchema's
+// bytea_xor, as schema-qualified signatures.
+func GetXOROperators(ctx context.Context, db DBQuerier, aceSchema string) ([]string, error) {
+	sql, err := RenderSQL(SQLTemplates.GetXOROperators, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to render GetXOROperators SQL: %w", err)
+	}
+
+	xorFunc := pgx.Identifier{aceSchema, "bytea_xor"}.Sanitize() + "(bytea,bytea)"
+	rows, err := db.Query(ctx, sql, xorFunc)
+	if err != nil {
+		return nil, fmt.Errorf("query to get xor operators failed: %w", err)
+	}
+	defer rows.Close()
+
+	var operators []string
+	for rows.Next() {
+		var op string
+		if err := rows.Scan(&op); err != nil {
+			return nil, fmt.Errorf("failed to scan operator name: %w", err)
+		}
+		operators = append(operators, op)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("error iterating over xor operators: %w", err)
+	}
+
+	return operators, nil
+}
+
+// DropOperator drops operator, a schema-qualified signature such as
+// GetXOROperators returns. It returns the database error unwrapped so
+// callers can check its SQLSTATE.
+func DropOperator(ctx context.Context, db DBQuerier, operator string) error {
+	sql, err := RenderSQL(SQLTemplates.DropOperator, map[string]string{"Operator": operator})
+	if err != nil {
+		return fmt.Errorf("failed to render DropOperator SQL: %w", err)
+	}
+
+	_, err = db.Exec(ctx, sql)
+	return err
+}
+
 func CreateMetadataTable(ctx context.Context, db DBQuerier) error {
 	sql, err := RenderSQL(SQLTemplates.CreateMetadataTable, nil)
 	if err != nil {

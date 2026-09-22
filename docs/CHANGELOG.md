@@ -2,6 +2,44 @@
 
 All notable changes to ACE will be captured in this document. This project follows semantic versioning; the latest changes appear first.
 
+## [Unreleased]
+
+### Fixed
+- **Spock `add_node` failed on clusters where `mtree init` had been run.**
+  `mtree init` created a `#` operator on `bytea_xor` without a schema name, so
+  it landed in `public` while the function stayed in the ACE schema. Spock's
+  node join dumps the source with `pg_dump --exclude-schema=pgedge_ace`, which
+  kept the operator but dropped the function, so the restore failed with
+  `schema "pgedge_ace" does not exist` and the new node never finished joining.
+  ACE now calls `bytea_xor` directly and no longer creates the operator.
+  Clusters initialized by an earlier version still have the operator.
+
+  **Upgrading:** the leftover operator does not affect ACE; existing Merkle
+  trees keep working after the upgrade. It only matters for Spock `add_node`,
+  which fails while the operator exists. Once every host running ACE has been
+  upgraded (earlier versions still use the operator), run this on each node to
+  list the command that drops it:
+
+  ```sql
+  SELECT format('DROP OPERATOR %I.%s(%s, %s);', n.nspname, o.oprname,
+                o.oprleft::regtype, o.oprright::regtype)
+  FROM pg_operator o
+  JOIN pg_namespace n ON n.oid = o.oprnamespace
+  WHERE o.oprname = '#'
+    AND o.oprcode = to_regprocedure('pgedge_ace.bytea_xor(bytea,bytea)');
+  ```
+
+  Run each command it prints as the operator's owner or a superuser. No rows
+  means the node is ready for `add_node`. Replace `pgedge_ace` if you set a
+  different `mtree.schema`. If you later roll back to an earlier ACE, recreate
+  the operator on each node with
+  `CREATE OPERATOR public.# (LEFTARG = bytea, RIGHTARG = bytea, PROCEDURE = pgedge_ace.bytea_xor);`
+
+  `ace mtree init` also drops the operator on the nodes it runs on, but
+  re-running init resets change tracking: changes not yet applied to the
+  Merkle trees are lost. Don't re-run it just to remove the operator unless
+  you plan to rebuild the trees.
+
 ## [v2.1.1]
 
 ### Added
