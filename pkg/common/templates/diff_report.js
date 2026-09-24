@@ -232,12 +232,13 @@
         if (!pkCols.length) throw new Error('No primary key info available');
         const tableKey = diff.summary.schema + '.' + diff.summary.table;
 
+        const report = diff.html_report || {};
         const defaultAction = { type: 'keep_n1' };
         const targetKeys = selectionInfo?.usingSelection ? selectionInfo.selectedKeys : null;
         const usingSelection = !!selectionInfo?.usingSelection;
         const allSelected = usingSelection && selectionInfo.selectedCount === selectionInfo.totalRows && selectionInfo.totalRows > 0;
 
-        const rows = collectRows(diff, pkCols, targetKeys, defaultAction);
+        const rows = collectRows(diff, targetKeys, defaultAction);
 
         const grouped = groupRows(rows, pkCols);
         const rules = [];
@@ -245,7 +246,7 @@
 
         grouped.forEach(group => {
             const useRulesForGroup = allSelected || group.keys.length > 1;
-            const pkMatchers = buildPKMatchers(group.pkTuples, pkCols);
+            const pkMatchers = buildPKMatchers(group.pkTuples, pkCols, !!report.integer_pk);
 
             if (useRulesForGroup) {
                 if (!pkMatchers.length) return;
@@ -259,9 +260,8 @@
             }
 
             // Fallback to per-row override for singletons when not all rows are selected.
-            const pkMap = group.pkMaps[0];
             const name = 'pk_' + group.keys[0].replace(/\|/g, '_');
-            overrides.push({ name, pk: pkMap, action: group.action });
+            overrides.push({ name, pk: group.pkTuples[0], action: group.action });
         });
 
         const lines = [];
@@ -278,9 +278,9 @@
                     lines.push('        pk_in:');
                     for (const matcher of rule.pk_in) {
                         if (matcher.range) {
-                            lines.push('          - range: { from: ' + scalar(matcher.range.from) + ', to: ' + scalar(matcher.range.to) + ' }');
+                            lines.push('          - range: { from: ' + matcher.range.from + ', to: ' + matcher.range.to + ' }');
                         } else if (matcher.equals && matcher.equals.length) {
-                            lines.push('          - equals: ' + formatList(matcher.equals));
+                            lines.push('          - equals: ' + formatLiteralList(matcher.equals));
                         }
                     }
                 }
@@ -296,10 +296,9 @@
             for (const ov of overrides) {
                 lines.push('      - name: ' + quote(ov.name));
                 lines.push('        pk:');
-                for (const col of pkCols) {
-                    const v = ov.pk[col];
-                    lines.push('          ' + col + ': ' + scalar(v));
-                }
+                pkCols.forEach((col, i) => {
+                    lines.push('          ' + col + ': ' + ov.pk[i]);
+                });
                 lines.push('        action:');
                 emitActionYaml(lines, '          ', ov.action);
             }
@@ -307,50 +306,37 @@
         return lines.join('\n') + '\n';
     }
 
-    function collectRows(diff, pkCols, targetKeys, defaultAction) {
+    // collectRows turns the shown rows (diff.rows, written by the Go code)
+    // into plan entries. A row's pk is a list of JSON literals copied from the
+    // diff file; they go into the YAML as they are and are never turned into
+    // JavaScript numbers, which would lose digits of a bigint and turn a text
+    // key such as "007" into the number 7.
+    function collectRows(diff, targetKeys, defaultAction) {
         const rows = [];
-        const nodeDiffs = diff.NodeDiffs || diff.diffs || {};
         const seen = new Set();
 
-        for (const pairKey of Object.keys(nodeDiffs)) {
-            const nodeDiff = nodeDiffs[pairKey];
-            if (!nodeDiff || !nodeDiff.Rows && !nodeDiff.rows) continue;
-            const rowsMap = nodeDiff.Rows || nodeDiff.rows;
-            const nodeNames = Object.keys(rowsMap || {}).sort();
-            if (nodeNames.length < 2) continue;
-            const n1 = nodeNames[0];
-            const n2 = nodeNames[1];
-            const rows1 = rowsMap[n1] || [];
-            const rows2 = rowsMap[n2] || [];
+        for (const r of (diff.rows || [])) {
+            const key = r.key;
+            if (seen.has(key)) continue;
+            seen.add(key);
+            if (targetKeys && !targetKeys.has(key)) continue;
 
-            const map1 = rowsToMap(rows1, pkCols);
-            const map2 = rowsToMap(rows2, pkCols);
-
-            const keys = new Set([...map1.keys(), ...map2.keys()]);
-            for (const key of keys) {
-                if (seen.has(key)) continue;
-                seen.add(key);
-                if (targetKeys && !targetKeys.has(key)) continue;
-
-                const row1 = map1.get(key);
-                const row2 = map2.get(key);
-                const pkMap = keyToPkMap(key, pkCols);
-                const pkTuple = pkCols.map(col => pkMap[col]);
-                const diffType = diffTypeForRow(row1, row2);
-
-                let action = selectionForKey(key) || defaultAction;
-                if (row1 && !row2) {
-                    action = selectionForKey(key) || { type: 'apply_from', from: n1, mode: 'insert' };
-                } else if (row2 && !row1) {
-                    action = selectionForKey(key) || { type: 'apply_from', from: n2, mode: 'insert' };
+            let action = selectionForKey(key);
+            if (!action) {
+                if (r.type === 'missing_on_n2') {
+                    action = { type: 'apply_from', from: r.node_a, mode: 'insert' };
+                } else if (r.type === 'missing_on_n1') {
+                    action = { type: 'apply_from', from: r.node_b, mode: 'insert' };
+                } else {
+                    action = defaultAction;
                 }
-
-                // Skip emitting explicit instructions for rows that match the table default.
-                const matchesDefault = isSameAction(action, defaultAction) && diffType === 'row_mismatch';
-                if (matchesDefault) continue;
-
-                rows.push({ key, pk: pkMap, pkTuple, action, diffType });
             }
+
+            // Skip emitting explicit instructions for rows that match the table default.
+            const matchesDefault = isSameAction(action, defaultAction) && r.type === 'row_mismatch';
+            if (matchesDefault) continue;
+
+            rows.push({ key, pkTuple: r.pk, action, diffType: r.type });
         }
 
         return rows;
@@ -362,67 +348,60 @@
             const sig = actionSignature(row.action) + '|' + (row.diffType || '') + '|' + pkCols.length;
             let group = groupsByKey.get(sig);
             if (!group) {
-                group = { action: row.action, diffType: row.diffType, pkTuples: [], pkMaps: [], keys: [] };
+                group = { action: row.action, diffType: row.diffType, pkTuples: [], keys: [] };
                 groupsByKey.set(sig, group);
             }
             group.pkTuples.push(row.pkTuple);
-            group.pkMaps.push(row.pk);
             group.keys.push(row.key);
         });
         return Array.from(groupsByKey.values());
     }
 
-    function buildPKMatchers(pkTuples, pkCols) {
+    // buildPKMatchers returns pk_in matchers whose values are JSON literals.
+    // Ranges are used only when the Go code says that every key of the diff
+    // is a whole number (integerPK): then a range over consecutive shown keys
+    // cannot match any key that is not shown. BigInt keeps bigint keys exact.
+    function buildPKMatchers(pkTuples, pkCols, integerPK) {
         if (!pkTuples.length) return [];
-        if (pkCols.length === 1) {
-            const values = pkTuples.map(t => t[0]);
-            const numeric = [];
-            const nonNumeric = [];
-            values.forEach(v => (isFiniteNumber(v) ? numeric : nonNumeric).push(v));
-
-            const matchers = [];
-            if (numeric.length) {
-                const uniq = Array.from(new Set(numeric)).sort((a, b) => a - b);
-                const singles = [];
-                let start = uniq[0];
-                let prev = uniq[0];
-                for (let i = 1; i <= uniq.length; i++) {
-                    const curr = uniq[i];
-                    const contiguous = curr !== undefined && curr === prev + 1;
-                    if (contiguous) {
-                        prev = curr;
-                        continue;
-                    }
-                    const span = prev - start + 1;
-                    if (span > 1) {
-                        matchers.push({ range: { from: start, to: prev } });
-                    } else {
-                        singles.push(start);
-                    }
-                    if (curr !== undefined) {
-                        start = curr;
-                        prev = curr;
-                    }
-                }
-                if (singles.length) matchers.push({ equals: singles });
-            }
-            if (nonNumeric.length) {
-                const uniq = Array.from(new Set(nonNumeric));
-                matchers.push({ equals: uniq });
-            }
-            return matchers;
+        if (pkCols.length !== 1) {
+            // Composite PKs: use equals tuples.
+            return [{ equals: pkTuples }];
         }
 
-        // Composite PKs: use equals tuples.
-        const equalsTuples = pkTuples.map(tuple => tuple);
-        return equalsTuples.length ? [{ equals: equalsTuples }] : [];
+        const values = Array.from(new Set(pkTuples.map(t => t[0])));
+        if (!integerPK) {
+            return [{ equals: values }];
+        }
+
+        const nums = values.map(v => BigInt(v)).sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+        const matchers = [];
+        const singles = [];
+        let start = nums[0];
+        let prev = nums[0];
+        for (let i = 1; i <= nums.length; i++) {
+            const curr = nums[i];
+            if (curr !== undefined && curr === prev + 1n) {
+                prev = curr;
+                continue;
+            }
+            if (prev > start) {
+                matchers.push({ range: { from: start.toString(), to: prev.toString() } });
+            } else {
+                singles.push(start.toString());
+            }
+            if (curr !== undefined) {
+                start = curr;
+                prev = curr;
+            }
+        }
+        if (singles.length) matchers.push({ equals: singles });
+        return matchers;
     }
 
-    function diffTypeForRow(row1, row2) {
-        if (row1 && row2) return 'row_mismatch';
-        if (row1 && !row2) return 'missing_on_n2';
-        if (!row1 && row2) return 'missing_on_n1';
-        return '';
+    // formatLiteralList writes a flow list of values that are already YAML
+    // literals (JSON text), or lists of them.
+    function formatLiteralList(values) {
+        return '[' + values.map(v => Array.isArray(v) ? formatLiteralList(v) : v).join(', ') + ']';
     }
 
     function isSameAction(a, b) {
@@ -437,10 +416,6 @@
         if (action.custom_row) parts.push('custom:' + JSON.stringify(action.custom_row));
         if (action.helpers) parts.push('helpers:' + JSON.stringify(action.helpers));
         return parts.join('|');
-    }
-
-    function isFiniteNumber(v) {
-        return typeof v === 'number' && Number.isFinite(v);
     }
 
     function formatList(values) {
@@ -541,35 +516,6 @@
         if (customRow) action.custom_row = customRow;
         if (hasHelpers) action.helpers = helpers;
         return action;
-    }
-
-    function rowsToMap(rows, pkCols) {
-        const m = new Map();
-        for (const r of rows) {
-            const keyParts = pkCols.map(c => stringify(r[c]));
-            const k = keyParts.join('|');
-            m.set(k, r);
-        }
-        return m;
-    }
-
-    function keyToPkMap(key, pkCols) {
-        const parts = key.split('|');
-        const pk = {};
-        pkCols.forEach((c, i) => pk[c] = parseMaybeNumber(parts[i]));
-        return pk;
-    }
-
-    function stringify(v) {
-        if (v === null || v === undefined) return '';
-        return '' + v;
-    }
-
-    function parseMaybeNumber(v) {
-        if (v === undefined || v === null) return v;
-        const n = Number(v);
-        if (!Number.isNaN(n) && v !== '') return n;
-        return v;
     }
 
     function quote(s) {
