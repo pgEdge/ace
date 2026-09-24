@@ -354,33 +354,34 @@
     // key such as "007" into the number 7.
     function collectRows(diff, targetKeys, rowDefault, planDefault) {
         const rows = [];
-        const seen = new Set();
-
-        for (const r of (diff.rows || [])) {
-            const key = r.key;
-            if (seen.has(key)) continue;
-            seen.add(key);
-            if (targetKeys && !targetKeys.has(key)) continue;
-
-            let action = selectionForKey(key);
-            if (!action) {
-                if (r.type === 'missing_on_n2') {
-                    action = { type: 'apply_from', from: r.node_a, mode: 'insert' };
-                } else if (r.type === 'missing_on_n1') {
-                    action = { type: 'apply_from', from: r.node_b, mode: 'insert' };
-                } else {
-                    action = rowDefault;
-                }
-            }
-
+        for (const r of uniqueTargetRows(diff, targetKeys)) {
+            const action = selectionForKey(r.key) || defaultActionFor(r, rowDefault);
             // Skip emitting explicit instructions for rows that match the table default.
-            const matchesDefault = isSameAction(action, planDefault) && r.type === 'row_mismatch';
-            if (matchesDefault) continue;
-
-            rows.push({ key, pkTuple: r.pk, action, diffType: r.type });
+            if (r.type === 'row_mismatch' && isSameAction(action, planDefault)) continue;
+            rows.push({ key: r.key, pkTuple: r.pk, action, diffType: r.type });
         }
-
         return rows;
+    }
+
+    // uniqueTargetRows returns the embedded rows once per key, and only the
+    // selected ones when targetKeys is set.
+    function uniqueTargetRows(diff, targetKeys) {
+        const seen = new Set();
+        const out = [];
+        for (const r of (diff.rows || [])) {
+            if (seen.has(r.key)) continue;
+            seen.add(r.key);
+            if (targetKeys && !targetKeys.has(r.key)) continue;
+            out.push(r);
+        }
+        return out;
+    }
+
+    // defaultActionFor is what "Default" means for the row on the page.
+    function defaultActionFor(r, rowDefault) {
+        if (r.type === 'missing_on_n2') return { type: 'apply_from', from: r.node_a, mode: 'insert' };
+        if (r.type === 'missing_on_n1') return { type: 'apply_from', from: r.node_b, mode: 'insert' };
+        return rowDefault;
     }
 
     function groupRows(rows, pkCols) {
@@ -401,20 +402,20 @@
     // buildPKMatchers returns pk_in matchers whose values are JSON literals.
     // Ranges are used only when the Go code says that every key of the diff
     // is a whole number (integerPK): then a range over consecutive shown keys
-    // cannot match any key that is not shown. BigInt keeps bigint keys exact.
+    // cannot match any key that is not shown.
     function buildPKMatchers(pkTuples, pkCols, integerPK) {
         if (!pkTuples.length) return [];
-        if (pkCols.length !== 1) {
-            // Composite PKs: use equals tuples.
-            return [{ equals: pkTuples }];
-        }
-
+        // Composite PKs: use equals tuples.
+        if (pkCols.length !== 1) return [{ equals: pkTuples }];
         const values = Array.from(new Set(pkTuples.map(t => t[0])));
-        if (!integerPK) {
-            return [{ equals: values }];
-        }
+        return integerPK ? integerRangeMatchers(values) : [{ equals: values }];
+    }
 
-        const nums = values.map(v => BigInt(v)).sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+    // integerRangeMatchers turns whole-number literals into ranges over runs of
+    // consecutive numbers, and one equals list for the rest. BigInt keeps
+    // bigint keys exact.
+    function integerRangeMatchers(values) {
+        const nums = values.map(v => BigInt(v)).sort(compareBigInt);
         const matchers = [];
         const singles = [];
         let start = nums[0];
@@ -430,13 +431,16 @@
             } else {
                 singles.push(start.toString());
             }
-            if (curr !== undefined) {
-                start = curr;
-                prev = curr;
-            }
+            start = curr;
+            prev = curr;
         }
         if (singles.length) matchers.push({ equals: singles });
         return matchers;
+    }
+
+    function compareBigInt(a, b) {
+        if (a < b) return -1;
+        return a > b ? 1 : 0;
     }
 
     // formatLiteralList writes a flow list of values that are already YAML
