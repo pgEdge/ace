@@ -17,6 +17,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"html/template"
+	"math"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -726,10 +727,16 @@ func comparePKKey(a, b string) int {
 	}
 }
 
+// comparePKComponent orders numbers by value and before all other strings,
+// and other strings byte-wise. The order must be total. The keys come from
+// map iteration, and with an order that is not transitive (as when a number
+// and a string compared as strings, so that "1a" < "9" < "10" but
+// "10" < "1a") sort.Slice put the rows in a different order on each run.
 func comparePKComponent(a, b string) int {
 	numA, okA := parseNumeric(a)
 	numB, okB := parseNumeric(b)
-	if okA && okB {
+	switch {
+	case okA && okB:
 		switch {
 		case numA < numB:
 			return -1
@@ -738,14 +745,12 @@ func comparePKComponent(a, b string) int {
 		default:
 			return 0
 		}
-	}
-	if a < b {
+	case okA:
 		return -1
-	}
-	if a > b {
+	case okB:
 		return 1
 	}
-	return 0
+	return strings.Compare(a, b)
 }
 
 func parseNumeric(val string) (float64, bool) {
@@ -753,7 +758,9 @@ func parseNumeric(val string) (float64, bool) {
 		return 0, false
 	}
 	num, err := strconv.ParseFloat(val, 64)
-	if err != nil {
+	// NaN is not equal to anything, itself included, and would break the
+	// order; treat it and the infinities as text.
+	if err != nil || math.IsNaN(num) || math.IsInf(num, 0) {
 		return 0, false
 	}
 	return num, true
