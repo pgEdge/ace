@@ -27,6 +27,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/pgedge/ace/pkg/logger"
 	"github.com/pgedge/ace/pkg/types"
 )
 
@@ -38,6 +39,13 @@ var htmlDiffCSS string
 
 //go:embed templates/diff_report.js
 var htmlDiffJS string
+
+// DefaultMaxHTMLRows is how many rows the HTML report shows for each node pair
+// when neither the command line nor the config file sets max_html_rows. A row
+// here is one primary key, whether it differs in value or is missing on one
+// node. One row takes several kilobytes of markup, so without a limit a large
+// diff gives a file of gigabytes that no browser can open.
+const DefaultMaxHTMLRows int64 = 10000
 
 // htmlWriteBufferSize is the size of the buffer in front of the report file.
 // It is a variable only so that tests can make every write reach the writer.
@@ -59,9 +67,19 @@ type htmlSummaryData struct {
 	Breakdown []htmlPairCount
 }
 
+// htmlTruncation is shown at the top of a report that does not show every
+// row of the diff.
+type htmlTruncation struct {
+	Shown    string
+	Total    string
+	Limit    string
+	DiffFile string
+}
+
 type htmlReportHead struct {
-	CSS     template.CSS
-	Summary htmlSummaryData
+	CSS        template.CSS
+	Truncation *htmlTruncation
+	Summary    htmlSummaryData
 }
 
 type htmlReportTail struct {
@@ -69,11 +87,20 @@ type htmlReportTail struct {
 }
 
 // htmlPairHead is the data for the "pair_head" and "pair_tail" blocks.
+// Hidden is empty when the section shows every row of the pair. NotRendered
+// is empty unless table-diff counted rows that the report leaves out because
+// they show no difference (see buildHTMLPairPlan).
 type htmlPairHead struct {
-	NodeA     string
-	NodeB     string
-	DiffCount string
-	HasDiffs  bool
+	NodeA           string
+	NodeB           string
+	DiffCount       string
+	Shown           string
+	Total           string
+	Hidden          string
+	HiddenBreakdown string
+	NotRendered     string
+	DiffFile        string
+	HasDiffs        bool
 }
 
 type htmlGroupHead struct {
@@ -102,14 +129,19 @@ type htmlRow struct {
 	NodeAJSON string
 }
 
-// htmlReportInfo goes into the embedded diff data, next to the list of rows
-// (see writeHTMLDiffData).
+// htmlReportInfo goes into the embedded diff data, so that the page script
+// knows when the repair plan it builds covers only part of the diff. The
+// list of rows follows it in the page (see writeHTMLDiffData).
 type htmlReportInfo struct {
-	IntegerPK bool `json:"integer_pk"`
+	Truncated bool           `json:"truncated"`
+	MaxRows   int64          `json:"max_html_rows"`
+	DiffFile  string         `json:"diff_file"`
+	IntegerPK bool           `json:"integer_pk"`
+	Pairs     []htmlPairInfo `json:"pairs"`
 }
 
 // htmlPlanRow is what the page script needs to write a repair-plan rule for
-// one row of the report. Key is the display key, as in data-pk. Type uses the names
+// one shown row. Key is the display key, as in data-pk. Type uses the names
 // of the repair executor. PK holds each primary key value as the JSON text
 // that the diff file has for it. The script copies that text into the YAML
 // as it is and never turns it into a JavaScript number, so a bigint keeps
@@ -121,6 +153,12 @@ type htmlPlanRow struct {
 	Key   string   `json:"key"`
 	Type  string   `json:"type"`
 	PK    []string `json:"pk"`
+}
+
+type htmlPairInfo struct {
+	Pair  string `json:"pair"`
+	Shown int    `json:"shown"`
+	Total int    `json:"total"`
 }
 
 // htmlPairPlan lists the report rows of one node pair, in report order:
@@ -138,10 +176,57 @@ type htmlPairPlan struct {
 	valueKeys  []string
 	missingInB []string
 	missingInA []string
+
+	// How many rows of each list the report shows.
+	shownValue    int
+	shownMissingB int
+	shownMissingA int
 }
 
 func (p *htmlPairPlan) total() int {
 	return len(p.valueKeys) + len(p.missingInB) + len(p.missingInA)
+}
+
+func (p *htmlPairPlan) shown() int {
+	return p.shownValue + p.shownMissingB + p.shownMissingA
+}
+
+// applyLimit shows at most limit rows of the pair and takes them in report
+// order. So when value differences alone reach the limit, no missing rows
+// are shown; the section note and footer then give the count of each kind.
+func (p *htmlPairPlan) applyLimit(limit int64) {
+	remaining := limit
+	take := func(n int) int {
+		if int64(n) > remaining {
+			n = int(remaining)
+		}
+		remaining -= int64(n)
+		return n
+	}
+	p.shownValue = take(len(p.valueKeys))
+	p.shownMissingB = take(len(p.missingInB))
+	p.shownMissingA = take(len(p.missingInA))
+}
+
+// hiddenBreakdown describes the rows that the report does not show, for
+// example "400,000 value differences, 50,000 missing in n3".
+func (p *htmlPairPlan) hiddenBreakdown() string {
+	var parts []string
+	add := func(one, many string, all, shown int) {
+		hidden := all - shown
+		if hidden <= 0 {
+			return
+		}
+		label := many
+		if hidden == 1 {
+			label = one
+		}
+		parts = append(parts, formatInt64WithCommas(int64(hidden))+" "+label)
+	}
+	add("value difference", "value differences", len(p.valueKeys), p.shownValue)
+	add("missing in "+p.nodeB, "missing in "+p.nodeB, len(p.missingInB), p.shownMissingB)
+	add("missing in "+p.nodeA, "missing in "+p.nodeA, len(p.missingInA), p.shownMissingA)
+	return strings.Join(parts, ", ")
 }
 
 // planType is the repair executor's name for the kind of difference of a row
@@ -172,8 +257,8 @@ var integerLiteralRe = regexp.MustCompile(`^-?[0-9]+$`)
 
 // htmlIntegerPK tells whether the primary key is a single column and every
 // row of the diff, in every pair, has a whole number in it. Only then can the
-// page script write a range rule: a range over the keys 1 and 2 would also
-// match a key 1.5 that has a rule of its own.
+// page script write a range rule: a range over the shown keys 1 and 2 would
+// also match a key 1.5 that the page did not show.
 func htmlIntegerPK(plans []*htmlPairPlan, primaryKey []string) bool {
 	if len(primaryKey) != 1 {
 		return false
@@ -197,7 +282,8 @@ func htmlIntegerPK(plans []*htmlPairPlan, primaryKey []string) bool {
 // buildHTMLPairPlan pairs the rows of the two nodes and sorts them. A row
 // that exists on both nodes but shows no difference after stringifyCellValue
 // (for example 1 against "1", or a difference only in _spock_metadata_) is
-// left out, as before. It returns nil when the pair has no rows to show.
+// left out, as before; writeHTMLPair reports how many. It returns nil when
+// the pair has no rows to show.
 func buildHTMLPairPlan(pairKey string, nodeDiff types.DiffByNodePair, primaryKey []string) *htmlPairPlan {
 	nodeNames := strings.Split(pairKey, "/")
 	if len(nodeNames) != 2 {
@@ -338,12 +424,18 @@ func (p *htmlPairPlan) missingRow(key string, missingInB bool, pkSet map[string]
 	return row
 }
 
-func buildHTMLSummaryItems(summary types.DiffSummary) []htmlSummaryItem {
+func buildHTMLSummaryItems(summary types.DiffSummary, shown, total int, truncated bool) []htmlSummaryItem {
 	items := []htmlSummaryItem{
 		{Label: "Table", Value: fmt.Sprintf("%s.%s", summary.Schema, summary.Table)},
 		{Label: "Nodes", Value: strings.Join(summary.Nodes, ", ")},
 		{Label: "Primary Key", Value: formatPrimaryKey(summary.PrimaryKey)},
 		{Label: "Total Differences", Value: formatInt64WithCommas(totalDiffs(summary.DiffRowsCount))},
+	}
+	if truncated {
+		items = append(items, htmlSummaryItem{
+			Label: "Rows Shown in Report",
+			Value: formatInt64WithCommas(int64(shown)) + " of " + formatInt64WithCommas(int64(total)),
+		})
 	}
 	items = append(items,
 		htmlSummaryItem{Label: "Total Rows Checked", Value: formatInt64WithCommas(summary.TotalRowsChecked)},
@@ -389,8 +481,10 @@ func buildHTMLSummaryItems(summary types.DiffSummary) []htmlSummaryItem {
 	return filtered
 }
 
-// writeHTMLDiffReport writes the HTML report next to the JSON report.
-func writeHTMLDiffReport(diffResult types.DiffOutput, jsonFilePath string) (htmlPath string, err error) {
+// writeHTMLDiffReport writes the HTML report next to the JSON report. It shows
+// at most maxRows rows for each node pair; a value <= 0 means
+// DefaultMaxHTMLRows.
+func writeHTMLDiffReport(diffResult types.DiffOutput, jsonFilePath string, maxRows int64) (htmlPath string, err error) {
 	if jsonFilePath == "" {
 		return "", nil
 	}
@@ -411,7 +505,7 @@ func writeHTMLDiffReport(diffResult types.DiffOutput, jsonFilePath string) (html
 		}
 	}()
 
-	if err = renderHTMLDiffReport(f, diffResult); err != nil {
+	if err = renderHTMLDiffReport(f, diffResult, filepath.Base(jsonFilePath), maxRows); err != nil {
 		return "", err
 	}
 	if err = f.Close(); err != nil {
@@ -420,13 +514,18 @@ func writeHTMLDiffReport(diffResult types.DiffOutput, jsonFilePath string) (html
 	return path, nil
 }
 
-// renderHTMLDiffReport writes the report to out.
+// renderHTMLDiffReport writes the report to out. diffFile is the name of the
+// JSON report, which the page refers to for the full diff.
 //
 // The report goes out block by block through a buffered writer. Only the row
 // keys of the whole diff are held in memory, never the markup: at several
 // kilobytes of markup per row, a document built in memory for a diff of half a
 // million rows needs gigabytes.
-func renderHTMLDiffReport(out io.Writer, diffResult types.DiffOutput) error {
+func renderHTMLDiffReport(out io.Writer, diffResult types.DiffOutput, diffFile string, maxRows int64) error {
+	if maxRows <= 0 {
+		maxRows = DefaultMaxHTMLRows
+	}
+
 	tmpl, err := template.New("tableDiffReport").Parse(htmlDiffTemplate)
 	if err != nil {
 		return fmt.Errorf("failed to parse HTML template: %w", err)
@@ -444,19 +543,38 @@ func renderHTMLDiffReport(out io.Writer, diffResult types.DiffOutput) error {
 	}
 	sort.Strings(pairKeys)
 
+	// The page header says whether the report is truncated, so every pair
+	// must be counted before the first byte is written.
 	var plans []*htmlPairPlan
+	var shownAll, totalAll int
 	for _, pairKey := range pairKeys {
-		if p := buildHTMLPairPlan(pairKey, diffResult.NodeDiffs[pairKey], summary.PrimaryKey); p != nil {
-			plans = append(plans, p)
+		p := buildHTMLPairPlan(pairKey, diffResult.NodeDiffs[pairKey], summary.PrimaryKey)
+		if p == nil {
+			continue
 		}
+		p.applyLimit(maxRows)
+		shownAll += p.shown()
+		totalAll += p.total()
+		plans = append(plans, p)
 	}
+	truncated := shownAll < totalAll
 
 	head := htmlReportHead{
 		CSS: template.CSS(htmlDiffCSS),
 		Summary: htmlSummaryData{
-			Items:     buildHTMLSummaryItems(summary),
+			Items:     buildHTMLSummaryItems(summary, shownAll, totalAll, truncated),
 			Breakdown: buildDiffBreakdown(summary.DiffRowsCount),
 		},
+	}
+	if truncated {
+		head.Truncation = &htmlTruncation{
+			Shown:    formatInt64WithCommas(int64(shownAll)),
+			Total:    formatInt64WithCommas(int64(totalAll)),
+			Limit:    formatInt64WithCommas(maxRows),
+			DiffFile: diffFile,
+		}
+		logger.Warn("HTML report shows %d of %d rows (max_html_rows=%d per node pair); the full diff is in %s",
+			shownAll, totalAll, maxRows, diffFile)
 	}
 
 	w := bufio.NewWriterSize(out, htmlWriteBufferSize)
@@ -469,12 +587,21 @@ func renderHTMLDiffReport(out io.Writer, diffResult types.DiffOutput) error {
 		}
 	}
 	for _, p := range plans {
-		if err := writeHTMLPair(tmpl, w, p, summary, pkSet); err != nil {
+		if err := writeHTMLPair(tmpl, w, p, summary, pkSet, diffFile); err != nil {
 			return fmt.Errorf("failed to render HTML diff report: %w", err)
 		}
 	}
 
-	info := htmlReportInfo{IntegerPK: htmlIntegerPK(plans, summary.PrimaryKey)}
+	info := htmlReportInfo{
+		Truncated: truncated,
+		MaxRows:   maxRows,
+		DiffFile:  diffFile,
+		IntegerPK: htmlIntegerPK(plans, summary.PrimaryKey),
+		Pairs:     make([]htmlPairInfo, 0, len(plans)),
+	}
+	for _, p := range plans {
+		info.Pairs = append(info.Pairs, htmlPairInfo{Pair: p.pairKey, Shown: p.shown(), Total: p.total()})
+	}
 	if err := writeHTMLDiffData(w, summary, plans, info, summary.PrimaryKey); err != nil {
 		return fmt.Errorf("failed to embed diff data in HTML report: %w", err)
 	}
@@ -489,23 +616,37 @@ func renderHTMLDiffReport(out io.Writer, diffResult types.DiffOutput) error {
 }
 
 // writeHTMLPair writes the section of one node pair, one row at a time.
-func writeHTMLPair(tmpl *template.Template, w io.Writer, p *htmlPairPlan, summary types.DiffSummary, pkSet map[string]struct{}) error {
+func writeHTMLPair(tmpl *template.Template, w io.Writer, p *htmlPairPlan, summary types.DiffSummary, pkSet map[string]struct{}, diffFile string) error {
+	// Every count in the section comes from the plan, so the numbers on the
+	// page always add up. The engine's own count can be higher; the note
+	// below says why.
+	counted := summary.DiffRowsCount[p.pairKey]
 	head := htmlPairHead{
 		NodeA:     p.nodeA,
 		NodeB:     p.nodeB,
-		DiffCount: formatInt64WithCommas(int64(summary.DiffRowsCount[p.pairKey])),
+		DiffCount: formatInt64WithCommas(int64(counted)),
+		Total:     formatInt64WithCommas(int64(p.total())),
+		DiffFile:  diffFile,
 		HasDiffs:  p.total() > 0,
+	}
+	if hidden := p.total() - p.shown(); hidden > 0 {
+		head.Shown = formatInt64WithCommas(int64(p.shown()))
+		head.Hidden = formatInt64WithCommas(int64(hidden))
+		head.HiddenBreakdown = p.hiddenBreakdown()
+	}
+	if notRendered := counted - p.total(); notRendered > 0 {
+		head.NotRendered = formatInt64WithCommas(int64(notRendered))
 	}
 
 	if err := tmpl.ExecuteTemplate(w, "pair_head", head); err != nil {
 		return err
 	}
 
-	if len(p.valueKeys) > 0 {
+	if p.shownValue > 0 {
 		if err := tmpl.ExecuteTemplate(w, "separator", "Value Differences"); err != nil {
 			return err
 		}
-		for i, key := range p.valueKeys {
+		for i, key := range p.valueKeys[:p.shownValue] {
 			row := p.valueRow(key, pkSet)
 			row.First = i == 0
 			if err := tmpl.ExecuteTemplate(w, "value_row", row); err != nil {
@@ -514,7 +655,7 @@ func writeHTMLPair(tmpl *template.Template, w io.Writer, p *htmlPairPlan, summar
 		}
 	}
 
-	if len(p.missingInB) > 0 || len(p.missingInA) > 0 {
+	if p.shownMissingB > 0 || p.shownMissingA > 0 {
 		if err := tmpl.ExecuteTemplate(w, "separator", "Missing Rows"); err != nil {
 			return err
 		}
@@ -523,8 +664,8 @@ func writeHTMLPair(tmpl *template.Template, w io.Writer, p *htmlPairPlan, summar
 			missingInB bool
 			title      string
 		}{
-			{p.missingInB, true, "Missing in " + p.nodeB},
-			{p.missingInA, false, "Missing in " + p.nodeA},
+			{p.missingInB[:p.shownMissingB], true, "Missing in " + p.nodeB},
+			{p.missingInA[:p.shownMissingA], false, "Missing in " + p.nodeA},
 		}
 		groupWritten := false
 		for _, g := range groups {
@@ -550,7 +691,7 @@ func writeHTMLPair(tmpl *template.Template, w io.Writer, p *htmlPairPlan, summar
 
 // writeHTMLDiffData embeds the data that the page script needs to build a
 // repair plan: the diff summary, htmlReportInfo, and one htmlPlanRow for each
-// row of the report, in report order. The rows are written one at a time, so the
+// shown row, in report order. The rows are written one at a time, so the
 // list never exists in memory as a whole.
 //
 // json.Marshal escapes '<', '>' and '&', so no value can close the script
@@ -581,9 +722,9 @@ func writeHTMLDiffData(w *bufio.Writer, summary types.DiffSummary, plans []*html
 			rows     map[string]types.OrderedMap
 			planType string
 		}{
-			{p.valueKeys, p.rowMapA, planTypeMismatch},
-			{p.missingInB, p.rowMapA, planTypeMissingN2},
-			{p.missingInA, p.rowMapB, planTypeMissingN1},
+			{p.valueKeys[:p.shownValue], p.rowMapA, planTypeMismatch},
+			{p.missingInB[:p.shownMissingB], p.rowMapA, planTypeMissingN2},
+			{p.missingInA[:p.shownMissingA], p.rowMapB, planTypeMissingN1},
 		}
 		for _, l := range lists {
 			for _, key := range l.keys {
@@ -968,10 +1109,10 @@ func comparePKKey(a, b string) int {
 }
 
 // comparePKComponent orders numbers by value and before all other strings,
-// and other strings byte-wise. The order must be total. The keys come from
-// map iteration, and with an order that is not transitive (as when a number
-// and a string compared as strings, so that "1a" < "9" < "10" but
-// "10" < "1a") sort.Slice put the rows in a different order on each run.
+// and other strings byte-wise. The order must be total: the HTML report shows
+// a prefix of the sorted rows, and with an order that is not transitive (as
+// when a number and a string compared as strings, so that "1a" < "9" < "10"
+// but "10" < "1a") the prefix changed from one run to the next.
 func comparePKComponent(a, b string) int {
 	numA, okA := parseNumeric(a)
 	numB, okB := parseNumeric(b)
