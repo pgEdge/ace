@@ -67,7 +67,7 @@ func htmlTestDiff(valueDiffs, missingOnB, missingOnA int, note string) types.Dif
 
 type htmlTestData struct {
 	Summary    types.DiffSummary `json:"summary"`
-	HTMLReport htmlReportInfo    `json:"html_report"`
+	HTMLReport htmlReportInfo    `json:"report_info"`
 	Rows       []htmlPlanRow     `json:"rows"`
 }
 
@@ -144,7 +144,7 @@ func TestHTMLReportNotTruncated(t *testing.T) {
 	}
 
 	if data.HTMLReport.Truncated {
-		t.Error("html_report.truncated is true for a complete report")
+		t.Error("report_info.truncated is true for a complete report")
 	}
 	if data.HTMLReport.MaxRows != DefaultMaxHTMLRows {
 		t.Errorf("max_html_rows: got %d, want the default %d", data.HTMLReport.MaxRows, DefaultMaxHTMLRows)
@@ -207,10 +207,10 @@ func TestHTMLReportTruncated(t *testing.T) {
 	}
 	info := data.HTMLReport
 	if !info.Truncated || info.MaxRows != 30 || info.DiffFile != "public_t_diffs-20260101000000.json" {
-		t.Errorf("html_report: got %+v", info)
+		t.Errorf("report_info: got %+v", info)
 	}
 	if len(info.Pairs) != 1 || info.Pairs[0] != (htmlPairInfo{Pair: "n1/n2", Shown: 30, Total: 40}) {
-		t.Errorf("html_report.pairs: got %+v", info.Pairs)
+		t.Errorf("report_info.pairs: got %+v", info.Pairs)
 	}
 }
 
@@ -378,7 +378,7 @@ func TestHTMLReportPageAndDataHoldTheSameRows(t *testing.T) {
 			t.Errorf("%s: %d rows, want the limit 8", pc.pair, n)
 		}
 		if info := data.HTMLReport.Pairs[i]; info.Pair != pc.pair || info.Shown != n {
-			t.Errorf("%s: html_report says %+v, page shows %d rows", pc.pair, info, n)
+			t.Errorf("%s: report_info says %+v, page shows %d rows", pc.pair, info, n)
 		}
 	}
 	if data.HTMLReport.Pairs[0].Total != 22 || data.HTMLReport.Pairs[1].Total != 11 {
@@ -505,7 +505,7 @@ func TestHTMLReportRowsWithoutVisibleDifference(t *testing.T) {
 		t.Error("section does not explain the row left out")
 	}
 	if data.HTMLReport.Truncated {
-		t.Error("html_report.truncated is true")
+		t.Error("report_info.truncated is true")
 	}
 }
 

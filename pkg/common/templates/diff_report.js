@@ -251,7 +251,7 @@
         // saw, so the plan must leave them alone: its default is skip, and
         // every shown row gets an explicit rule. keep_n1 would also be wrong
         // for rows missing on n1, and table-repair rejects the whole plan then.
-        const report = diff.html_report || {};
+        const report = diff.report_info || {};
         const truncated = !!report.truncated;
         const rowDefault = { type: 'keep_n1' };
         const planDefault = truncated ? { type: 'skip' } : rowDefault;
