@@ -1,4 +1,11 @@
-<!DOCTYPE html>
+{{/*
+The report is written in parts, so that the writer can stream it to disk one
+row at a time instead of building the whole document in memory. Each block
+below is executed separately, in the order the blocks appear here. The
+embedded diff data (<script id="diff-data">) is written by the Go code after
+the last pair block and before "report_tail".
+*/}}
+{{define "report_head"}}<!DOCTYPE html>
 <html>
 <head>
     <meta charset="utf-8">
@@ -37,11 +44,16 @@
             </div>
             {{end}}
         </div>
+{{end}}
 
-        {{if .Pairs}}
-            {{range .Pairs}}
+{{define "no_pairs"}}
+            <div class="diff-section">
+                <div class="empty-message">No row-level differences were recorded.</div>
+            </div>
+{{end}}
+
+{{define "pair_head"}}
             <div class="diff-section" data-nodea="{{.NodeA}}" data-nodeb="{{.NodeB}}">
-                {{ $nodeA := .NodeA }}{{ $nodeB := .NodeB }}
                 <div class="diff-header">
                     <div class="pair-title">Differences between {{.NodeA}} and {{.NodeB}}</div>
                     <span class="diff-count-pill">{{.DiffCount}} entries</span>
@@ -56,29 +68,38 @@
                             </tr>
                         </thead>
                         <tbody>
-                        {{if .ValueDiffs}}
-                        <tr class="row-separator"><td colspan="100%">Value Differences</td></tr>
-                        {{range $i, $row := .ValueDiffs}}
-                            {{if $i}}<tr class="row-divider"><td colspan="100%"></td></tr>{{end}}
+{{end}}
+
+{{define "separator"}}
+                        <tr class="row-separator"><td colspan="100%">{{.}}</td></tr>
+{{end}}
+
+{{define "group_head"}}
+                            {{if .DividerBefore}}<tr class="row-divider"><td colspan="100%"></td></tr>{{end}}
+                            <tr class="row-subseparator"><td colspan="100%">{{.Title}}</td></tr>
+{{end}}
+
+{{define "value_row"}}
+                            {{if not .First}}<tr class="row-divider"><td colspan="100%"></td></tr>{{end}}
                             <tr class="diff-row">
                                 <td class="select-cell">
-                                    <input type="checkbox" class="row-select" data-pk="{{$row.PKey}}" data-type="{{$row.RowType}}" data-nodea="{{ $nodeA }}" data-nodeb="{{ $nodeB }}" aria-label="Select row {{$row.PKey}}">
+                                    <input type="checkbox" class="row-select" data-pk="{{.PKey}}" data-type="{{.RowType}}" data-nodea="{{ .NodeA }}" data-nodeb="{{ .NodeB }}" aria-label="Select row {{.PKey}}">
                                 </td>
                                 <td class="action-cell">
                                     <div class="action-wrapper">
                                         <span class="action-label">Row Action</span>
-                                        <select class="plan-action" data-type="mismatch" data-pk="{{$row.PKey}}" data-nodea="{{ $nodeA }}" data-nodeb="{{ $nodeB }}">
+                                        <select class="plan-action" data-type="mismatch" data-pk="{{.PKey}}" data-nodea="{{ .NodeA }}" data-nodeb="{{ .NodeB }}">
                                             <option value="">Use default (keep_n1)</option>
-                                            <option value="keep_n1">Keep {{$nodeA}}</option>
-                                            <option value="keep_n2">Keep {{$nodeB}}</option>
-                                            <option value="apply_from_n1_insert">Apply from {{$nodeA}} (insert if missing)</option>
-                                            <option value="apply_from_n2_insert">Apply from {{$nodeB}} (insert if missing)</option>
+                                            <option value="keep_n1">Keep {{.NodeA}}</option>
+                                            <option value="keep_n2">Keep {{.NodeB}}</option>
+                                            <option value="apply_from_n1_insert">Apply from {{.NodeA}} (insert if missing)</option>
+                                            <option value="apply_from_n2_insert">Apply from {{.NodeB}} (insert if missing)</option>
                                             <option value="delete">Delete</option>
                                             <option value="skip">Skip</option>
                                             <option value="custom">Custom...</option>
                                         </select>
-                                        <div class="row-key" title="Primary key">{{$row.PKey}}</div>
-                                        <div class="custom-editor" data-pk="{{$row.PKey}}" data-nodea="{{ $nodeA }}" data-nodeb="{{ $nodeB }}">
+                                        <div class="row-key" title="Primary key">{{.PKey}}</div>
+                                        <div class="custom-editor" data-pk="{{.PKey}}" data-nodea="{{ .NodeA }}" data-nodeb="{{ .NodeB }}">
                                             <div class="custom-editor-header">Custom action</div>
                                             <label class="custom-field">
                                                 <span>Custom row (JSON)</span>
@@ -89,8 +110,8 @@
                                                         <span>Coalesce priority</span>
                                                         <select class="helper-coalesce">
                                                             <option value="">None</option>
-                                                            <option value="{{$nodeA}},{{$nodeB}}">Prefer {{$nodeA}} then {{$nodeB}}</option>
-                                                            <option value="{{$nodeB}},{{$nodeA}}">Prefer {{$nodeB}} then {{$nodeA}}</option>
+                                                            <option value="{{.NodeA}},{{.NodeB}}">Prefer {{.NodeA}} then {{.NodeB}}</option>
+                                                            <option value="{{.NodeB}},{{.NodeA}}">Prefer {{.NodeB}} then {{.NodeA}}</option>
                                                         </select>
                                                     </label>
                                                     <div class="custom-field freshest-row">
@@ -101,8 +122,8 @@
                                                                 <span>Enable (commit_ts)</span>
                                                             </label>
                                                             <select class="helper-freshest-tie">
-                                                                <option value="{{$nodeA}}">Tie → {{$nodeA}}</option>
-                                                                <option value="{{$nodeB}}">Tie → {{$nodeB}}</option>
+                                                                <option value="{{.NodeA}}">Tie → {{.NodeA}}</option>
+                                                                <option value="{{.NodeB}}">Tie → {{.NodeB}}</option>
                                                             </select>
                                                         </div>
                                                     </div>
@@ -115,12 +136,12 @@
                                         <thead>
                                             <tr>
                                                 <th class="inner-col-header">Column</th>
-                                                <th class="inner-node-header">{{ $nodeA }}</th>
-                                                <th class="inner-node-header">{{ $nodeB }}</th>
+                                                <th class="inner-node-header">{{ .NodeA }}</th>
+                                                <th class="inner-node-header">{{ .NodeB }}</th>
                                             </tr>
                                         </thead>
                                         <tbody>
-                                            {{range $row.Cells}}
+                                            {{range .Cells}}
                                             <tr{{if .HasDiff}} class="has-diff"{{end}}>
                                                 <td class="col-name{{if .IsKey}} key-column{{end}}">{{.Column}}</td>
                                                 <td class="value-cell{{if .NodeAClass}} {{.NodeAClass}}{{end}}">{{.NodeAHTML}}</td>
@@ -131,33 +152,27 @@
                                     </table>
                                 </td>
                             </tr>
-                        {{end}}
-                        {{end}}
+{{end}}
 
-                        {{if .Missing}}
-                        <tr class="row-separator"><td colspan="100%">Missing Rows</td></tr>
-                        {{range $gIndex, $group := .Missing}}
-                            {{if $group.DividerBefore}}<tr class="row-divider"><td colspan="100%"></td></tr>{{end}}
-                            <tr class="row-subseparator"><td colspan="100%">{{$group.Title}}</td></tr>
-                            {{range $rIndex, $row := $group.Rows}}
-                                {{if $rIndex}}<tr class="row-divider"><td colspan="100%"></td></tr>{{end}}
+{{define "missing_row"}}
+                                {{if not .First}}<tr class="row-divider"><td colspan="100%"></td></tr>{{end}}
                                 <tr class="diff-row">
                                     <td class="select-cell">
-                                        <input type="checkbox" class="row-select" data-pk="{{$row.PKey}}" data-type="{{$row.RowType}}" data-nodea="{{ $nodeA }}" data-nodeb="{{ $nodeB }}" aria-label="Select row {{$row.PKey}}">
+                                        <input type="checkbox" class="row-select" data-pk="{{.PKey}}" data-type="{{.RowType}}" data-nodea="{{ .NodeA }}" data-nodeb="{{ .NodeB }}" aria-label="Select row {{.PKey}}">
                                     </td>
                                     <td class="action-cell">
                                         <div class="action-wrapper">
                                             <span class="action-label">Row Action</span>
-                                            <select class="plan-action" data-type="{{if eq $group.Title (print "Missing in " $nodeB)}}missing_in_b{{else}}missing_in_a{{end}}" data-pk="{{$row.PKey}}" data-nodea="{{ $nodeA }}" data-nodeb="{{ $nodeB }}">
+                                            <select class="plan-action" data-type="{{.RowType}}" data-pk="{{.PKey}}" data-nodea="{{ .NodeA }}" data-nodeb="{{ .NodeB }}">
                                                 <option value="">Use default</option>
-                                                <option value="apply_from_n1_insert">Insert from {{$nodeA}}</option>
-                                                <option value="apply_from_n2_insert">Insert from {{$nodeB}}</option>
+                                                <option value="apply_from_n1_insert">Insert from {{.NodeA}}</option>
+                                                <option value="apply_from_n2_insert">Insert from {{.NodeB}}</option>
                                                 <option value="delete">Delete</option>
                                                 <option value="skip">Skip</option>
                                                 <option value="custom">Custom...</option>
                                             </select>
-                                            <div class="row-key" title="Primary key">{{$row.PKey}}</div>
-                                            <div class="custom-editor" data-pk="{{$row.PKey}}" data-nodea="{{ $nodeA }}" data-nodeb="{{ $nodeB }}">
+                                            <div class="row-key" title="Primary key">{{.PKey}}</div>
+                                            <div class="custom-editor" data-pk="{{.PKey}}" data-nodea="{{ .NodeA }}" data-nodeb="{{ .NodeB }}">
                                                 <div class="custom-editor-header">Custom action</div>
                                                 <label class="custom-field">
                                                     <span>Custom row (JSON)</span>
@@ -168,8 +183,8 @@
                                                         <span>Coalesce priority</span>
                                                         <select class="helper-coalesce">
                                                             <option value="">None</option>
-                                                            <option value="{{$nodeA}},{{$nodeB}}">Prefer {{$nodeA}} then {{$nodeB}}</option>
-                                                            <option value="{{$nodeB}},{{$nodeA}}">Prefer {{$nodeB}} then {{$nodeA}}</option>
+                                                            <option value="{{.NodeA}},{{.NodeB}}">Prefer {{.NodeA}} then {{.NodeB}}</option>
+                                                            <option value="{{.NodeB}},{{.NodeA}}">Prefer {{.NodeB}} then {{.NodeA}}</option>
                                                         </select>
                                                     </label>
                                                     <div class="custom-field freshest-row">
@@ -180,8 +195,8 @@
                                                                 <span>Enable (commit_ts)</span>
                                                             </label>
                                                             <select class="helper-freshest-tie">
-                                                                <option value="{{$nodeA}}">Tie → {{$nodeA}}</option>
-                                                                <option value="{{$nodeB}}">Tie → {{$nodeB}}</option>
+                                                                <option value="{{.NodeA}}">Tie → {{.NodeA}}</option>
+                                                                <option value="{{.NodeB}}">Tie → {{.NodeB}}</option>
                                                             </select>
                                                         </div>
                                                     </div>
@@ -194,12 +209,12 @@
                                             <thead>
                                                 <tr>
                                                     <th class="inner-col-header">Column</th>
-                                                    <th class="inner-node-header">{{ $nodeA }}</th>
-                                                    <th class="inner-node-header">{{ $nodeB }}</th>
+                                                    <th class="inner-node-header">{{ .NodeA }}</th>
+                                                    <th class="inner-node-header">{{ .NodeB }}</th>
                                                 </tr>
                                             </thead>
                                             <tbody>
-                                                {{range $row.Cells}}
+                                                {{range .Cells}}
                                                 <tr>
                                                     <td class="col-name{{if .IsKey}} key-column{{end}}">{{.Column}}</td>
                                                     <td class="value-cell{{if .NodeAClass}} {{.NodeAClass}}{{end}}">{{.NodeAHTML}}</td>
@@ -210,10 +225,9 @@
                                         </table>
                                     </td>
                                 </tr>
-                            {{end}}
-                        {{end}}
-                        {{end}}
+{{end}}
 
+{{define "pair_tail"}}
                         {{if not .HasDiffs}}
                         <tr><td colspan="3" class="empty-message">No column level differences detected for this node pair.</td></tr>
                         {{end}}
@@ -221,14 +235,11 @@
                     </table>
                 </div>
             </div>
-            {{end}}
-        {{else}}
-            <div class="diff-section">
-                <div class="empty-message">No row-level differences were recorded.</div>
-            </div>
-        {{end}}
-        <script id="diff-data" type="application/json">{{ .RawDiffJSON }}</script>
+{{end}}
+
+{{define "report_tail"}}
         <script>{{.JS}}</script>
     </div>
 </body>
 </html>
+{{end}}

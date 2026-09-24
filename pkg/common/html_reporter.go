@@ -12,13 +12,16 @@
 package common
 
 import (
-	"bytes"
+	"bufio"
 	_ "embed"
 	"encoding/json"
 	"fmt"
 	"html/template"
+	"io"
 	"math"
+	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -36,99 +39,331 @@ var htmlDiffCSS string
 //go:embed templates/diff_report.js
 var htmlDiffJS string
 
+// htmlWriteBufferSize is the size of the buffer in front of the report file.
+// It is a variable only so that tests can make every write reach the writer.
+var htmlWriteBufferSize = 256 * 1024
+
 // htmlPairCount captures the diff counts grouped by node pair for the report summary.
 type htmlPairCount struct {
 	Name  string
 	Count string
 }
 
-func writeHTMLDiffReport(diffResult types.DiffOutput, jsonFilePath string) (string, error) {
-	if jsonFilePath == "" {
-		return "", nil
+type htmlSummaryItem struct {
+	Label string
+	Value string
+}
+
+type htmlSummaryData struct {
+	Items     []htmlSummaryItem
+	Breakdown []htmlPairCount
+}
+
+type htmlReportHead struct {
+	CSS     template.CSS
+	Summary htmlSummaryData
+}
+
+type htmlReportTail struct {
+	JS template.JS
+}
+
+// htmlPairHead is the data for the "pair_head" and "pair_tail" blocks.
+type htmlPairHead struct {
+	NodeA     string
+	NodeB     string
+	DiffCount string
+	HasDiffs  bool
+}
+
+type htmlGroupHead struct {
+	Title         string
+	DividerBefore bool
+}
+
+type htmlCell struct {
+	Column     string
+	IsKey      bool
+	NodeAHTML  template.HTML
+	NodeAClass string
+	NodeBHTML  template.HTML
+	NodeBClass string
+	HasDiff    bool
+}
+
+// htmlRow is the data for one "value_row" or "missing_row" block.
+type htmlRow struct {
+	NodeA     string
+	NodeB     string
+	First     bool
+	PKey      string
+	RowType   string // "value_diff", "missing_in_a", "missing_in_b"
+	Cells     []htmlCell
+	NodeAJSON string
+}
+
+// htmlReportInfo goes into the embedded diff data, next to the list of rows
+// (see writeHTMLDiffData).
+type htmlReportInfo struct {
+	IntegerPK bool `json:"integer_pk"`
+}
+
+// htmlPlanRow is what the page script needs to write a repair-plan rule for
+// one row of the report. Key is the display key, as in data-pk. Type uses the names
+// of the repair executor. PK holds each primary key value as the JSON text
+// that the diff file has for it. The script copies that text into the YAML
+// as it is and never turns it into a JavaScript number, so a bigint keeps
+// every digit and a text key such as "007" stays text.
+type htmlPlanRow struct {
+	Pair  string   `json:"pair"`
+	NodeA string   `json:"node_a"`
+	NodeB string   `json:"node_b"`
+	Key   string   `json:"key"`
+	Type  string   `json:"type"`
+	PK    []string `json:"pk"`
+}
+
+// htmlPairPlan lists the report rows of one node pair, in report order:
+// value differences, then rows missing on node B, then rows missing on node A.
+// It holds only row keys. The row data stays in the diff result, and the
+// markup for a row exists only while that row is written.
+type htmlPairPlan struct {
+	pairKey    string
+	nodeA      string
+	nodeB      string
+	columns    []string
+	rowMapA    map[string]types.OrderedMap
+	rowMapB    map[string]types.OrderedMap
+	display    map[string]string
+	valueKeys  []string
+	missingInB []string
+	missingInA []string
+}
+
+func (p *htmlPairPlan) total() int {
+	return len(p.valueKeys) + len(p.missingInB) + len(p.missingInA)
+}
+
+// planType is the repair executor's name for the kind of difference of a row
+// in this pair: row_mismatch, missing_on_n2 or missing_on_n1, where n1 and n2
+// are node A and node B of the pair.
+const (
+	planTypeMismatch  = "row_mismatch"
+	planTypeMissingN2 = "missing_on_n2"
+	planTypeMissingN1 = "missing_on_n1"
+)
+
+// pkLiterals returns each primary key value of the row as JSON text, the
+// same text the diff file has for it.
+func pkLiterals(row types.OrderedMap, primaryKey []string) []string {
+	m := OrderedMapToMap(row)
+	out := make([]string, len(primaryKey))
+	for i, col := range primaryKey {
+		b, err := json.Marshal(m[col])
+		if err != nil {
+			b = []byte("null")
+		}
+		out[i] = string(b)
+	}
+	return out
+}
+
+var integerLiteralRe = regexp.MustCompile(`^-?[0-9]+$`)
+
+// htmlIntegerPK tells whether the primary key is a single column and every
+// row of the diff, in every pair, has a whole number in it. Only then can the
+// page script write a range rule: a range over the keys 1 and 2 would also
+// match a key 1.5 that has a rule of its own.
+func htmlIntegerPK(plans []*htmlPairPlan, primaryKey []string) bool {
+	if len(primaryKey) != 1 {
+		return false
+	}
+	isInt := func(rows map[string]types.OrderedMap) bool {
+		for _, row := range rows {
+			if !integerLiteralRe.MatchString(pkLiterals(row, primaryKey)[0]) {
+				return false
+			}
+		}
+		return true
+	}
+	for _, p := range plans {
+		if !isInt(p.rowMapA) || !isInt(p.rowMapB) {
+			return false
+		}
+	}
+	return true
+}
+
+// buildHTMLPairPlan pairs the rows of the two nodes and sorts them. A row
+// that exists on both nodes but shows no difference after stringifyCellValue
+// (for example 1 against "1", or a difference only in _spock_metadata_) is
+// left out, as before. It returns nil when the pair has no rows to show.
+func buildHTMLPairPlan(pairKey string, nodeDiff types.DiffByNodePair, primaryKey []string) *htmlPairPlan {
+	nodeNames := strings.Split(pairKey, "/")
+	if len(nodeNames) != 2 {
+		nodeNames = nodeNames[:0]
+		for name := range nodeDiff.Rows {
+			nodeNames = append(nodeNames, name)
+		}
+		sort.Strings(nodeNames)
+		if len(nodeNames) < 2 {
+			return nil
+		}
 	}
 
-	rawJSON, err := json.Marshal(diffResult)
-	if err != nil {
-		return "", fmt.Errorf("failed to marshal diff result for HTML embedding: %w", err)
+	p := &htmlPairPlan{
+		pairKey: pairKey,
+		nodeA:   nodeNames[0],
+		nodeB:   nodeNames[1],
+	}
+	rowsA := nodeDiff.Rows[p.nodeA]
+	rowsB := nodeDiff.Rows[p.nodeB]
+	if len(rowsA) == 0 && len(rowsB) == 0 {
+		return nil
 	}
 
-	htmlPath := strings.TrimSuffix(jsonFilePath, filepath.Ext(jsonFilePath)) + ".html"
-	summary := diffResult.Summary
+	p.columns = collectColumnsInOrder(primaryKey, rowsA, rowsB)
 
-	type summaryItem struct {
-		Label string
-		Value string
+	// Two keys per row, and they are not interchangeable. buildRowKey is
+	// the collision-proof identity used to pair a row on A with the same
+	// row on B; buildRowDisplayKey is the plain rendering shown in the
+	// report and embedded in data-pk, which the report's own JavaScript
+	// interpolates into a CSS attribute selector and so cannot carry the
+	// quotes the identity encoding adds.
+	p.display = make(map[string]string, len(rowsA)+len(rowsB))
+
+	p.rowMapA = make(map[string]types.OrderedMap, len(rowsA))
+	for idx, row := range rowsA {
+		key := buildRowKey(row, primaryKey, idx)
+		p.rowMapA[key] = row
+		p.display[key] = buildRowDisplayKey(row, primaryKey, idx)
 	}
 
-	type summaryData struct {
-		Items     []summaryItem
-		Breakdown []htmlPairCount
+	p.rowMapB = make(map[string]types.OrderedMap, len(rowsB))
+	for idx, row := range rowsB {
+		key := buildRowKey(row, primaryKey, idx)
+		p.rowMapB[key] = row
+		p.display[key] = buildRowDisplayKey(row, primaryKey, idx)
 	}
 
-	type cell struct {
-		Column     string
-		IsKey      bool
-		NodeAHTML  template.HTML
-		NodeAClass string
-		NodeBHTML  template.HTML
-		NodeBClass string
-		HasDiff    bool
+	for key, rowA := range p.rowMapA {
+		if rowB, ok := p.rowMapB[key]; ok {
+			if rowsDiffer(rowA, rowB, p.columns) {
+				p.valueKeys = append(p.valueKeys, key)
+			}
+		} else {
+			p.missingInB = append(p.missingInB, key)
+		}
+	}
+	for key := range p.rowMapB {
+		if _, ok := p.rowMapA[key]; !ok {
+			p.missingInA = append(p.missingInA, key)
+		}
 	}
 
-	type row struct {
-		PKey      string
-		Cells     []cell
-		RowType   string // "value_diff", "missing_in_a", "missing_in_b"
-		HasDiffs  bool
-		NodeAJSON string
+	sortPKKeys(p.valueKeys, p.display)
+	sortPKKeys(p.missingInA, p.display)
+	sortPKKeys(p.missingInB, p.display)
+	return p
+}
+
+func (p *htmlPairPlan) valueRow(key string, pkSet map[string]struct{}) htmlRow {
+	rowA := OrderedMapToMap(p.rowMapA[key])
+	rowB := OrderedMapToMap(p.rowMapB[key])
+
+	cells := make([]htmlCell, 0, len(p.columns))
+	for _, col := range p.columns {
+		valA := stringifyCellValue(rowA[col])
+		valB := stringifyCellValue(rowB[col])
+		_, isPK := pkSet[col]
+
+		htmlA, htmlB := highlightDifference(valA, valB)
+		c := htmlCell{
+			Column:    col,
+			IsKey:     isPK,
+			NodeAHTML: htmlA,
+			NodeBHTML: htmlB,
+			HasDiff:   valA != valB,
+		}
+		if c.HasDiff {
+			c.NodeAClass = "value-diff"
+			c.NodeBClass = "value-diff"
+		}
+		cells = append(cells, c)
+	}
+	return htmlRow{
+		NodeA:     p.nodeA,
+		NodeB:     p.nodeB,
+		PKey:      p.display[key],
+		RowType:   "value_diff",
+		Cells:     cells,
+		NodeAJSON: buildRowJSONPretty(p.rowMapA[key], p.columns),
+	}
+}
+
+// missingRow builds a row that exists on one node only. missingInB tells
+// which node lacks it.
+func (p *htmlPairPlan) missingRow(key string, missingInB bool, pkSet map[string]struct{}) htmlRow {
+	row := htmlRow{
+		NodeA: p.nodeA,
+		NodeB: p.nodeB,
+		PKey:  p.display[key],
+	}
+	var present map[string]any
+	if missingInB {
+		present = OrderedMapToMap(p.rowMapA[key])
+		row.RowType = "missing_in_b"
+		row.NodeAJSON = buildRowJSONPretty(p.rowMapA[key], p.columns)
+	} else {
+		present = OrderedMapToMap(p.rowMapB[key])
+		row.RowType = "missing_in_a"
 	}
 
-	type missingGroup struct {
-		Title         string
-		Rows          []row
-		DividerBefore bool
+	row.Cells = make([]htmlCell, 0, len(p.columns))
+	for _, col := range p.columns {
+		val := plainHTML(stringifyCellValue(present[col]))
+		_, isPK := pkSet[col]
+		c := htmlCell{Column: col, IsKey: isPK}
+		if missingInB {
+			c.NodeAHTML = val
+			c.NodeBHTML = plainHTML("MISSING")
+			c.NodeBClass = "missing"
+		} else {
+			c.NodeAHTML = plainHTML("MISSING")
+			c.NodeAClass = "missing"
+			c.NodeBHTML = val
+		}
+		row.Cells = append(row.Cells, c)
 	}
+	return row
+}
 
-	type pairSection struct {
-		NodeA      string
-		NodeB      string
-		DiffCount  string
-		ValueDiffs []row
-		Missing    []missingGroup
-		HasDiffs   bool
-	}
-
-	type reportData struct {
-		Summary     summaryData
-		Pairs       []pairSection
-		RawDiffJSON template.JS
-		CSS         template.CSS
-		JS          template.JS
-	}
-
-	summaryItems := []summaryItem{
+func buildHTMLSummaryItems(summary types.DiffSummary) []htmlSummaryItem {
+	items := []htmlSummaryItem{
 		{Label: "Table", Value: fmt.Sprintf("%s.%s", summary.Schema, summary.Table)},
 		{Label: "Nodes", Value: strings.Join(summary.Nodes, ", ")},
 		{Label: "Primary Key", Value: formatPrimaryKey(summary.PrimaryKey)},
 		{Label: "Total Differences", Value: formatInt64WithCommas(totalDiffs(summary.DiffRowsCount))},
-		{Label: "Total Rows Checked", Value: formatInt64WithCommas(summary.TotalRowsChecked)},
-		{Label: "Initial Ranges", Value: formatInt64WithCommas(int64(summary.InitialRangesCount))},
-		{Label: "Mismatched Ranges", Value: formatInt64WithCommas(int64(summary.MismatchedRangesCount))},
-		{Label: "Block Size", Value: formatInt64WithCommas(int64(summary.BlockSize))},
-		{Label: "Compare Unit Size", Value: formatInt64WithCommas(int64(summary.CompareUnitSize))},
-		{Label: "Concurrency Factor", Value: strconv.FormatFloat(summary.ConcurrencyFactor, 'f', -1, 64)},
-		{Label: "Time Taken", Value: formatDurationHuman(summary.TimeTaken)},
-		{Label: "Start Time", Value: formatTimestampHuman(summary.StartTime)},
-		{Label: "End Time", Value: formatTimestampHuman(summary.EndTime)},
 	}
+	items = append(items,
+		htmlSummaryItem{Label: "Total Rows Checked", Value: formatInt64WithCommas(summary.TotalRowsChecked)},
+		htmlSummaryItem{Label: "Initial Ranges", Value: formatInt64WithCommas(int64(summary.InitialRangesCount))},
+		htmlSummaryItem{Label: "Mismatched Ranges", Value: formatInt64WithCommas(int64(summary.MismatchedRangesCount))},
+		htmlSummaryItem{Label: "Block Size", Value: formatInt64WithCommas(int64(summary.BlockSize))},
+		htmlSummaryItem{Label: "Compare Unit Size", Value: formatInt64WithCommas(int64(summary.CompareUnitSize))},
+		htmlSummaryItem{Label: "Concurrency Factor", Value: strconv.FormatFloat(summary.ConcurrencyFactor, 'f', -1, 64)},
+		htmlSummaryItem{Label: "Time Taken", Value: formatDurationHuman(summary.TimeTaken)},
+		htmlSummaryItem{Label: "Start Time", Value: formatTimestampHuman(summary.StartTime)},
+		htmlSummaryItem{Label: "End Time", Value: formatTimestampHuman(summary.EndTime)},
+	)
 
 	if summary.MaxDiffRows > 0 {
-		summaryItems = append(summaryItems, summaryItem{
+		items = append(items, htmlSummaryItem{
 			Label: "Max Diff Rows",
 			Value: formatInt64WithCommas(summary.MaxDiffRows),
 		})
 		if summary.DiffRowLimitReached {
-			summaryItems = append(summaryItems, summaryItem{
+			items = append(items, htmlSummaryItem{
 				Label: "Stopped Early",
 				Value: "yes (max_diff_rows limit)",
 			})
@@ -139,19 +374,65 @@ func writeHTMLDiffReport(diffResult types.DiffOutput, jsonFilePath string) (stri
 	// like a clean one. People who read the report never see the worker
 	// errors, which only went to the log.
 	if len(summary.IncompletePairs) > 0 {
-		summaryItems = append(summaryItems, summaryItem{
+		items = append(items, htmlSummaryItem{
 			Label: "Comparison Incomplete",
 			Value: strings.Join(summary.IncompletePairs, ", ") + " (counts are lower bounds)",
 		})
 	}
 
-	var filteredItems []summaryItem
-	for _, item := range summaryItems {
+	var filtered []htmlSummaryItem
+	for _, item := range items {
 		if item.Value != "" && item.Value != "0" {
-			filteredItems = append(filteredItems, item)
+			filtered = append(filtered, item)
 		}
 	}
+	return filtered
+}
 
+// writeHTMLDiffReport writes the HTML report next to the JSON report.
+func writeHTMLDiffReport(diffResult types.DiffOutput, jsonFilePath string) (htmlPath string, err error) {
+	if jsonFilePath == "" {
+		return "", nil
+	}
+
+	path := strings.TrimSuffix(jsonFilePath, filepath.Ext(jsonFilePath)) + ".html"
+	f, err := CreateFileSecure(path)
+	if err != nil {
+		return "", fmt.Errorf("failed to create HTML diff report: %w", err)
+	}
+	// A report cut off in the middle looks complete in a browser up to the
+	// point where it stops, so do not leave one behind. The deferred call
+	// uses its own copy of the path: by the time it runs, "return "", err"
+	// has already cleared htmlPath.
+	defer func() {
+		if err != nil {
+			f.Close()
+			os.Remove(path)
+		}
+	}()
+
+	if err = renderHTMLDiffReport(f, diffResult); err != nil {
+		return "", err
+	}
+	if err = f.Close(); err != nil {
+		return "", fmt.Errorf("failed to close HTML diff report: %w", err)
+	}
+	return path, nil
+}
+
+// renderHTMLDiffReport writes the report to out.
+//
+// The report goes out block by block through a buffered writer. Only the row
+// keys of the whole diff are held in memory, never the markup: at several
+// kilobytes of markup per row, a document built in memory for a diff of half a
+// million rows needs gigabytes.
+func renderHTMLDiffReport(out io.Writer, diffResult types.DiffOutput) error {
+	tmpl, err := template.New("tableDiffReport").Parse(htmlDiffTemplate)
+	if err != nil {
+		return fmt.Errorf("failed to parse HTML template: %w", err)
+	}
+
+	summary := diffResult.Summary
 	pkSet := make(map[string]struct{}, len(summary.PrimaryKey))
 	for _, col := range summary.PrimaryKey {
 		pkSet[col] = struct{}{}
@@ -163,212 +444,170 @@ func writeHTMLDiffReport(diffResult types.DiffOutput, jsonFilePath string) (stri
 	}
 	sort.Strings(pairKeys)
 
-	pairs := make([]pairSection, 0, len(pairKeys))
-
+	var plans []*htmlPairPlan
 	for _, pairKey := range pairKeys {
-		nodeDiff := diffResult.NodeDiffs[pairKey]
-		nodeNames := strings.Split(pairKey, "/")
-		if len(nodeNames) != 2 {
-			nodeNames = nodeNames[:0]
-			for name := range nodeDiff.Rows {
-				nodeNames = append(nodeNames, name)
-			}
-			sort.Strings(nodeNames)
-			if len(nodeNames) < 2 {
-				continue
-			}
+		if p := buildHTMLPairPlan(pairKey, diffResult.NodeDiffs[pairKey], summary.PrimaryKey); p != nil {
+			plans = append(plans, p)
 		}
-
-		nodeA := nodeNames[0]
-		nodeB := nodeNames[1]
-		rowsA := nodeDiff.Rows[nodeA]
-		rowsB := nodeDiff.Rows[nodeB]
-
-		if len(rowsA) == 0 && len(rowsB) == 0 {
-			continue
-		}
-
-		columns := collectColumnsInOrder(summary.PrimaryKey, rowsA, rowsB)
-
-		// Two keys per row, and they are not interchangeable. buildRowKey is
-		// the collision-proof identity used to pair a row on A with the same
-		// row on B; buildRowDisplayKey is the plain rendering shown in the
-		// report and embedded in data-pk, which the report's own JavaScript
-		// interpolates into a CSS attribute selector and so cannot carry the
-		// quotes the identity encoding adds.
-		displayByKey := make(map[string]string, len(rowsA)+len(rowsB))
-
-		rowMapA := make(map[string]types.OrderedMap, len(rowsA))
-		for idx, row := range rowsA {
-			key := buildRowKey(row, summary.PrimaryKey, idx)
-			rowMapA[key] = row
-			displayByKey[key] = buildRowDisplayKey(row, summary.PrimaryKey, idx)
-		}
-
-		rowMapB := make(map[string]types.OrderedMap, len(rowsB))
-		for idx, row := range rowsB {
-			key := buildRowKey(row, summary.PrimaryKey, idx)
-			rowMapB[key] = row
-			displayByKey[key] = buildRowDisplayKey(row, summary.PrimaryKey, idx)
-		}
-
-		var commonKeys []string
-		var missingInB []string
-		for key := range rowMapA {
-			if _, ok := rowMapB[key]; ok {
-				commonKeys = append(commonKeys, key)
-			} else {
-				missingInB = append(missingInB, key)
-			}
-		}
-
-		var missingInA []string
-		for key := range rowMapB {
-			if _, ok := rowMapA[key]; !ok {
-				missingInA = append(missingInA, key)
-			}
-		}
-
-		sortPKKeys(commonKeys, displayByKey)
-		sortPKKeys(missingInA, displayByKey)
-		sortPKKeys(missingInB, displayByKey)
-
-		valueDiffs := make([]row, 0, len(commonKeys))
-		for _, key := range commonKeys {
-			rowA := OrderedMapToMap(rowMapA[key])
-			rowB := OrderedMapToMap(rowMapB[key])
-			if !rowsDiffer(rowMapA[key], rowMapB[key], columns) {
-				continue
-			}
-
-			var cells []cell
-			hasDiffs := false
-			for _, col := range columns {
-				valA := stringifyCellValue(rowA[col])
-				valB := stringifyCellValue(rowB[col])
-				_, isPK := pkSet[col]
-
-				htmlA, htmlB := highlightDifference(valA, valB)
-				hasDiff := valA != valB
-				c := cell{
-					Column:    col,
-					IsKey:     isPK,
-					NodeAHTML: htmlA,
-					NodeBHTML: htmlB,
-					HasDiff:   hasDiff,
-				}
-				if hasDiff {
-					c.NodeAClass = "value-diff"
-					c.NodeBClass = "value-diff"
-					hasDiffs = true
-				}
-				cells = append(cells, c)
-			}
-			valueDiffs = append(valueDiffs, row{
-				PKey:      displayByKey[key],
-				Cells:     cells,
-				RowType:   "value_diff",
-				HasDiffs:  hasDiffs,
-				NodeAJSON: buildRowJSONPretty(rowMapA[key], columns),
-			})
-		}
-
-		missingGroups := make([]missingGroup, 0)
-		if len(missingInB) > 0 {
-			group := missingGroup{Title: fmt.Sprintf("Missing in %s", nodeB)}
-			for _, key := range missingInB {
-				rowA := OrderedMapToMap(rowMapA[key])
-				var cells []cell
-				for _, col := range columns {
-					valA := stringifyCellValue(rowA[col])
-					_, isPK := pkSet[col]
-					cells = append(cells, cell{
-						Column:     col,
-						IsKey:      isPK,
-						NodeAHTML:  plainHTML(valA),
-						NodeBHTML:  plainHTML("MISSING"),
-						NodeBClass: "missing",
-						HasDiff:    false,
-					})
-				}
-				group.Rows = append(group.Rows, row{
-					PKey:      displayByKey[key],
-					Cells:     cells,
-					RowType:   "missing_in_b",
-					HasDiffs:  true,
-					NodeAJSON: buildRowJSONPretty(rowMapA[key], columns),
-				})
-			}
-			missingGroups = append(missingGroups, group)
-		}
-
-		if len(missingInA) > 0 {
-			group := missingGroup{Title: fmt.Sprintf("Missing in %s", nodeA)}
-			for _, key := range missingInA {
-				rowB := OrderedMapToMap(rowMapB[key])
-				var cells []cell
-				for _, col := range columns {
-					valB := stringifyCellValue(rowB[col])
-					_, isPK := pkSet[col]
-					cells = append(cells, cell{
-						Column:     col,
-						IsKey:      isPK,
-						NodeAHTML:  plainHTML("MISSING"),
-						NodeAClass: "missing",
-						NodeBHTML:  plainHTML(valB),
-						HasDiff:    false,
-					})
-				}
-				group.Rows = append(group.Rows, row{
-					PKey:     displayByKey[key],
-					Cells:    cells,
-					RowType:  "missing_in_a",
-					HasDiffs: true,
-				})
-			}
-			if len(missingGroups) > 0 {
-				group.DividerBefore = true
-			}
-			missingGroups = append(missingGroups, group)
-		}
-
-		pair := pairSection{
-			NodeA:      nodeA,
-			NodeB:      nodeB,
-			DiffCount:  formatInt64WithCommas(int64(summary.DiffRowsCount[pairKey])),
-			ValueDiffs: valueDiffs,
-			Missing:    missingGroups,
-			HasDiffs:   len(valueDiffs) > 0 || len(missingGroups) > 0,
-		}
-		pairs = append(pairs, pair)
 	}
 
-	report := reportData{
-		Summary: summaryData{
-			Items:     filteredItems,
+	head := htmlReportHead{
+		CSS: template.CSS(htmlDiffCSS),
+		Summary: htmlSummaryData{
+			Items:     buildHTMLSummaryItems(summary),
 			Breakdown: buildDiffBreakdown(summary.DiffRowsCount),
 		},
-		Pairs:       pairs,
-		RawDiffJSON: template.JS(rawJSON),
-		CSS:         template.CSS(htmlDiffCSS),
-		JS:          template.JS(htmlDiffJS),
 	}
 
-	tmpl, err := template.New("tableDiffReport").Parse(htmlDiffTemplate)
-	if err != nil {
-		return "", fmt.Errorf("failed to parse HTML template: %w", err)
+	w := bufio.NewWriterSize(out, htmlWriteBufferSize)
+	if err := tmpl.ExecuteTemplate(w, "report_head", head); err != nil {
+		return fmt.Errorf("failed to render HTML diff report: %w", err)
+	}
+	if len(plans) == 0 {
+		if err := tmpl.ExecuteTemplate(w, "no_pairs", nil); err != nil {
+			return fmt.Errorf("failed to render HTML diff report: %w", err)
+		}
+	}
+	for _, p := range plans {
+		if err := writeHTMLPair(tmpl, w, p, summary, pkSet); err != nil {
+			return fmt.Errorf("failed to render HTML diff report: %w", err)
+		}
 	}
 
-	var buf bytes.Buffer
-	if err := tmpl.Execute(&buf, report); err != nil {
-		return "", fmt.Errorf("failed to render HTML diff report: %w", err)
+	info := htmlReportInfo{IntegerPK: htmlIntegerPK(plans, summary.PrimaryKey)}
+	if err := writeHTMLDiffData(w, summary, plans, info, summary.PrimaryKey); err != nil {
+		return fmt.Errorf("failed to embed diff data in HTML report: %w", err)
 	}
 
-	if err := WriteFileSecure(htmlPath, buf.Bytes()); err != nil {
-		return "", fmt.Errorf("failed to write HTML diff report: %w", err)
+	if err := tmpl.ExecuteTemplate(w, "report_tail", htmlReportTail{JS: template.JS(htmlDiffJS)}); err != nil {
+		return fmt.Errorf("failed to render HTML diff report: %w", err)
+	}
+	if err := w.Flush(); err != nil {
+		return fmt.Errorf("failed to write HTML diff report: %w", err)
+	}
+	return nil
+}
+
+// writeHTMLPair writes the section of one node pair, one row at a time.
+func writeHTMLPair(tmpl *template.Template, w io.Writer, p *htmlPairPlan, summary types.DiffSummary, pkSet map[string]struct{}) error {
+	head := htmlPairHead{
+		NodeA:     p.nodeA,
+		NodeB:     p.nodeB,
+		DiffCount: formatInt64WithCommas(int64(summary.DiffRowsCount[p.pairKey])),
+		HasDiffs:  p.total() > 0,
 	}
 
-	return htmlPath, nil
+	if err := tmpl.ExecuteTemplate(w, "pair_head", head); err != nil {
+		return err
+	}
+
+	if len(p.valueKeys) > 0 {
+		if err := tmpl.ExecuteTemplate(w, "separator", "Value Differences"); err != nil {
+			return err
+		}
+		for i, key := range p.valueKeys {
+			row := p.valueRow(key, pkSet)
+			row.First = i == 0
+			if err := tmpl.ExecuteTemplate(w, "value_row", row); err != nil {
+				return err
+			}
+		}
+	}
+
+	if len(p.missingInB) > 0 || len(p.missingInA) > 0 {
+		if err := tmpl.ExecuteTemplate(w, "separator", "Missing Rows"); err != nil {
+			return err
+		}
+		groups := []struct {
+			keys       []string
+			missingInB bool
+			title      string
+		}{
+			{p.missingInB, true, "Missing in " + p.nodeB},
+			{p.missingInA, false, "Missing in " + p.nodeA},
+		}
+		groupWritten := false
+		for _, g := range groups {
+			if len(g.keys) == 0 {
+				continue
+			}
+			if err := tmpl.ExecuteTemplate(w, "group_head", htmlGroupHead{Title: g.title, DividerBefore: groupWritten}); err != nil {
+				return err
+			}
+			groupWritten = true
+			for i, key := range g.keys {
+				row := p.missingRow(key, g.missingInB, pkSet)
+				row.First = i == 0
+				if err := tmpl.ExecuteTemplate(w, "missing_row", row); err != nil {
+					return err
+				}
+			}
+		}
+	}
+
+	return tmpl.ExecuteTemplate(w, "pair_tail", head)
+}
+
+// writeHTMLDiffData embeds the data that the page script needs to build a
+// repair plan: the diff summary, htmlReportInfo, and one htmlPlanRow for each
+// row of the report, in report order. The rows are written one at a time, so the
+// list never exists in memory as a whole.
+//
+// json.Marshal escapes '<', '>' and '&', so no value can close the script
+// element early.
+func writeHTMLDiffData(w *bufio.Writer, summary types.DiffSummary, plans []*htmlPairPlan, info htmlReportInfo, primaryKey []string) error {
+	writeJSON := func(v any) error {
+		b, err := json.Marshal(v)
+		if err != nil {
+			return err
+		}
+		w.Write(b)
+		return nil
+	}
+
+	w.WriteString(`<script id="diff-data" type="application/json">{"summary":`)
+	if err := writeJSON(summary); err != nil {
+		return err
+	}
+	w.WriteString(`,"html_report":`)
+	if err := writeJSON(info); err != nil {
+		return err
+	}
+	w.WriteString(`,"rows":[`)
+	first := true
+	for _, p := range plans {
+		lists := []struct {
+			keys     []string
+			rows     map[string]types.OrderedMap
+			planType string
+		}{
+			{p.valueKeys, p.rowMapA, planTypeMismatch},
+			{p.missingInB, p.rowMapA, planTypeMissingN2},
+			{p.missingInA, p.rowMapB, planTypeMissingN1},
+		}
+		for _, l := range lists {
+			for _, key := range l.keys {
+				if !first {
+					w.WriteByte(',')
+				}
+				first = false
+				if err := writeJSON(htmlPlanRow{
+					Pair:  p.pairKey,
+					NodeA: p.nodeA,
+					NodeB: p.nodeB,
+					Key:   p.display[key],
+					Type:  l.planType,
+					PK:    pkLiterals(l.rows[key], primaryKey),
+				}); err != nil {
+					return err
+				}
+			}
+		}
+	}
+	// bufio.Writer keeps the first write error and returns it from every
+	// later call, so a single check at the end covers all the writes above.
+	_, err := w.WriteString("]}</script>\n")
+	return err
 }
 
 func highlightDifference(a, b string) (template.HTML, template.HTML) {
@@ -458,8 +697,9 @@ func buildDiffBreakdown(diffCounts map[string]int) []htmlPairCount {
 }
 
 // buildRowKey returns the identity a row is matched by across the two nodes.
-// It falls back to the row's position when there is no usable primary key,
-// which pairs nothing but at least keeps distinct rows distinct.
+// It falls back to the row's position when there is no usable primary key.
+// That keeps distinct rows of one node distinct, but it pairs rows of the two
+// nodes by position only: __row_0 on A meets __row_0 on B, whatever they hold.
 func buildRowKey(row types.OrderedMap, primaryKey []string, index int) string {
 	if len(primaryKey) == 0 {
 		return fmt.Sprintf("__row_%d", index)

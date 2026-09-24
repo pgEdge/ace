@@ -1567,7 +1567,8 @@ func WriteDiffReport(diffResult types.DiffOutput, schema, table, format string) 
 	if strings.EqualFold(format, "html") {
 		htmlPath, err = writeHTMLDiffReport(diffResult, jsonFileName)
 		if err != nil {
-			return "", "", err
+			// The JSON report is complete; say where it is, so the run is not lost.
+			return jsonFileName, "", fmt.Errorf("%w (the JSON report %s was written)", err, jsonFileName)
 		}
 		if htmlPath != "" {
 			logger.Info("HTML diff report written to %s", htmlPath)
