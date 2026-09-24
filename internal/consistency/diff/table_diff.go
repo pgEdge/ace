@@ -105,6 +105,10 @@ type TableDiffTask struct {
 
 	CompareUnitSize int
 	MaxDiffRows     int64
+	// MaxHTMLRows limits how many entries the HTML report shows for each
+	// node pair. 0 means table_diff.max_html_rows from the config, and if
+	// that is not set either, utils.DefaultMaxHTMLRows.
+	MaxHTMLRows int64
 
 	DiffResult types.DiffOutput
 	diffMutex  sync.Mutex
@@ -680,6 +684,16 @@ func (t *TableDiffTask) Validate() error {
 		t.MaxDiffRows = cfg.TableDiff.MaxDiffRows
 	}
 
+	if t.MaxHTMLRows < 0 {
+		return fmt.Errorf("max_html_rows must be >= 0")
+	}
+	if cfg.TableDiff.MaxHTMLRows < 0 {
+		return fmt.Errorf("table_diff.max_html_rows in the config must be >= 0, got %d", cfg.TableDiff.MaxHTMLRows)
+	}
+	if t.MaxHTMLRows == 0 && cfg.TableDiff.MaxHTMLRows > 0 {
+		t.MaxHTMLRows = cfg.TableDiff.MaxHTMLRows
+	}
+
 	if t.ConcurrencyFactor > 4.0 || t.ConcurrencyFactor <= 0 {
 		return fmt.Errorf("invalid value range for concurrency_factor, must be > 0 and <= 4.0")
 	}
@@ -1053,6 +1067,7 @@ func (t *TableDiffTask) CloneForSchedule(ctx context.Context) *TableDiffTask {
 	cloned.InvokeMethod = t.InvokeMethod
 	cloned.CompareUnitSize = t.CompareUnitSize
 	cloned.MaxDiffRows = t.MaxDiffRows
+	cloned.MaxHTMLRows = t.MaxHTMLRows
 	cloned.EnsurePgcrypto = t.EnsurePgcrypto
 	cloned.AgainstOrigin = t.AgainstOrigin
 	cloned.Until = t.Until
@@ -1641,7 +1656,7 @@ func (t *TableDiffTask) ExecuteTask() (err error) {
 
 	t.AddPrimaryKeyToDiffSummary()
 
-	jsonPath, _, err := utils.WriteDiffReport(t.DiffResult, t.Schema, t.BaseTable, t.Output, 0)
+	jsonPath, _, err := utils.WriteDiffReport(t.DiffResult, t.Schema, t.BaseTable, t.Output, t.MaxHTMLRows)
 	if err != nil {
 		return err
 	}

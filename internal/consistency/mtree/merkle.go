@@ -110,6 +110,11 @@ type MerkleTreeTask struct {
 	// and OOM the process.
 	MaxDiffRows int64
 
+	// MaxHTMLRows limits how many entries the HTML report shows for each
+	// node pair. 0 means mtree.diff.max_html_rows from the config, and if
+	// that is not set either, utils.DefaultMaxHTMLRows.
+	MaxHTMLRows int64
+
 	DiffResult     types.DiffOutput
 	diffMutex      sync.Mutex
 	diffRowKeySets map[string]map[string]map[string]struct{}
@@ -2401,6 +2406,12 @@ func (m *MerkleTreeTask) DiffMtree() (err error) {
 	if m.MaxDiffRows < 0 {
 		return fmt.Errorf("max_diff_rows must be >= 0, got %d", m.MaxDiffRows)
 	}
+	if m.MaxHTMLRows < 0 {
+		return fmt.Errorf("max_html_rows must be >= 0, got %d", m.MaxHTMLRows)
+	}
+	if cfg := config.Get(); cfg != nil && cfg.MTree.Diff.MaxHTMLRows < 0 {
+		return fmt.Errorf("mtree.diff.max_html_rows in the config must be >= 0, got %d", cfg.MTree.Diff.MaxHTMLRows)
+	}
 
 	if err = m.UpdateMtree(true); err != nil {
 		// A missing tree already carries a complete, actionable message;
@@ -2441,6 +2452,11 @@ func (m *MerkleTreeTask) DiffMtree() (err error) {
 	if m.MaxDiffRows == 0 {
 		if cfg := config.Get(); cfg != nil && cfg.MTree.Diff.MaxDiffRows > 0 {
 			m.MaxDiffRows = cfg.MTree.Diff.MaxDiffRows
+		}
+	}
+	if m.MaxHTMLRows == 0 {
+		if cfg := config.Get(); cfg != nil && cfg.MTree.Diff.MaxHTMLRows > 0 {
+			m.MaxHTMLRows = cfg.MTree.Diff.MaxHTMLRows
 		}
 	}
 	m.diffRowCounts = make(map[string]int64)
@@ -2615,7 +2631,7 @@ func (m *MerkleTreeTask) DiffMtree() (err error) {
 			logger.Warn("mtree table-diff stopped after reaching max_diff_rows=%d; additional differences may exist", m.MaxDiffRows)
 		}
 
-		diffPath, _, writeErr := utils.WriteDiffReport(m.DiffResult, m.Schema, m.Table, m.Output, 0)
+		diffPath, _, writeErr := utils.WriteDiffReport(m.DiffResult, m.Schema, m.Table, m.Output, m.MaxHTMLRows)
 		if writeErr != nil {
 			return writeErr
 		}

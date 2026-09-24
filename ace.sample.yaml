@@ -22,6 +22,7 @@ postgres:
 table_diff:
   concurrency_factor: 0.5
   max_diff_rows: 1000000
+  max_html_rows: 10000         # max rows per node pair in the HTML report
   min_diff_block_size: 1
   max_diff_block_size: 1000000
   diff_block_size: 1000
@@ -52,6 +53,8 @@ mtree:
     max_block_size: 1000000
     # Max differing rows collected per node pair; 0 or absent means unbounded.
     max_diff_rows: 1000000
+    # Max rows per node pair in the HTML report (--output html).
+    max_html_rows: 10000
 
 # Example scheduler configuration:
 # schedule_jobs:

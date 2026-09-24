@@ -142,6 +142,11 @@ func SetupCLI(version string) *cli.Command {
 
 	tableDiffFlags := append(commonFlags, diffFlags...)
 	tableDiffFlags = append(tableDiffFlags,
+		&cli.Int64Flag{
+			Name:  "max-html-rows",
+			Usage: "Max rows per node pair in the HTML report (0 = use max_html_rows from config, default 10000)",
+			Value: 0,
+		},
 		&cli.StringFlag{
 			Name:    "table-filter",
 			Aliases: []string{"F"},
@@ -376,6 +381,11 @@ func SetupCLI(version string) *cli.Command {
 	mtreeUpdateFlags = append(mtreeUpdateFlags, commonFlags...)
 
 	mtreeDiffFlags := []cli.Flag{
+		&cli.Int64Flag{
+			Name:  "max-html-rows",
+			Usage: "Max rows per node pair in the HTML report (0 = use max_html_rows from config, default 10000)",
+			Value: 0,
+		},
 		&cli.Float64Flag{
 			Name:    "max-cpu-ratio",
 			Aliases: []string{"m"},
@@ -948,6 +958,7 @@ func TableDiffCLI(cmd *cli.Command) error {
 	task.MaxConnections = cmd.Int("max-connections")
 	task.CompareUnitSize = cmd.Int("compare-unit-size")
 	task.Output = strings.ToLower(cmd.String("output"))
+	task.MaxHTMLRows = cmd.Int64("max-html-rows")
 	task.Nodes = cmd.String("nodes")
 	task.EnsurePgcrypto = cmd.Bool("ensure-pgcrypto")
 	scheduleEnabled := cmd.Bool("schedule")
@@ -1205,6 +1216,7 @@ func MtreeDiffCLI(cmd *cli.Command) error {
 	task.QuietMode = cmd.Bool("quiet")
 	task.MaxCpuRatio = cmd.Float64("max-cpu-ratio")
 	task.Output = cmd.String("output")
+	task.MaxHTMLRows = cmd.Int64("max-html-rows")
 	task.NoCDC = cmd.Bool("skip-cdc")
 	task.CDCTimeoutSec = cmd.Int("cdc-timeout")
 	task.Until = cmd.String("until")

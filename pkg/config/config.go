@@ -47,6 +47,7 @@ type PostgresConfig struct {
 type DiffConfig struct {
 	ConcurrencyFactor float64 `yaml:"concurrency_factor"`
 	MaxDiffRows       int64   `yaml:"max_diff_rows"`
+	MaxHTMLRows       int64   `yaml:"max_html_rows"`
 	MinBlockSize      int     `yaml:"min_diff_block_size"`
 	MaxBlockSize      int     `yaml:"max_diff_block_size"`
 	DiffBlockSize     int     `yaml:"diff_block_size"`
@@ -81,6 +82,7 @@ type MTreeConfig struct {
 		BlockSize    int   `yaml:"block_size"`
 		MaxBlockSize int   `yaml:"max_block_size"`
 		MaxDiffRows  int64 `yaml:"max_diff_rows"`
+		MaxHTMLRows  int64 `yaml:"max_html_rows"`
 	} `yaml:"diff"`
 }
 
