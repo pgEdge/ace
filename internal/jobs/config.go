@@ -109,6 +109,11 @@ func buildTableDiffJob(cfg *config.Config, def config.JobDef, spec scheduleSpec)
 	if v := intArg(def.Args, "max_diff_rows", 0); v > 0 {
 		base.MaxDiffRows = int64(v)
 	}
+	if v := intArg(def.Args, "max_html_rows", 0); v < 0 {
+		return Job{}, fmt.Errorf("max_html_rows must be >= 0 for table-diff jobs, got %d", v)
+	} else if v > 0 {
+		base.MaxHTMLRows = int64(v)
+	}
 	base.MaxConnections = intArg(def.Args, "max_connections", 0)
 	if out := stringArg(def.Args, "output"); out != "" {
 		base.Output = out
