@@ -747,7 +747,7 @@ func writeHTMLDiffData(w *bufio.Writer, summary types.DiffSummary, plans []*html
 	if err := writeJSONTo(w, summary); err != nil {
 		return err
 	}
-	w.WriteString(`,"html_report":`)
+	w.WriteString(`,"report_info":`)
 	if err := writeJSONTo(w, info); err != nil {
 		return err
 	}
