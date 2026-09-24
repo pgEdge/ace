@@ -1,5 +1,10 @@
 # Installing ACE
 
+ACE supports Linux and macOS only. It does not build on Windows. On a
+Windows host, run ACE in WSL or in the container image. Keep its output
+directory on the Linux file system, not on a Windows drive: ACE protects
+reports with POSIX file modes, and Windows drives do not keep them.
+
 Choose the option that fits your environment:
 
 - Go install (fastest if you have Go toolchains)
@@ -30,7 +35,7 @@ Grab the prebuilt archive for your platform from GitHub Releases and unpack the 
 
 ```sh
 ACE_VER=v1.9.0  # update to the latest tag from GitHub Releases
-OS=Linux    # or Darwin or Windows
+OS=Linux    # or Darwin
 ARCH=x86_64 # or arm64
 
 curl -fsSL "https://github.com/pgedge/ace/releases/download/${ACE_VER}/ace_${OS}_${ARCH}.tar.gz" -o /tmp/ace.tgz
@@ -39,8 +44,7 @@ sudo install -m 0755 /tmp/ace/ace /usr/local/bin/ace
 ```
 
 Notes:
-- macOS uses `Darwin`; Windows archives are `.zip`.
-- On Windows, place `ace.exe` somewhere on your `PATH` (e.g., `%USERPROFILE%\\bin`).
+- macOS uses `Darwin`.
 
 ## Run with Docker/Podman
 

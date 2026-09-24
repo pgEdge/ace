@@ -21,6 +21,10 @@ import (
 // only *request* a mode, which the umask then masks off — under the usual 0022
 // that lands at 0644, readable by every local user. These helpers set the mode
 // explicitly so it does not depend on the operator's umask.
+//
+// Owner-only access here comes from POSIX mode bits. On Windows, os.Chmod
+// does not change the ACLs, so these helpers would not protect the files.
+// For this reason ACE does not build on Windows: see secure_file_windows.go.
 const (
 	SecureFileMode os.FileMode = 0o600
 	SecureDirMode  os.FileMode = 0o700

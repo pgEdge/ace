@@ -14,7 +14,6 @@ builds:
     goos:
       - linux
       - darwin
-      - windows
     goarch:
       - amd64
       - arm64
@@ -32,10 +31,6 @@ archives:
       {{- if .Arm }}v{{ .Arm }}{{ end }}
 
     wrap_in_directory: "ace-{{ .Version }}"
-
-    format_overrides:
-      - goos: windows
-        formats: [zip]
 
 changelog:
   sort: asc
