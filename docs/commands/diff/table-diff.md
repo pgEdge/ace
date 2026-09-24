@@ -20,6 +20,7 @@ This command compares the data in the specified table across nodes in a cluster 
 | `--concurrency-factor <float>` | `-c` | CPU ratio for concurrency (0.0–4.0, e.g. 0.5 uses half of available CPUs). Default `0.5`. |
 | `--compare-unit-size <int>` | `-u` | Recursive split size for mismatched blocks. Default `10000`. |
 | `--output <json\|html>` | `-o` | Report format. Default `json`. When `html`, both JSON and HTML files share the same timestamped prefix. |
+| `--max-html-rows <int>` |  | Maximum number of rows for each node pair in the HTML report. Default `0`, which means `table_diff.max_html_rows` from `ace.yaml`, or `10000` when that is not set either. There is no setting for "no limit"; set a large number instead. The JSON report always contains every row. |
 | `--nodes <list>` | `-n` | Comma-separated node list or `all`. Up to three-way diffs are supported. |
 | `--table-filter <WHERE>` | `-F` | Optional SQL `WHERE` clause applied on every node before hashing. |
 | `--against-origin <node>` |  | Limit the diff to rows whose `node_origin` matches this Spock node id or name (useful for failed-node recovery). |
@@ -119,6 +120,25 @@ ace table-diff my-cluster public._events \
       summary as both the raw filter and the effective filter (which also
       includes `--against-origin`/`--until` if set).
 3. Prefer `--output html` when you'll manually review diffs.
+    - The HTML report shows at most `max_html_rows` rows for each node pair
+      (default `10000`). A row is one primary key: a value difference or a
+      row missing on one node. Each row takes several kilobytes of markup, so
+      a report with hundreds of thousands of rows is too large for a browser.
+      When the diff has more rows, the report says so at the top and in each
+      node pair section, and the full list stays in the JSON file. Rows are
+      taken in report order: value differences, then rows missing on the
+      second node, then rows missing on the first node.
+    - A repair plan that you build in a truncated report has rules only for
+      the rows shown, and its `default_action` is `skip`. So when you run
+      `table-repair` with that plan and the full diff file, the rows that the
+      report did not show are not changed. The downloaded YAML starts with a
+      comment that says this. To repair every row, run `table-diff` again with
+      a larger `--max-html-rows`, or write the plan by hand.
+    - Known limit: a plan rule matches a primary key and a kind of
+      difference, not a node pair. With three or more nodes, a rule for a
+      key shown in one pair also acts on the same key in another pair, even
+      where the report hides it there. Check such keys before you run
+      `table-repair`.
 4. Use `--override-block-size` sparingly; the guardrails in `ace.yaml` prevent
    allocations that can overwhelm memory.
 5. The `max_diff_rows` setting caps the number of differing rows that
