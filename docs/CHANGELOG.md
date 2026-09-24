@@ -5,6 +5,30 @@ All notable changes to ACE will be captured in this document. This project follo
 ## [Unreleased]
 
 ### Fixed
+- **`table-diff --output html` was killed by the OOM killer on large diffs.**
+  The HTML writer built the whole report in memory: a copy of the diff as
+  JSON, the markup of every row, and the final document in one buffer. With
+  several kilobytes of markup per row, a diff of 493,200 rows used about 4 GB
+  before the process was killed.
+  The writer now streams the report to disk one row at a time. It also shows
+  at most `max_html_rows` rows for each node pair (default `10000`, set in
+  `table_diff` and `mtree.diff` in `ace.yaml`, or with `--max-html-rows`),
+  because a report with hundreds of thousands of rows is too large for a
+  browser anyway. A truncated report says so at the top and in each node pair
+  section. A repair plan built in it has rules only for the rows shown and
+  `default_action: skip`, so `table-repair` does not change the rows that the
+  report did not show; the YAML starts with a comment that says this. With
+  three or more nodes this holds per key only: a plan rule is not tied to a
+  node pair, so it also acts on a key that the report hides in another pair.
+  The JSON report is not changed and always contains every row.
+- **HTML report: repair plans named the wrong rows for some primary keys.**
+  The page script read keys as JavaScript numbers, so a bigint above 2^53
+  could name the neighbouring row, and a text key such as `"007"` became the
+  number 7 and matched nothing. The plan now uses the keys exactly as the
+  diff file has them.
+- **HTML report: rows with primary keys that mix numbers and text were sorted
+  in a different order on each run.** The key comparison now puts numbers
+  before text, so the order is stable.
 - **Spock `add_node` failed on clusters where `mtree init` had been run.**
   `mtree init` created a `#` operator on `bytea_xor` without a schema name, so
   it landed in `public` while the function stayed in the ACE schema. Spock's

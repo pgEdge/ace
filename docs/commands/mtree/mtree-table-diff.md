@@ -31,6 +31,7 @@ holding the node's slot, then re-run, if you need a guaranteed-current drain.
 | `--nodes` | `-n` | Nodes to include (comma or `all`) | `all` |
 | `--max-cpu-ratio` | `-m` | Max CPU ratio | `0.5` |
 | `--output` | `-o` | `json` or `html` | `json` |
+| `--max-html-rows` |  | Max rows per node pair in the HTML report (`0` = use `mtree.diff.max_html_rows`, or `10000`) | `0` |
 | `--skip-cdc` | `-U` | Skip CDC processing (only rehash and compare) | `false` |
 | `--cdc-timeout` |  | Seconds to drain CDC before giving up (`0` = use `cdc_processing_timeout` / default) | `0` |
 | `--quiet` | `-q` | Suppress output | `false` |
@@ -45,6 +46,13 @@ holding the node's slot, then re-run, if you need a guaranteed-current drain.
 **Notes**
 
 - With `--output html`, both JSON and HTML reports are generated with matching timestamps.
+- The HTML report shows at most `max_html_rows` rows for each node pair
+  (`mtree.diff.max_html_rows`, default `10000`). The JSON report always
+  contains every row. When the HTML report is truncated, it says so, and a
+  repair plan built in it has rules only for the rows shown and
+  `default_action: skip`, so `table-repair` does not change the other rows.
+  With three or more nodes this holds per key, not per node pair: see the
+  known limit in the `table-diff` docs.
 - The number of differing rows collected per node pair is bounded by
   `mtree.diff.max_diff_rows` (the shipped `ace.yaml` sets `1000000`; if the key
   is absent or `0`, the diff is unbounded). When the cap is reached, enumeration
