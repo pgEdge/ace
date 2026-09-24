@@ -1503,7 +1503,11 @@ func MapToOrderedMap(m map[string]any, cols []string) types.OrderedMap {
 	return om
 }
 
-func WriteDiffReport(diffResult types.DiffOutput, schema, table, format string) (string, string, error) {
+// WriteDiffReport writes the JSON diff report and, when format is "html", an
+// HTML report next to it. maxHTMLRows limits how many entries the HTML report
+// shows for each node pair; a value <= 0 means DefaultMaxHTMLRows. The JSON
+// report always has every row.
+func WriteDiffReport(diffResult types.DiffOutput, schema, table, format string, maxHTMLRows int64) (string, string, error) {
 	// An empty NodeDiffs means "the tables match" only if every node pair was
 	// really compared. If work items were lost to errors, it means "we do not
 	// know", and the summary that names those pairs is still worth writing to
@@ -1565,7 +1569,7 @@ func WriteDiffReport(diffResult types.DiffOutput, schema, table, format string) 
 
 	var htmlPath string
 	if strings.EqualFold(format, "html") {
-		htmlPath, err = writeHTMLDiffReport(diffResult, jsonFileName)
+		htmlPath, err = writeHTMLDiffReport(diffResult, jsonFileName, maxHTMLRows)
 		if err != nil {
 			// The JSON report is complete; say where it is, so the run is not lost.
 			return jsonFileName, "", fmt.Errorf("%w (the JSON report %s was written)", err, jsonFileName)

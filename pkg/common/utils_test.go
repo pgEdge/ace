@@ -524,7 +524,7 @@ func TestWriteDiffReportNoMatchVerdictWhenIncomplete(t *testing.T) {
 	clean := types.DiffOutput{
 		Summary: types.DiffSummary{Schema: "public", Table: "t"},
 	}
-	jsonPath, _, err := WriteDiffReport(clean, "public", "t", "json")
+	jsonPath, _, err := WriteDiffReport(clean, "public", "t", "json", 0)
 	require.NoError(t, err)
 	require.Empty(t, jsonPath, "a fully compared run with no diffs is a match, so nothing is written")
 
@@ -535,7 +535,7 @@ func TestWriteDiffReportNoMatchVerdictWhenIncomplete(t *testing.T) {
 			IncompletePairs: []string{"n1/n2"},
 		},
 	}
-	jsonPath, _, err = WriteDiffReport(incomplete, "public", "t", "json")
+	jsonPath, _, err = WriteDiffReport(incomplete, "public", "t", "json", 0)
 	require.NoError(t, err)
 	require.NotEmpty(t, jsonPath, "an incomplete comparison must not be reported as a match")
 	require.FileExists(t, jsonPath)

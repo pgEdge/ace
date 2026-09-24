@@ -573,6 +573,52 @@ h1 {
     padding: 0;
 }
 
+.truncation-banner {
+    margin: 1.5rem 0;
+    padding: 1rem 1.25rem;
+    border: 1px solid var(--warning-color);
+    border-radius: 8px;
+    background: #fff8e1;
+    color: #6f4e00;
+}
+
+.truncation-title {
+    font-weight: 650;
+    font-size: 1.05rem;
+    margin-bottom: 0.25rem;
+}
+
+.truncation-note {
+    padding: 0.75rem 1.5rem;
+    background: #fff8e1;
+    color: #6f4e00;
+    border-bottom: 1px solid var(--border-color);
+    font-size: 0.9rem;
+}
+
+.truncation-row td {
+    background: var(--bg-secondary);
+    color: var(--text-secondary);
+    text-align: center;
+    padding: 0.85rem;
+    font-weight: 600;
+    border-top: 1px solid var(--border-color);
+}
+
+.truncation-banner code,
+.truncation-note code,
+.truncation-row code {
+    overflow-wrap: anywhere;
+}
+
+.section-note {
+    padding: 0.6rem 1.5rem;
+    background: var(--bg-secondary);
+    color: var(--text-secondary);
+    border-bottom: 1px solid var(--border-color);
+    font-size: 0.85rem;
+}
+
 .empty-message {
     padding: 1.5rem;
     color: var(--text-secondary);

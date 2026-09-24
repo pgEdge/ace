@@ -2615,7 +2615,7 @@ func (m *MerkleTreeTask) DiffMtree() (err error) {
 			logger.Warn("mtree table-diff stopped after reaching max_diff_rows=%d; additional differences may exist", m.MaxDiffRows)
 		}
 
-		diffPath, _, writeErr := utils.WriteDiffReport(m.DiffResult, m.Schema, m.Table, m.Output)
+		diffPath, _, writeErr := utils.WriteDiffReport(m.DiffResult, m.Schema, m.Table, m.Output, 0)
 		if writeErr != nil {
 			return writeErr
 		}

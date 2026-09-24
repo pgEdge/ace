@@ -96,7 +96,7 @@ func TestWriteDiffReportIsNotWorldReadable(t *testing.T) {
 				},
 			}
 
-			jsonPath, htmlPath, err := WriteDiffReport(diff, "public", "customers", format)
+			jsonPath, htmlPath, err := WriteDiffReport(diff, "public", "customers", format, 0)
 			if err != nil {
 				t.Fatalf("WriteDiffReport: %v", err)
 			}

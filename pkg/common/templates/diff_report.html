@@ -15,6 +15,13 @@ the last pair block and before "report_tail".
 <body>
     <div class="container">
         <h1>ACE Table Diff Report</h1>
+        {{if .Truncation}}
+        <div class="truncation-banner" role="status">
+            <div class="truncation-title">This report shows {{.Truncation.Shown}} of {{.Truncation.Total}} rows</div>
+            <div>The HTML report shows at most {{.Truncation.Limit}} rows for each node pair (max_html_rows). The full diff is in <code>{{.Truncation.DiffFile}}</code>.</div>
+            <div>A repair plan built on this page has rules only for the rows shown. Its default action is <code>skip</code>, so table-repair does not change the other rows, and they stay different between the nodes. To see or repair them, run table-diff again with a larger <code>--max-html-rows</code>.</div>
+        </div>
+        {{end}}
         <div class="plan-builder">
             <h3>Build an advanced repair plan</h3>
             <p>Create a starter repair plan (YAML) from this diff. The plan will set <code>keep_n1</code> for mismatches, <code>apply_from n1 insert</code> for rows missing on node2, and <code>apply_from n2 insert</code> for rows missing on node1. You can edit the plan to add rules or change actions.</p>
@@ -53,11 +60,17 @@ the last pair block and before "report_tail".
 {{end}}
 
 {{define "pair_head"}}
-            <div class="diff-section" data-nodea="{{.NodeA}}" data-nodeb="{{.NodeB}}">
+            <div class="diff-section" data-nodea="{{.NodeA}}" data-nodeb="{{.NodeB}}"{{if .Hidden}} data-truncated="true"{{end}}>
                 <div class="diff-header">
                     <div class="pair-title">Differences between {{.NodeA}} and {{.NodeB}}</div>
-                    <span class="diff-count-pill">{{.DiffCount}} entries</span>
+                    <span class="diff-count-pill">{{if .Hidden}}{{.Shown}} of {{.Total}} rows shown{{else}}{{.Total}} rows{{end}}</span>
                 </div>
+                {{if .Hidden}}
+                <div class="truncation-note">This section shows {{.Shown}} of {{.Total}} rows. Not shown: {{.HiddenBreakdown}}. The repair plan from this page has rules only for the rows shown; table-repair skips the other rows, and they stay different.</div>
+                {{end}}
+                {{if .NotRendered}}
+                <div class="section-note">{{.NotRendered}} of the {{.DiffCount}} rows that table-diff found for this pair have no visible difference in the compared columns, so the report does not show them.</div>
+                {{end}}
                 <div class="table-wrapper">
                     <table class="diff-table">
                         <thead>
@@ -89,7 +102,7 @@ the last pair block and before "report_tail".
                                     <div class="action-wrapper">
                                         <span class="action-label">Row Action</span>
                                         <select class="plan-action" data-type="mismatch" data-pk="{{.PKey}}" data-nodea="{{ .NodeA }}" data-nodeb="{{ .NodeB }}">
-                                            <option value="">Use default (keep_n1)</option>
+                                            <option value="">Default: keep_n1</option>
                                             <option value="keep_n1">Keep {{.NodeA}}</option>
                                             <option value="keep_n2">Keep {{.NodeB}}</option>
                                             <option value="apply_from_n1_insert">Apply from {{.NodeA}} (insert if missing)</option>
@@ -164,7 +177,7 @@ the last pair block and before "report_tail".
                                         <div class="action-wrapper">
                                             <span class="action-label">Row Action</span>
                                             <select class="plan-action" data-type="{{.RowType}}" data-pk="{{.PKey}}" data-nodea="{{ .NodeA }}" data-nodeb="{{ .NodeB }}">
-                                                <option value="">Use default</option>
+                                                <option value="">Default: insert from {{if eq .RowType "missing_in_b"}}{{.NodeA}}{{else}}{{.NodeB}}{{end}}</option>
                                                 <option value="apply_from_n1_insert">Insert from {{.NodeA}}</option>
                                                 <option value="apply_from_n2_insert">Insert from {{.NodeB}}</option>
                                                 <option value="delete">Delete</option>
@@ -228,6 +241,9 @@ the last pair block and before "report_tail".
 {{end}}
 
 {{define "pair_tail"}}
+                        {{if .Hidden}}
+                        <tr class="truncation-row"><td colspan="3">{{.Hidden}} more rows are not shown ({{.HiddenBreakdown}}). See <code>{{.DiffFile}}</code> for the full list.</td></tr>
+                        {{end}}
                         {{if not .HasDiffs}}
                         <tr><td colspan="3" class="empty-message">No column level differences detected for this node pair.</td></tr>
                         {{end}}

@@ -1641,7 +1641,7 @@ func (t *TableDiffTask) ExecuteTask() (err error) {
 
 	t.AddPrimaryKeyToDiffSummary()
 
-	jsonPath, _, err := utils.WriteDiffReport(t.DiffResult, t.Schema, t.BaseTable, t.Output)
+	jsonPath, _, err := utils.WriteDiffReport(t.DiffResult, t.Schema, t.BaseTable, t.Output, 0)
 	if err != nil {
 		return err
 	}

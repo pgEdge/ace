@@ -11,12 +11,16 @@
         if (controls.length === 0 && checkboxes.length === 0) return;
         const nodeALabel = section.dataset.nodea || 'node A';
         const nodeBLabel = section.dataset.nodeb || 'node B';
+        // A truncated section holds only part of the pair's rows. The bulk
+        // controls act on the rows on this page, so their labels must not
+        // say "all rows" there.
+        const sectionTruncated = section.dataset.truncated === 'true';
         const bulkBar = document.createElement('div');
         bulkBar.className = 'bulk-bar';
         const selectAllBtn = document.createElement('button');
         selectAllBtn.type = 'button';
         selectAllBtn.className = 'select-all-btn';
-        selectAllBtn.textContent = 'Select all rows';
+        selectAllBtn.textContent = allRowsLabel('Select all');
         selectAllBtn.addEventListener('click', () => {
             if (!checkboxes.length) return;
             const shouldSelectAll = !checkboxes.every(cb => cb.checked);
@@ -44,7 +48,7 @@
         });
         const label = document.createElement('span');
         label.className = 'bulk-label';
-        label.textContent = 'Apply to all rows for ' + nodeALabel + ' vs ' + nodeBLabel + ':';
+        label.textContent = 'Apply to ' + allRowsLabel('all').toLowerCase() + ' for ' + nodeALabel + ' vs ' + nodeBLabel + ':';
         const select = document.createElement('select');
         select.className = 'bulk-select';
         select.setAttribute('aria-label', 'Bulk action for ' + nodeALabel + ' and ' + nodeBLabel);
@@ -102,7 +106,9 @@
         bulkBar.appendChild(selectAllBtn);
         bulkBar.appendChild(copyBtn);
         bulkBar.appendChild(downloadBtn);
-        section.insertBefore(bulkBar, section.children[1]);
+        // Put the bar after the section notes, so that the warnings come
+        // before the buttons that export the plan.
+        section.insertBefore(bulkBar, section.querySelector('.table-wrapper'));
 
         function toggleRowSelection(cb) {
             const row = cb.closest('.diff-row');
@@ -120,7 +126,7 @@
                 return;
             }
             const allSelected = checkboxes.every(cb => cb.checked);
-            selectAllBtn.textContent = allSelected ? 'Clear selection' : 'Select all rows';
+            selectAllBtn.textContent = allSelected ? 'Clear selection' : allRowsLabel('Select all');
             selectAllBtn.classList.toggle('is-active', allSelected);
             selectAllBtn.setAttribute('aria-pressed', allSelected ? 'true' : 'false');
         }
@@ -129,8 +135,14 @@
             if (selectedCount > 0) {
                 label.textContent = 'Apply to ' + selectedCount + ' selected ' + (selectedCount === 1 ? 'row' : 'rows') + ' for ' + nodeALabel + ' vs ' + nodeBLabel + ':';
             } else {
-                label.textContent = 'Apply to all rows for ' + nodeALabel + ' vs ' + nodeBLabel + ':';
+                label.textContent = 'Apply to ' + allRowsLabel('all').toLowerCase() + ' for ' + nodeALabel + ' vs ' + nodeBLabel + ':';
             }
+        }
+
+        // "Select all rows", or "Select all 25 shown rows" in a truncated report.
+        function allRowsLabel(prefix) {
+            if (!sectionTruncated) return prefix + ' rows';
+            return prefix + ' ' + checkboxes.length + ' shown ' + (checkboxes.length === 1 ? 'row' : 'rows');
         }
 
         function toggleCustomEditor(selectEl) {
@@ -232,13 +244,22 @@
         if (!pkCols.length) throw new Error('No primary key info available');
         const tableKey = diff.summary.schema + '.' + diff.summary.table;
 
+        // rowDefault is what "Default" means for a mismatched row on the
+        // page. planDefault is the plan's default_action, which table-repair
+        // applies to every row of the diff file that no rule or override
+        // matches. In a truncated report that includes the rows the user never
+        // saw, so the plan must leave them alone: its default is skip, and
+        // every shown row gets an explicit rule. keep_n1 would also be wrong
+        // for rows missing on n1, and table-repair rejects the whole plan then.
         const report = diff.html_report || {};
-        const defaultAction = { type: 'keep_n1' };
+        const truncated = !!report.truncated;
+        const rowDefault = { type: 'keep_n1' };
+        const planDefault = truncated ? { type: 'skip' } : rowDefault;
         const targetKeys = selectionInfo?.usingSelection ? selectionInfo.selectedKeys : null;
         const usingSelection = !!selectionInfo?.usingSelection;
         const allSelected = usingSelection && selectionInfo.selectedCount === selectionInfo.totalRows && selectionInfo.totalRows > 0;
 
-        const rows = collectRows(diff, targetKeys, defaultAction);
+        const rows = collectRows(diff, targetKeys, rowDefault, planDefault);
 
         const grouped = groupRows(rows, pkCols);
         const rules = [];
@@ -265,11 +286,31 @@
         });
 
         const lines = [];
+        // The YAML file leaves this page, so the warning must travel inside it.
+        if (truncated) {
+            lines.push('# WARNING: this plan was built from a truncated HTML report.');
+            if (usingSelection) {
+                lines.push('# It has rules only for the ' + selectionInfo.selectedCount + ' rows selected in that report.');
+                lines.push('# The report shows:');
+            } else {
+                lines.push('# It has rules only for the rows shown in that report:');
+            }
+            (report.pairs || []).forEach(p => {
+                if (p.shown < p.total) {
+                    lines.push('#   ' + p.pair + ': ' + p.shown + ' of ' + p.total + ' rows shown');
+                }
+            });
+            lines.push('# default_action is skip, so table-repair does not change any other');
+            lines.push('# row of the diff file, and those rows stay different. To cover all');
+            lines.push('# rows, run table-diff again with a larger max_html_rows');
+            lines.push('# (or --max-html-rows), or add rules by hand.');
+            lines.push('# Full diff: ' + JSON.stringify(report.diff_file || ''));
+        }
         lines.push('version: 1');
         lines.push('tables:');
         lines.push('  ' + tableKey + ':');
         lines.push('    default_action:');
-        lines.push('      type: ' + defaultAction.type);
+        lines.push('      type: ' + planDefault.type);
         if (rules.length) {
             lines.push('    rules:');
             rules.forEach(rule => {
@@ -311,7 +352,7 @@
     // diff file; they go into the YAML as they are and are never turned into
     // JavaScript numbers, which would lose digits of a bigint and turn a text
     // key such as "007" into the number 7.
-    function collectRows(diff, targetKeys, defaultAction) {
+    function collectRows(diff, targetKeys, rowDefault, planDefault) {
         const rows = [];
         const seen = new Set();
 
@@ -328,12 +369,12 @@
                 } else if (r.type === 'missing_on_n1') {
                     action = { type: 'apply_from', from: r.node_b, mode: 'insert' };
                 } else {
-                    action = defaultAction;
+                    action = rowDefault;
                 }
             }
 
             // Skip emitting explicit instructions for rows that match the table default.
-            const matchesDefault = isSameAction(action, defaultAction) && r.type === 'row_mismatch';
+            const matchesDefault = isSameAction(action, planDefault) && r.type === 'row_mismatch';
             if (matchesDefault) continue;
 
             rows.push({ key, pkTuple: r.pk, action, diffType: r.type });

@@ -57,10 +57,10 @@ func e2eRow(id any, v string) types.OrderedMap {
 	return types.OrderedMap{{Key: "id", Value: id}, {Key: "v", Value: v}}
 }
 
-// runHTMLPlan writes the reports for diff, builds the plan on the page, and
-// resolves it. It returns the upserted primary keys per
+// runHTMLPlan writes the reports for diff with the given limit, builds the
+// plan on the page, and resolves it. It returns the upserted primary keys per
 // node, the plan, and the resolver error.
-func runHTMLPlan(t *testing.T, diff types.DiffOutput) (map[string][]string, string, error) {
+func runHTMLPlan(t *testing.T, diff types.DiffOutput, limit int64) (map[string][]string, string, error) {
 	t.Helper()
 	node, err := exec.LookPath("node")
 	if err != nil {
@@ -69,7 +69,7 @@ func runHTMLPlan(t *testing.T, diff types.DiffOutput) (map[string][]string, stri
 	dir := t.TempDir()
 	t.Chdir(dir) // WriteDiffReport writes into the current directory
 
-	jsonPath, htmlPath, err := utils.WriteDiffReport(diff, "public", "t", "html")
+	jsonPath, htmlPath, err := utils.WriteDiffReport(diff, "public", "t", "html", limit)
 	if err != nil {
 		t.Fatalf("WriteDiffReport: %v", err)
 	}
@@ -114,6 +114,15 @@ func runHTMLPlan(t *testing.T, diff types.DiffOutput) (map[string][]string, stri
 	return got, string(planText), err
 }
 
+func idRange(from, to int) []string {
+	var out []string
+	for i := from; i <= to; i++ {
+		out = append(out, fmt.Sprint(i))
+	}
+	sort.Strings(out)
+	return out
+}
+
 // twoNodeDiff: 30 value differences (1..30), 15 rows missing on n2
 // (31..45), 8 rows missing on n1 (46..53).
 func twoNodeDiff() types.DiffOutput {
@@ -135,18 +144,31 @@ func twoNodeDiff() types.DiffOutput {
 	}
 }
 
-// Every row is on the page, so the plan covers every row: the default
-// keep_n1 for value differences, and explicit inserts for missing rows.
+// Before the fix, the hidden rows missing on n1 got keep_n1 and the whole
+// plan was rejected.
+func TestHTMLPlanTruncatedTwoNodes(t *testing.T) {
+	got, plan, err := runHTMLPlan(t, twoNodeDiff(), 25)
+	if err != nil {
+		t.Fatalf("plan from a truncated report does not resolve: %v\n%s", err, plan)
+	}
+	if want := idRange(1, 25); fmt.Sprint(got["n2"]) != fmt.Sprint(want) || len(got["n1"]) != 0 {
+		t.Errorf("upserts: got %v, want n2=%v and nothing on n1\n%s", got, want, plan)
+	}
+	if !strings.Contains(plan, "type: skip") || !strings.Contains(plan, "# WARNING") {
+		t.Errorf("plan has no skip default or no warning:\n%s", plan)
+	}
+}
+
 func TestHTMLPlanCompleteReport(t *testing.T) {
-	got, plan, err := runHTMLPlan(t, twoNodeDiff())
+	got, plan, err := runHTMLPlan(t, twoNodeDiff(), 0)
 	if err != nil {
 		t.Fatalf("plan does not resolve: %v\n%s", err, plan)
 	}
 	if len(got["n2"]) != 45 || len(got["n1"]) != 8 {
 		t.Errorf("upserts: got n1=%d n2=%d, want n1=8 n2=45", len(got["n1"]), len(got["n2"]))
 	}
-	if !strings.Contains(plan, "type: keep_n1") {
-		t.Errorf("plan has no keep_n1 default:\n%s", plan)
+	if strings.Contains(plan, "# WARNING") || !strings.Contains(plan, "type: keep_n1") {
+		t.Errorf("complete report must give the old plan:\n%s", plan)
 	}
 }
 
@@ -161,7 +183,7 @@ func TestHTMLPlanBigintKeys(t *testing.T) {
 		Summary: types.DiffSummary{Schema: "public", Table: "t", PrimaryKey: []string{"id"},
 			DiffRowsCount: map[string]int{"n1/n2": 3}},
 	}
-	got, plan, err := runHTMLPlan(t, diff)
+	got, plan, err := runHTMLPlan(t, diff, 0)
 	if err != nil {
 		t.Fatalf("plan does not resolve: %v\n%s", err, plan)
 	}
@@ -187,7 +209,7 @@ func TestHTMLPlanTextKeysThatLookNumeric(t *testing.T) {
 		Summary: types.DiffSummary{Schema: "public", Table: "t", PrimaryKey: []string{"id"},
 			DiffRowsCount: map[string]int{"n1/n2": 3}},
 	}
-	got, plan, err := runHTMLPlan(t, diff)
+	got, plan, err := runHTMLPlan(t, diff, 0)
 	if err != nil {
 		t.Fatalf("plan does not resolve: %v\n%s", err, plan)
 	}
