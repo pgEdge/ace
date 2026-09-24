@@ -5,6 +5,10 @@ Windows host, run ACE in WSL or in the container image. Keep its output
 directory on the Linux file system, not on a Windows drive: ACE protects
 reports with POSIX file modes, and Windows drives do not keep them.
 
+Reports written by earlier Windows builds keep their Windows ACLs, even
+after you move ACE to WSL. Other local users may be able to read the
+table rows in them. Delete these reports, or restrict their ACLs by hand.
+
 Choose the option that fits your environment:
 
 - Go install (fastest if you have Go toolchains)
