@@ -232,11 +232,17 @@
         const allCheckboxes = Array.from(document.querySelectorAll('.row-select'));
         const selected = allCheckboxes.filter(cb => cb.checked);
         return {
-            selectedKeys: new Set(selected.map(cb => cb.dataset.pk)),
+            selectedKeys: new Set(selected.map(cb => rowId(cb.dataset.nodea, cb.dataset.nodeb, cb.dataset.pk))),
             selectedCount: selected.length,
             totalRows: allCheckboxes.length,
             usingSelection: selected.length > 0
         };
+    }
+
+    // rowId names one row of one node pair. A key can be a row in several
+    // pairs, each with its own controls on the page.
+    function rowId(nodeA, nodeB, key) {
+        return nodeA + '/' + nodeB + '|' + key;
     }
 
     function buildPlanYaml(diff, selectionInfo) {
@@ -248,25 +254,36 @@
         // page. planDefault is the plan's default_action, which table-repair
         // applies to every row of the diff file that no rule or override
         // matches. In a truncated report that includes the rows the user never
-        // saw, so the plan must leave them alone: its default is skip, and
-        // every shown row gets an explicit rule. keep_n1 would also be wrong
-        // for rows missing on n1, and table-repair rejects the whole plan then.
+        // saw, and the same holds for shown rows the plan has to leave out
+        // (see collectEntries) and for rows the user did not select when some
+        // rows are selected. So the plan must leave them alone: its default
+        // is skip, and every other shown row gets an explicit rule. keep_n1
+        // would also be wrong for rows missing on n1, and table-repair rejects
+        // the whole plan then.
         const report = diff.report_info || {};
         const truncated = !!report.truncated;
         const rowDefault = { type: 'keep_n1' };
-        const planDefault = truncated ? { type: 'skip' } : rowDefault;
         const targetKeys = selectionInfo?.usingSelection ? selectionInfo.selectedKeys : null;
         const usingSelection = !!selectionInfo?.usingSelection;
         const allSelected = usingSelection && selectionInfo.selectedCount === selectionInfo.totalRows && selectionInfo.totalRows > 0;
 
-        const rows = collectRows(diff, targetKeys, rowDefault, planDefault);
+        const { entries, leftOut } = collectEntries(diff, targetKeys, rowDefault);
+        const partialSelection = usingSelection && !allSelected;
+        const planDefault = truncated || partialSelection || leftOut.length ? { type: 'skip' } : rowDefault;
+        // Skip emitting explicit instructions for rows that match the table default.
+        const rows = entries.filter(e => !(e.diffType === 'row_mismatch' && isSameAction(e.action, planDefault)));
+
+        // row_overrides match by primary key alone. With more than one node
+        // pair, a key can be a row in several pairs with different kinds of
+        // difference, so only rules, which also match diff_type, are safe.
+        const multiPair = (report.pairs || []).length > 1;
 
         const grouped = groupRows(rows, pkCols);
         const rules = [];
         const overrides = [];
 
         grouped.forEach(group => {
-            const useRulesForGroup = allSelected || group.keys.length > 1;
+            const useRulesForGroup = allSelected || multiPair || group.keys.length > 1;
             const pkMatchers = buildPKMatchers(group.pkTuples, pkCols, !!report.integer_pk);
 
             if (useRulesForGroup) {
@@ -305,6 +322,13 @@
             lines.push('# rows, run table-diff again with a larger max_html_rows');
             lines.push('# (or --max-html-rows), or add rules by hand.');
             lines.push('# Full diff: ' + JSON.stringify(report.diff_file || ''));
+        } else if (partialSelection) {
+            lines.push('# This plan has rules only for the ' + selectionInfo.selectedCount + ' rows selected in the HTML report.');
+            lines.push('# default_action is skip, so table-repair does not change any other');
+            lines.push('# row of the diff file, and those rows stay different.');
+        }
+        if (leftOut.length) {
+            pushLeftOutComment(lines, leftOut);
         }
         lines.push('version: 1');
         lines.push('tables:');
@@ -344,44 +368,95 @@
                 emitActionYaml(lines, '          ', ov.action);
             }
         }
-        return lines.join('\n') + '\n';
+        return escapeYAMLBreaks(lines.join('\n') + '\n');
     }
 
-    // collectRows turns the shown rows (diff.rows, written by the Go code)
-    // into plan entries. A row's pk is a list of JSON literals copied from the
-    // diff file; they go into the YAML as they are and are never turned into
-    // JavaScript numbers, which would lose digits of a bigint and turn a text
-    // key such as "007" into the number 7.
-    function collectRows(diff, targetKeys, rowDefault, planDefault) {
-        const rows = [];
-        for (const r of uniqueTargetRows(diff, targetKeys)) {
-            const action = selectionForKey(r.key) || defaultActionFor(r, rowDefault);
-            // Skip emitting explicit instructions for rows that match the table default.
-            if (r.type === 'row_mismatch' && isSameAction(action, planDefault)) continue;
-            rows.push({ key: r.key, pkTuple: r.pk, action, diffType: r.type });
-        }
-        return rows;
+    // escapeYAMLBreaks writes U+0085, U+2028 and U+2029 as \u escapes. YAML
+    // reads them as line breaks, but JSON.stringify and Go's json.Marshal can
+    // leave them as they are: in a comment, the rest of the text would become
+    // part of the plan, and in a quoted key, the break would turn into a
+    // space and name another row. The plan has non-ASCII text only in
+    // comments and in double-quoted JSON strings, where the escape means the
+    // same character.
+    function escapeYAMLBreaks(text) {
+        return text.replace(/[\u0085\u2028\u2029]/g, c => '\\u' + c.charCodeAt(0).toString(16).padStart(4, '0'));
     }
 
-    // uniqueTargetRows returns the embedded rows once per key, and only the
-    // selected ones when targetKeys is set.
-    function uniqueTargetRows(diff, targetKeys) {
-        const seen = new Set();
-        const out = [];
+    // collectEntries turns the shown rows (diff.rows, written by the Go code)
+    // into plan entries, one per primary key and kind of difference. A plan
+    // rule cannot name a node pair, so an entry covers that key and kind in
+    // every pair. When that would change a row the user did not choose, the
+    // entry goes into leftOut instead: the key and kind is also a row in a
+    // pair where the page does not show it (hidden_twin), or where it is not
+    // selected, or where it has a different action.
+    //
+    // A row's pk is a list of JSON literals copied from the diff file; they
+    // go into the YAML as they are and are never turned into JavaScript
+    // numbers, which would lose digits of a bigint and turn a text key such
+    // as "007" into the number 7.
+    function collectEntries(diff, targetKeys, rowDefault) {
+        const byKeyAndType = new Map();
         for (const r of (diff.rows || [])) {
-            if (seen.has(r.key)) continue;
-            seen.add(r.key);
-            if (targetKeys && !targetKeys.has(r.key)) continue;
-            out.push(r);
+            const id = r.type + '|' + JSON.stringify(r.pk);
+            let group = byKeyAndType.get(id);
+            if (!group) {
+                group = [];
+                byKeyAndType.set(id, group);
+            }
+            group.push(r);
         }
-        return out;
+
+        const entries = [];
+        const leftOut = [];
+        for (const group of byKeyAndType.values()) {
+            const selected = group.filter(r => !targetKeys || targetKeys.has(rowId(r.node_a, r.node_b, r.key)));
+            if (!selected.length) continue;
+            const first = group[0];
+            const pairs = group.map(r => r.pair);
+            if (group.some(r => r.hidden_twin)) {
+                leftOut.push({ key: first.key, diffType: first.type, pairs, reason: 'also a hidden row in another pair' });
+                continue;
+            }
+            if (selected.length < group.length) {
+                leftOut.push({ key: first.key, diffType: first.type, pairs, reason: 'selected in only some pairs' });
+                continue;
+            }
+            const actions = group.map(r => selectionForRow(r) || defaultActionFor(r, rowDefault));
+            if (actions.some(a => actionSignature(a) !== actionSignature(actions[0]))) {
+                leftOut.push({ key: first.key, diffType: first.type, pairs, reason: 'different actions in different pairs' });
+                continue;
+            }
+            entries.push({ key: first.key, pkTuple: first.pk, action: actions[0], diffType: first.type });
+        }
+        return { entries, leftOut };
     }
 
-    // defaultActionFor is what "Default" means for the row on the page.
+    // defaultActionFor is what "Default" means for the row on the page. In a
+    // plan, n1 and n2 are the first and second node of each pair, not node
+    // names.
     function defaultActionFor(r, rowDefault) {
-        if (r.type === 'missing_on_n2') return { type: 'apply_from', from: r.node_a, mode: 'insert' };
-        if (r.type === 'missing_on_n1') return { type: 'apply_from', from: r.node_b, mode: 'insert' };
+        if (r.type === 'missing_on_n2') return { type: 'apply_from', from: 'n1', mode: 'insert' };
+        if (r.type === 'missing_on_n1') return { type: 'apply_from', from: 'n2', mode: 'insert' };
         return rowDefault;
+    }
+
+    // pushLeftOutComment lists the shown rows that have no rule. The list is
+    // cut short so that a large report does not give a huge comment.
+    function pushLeftOutComment(lines, leftOut) {
+        const limit = 20;
+        lines.push('# WARNING: ' + leftOut.length + ' shown ' + (leftOut.length === 1 ? 'row has' : 'rows have') + ' no rule in this plan.');
+        lines.push('# A rule matches rows by primary key and diff_type in every node pair,');
+        lines.push('# so a rule for one of these rows would also change a row that was not');
+        lines.push('# chosen. default_action is skip, so table-repair leaves them alone.');
+        // JSON.stringify keeps a key with a newline on one comment line;
+        // otherwise the rest of the key would become part of the plan (see
+        // also escapeYAMLBreaks).
+        leftOut.slice(0, limit).forEach(e => {
+            lines.push('#   ' + JSON.stringify(e.key) + ' (' + e.diffType + ' in ' + e.pairs.join(', ') + '): ' + e.reason);
+        });
+        if (leftOut.length > limit) {
+            lines.push('#   ... and ' + (leftOut.length - limit) + ' more');
+        }
     }
 
     function groupRows(rows, pkCols) {
@@ -500,8 +575,22 @@
         return scalar(val);
     }
 
-    function selectionForKey(key) {
-        const sel = document.querySelector('.plan-action[data-pk="' + key + '"]');
+    // sectionFor returns the section of a node pair; the page has one per pair.
+    function sectionFor(nodeA, nodeB) {
+        for (const section of sections) {
+            if (section.dataset.nodea === nodeA && section.dataset.nodeb === nodeB) return section;
+        }
+        return null;
+    }
+
+    // selectionForRow reads the action chosen for a row in its own pair's
+    // section. The same key can have a control in several sections. The key
+    // is raw text and can hold a quote or a backslash, so it goes into the
+    // selector through CSS.escape.
+    function selectionForRow(r) {
+        const section = sectionFor(r.node_a, r.node_b);
+        if (!section) return null;
+        const sel = section.querySelector('.plan-action[data-pk="' + CSS.escape(r.key) + '"]');
         if (!sel) return null;
         const val = sel.value;
         if (!val) return null;
@@ -511,25 +600,25 @@
             case 'keep_n2':
                 return { type: 'keep_n2' };
             case 'apply_from_n1_insert':
-                return { type: 'apply_from', from: sel.dataset.nodea, mode: 'insert' };
+                return { type: 'apply_from', from: 'n1', mode: 'insert' };
             case 'apply_from_n2_insert':
-                return { type: 'apply_from', from: sel.dataset.nodeb, mode: 'insert' };
+                return { type: 'apply_from', from: 'n2', mode: 'insert' };
             case 'delete':
                 return { type: 'delete' };
             case 'skip':
                 return { type: 'skip' };
             case 'custom':
-                return buildCustomAction(key);
+                return buildCustomAction(section, r);
             default:
                 return null;
         }
     }
 
-    function buildCustomAction(key) {
-        const editor = document.querySelector('.custom-editor[data-pk="' + key + '"]');
+    function buildCustomAction(section, r) {
+        const editor = section.querySelector('.custom-editor[data-pk="' + CSS.escape(r.key) + '"]');
         if (!editor) return { type: 'custom' };
-        const nodeA = editor.dataset.nodea || 'n1';
-        const nodeB = editor.dataset.nodeb || 'n2';
+        // The helper controls hold node names; the plan wants n1 or n2.
+        const planNode = name => name === r.node_a ? 'n1' : name === r.node_b ? 'n2' : name;
 
         const customRowInput = editor.querySelector('.custom-row-input');
         let customRow = null;
@@ -538,19 +627,18 @@
             try {
                 customRow = JSON.parse(raw);
             } catch (e) {
-                throw new Error('Invalid custom row JSON for ' + key + ': ' + e.message);
+                throw new Error('Invalid custom row JSON for ' + r.key + ': ' + e.message);
             }
         }
 
         const helpers = {};
         const coalesce = editor.querySelector('.helper-coalesce')?.value || '';
-        if (coalesce) helpers.coalesce_priority = coalesce.split(',').map(s => s.trim()).filter(Boolean);
+        if (coalesce) helpers.coalesce_priority = coalesce.split(',').map(s => s.trim()).filter(Boolean).map(planNode);
 
         const freshToggle = editor.querySelector('.helper-freshest-toggle');
-        const freshTie = editor.querySelector('.helper-freshest-tie')?.value || nodeA;
-        const freshEnabled = !!freshToggle?.checked;
-        if (freshEnabled) {
-            helpers.pick_freshest = { key: 'commit_ts', tie: freshTie || nodeA };
+        const freshTie = editor.querySelector('.helper-freshest-tie')?.value || r.node_a;
+        if (freshToggle?.checked) {
+            helpers.pick_freshest = { key: 'commit_ts', tie: planNode(freshTie) };
         }
 
         const hasHelpers = Object.keys(helpers).length > 0;

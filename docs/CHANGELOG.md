@@ -17,15 +17,32 @@ All notable changes to ACE will be captured in this document. This project follo
   browser anyway. A truncated report says so at the top and in each node pair
   section. A repair plan built in it has rules only for the rows shown and
   `default_action: skip`, so `table-repair` does not change the rows that the
-  report did not show; the YAML starts with a comment that says this. With
-  three or more nodes this holds per key only: a plan rule is not tied to a
-  node pair, so it also acts on a key that the report hides in another pair.
+  report did not show; the YAML starts with a comment that says this. A plan
+  rule is not tied to a node pair, so with three or more nodes a shown row
+  gets no rule when the same key and kind of difference is hidden in another
+  pair; the YAML comment lists such rows.
   The JSON report is not changed and always contains every row.
 - **HTML report: repair plans named the wrong rows for some primary keys.**
   The page script read keys as JavaScript numbers, so a bigint above 2^53
   could name the neighbouring row, and a text key such as `"007"` became the
-  number 7 and matched nothing. The plan now uses the keys exactly as the
-  diff file has them.
+  number 7 and matched nothing. A text key with the character U+0085, U+2028
+  or U+2029 also named the wrong row, because YAML reads these as line
+  breaks. The plan now uses the keys exactly as the diff file has them, and
+  writes those three characters as `\u` escapes.
+- **HTML report: repair plans were wrong for clusters of three or more nodes
+  and for nodes not named `n1` and `n2`.** The plan wrote node names in
+  `apply_from`, where `table-repair` expects `n1` or `n2`, the first or second
+  node of each pair; `table-repair` rejected such a plan or, for a pair such
+  as `n2/n3`, read it the wrong way round. The plan also had one entry per
+  key, taken from the first node pair that had the key, and applied it in
+  every pair. It now has one rule per key and kind of difference, reads each
+  row's action from its own pair, and leaves out, with a comment, any row it
+  cannot give a rule without also changing a row in another pair.
+- **HTML report: a repair plan built from selected rows also repaired the
+  rows that were not selected.** Its `default_action` was `keep_n1`, and
+  `table-repair` rejected the whole plan when an unselected row was missing
+  on the first node of its pair. The plan now has `default_action: skip`, so
+  `table-repair` changes only the selected rows.
 - **HTML report: rows with primary keys that mix numbers and text were sorted
   in a different order on each run.** The key comparison now puts numbers
   before text, so the order is stable.
