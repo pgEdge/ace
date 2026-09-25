@@ -509,6 +509,53 @@ func TestHTMLReportRowsWithoutVisibleDifference(t *testing.T) {
 	}
 }
 
+// A shown row gets hidden_twin when another pair has a row with the same key
+// and type that the page does not show, including a row with no visible
+// difference, which the page never shows.
+func TestHTMLReportHiddenTwin(t *testing.T) {
+	row := func(id int, val any) types.OrderedMap {
+		return types.OrderedMap{{Key: "id", Value: id}, {Key: "val", Value: val}}
+	}
+	d := types.DiffOutput{
+		NodeDiffs: map[string]types.DiffByNodePair{
+			// Value differences 1, 2, 3, 5; the limit of 3 hides 5.
+			"n1/n2": {Rows: map[string][]types.OrderedMap{
+				"n1": {row(1, "a"), row(2, "a"), row(3, "a"), row(5, "a")},
+				"n2": {row(1, "b"), row(2, "b"), row(3, "b"), row(5, "b")},
+			}},
+			// All three shown. 5 is hidden in n1/n2. 4 has no visible
+			// difference in n2/n3. 1 is missing on n3, a different type from
+			// its row in n1/n2.
+			"n1/n3": {Rows: map[string][]types.OrderedMap{
+				"n1": {row(1, "a"), row(4, 1), row(5, "a")},
+				"n3": {row(4, 2), row(5, "c")},
+			}},
+			"n2/n3": {Rows: map[string][]types.OrderedMap{
+				"n2": {row(4, 1)},
+				"n3": {row(4, "1")},
+			}},
+		},
+		Summary: types.DiffSummary{Schema: "public", Table: "t", PrimaryKey: []string{"id"},
+			DiffRowsCount: map[string]int{"n1/n2": 4, "n1/n3": 3, "n2/n3": 1}},
+	}
+	_, data := renderHTMLTestReport(t, d, 3)
+	got := map[string]bool{}
+	for _, r := range data.Rows {
+		got[r.Pair+" "+r.Key+" "+r.Type] = r.HiddenTwin
+	}
+	want := map[string]bool{
+		"n1/n2 1 row_mismatch":  false,
+		"n1/n2 2 row_mismatch":  false,
+		"n1/n2 3 row_mismatch":  false,
+		"n1/n3 4 row_mismatch":  true,
+		"n1/n3 5 row_mismatch":  true,
+		"n1/n3 1 missing_on_n2": false,
+	}
+	if fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Errorf("hidden_twin: got %v, want %v", got, want)
+	}
+}
+
 type failingWriter struct{ left int }
 
 func (w *failingWriter) Write(p []byte) (int, error) {

@@ -134,11 +134,13 @@ ace table-diff my-cluster public._events \
       report did not show are not changed. The downloaded YAML starts with a
       comment that says this. To repair every row, run `table-diff` again with
       a larger `--max-html-rows`, or write the plan by hand.
-    - Known limit: a plan rule matches a primary key and a kind of
-      difference, not a node pair. With three or more nodes, a rule for a
-      key shown in one pair also acts on the same key in another pair, even
-      where the report hides it there. Check such keys before you run
-      `table-repair`.
+    - A plan rule matches a primary key and a kind of difference, not a node
+      pair. With three or more nodes, a rule for a key shown in one pair
+      would also act on the same key in another pair. So a shown row gets no
+      rule when the same key and kind of difference is hidden in another
+      pair or has a different action there, or when you select it in some
+      pairs but not in others. The YAML comment lists these rows and says
+      why; `table-repair` leaves them alone.
 4. Use `--override-block-size` sparingly; the guardrails in `ace.yaml` prevent
    allocations that can overwhelm memory.
 5. The `max_diff_rows` setting caps the number of differing rows that

@@ -146,13 +146,17 @@ type htmlReportInfo struct {
 // that the diff file has for it. The script copies that text into the YAML
 // as it is and never turns it into a JavaScript number, so a bigint keeps
 // every digit and a text key such as "007" stays text.
+//
+// HiddenTwin is set when another pair has a row with the same primary key and
+// Type that the page does not show (see hiddenTwins).
 type htmlPlanRow struct {
-	Pair  string   `json:"pair"`
-	NodeA string   `json:"node_a"`
-	NodeB string   `json:"node_b"`
-	Key   string   `json:"key"`
-	Type  string   `json:"type"`
-	PK    []string `json:"pk"`
+	Pair       string   `json:"pair"`
+	NodeA      string   `json:"node_a"`
+	NodeB      string   `json:"node_b"`
+	Key        string   `json:"key"`
+	Type       string   `json:"type"`
+	PK         []string `json:"pk"`
+	HiddenTwin bool     `json:"hidden_twin,omitempty"`
 }
 
 type htmlPairInfo struct {
@@ -176,6 +180,10 @@ type htmlPairPlan struct {
 	valueKeys  []string
 	missingInB []string
 	missingInA []string
+	// Rows on both nodes that show no difference on the page (see
+	// buildHTMLPairPlan). The page never shows them, but table-repair still
+	// sees them as row_mismatch rows of the diff file.
+	unchanged []string
 
 	// How many rows of each list the report shows.
 	shownValue    int
@@ -237,6 +245,65 @@ const (
 	planTypeMissingN2 = "missing_on_n2"
 	planTypeMissingN1 = "missing_on_n1"
 )
+
+// htmlPlanList is one list of a pair's rows as table-repair sees them: the
+// row keys, how many of them the page shows, the node rows that hold the
+// primary key values, and the executor's name for the kind of difference.
+type htmlPlanList struct {
+	keys     []string
+	shown    int
+	rows     map[string]types.OrderedMap
+	planType string
+}
+
+// planLists returns every row of the pair that table-repair will see, in
+// report order, with the unchanged rows last.
+func (p *htmlPairPlan) planLists() []htmlPlanList {
+	return []htmlPlanList{
+		{p.valueKeys, p.shownValue, p.rowMapA, planTypeMismatch},
+		{p.missingInB, p.shownMissingB, p.rowMapA, planTypeMissingN2},
+		{p.missingInA, p.shownMissingA, p.rowMapB, planTypeMissingN1},
+		{p.unchanged, 0, p.rowMapA, planTypeMismatch},
+	}
+}
+
+// hiddenTwins finds the shown rows that the repair plan must leave out. A plan
+// rule matches rows by primary key and diff_type only; it cannot name a node
+// pair. So a rule for a shown row also matches a row with the same key and
+// type in another pair, and if the page does not show that row, the plan would
+// change a row the user never saw. The page script leaves such rows out of
+// the plan, and default_action skip leaves them alone.
+//
+// The result is keyed by twinKey. It holds only keys of shown rows, so its
+// size is bounded by the row limit and not by the size of the diff.
+func hiddenTwins(plans []*htmlPairPlan) map[string]struct{} {
+	shown := make(map[string]struct{})
+	for _, p := range plans {
+		for _, l := range p.planLists() {
+			for _, key := range l.keys[:l.shown] {
+				shown[twinKey(l.planType, key)] = struct{}{}
+			}
+		}
+	}
+	twins := make(map[string]struct{})
+	for _, p := range plans {
+		for _, l := range p.planLists() {
+			for _, key := range l.keys[l.shown:] {
+				k := twinKey(l.planType, key)
+				if _, ok := shown[k]; ok {
+					twins[k] = struct{}{}
+				}
+			}
+		}
+	}
+	return twins
+}
+
+// twinKey joins a plan type and a row identity key. The identity key is the
+// same for one primary key in every pair.
+func twinKey(planType, key string) string {
+	return planType + "\x00" + key
+}
 
 // pkLiterals returns each primary key value of the row as JSON text, the
 // same text the diff file has for it.
@@ -331,9 +398,9 @@ func pairNodeNames(pairKey string, nodeDiff types.DiffByNodePair) (string, strin
 // Two keys per row, and they are not interchangeable. buildRowKey is the
 // collision-proof identity used to pair a row on A with the same row on B;
 // buildRowDisplayKey is the plain rendering shown in the report and embedded
-// in data-pk, which the report's own JavaScript interpolates into a CSS
-// attribute selector and so cannot carry the quotes the identity encoding
-// adds.
+// in data-pk. The display key can hold any character, including quotes, so
+// the report's JavaScript escapes it with CSS.escape before it uses it in a
+// selector.
 func (p *htmlPairPlan) indexRows(rows []types.OrderedMap, primaryKey []string) map[string]types.OrderedMap {
 	byKey := make(map[string]types.OrderedMap, len(rows))
 	for idx, row := range rows {
@@ -354,6 +421,8 @@ func (p *htmlPairPlan) classifyRows() {
 			p.missingInB = append(p.missingInB, key)
 		case rowsDiffer(rowA, rowB, p.columns):
 			p.valueKeys = append(p.valueKeys, key)
+		default:
+			p.unchanged = append(p.unchanged, key)
 		}
 	}
 	for key := range p.rowMapB {
@@ -589,7 +658,7 @@ func renderHTMLDiffReport(out io.Writer, diffResult types.DiffOutput, diffFile s
 	for _, p := range plans {
 		writeHTMLPair(bw, p, summary, pkSet, diffFile)
 	}
-	bw.do(func() error { return writeHTMLDiffData(w, summary, plans, info) })
+	bw.do(func() error { return writeHTMLDiffData(w, summary, plans, info, hiddenTwins(plans)) })
 	bw.block("report_tail", htmlReportTail{JS: template.JS(htmlDiffJS)})
 	bw.do(w.Flush)
 	if bw.err != nil {
@@ -738,11 +807,11 @@ func writeHTMLMissingRows(bw *htmlBlockWriter, p *htmlPairPlan, pkSet map[string
 // writeHTMLDiffData embeds the data that the page script needs to build a
 // repair plan: the diff summary, htmlReportInfo, and one htmlPlanRow for each
 // shown row, in report order. The rows are written one at a time, so the
-// list never exists in memory as a whole.
+// list never exists in memory as a whole. twins comes from hiddenTwins.
 //
 // json.Marshal escapes '<', '>' and '&', so no value can close the script
 // element early.
-func writeHTMLDiffData(w *bufio.Writer, summary types.DiffSummary, plans []*htmlPairPlan, info htmlReportInfo) error {
+func writeHTMLDiffData(w *bufio.Writer, summary types.DiffSummary, plans []*htmlPairPlan, info htmlReportInfo, twins map[string]struct{}) error {
 	w.WriteString(`<script id="diff-data" type="application/json">{"summary":`)
 	if err := writeJSONTo(w, summary); err != nil {
 		return err
@@ -754,7 +823,7 @@ func writeHTMLDiffData(w *bufio.Writer, summary types.DiffSummary, plans []*html
 	w.WriteString(`,"rows":[`)
 	first := true
 	for _, p := range plans {
-		if err := p.writePlanRows(w, summary.PrimaryKey, &first); err != nil {
+		if err := p.writePlanRows(w, summary.PrimaryKey, twins, &first); err != nil {
 			return err
 		}
 	}
@@ -766,29 +835,22 @@ func writeHTMLDiffData(w *bufio.Writer, summary types.DiffSummary, plans []*html
 
 // writePlanRows writes the htmlPlanRow of every shown row of the pair. first
 // tells whether no row has been written yet, across all pairs.
-func (p *htmlPairPlan) writePlanRows(w *bufio.Writer, primaryKey []string, first *bool) error {
-	lists := []struct {
-		keys     []string
-		rows     map[string]types.OrderedMap
-		planType string
-	}{
-		{p.valueKeys[:p.shownValue], p.rowMapA, planTypeMismatch},
-		{p.missingInB[:p.shownMissingB], p.rowMapA, planTypeMissingN2},
-		{p.missingInA[:p.shownMissingA], p.rowMapB, planTypeMissingN1},
-	}
-	for _, l := range lists {
-		for _, key := range l.keys {
+func (p *htmlPairPlan) writePlanRows(w *bufio.Writer, primaryKey []string, twins map[string]struct{}, first *bool) error {
+	for _, l := range p.planLists() {
+		for _, key := range l.keys[:l.shown] {
 			if !*first {
 				w.WriteByte(',')
 			}
 			*first = false
+			_, twin := twins[twinKey(l.planType, key)]
 			row := htmlPlanRow{
-				Pair:  p.pairKey,
-				NodeA: p.nodeA,
-				NodeB: p.nodeB,
-				Key:   p.display[key],
-				Type:  l.planType,
-				PK:    pkLiterals(l.rows[key], primaryKey),
+				Pair:       p.pairKey,
+				NodeA:      p.nodeA,
+				NodeB:      p.nodeB,
+				Key:        p.display[key],
+				Type:       l.planType,
+				PK:         pkLiterals(l.rows[key], primaryKey),
+				HiddenTwin: twin,
 			}
 			if err := writeJSONTo(w, row); err != nil {
 				return err
