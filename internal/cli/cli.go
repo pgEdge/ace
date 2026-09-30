@@ -318,8 +318,14 @@ func SetupCLI(version string) *cli.Command {
 		&cli.Float64Flag{
 			Name:    "max-cpu-ratio",
 			Aliases: []string{"m"},
-			Usage:   "Max CPU for parallel operations",
+			Usage:   "Share of this host's CPUs to use as parallel workers per node",
 			Value:   0.5,
+		},
+		&cli.IntFlag{
+			Name:    "max-connections",
+			Aliases: []string{"M"},
+			Usage:   "Maximum number of database connections per node (0 = mtree.max_connections from config, else derived from --max-cpu-ratio)",
+			Value:   0,
 		},
 		&cli.BoolFlag{
 			Name:    "override-block-size",
@@ -357,8 +363,14 @@ func SetupCLI(version string) *cli.Command {
 		&cli.Float64Flag{
 			Name:    "max-cpu-ratio",
 			Aliases: []string{"m"},
-			Usage:   "Max CPU for parallel operations",
+			Usage:   "Share of this host's CPUs to use as parallel workers per node",
 			Value:   0.5,
+		},
+		&cli.IntFlag{
+			Name:    "max-connections",
+			Aliases: []string{"M"},
+			Usage:   "Maximum number of database connections per node (0 = mtree.max_connections from config, else derived from --max-cpu-ratio)",
+			Value:   0,
 		},
 		&cli.BoolFlag{
 			Name:    "rebalance",
@@ -389,8 +401,14 @@ func SetupCLI(version string) *cli.Command {
 		&cli.Float64Flag{
 			Name:    "max-cpu-ratio",
 			Aliases: []string{"m"},
-			Usage:   "Max CPU for parallel operations",
+			Usage:   "Share of this host's CPUs to use as parallel workers per node",
 			Value:   0.5,
+		},
+		&cli.IntFlag{
+			Name:    "max-connections",
+			Aliases: []string{"M"},
+			Usage:   "Maximum number of database connections per node (0 = mtree.max_connections from config, else derived from --max-cpu-ratio)",
+			Value:   0,
 		},
 		&cli.StringFlag{
 			Name:  "until",
@@ -1146,6 +1164,7 @@ func MtreeBuildCLI(cmd *cli.Command) error {
 	task.QuietMode = cmd.Bool("quiet")
 	task.BlockSize = int(blockSizeInt)
 	task.MaxCpuRatio = cmd.Float64("max-cpu-ratio")
+	task.MaxConnections = cmd.Int("max-connections")
 	task.OverrideBlockSize = cmd.Bool("override-block-size")
 	task.Analyse = cmd.Bool("analyse")
 	task.RecreateObjects = cmd.Bool("recreate-objects")
@@ -1182,6 +1201,7 @@ func MtreeUpdateCLI(cmd *cli.Command) error {
 	task.Nodes = cmd.String("nodes")
 	task.QuietMode = cmd.Bool("quiet")
 	task.MaxCpuRatio = cmd.Float64("max-cpu-ratio")
+	task.MaxConnections = cmd.Int("max-connections")
 	task.Rebalance = cmd.Bool("rebalance")
 	task.NoCDC = cmd.Bool("skip-cdc")
 	task.CDCTimeoutSec = cmd.Int("cdc-timeout")
@@ -1215,6 +1235,7 @@ func MtreeDiffCLI(cmd *cli.Command) error {
 	task.Nodes = cmd.String("nodes")
 	task.QuietMode = cmd.Bool("quiet")
 	task.MaxCpuRatio = cmd.Float64("max-cpu-ratio")
+	task.MaxConnections = cmd.Int("max-connections")
 	task.Output = cmd.String("output")
 	task.MaxHTMLRows = cmd.Int64("max-html-rows")
 	task.NoCDC = cmd.Bool("skip-cdc")

@@ -18,6 +18,11 @@ postgres:
   tcp_keepalives_idle: 30        # seconds
   tcp_keepalives_interval: 10    # seconds
   tcp_keepalives_count: 5
+  # Sent as a session setting on every ACE connection. ACE already runs its
+  # hash queries from several client-side workers, so 0 (the default) stops
+  # Postgres from adding parallel workers to each of them. Set to -1 to leave
+  # the server's own setting in place.
+  max_parallel_workers_per_gather: 0
 
 table_diff:
   concurrency_factor: 0.5
@@ -46,6 +51,11 @@ mtree:
     adaptive_drain_fraction: 0.01
     adaptive_drain_min_changes: 1000
   schema: "pgedge_ace"
+  # Max DB connections per node for mtree build, update and table-diff, like
+  # table_diff.max_connections. One connection holds the tree's transaction
+  # and the rest run hash queries, so this also caps the busy backends per
+  # node. Must be at least 2 when set. 0 = derive from --max-cpu-ratio.
+  max_connections: 0
 
   diff:
     min_block_size: 1000

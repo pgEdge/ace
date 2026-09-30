@@ -20,7 +20,8 @@ Manually applies changes to a table’s Merkle tree (also supports rebalancing).
 |------|-------|-------------|---------|
 | `--dbname` | `-d` | Database name |  |
 | `--nodes` | `-n` | Nodes to include (comma or `all`) | `all` |
-| `--max-cpu-ratio` | `-m` | Max CPU ratio | `0.5` |
+| `--max-cpu-ratio` | `-m` | Share of this host's CPUs to use as parallel workers per node | `0.5` |
+| `--max-connections` | `-M` | Maximum database connections per node (`0` = use `mtree.max_connections`, else derive from `--max-cpu-ratio`) | `0` |
 | `--rebalance` | `-l` | Merge small blocks to rebalance | `false` |
 | `--skip-cdc` | `-U` | Skip CDC processing (only rehash dirty blocks) | `false` |
 | `--cdc-timeout` |  | Seconds to drain CDC before giving up (`0` = use `cdc_processing_timeout` / default) | `0` |

@@ -42,6 +42,11 @@ type PostgresConfig struct {
 	TCPKeepalivesIdle     *int   `yaml:"tcp_keepalives_idle"`     // s
 	TCPKeepalivesInterval *int   `yaml:"tcp_keepalives_interval"` // s
 	TCPKeepalivesCount    *int   `yaml:"tcp_keepalives_count"`
+	// MaxParallelWorkersPerGather is sent as a session setting on every ACE
+	// connection. ACE already runs its hash queries from several client-side
+	// workers, so unset (or 0) stops Postgres from adding parallel workers
+	// on top of that. A negative value leaves the server's setting alone.
+	MaxParallelWorkersPerGather *int `yaml:"max_parallel_workers_per_gather"`
 }
 
 type DiffConfig struct {
@@ -77,7 +82,13 @@ type MTreeConfig struct {
 		AdaptiveDrainMinChanges int     `yaml:"adaptive_drain_min_changes"`
 	} `yaml:"cdc"`
 	Schema string `yaml:"schema"`
-	Diff   struct {
+	// MaxConnections caps the connection pool per node for mtree build,
+	// update and table-diff, the same way table_diff.max_connections does
+	// for the diff commands. One connection holds the tree's transaction and
+	// the rest run hash queries, so this also caps the busy backends per
+	// node. 0 = derive the worker count from max_cpu_ratio alone.
+	MaxConnections int `yaml:"max_connections"`
+	Diff           struct {
 		MinBlockSize int   `yaml:"min_block_size"`
 		BlockSize    int   `yaml:"block_size"`
 		MaxBlockSize int   `yaml:"max_block_size"`

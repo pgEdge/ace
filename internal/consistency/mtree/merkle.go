@@ -82,6 +82,7 @@ type MerkleTreeTask struct {
 	RecreateObjects   bool // TBD
 	BlockSize         int
 	MaxCpuRatio       float64
+	MaxConnections    int // cap on the connection pool per node; 0 = derive from MaxCpuRatio
 	BatchSize         int
 	Output            string
 	QuietMode         bool
@@ -255,11 +256,57 @@ func (m *MerkleTreeTask) finishLifecycle(recorder *taskstore.Recorder, start tim
 	}
 }
 
-func (m *MerkleTreeTask) CompareRanges(workItems []CompareRangesWorkItem) {
-	numWorkers := int(float64(runtime.NumCPU()) * m.MaxCpuRatio)
-	if numWorkers < 1 {
-		numWorkers = 1
+// validateWorkerLimits checks the parallelism flags and fills MaxConnections
+// from mtree.max_connections in the config when the caller left it at 0.
+// The cap must leave room for one worker beside the transaction that holds
+// the tree, so 1 is rejected.
+func (m *MerkleTreeTask) validateWorkerLimits(cfg *config.Config) error {
+	if m.MaxCpuRatio > 1.0 || m.MaxCpuRatio < 0.0 {
+		return fmt.Errorf("invalid value range for max_cpu_ratio")
 	}
+	if m.MaxConnections == 0 && cfg != nil {
+		m.MaxConnections = cfg.MTree.MaxConnections
+	}
+	if m.MaxConnections < 0 || m.MaxConnections == 1 {
+		return fmt.Errorf("max_connections must be >= 2 for mtree commands (one connection holds the tree transaction), or 0 to derive from max_cpu_ratio")
+	}
+	return nil
+}
+
+// workerCount turns the CPU ratio into a worker count. It is a share of the
+// cores on the host running ACE, rounded the same way table-diff rounds its
+// concurrency factor, and never fewer than one. maxConnections (when greater
+// than zero) caps the pool per node; one connection of that pool is held by
+// the transaction that owns the tree, so the workers get the rest.
+func workerCount(numCPU int, ratio float64, maxConnections int) int {
+	n := int(math.Round(float64(numCPU) * ratio))
+	if n < 1 {
+		n = 1
+	}
+	if maxConnections > 0 && n > maxConnections-1 {
+		n = maxConnections - 1
+	}
+	if n < 1 {
+		n = 1
+	}
+	return n
+}
+
+// workerCount reports how many parallel workers this task runs against each
+// node and logs the result, so an operator can tell whether --max-cpu-ratio
+// and --max-connections had the effect they expected.
+func (m *MerkleTreeTask) workerCount(phase string) int {
+	cpus := runtime.NumCPU()
+	n := workerCount(cpus, m.MaxCpuRatio, m.MaxConnections)
+	logger.Info("%s: using %d worker(s) (host cpus=%d, max_cpu_ratio=%.2f, max_connections=%d)",
+		phase, n, cpus, m.MaxCpuRatio, m.MaxConnections)
+	return n
+}
+
+func (m *MerkleTreeTask) CompareRanges(workItems []CompareRangesWorkItem) {
+	// Each worker here compares one block range across a node pair, so it
+	// holds a connection on both nodes of the pair.
+	numWorkers := m.workerCount("Comparing ranges")
 	jobs := make(chan CompareRangesWorkItem, len(workItems))
 
 	p := mpb.New(mpb.WithOutput(os.Stderr))
@@ -1410,13 +1457,16 @@ func NewMerkleTreeTask() *MerkleTreeTask {
 	}
 }
 
+// connOpts carries the per-node connection cap into every pool the task
+// opens, so --max-connections holds for update and diff as well as build.
 func (m *MerkleTreeTask) connOpts() auth.ConnectionOptions {
-	return auth.ConnectionOptions{}
+	return auth.ConnectionOptions{PoolSize: m.MaxConnections}
 }
 
 func (m *MerkleTreeTask) userConnOpts() auth.ConnectionOptions {
 	return auth.ConnectionOptions{
-		Role: m.ClientRole,
+		Role:     m.ClientRole,
+		PoolSize: m.MaxConnections,
 	}
 }
 func (m *MerkleTreeTask) validateInit() error {
@@ -1503,8 +1553,8 @@ func (m *MerkleTreeTask) Validate() error {
 		}
 	}
 
-	if m.MaxCpuRatio > 1.0 || m.MaxCpuRatio < 0.0 {
-		return fmt.Errorf("invalid value range for max_cpu_ratio")
+	if err := m.validateWorkerLimits(config.Get()); err != nil {
+		return err
 	}
 
 	if trimmed := strings.TrimSpace(m.Until); trimmed != "" {
@@ -1658,11 +1708,12 @@ func (m *MerkleTreeTask) RunChecks(skipValidation bool) error {
 func (m *MerkleTreeTask) BuildMtree() (err error) {
 	resultCtx := map[string]any{}
 	initialCtx := map[string]any{
-		"block_size":     m.BlockSize,
-		"max_cpu_ratio":  m.MaxCpuRatio,
-		"override_block": m.OverrideBlockSize,
-		"write_ranges":   m.WriteRanges,
-		"ranges_file":    m.RangesFile,
+		"block_size":      m.BlockSize,
+		"max_cpu_ratio":   m.MaxCpuRatio,
+		"max_connections": m.MaxConnections,
+		"override_block":  m.OverrideBlockSize,
+		"write_ranges":    m.WriteRanges,
+		"ranges_file":     m.RangesFile,
 	}
 	recorder, start := m.startLifecycle(taskstore.TaskTypeMtreeBuild, initialCtx)
 	defer func() {
@@ -1689,11 +1740,12 @@ func (m *MerkleTreeTask) BuildMtree() (err error) {
 		}
 	}()
 
-	numWorkers := int(math.Ceil(float64(runtime.NumCPU()) * m.MaxCpuRatio * 2))
-	if numWorkers < 1 {
-		numWorkers = 1
-	}
+	numWorkers := m.workerCount("Building tree")
+	// One connection per worker plus one for the transaction that holds
+	// the tree's metadata while the leaf hashes are computed. workerCount
+	// already left room for that one under --max-connections.
 	poolSize := numWorkers + 1
+	logger.Info("Opening a pool of %d connection(s) per node", poolSize)
 
 	if m.RangesFile != "" {
 		logger.Info("Reading block ranges from %s", m.RangesFile)
@@ -1936,6 +1988,8 @@ func (m *MerkleTreeTask) UpdateMtree(skipAllChecks bool) (err error) { //nolint:
 		initialCtx := map[string]any{
 			"rebalance":       m.Rebalance,
 			"skip_all_checks": skipAllChecks,
+			"max_cpu_ratio":   m.MaxCpuRatio,
+			"max_connections": m.MaxConnections,
 		}
 		recorder, start = m.startLifecycle(taskstore.TaskTypeMtreeUpdate, initialCtx)
 		defer func() {
@@ -2178,10 +2232,7 @@ func (m *MerkleTreeTask) UpdateMtree(skipAllChecks bool) (err error) { //nolint:
 		}
 
 		if len(affectedPositions) > 0 {
-			numWorkers := int(math.Ceil(float64(runtime.NumCPU()) * m.MaxCpuRatio * 2))
-			if numWorkers < 1 {
-				numWorkers = 1
-			}
+			numWorkers := m.workerCount("Recomputing leaf hashes")
 
 			if err := m.computeLeafHashes(pool, tx, blocksToUpdate, numWorkers, "Recomputing leaf hashes:"); err != nil {
 				return fmt.Errorf("failed to recompute leaf hashes: %w", err)
@@ -2391,8 +2442,10 @@ func getNodePairs(nodes []map[string]any) [][2]map[string]any {
 
 func (m *MerkleTreeTask) DiffMtree() (err error) {
 	initialCtx := map[string]any{
-		"output":     m.Output,
-		"batch_size": m.BatchSize,
+		"output":          m.Output,
+		"batch_size":      m.BatchSize,
+		"max_cpu_ratio":   m.MaxCpuRatio,
+		"max_connections": m.MaxConnections,
 	}
 	resultCtx := map[string]any{}
 	recorder, start := m.startLifecycle(taskstore.TaskTypeMtreeDiff, initialCtx)
@@ -2725,10 +2778,7 @@ func (m *MerkleTreeTask) refreshStaleLeaves(pool *pgxpool.Pool, positions []int6
 	if len(blocks) == 0 {
 		return tx.Commit(m.Ctx)
 	}
-	numWorkers := int(float64(runtime.NumCPU()) * m.MaxCpuRatio)
-	if numWorkers < 1 {
-		numWorkers = 1
-	}
+	numWorkers := m.workerCount("Refreshing stale blocks")
 	if err := m.computeLeafHashes(pool, tx, blocks, numWorkers, "Refreshing stale blocks:"); err != nil {
 		return err
 	}
