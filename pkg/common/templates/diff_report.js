@@ -248,16 +248,19 @@
         // page. planDefault is the plan's default_action, which table-repair
         // applies to every row of the diff file that no rule or override
         // matches. In a truncated report that includes the rows the user never
-        // saw, so the plan must leave them alone: its default is skip, and
-        // every shown row gets an explicit rule. keep_n1 would also be wrong
-        // for rows missing on n1, and table-repair rejects the whole plan then.
+        // saw, and the same holds for the rows the user did not select when
+        // some rows are selected. So the plan must leave them alone: its
+        // default is skip, and every other row gets an explicit rule. keep_n1
+        // would also be wrong for rows missing on n1, and table-repair rejects
+        // the whole plan then.
         const report = diff.report_info || {};
         const truncated = !!report.truncated;
         const rowDefault = { type: 'keep_n1' };
-        const planDefault = truncated ? { type: 'skip' } : rowDefault;
         const targetKeys = selectionInfo?.usingSelection ? selectionInfo.selectedKeys : null;
         const usingSelection = !!selectionInfo?.usingSelection;
         const allSelected = usingSelection && selectionInfo.selectedCount === selectionInfo.totalRows && selectionInfo.totalRows > 0;
+        const partialSelection = usingSelection && !allSelected;
+        const planDefault = truncated || partialSelection ? { type: 'skip' } : rowDefault;
 
         const rows = collectRows(diff, targetKeys, rowDefault, planDefault);
 
@@ -305,6 +308,10 @@
             lines.push('# rows, run table-diff again with a larger max_html_rows');
             lines.push('# (or --max-html-rows), or add rules by hand.');
             lines.push('# Full diff: ' + JSON.stringify(report.diff_file || ''));
+        } else if (partialSelection) {
+            lines.push('# This plan has rules only for the ' + selectionInfo.selectedCount + ' rows selected in the HTML report.');
+            lines.push('# default_action is skip, so table-repair does not change any other');
+            lines.push('# row of the diff file, and those rows stay different.');
         }
         lines.push('version: 1');
         lines.push('tables:');
@@ -344,7 +351,18 @@
                 emitActionYaml(lines, '          ', ov.action);
             }
         }
-        return lines.join('\n') + '\n';
+        return escapeYAMLBreaks(lines.join('\n') + '\n');
+    }
+
+    // escapeYAMLBreaks writes U+0085, U+2028 and U+2029 as \u escapes. YAML
+    // reads them as line breaks, but JSON.stringify leaves all three as they
+    // are, and Go's json.Marshal leaves U+0085. In a comment, any of them ends
+    // the comment and the rest of the text becomes part of the plan; in a
+    // quoted string, U+0085 turns into a space, so a key names another row.
+    // The plan has non-ASCII text only in comments and in double-quoted JSON
+    // strings, where the escape means the same character.
+    function escapeYAMLBreaks(text) {
+        return text.replace(/[\u0085\u2028\u2029]/g, c => '\\u' + c.charCodeAt(0).toString(16).padStart(4, '0'));
     }
 
     // collectRows turns the shown rows (diff.rows, written by the Go code)
@@ -377,10 +395,12 @@
         return out;
     }
 
-    // defaultActionFor is what "Default" means for the row on the page.
+    // defaultActionFor is what "Default" means for the row on the page. In a
+    // plan, n1 and n2 are the first and second node of each pair, not node
+    // names.
     function defaultActionFor(r, rowDefault) {
-        if (r.type === 'missing_on_n2') return { type: 'apply_from', from: r.node_a, mode: 'insert' };
-        if (r.type === 'missing_on_n1') return { type: 'apply_from', from: r.node_b, mode: 'insert' };
+        if (r.type === 'missing_on_n2') return { type: 'apply_from', from: 'n1', mode: 'insert' };
+        if (r.type === 'missing_on_n1') return { type: 'apply_from', from: 'n2', mode: 'insert' };
         return rowDefault;
     }
 
@@ -500,8 +520,11 @@
         return scalar(val);
     }
 
+    // selectionForKey reads the action chosen for a row. The key is raw text
+    // and can hold a quote or a backslash, so it goes into the selector
+    // through CSS.escape.
     function selectionForKey(key) {
-        const sel = document.querySelector('.plan-action[data-pk="' + key + '"]');
+        const sel = document.querySelector('.plan-action[data-pk="' + CSS.escape(key) + '"]');
         if (!sel) return null;
         const val = sel.value;
         if (!val) return null;
@@ -511,9 +534,9 @@
             case 'keep_n2':
                 return { type: 'keep_n2' };
             case 'apply_from_n1_insert':
-                return { type: 'apply_from', from: sel.dataset.nodea, mode: 'insert' };
+                return { type: 'apply_from', from: 'n1', mode: 'insert' };
             case 'apply_from_n2_insert':
-                return { type: 'apply_from', from: sel.dataset.nodeb, mode: 'insert' };
+                return { type: 'apply_from', from: 'n2', mode: 'insert' };
             case 'delete':
                 return { type: 'delete' };
             case 'skip':
@@ -526,10 +549,12 @@
     }
 
     function buildCustomAction(key) {
-        const editor = document.querySelector('.custom-editor[data-pk="' + key + '"]');
+        const editor = document.querySelector('.custom-editor[data-pk="' + CSS.escape(key) + '"]');
         if (!editor) return { type: 'custom' };
         const nodeA = editor.dataset.nodea || 'n1';
         const nodeB = editor.dataset.nodeb || 'n2';
+        // The helper controls hold node names; the plan wants n1 or n2.
+        const planNode = name => name === nodeA ? 'n1' : name === nodeB ? 'n2' : name;
 
         const customRowInput = editor.querySelector('.custom-row-input');
         let customRow = null;
@@ -544,13 +569,13 @@
 
         const helpers = {};
         const coalesce = editor.querySelector('.helper-coalesce')?.value || '';
-        if (coalesce) helpers.coalesce_priority = coalesce.split(',').map(s => s.trim()).filter(Boolean);
+        if (coalesce) helpers.coalesce_priority = coalesce.split(',').map(s => s.trim()).filter(Boolean).map(planNode);
 
         const freshToggle = editor.querySelector('.helper-freshest-toggle');
         const freshTie = editor.querySelector('.helper-freshest-tie')?.value || nodeA;
         const freshEnabled = !!freshToggle?.checked;
         if (freshEnabled) {
-            helpers.pick_freshest = { key: 'commit_ts', tie: freshTie || nodeA };
+            helpers.pick_freshest = { key: 'commit_ts', tie: planNode(freshTie || nodeA) };
         }
 
         const hasHelpers = Object.keys(helpers).length > 0;
