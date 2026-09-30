@@ -24,8 +24,26 @@ All notable changes to ACE will be captured in this document. This project follo
 - **HTML report: repair plans named the wrong rows for some primary keys.**
   The page script read keys as JavaScript numbers, so a bigint above 2^53
   could name the neighbouring row, and a text key such as `"007"` became the
-  number 7 and matched nothing. The plan now uses the keys exactly as the
-  diff file has them.
+  number 7 and matched nothing. A text key with the character U+0085 also
+  named the wrong row: YAML reads it as a line break and turned it into a
+  space, and it did the same in the text of a custom row. The plan now uses
+  the keys exactly as the diff file has them, and writes U+0085, U+2028 and
+  U+2029, which YAML also reads as line breaks, as `\u` escapes.
+- **HTML report: repair plans used node names where `table-repair` expects
+  `n1` or `n2`.** In `apply_from`, `coalesce_priority` and the
+  `pick_freshest` tie, `n1` and `n2` mean the first and second node of each
+  pair, but the plan wrote the node names. With nodes named anything else,
+  `table-repair` rejected the plan, and for a pair such as `n2/n3` a node name
+  could be read as the wrong node of the pair.
+- **HTML report: a repair plan built from selected rows also repaired the
+  rows that were not selected.** Its `default_action` was `keep_n1`, and
+  `table-repair` rejected the whole plan when an unselected row was missing
+  on the first node of its pair. The plan now has `default_action: skip`, so
+  `table-repair` changes only the selected rows.
+- **HTML report: the action chosen for a row was lost when its key held a
+  quote or a backslash.** The page looked up the row's control with the raw
+  key in a CSS selector. A quote made building the plan fail, and a backslash
+  matched no control, so the plan used the default action instead.
 - **HTML report: rows with primary keys that mix numbers and text were sorted
   in a different order on each run.** The key comparison now puts numbers
   before text, so the order is stable.

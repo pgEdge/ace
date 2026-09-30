@@ -331,9 +331,9 @@ func pairNodeNames(pairKey string, nodeDiff types.DiffByNodePair) (string, strin
 // Two keys per row, and they are not interchangeable. buildRowKey is the
 // collision-proof identity used to pair a row on A with the same row on B;
 // buildRowDisplayKey is the plain rendering shown in the report and embedded
-// in data-pk, which the report's own JavaScript interpolates into a CSS
-// attribute selector and so cannot carry the quotes the identity encoding
-// adds.
+// in data-pk. The display key can hold any character, including quotes, so
+// the report's JavaScript escapes it with CSS.escape before it uses it in a
+// selector.
 func (p *htmlPairPlan) indexRows(rows []types.OrderedMap, primaryKey []string) map[string]types.OrderedMap {
 	byKey := make(map[string]types.OrderedMap, len(rows))
 	for idx, row := range rows {
