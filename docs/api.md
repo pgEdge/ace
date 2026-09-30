@@ -288,7 +288,8 @@ Builds a Merkle tree for a specific table on all nodes in the cluster. This comm
 | `--dbname`              | `-d`  | Name of the database                                                  |         |
 | `--nodes`               | `-n`  | Nodes to include (comma-separated, or "all")                          | all     |
 | `--block-size`          | `-b`  | Number of rows per leaf block                                         | 10000   |
-| `--max-cpu-ratio`       | `-m`  | Max CPU ratio for parallel operations                                 | 0.5     |
+| `--max-cpu-ratio`       | `-m`  | Share of this host's CPUs to use as parallel workers per node         | 0.5     |
+| `--max-connections`     | `-M`  | Maximum database connections per node (0 = `mtree.max_connections`, else derived from ratio) | 0 |
 | `--override-block-size` | `-B`  | Skip block size check and allow potentially unsafe block sizes        | false   |
 | `--analyse`             | `-a`  | Run `ANALYZE` on the table before building the tree                   | false   |
 | `--recreate-objects`    | `-R`  | Drop and recreate Merkle tree objects if they already exist           | false   |
@@ -321,7 +322,8 @@ Compares the Merkle trees of a table across nodes to find inconsistencies. It ge
 |-------------------|-------|------------------------------------------------------------------------|---------|
 | `--dbname`        | `-d`  | Name of the database                                                   |         |
 | `--nodes`         | `-n`  | Nodes to include (comma-separated, or "all")                           | all     |
-| `--max-cpu-ratio` | `-m`  | Max CPU ratio for parallel operations                                  | 0.5     |
+| `--max-cpu-ratio` | `-m`  | Share of this host's CPUs to use as parallel workers per node          | 0.5     |
+| `--max-connections` | `-M` | Maximum database connections per node (0 = `mtree.max_connections`, else derived from ratio) | 0 |
 | `--output`        | `-o`  | Output format for the diff report (`json` or `html`)                   | json    |
 | `--skip-cdc`      | `-U`  | Skip CDC processing (only rehash dirty blocks and compare)            | false   |
 | `--quiet`         | `-q`  | Suppress output                                                        | false   |
@@ -354,7 +356,8 @@ Manually triggers an update of a Merkle tree for a table using the captured chan
 |-------------------|-------|--------------------------------------------------|---------|
 | `--dbname`        | `-d`  | Name of the database                             |         |
 | `--nodes`         | `-n`  | Nodes to include (comma-separated, or "all")     | all     |
-| `--max-cpu-ratio` | `-m`  | Max CPU ratio for parallel operations            | 0.5     |
+| `--max-cpu-ratio` | `-m`  | Share of host CPUs used as workers per node      | 0.5     |
+| `--max-connections` | `-M` | Max DB connections per node (0 = `mtree.max_connections`, else derived from ratio) | 0 |
 | `--rebalance`     | `-l`  | Rebalance the tree by merging small blocks       | false   |
 | `--quiet`         | `-q`  | Suppress output                                  | false   |
 | `--debug`         | `-v`  | Enable debug logging                             | false   |

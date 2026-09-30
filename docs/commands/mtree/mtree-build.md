@@ -19,7 +19,8 @@ Builds a Merkle tree for a table on all nodes (after `mtree init`).
 | `--dbname` | `-d` | Database name |  |
 | `--nodes` | `-n` | Nodes to include (comma or `all`) | `all` |
 | `--block-size` | `-b` | Rows per leaf block | `10000` |
-| `--max-cpu-ratio` | `-m` | Max CPU ratio for parallel ops | `0.5` |
+| `--max-cpu-ratio` | `-m` | Share of this host's CPUs to use as parallel workers per node | `0.5` |
+| `--max-connections` | `-M` | Maximum database connections per node (`0` = use `mtree.max_connections`, else derive from `--max-cpu-ratio`) | `0` |
 | `--override-block-size` | `-B` | Skip safety checks | `false` |
 | `--analyse` | `-a` | Run `ANALYZE` before build | `false` |
 | `--recreate-objects` | `-R` | Drop & recreate Merkle objects | `false` |

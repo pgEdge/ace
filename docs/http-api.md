@@ -267,6 +267,7 @@ Request body:
 | `nodes` | array[string] | no | Defaults to `"all"`. |
 | `block_size` | int | no | Defaults to `10000`. |
 | `max_cpu_ratio` | float | no | Defaults to `0.5`. |
+| `max_connections` | int | no | Max DB connections per node (at least 2). Defaults to `mtree.max_connections`, or derived from `max_cpu_ratio`. |
 | `override_block_size` | bool | no | Bypass block-size guardrails. |
 | `analyse` | bool | no | Analyze table statistics. |
 | `recreate_objects` | bool | no | Drop/recreate Merkle tree objects. |
@@ -287,6 +288,7 @@ Request body:
 | `dbname` | string | no | Overrides DB name from config. |
 | `nodes` | array[string] | no | Defaults to `"all"`. |
 | `max_cpu_ratio` | float | no | Defaults to `0.5`. |
+| `max_connections` | int | no | Max DB connections per node (at least 2). Defaults to `mtree.max_connections`, or derived from `max_cpu_ratio`. |
 | `rebalance` | bool | no | Rebalance small blocks. |
 | `quiet` | bool | no | Suppress output. |
 
@@ -303,6 +305,7 @@ Request body:
 | `dbname` | string | no | Overrides DB name from config. |
 | `nodes` | array[string] | no | Defaults to `"all"`. |
 | `max_cpu_ratio` | float | no | Defaults to `0.5`. |
+| `max_connections` | int | no | Max DB connections per node (at least 2). Defaults to `mtree.max_connections`, or derived from `max_cpu_ratio`. |
 | `output` | string | no | `json` (default) or `html`. |
 | `skip_update` | bool | no | Skip CDC/update step. |
 | `quiet` | bool | no | Suppress output. |

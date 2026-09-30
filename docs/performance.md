@@ -54,7 +54,8 @@ Using a [Merkle tree](commands/mtree/index.md) can improve performance when your
 - Keep your statistics fresh (`ANALYZE`) for accurate range estimation.
 - For huge tables(billion-row/terabyte), [parallelize builds](commands/mtree/index.md#building-merkle-trees-in-parallel-for-very-large-tables). 
 - Use `mtree listen` (CDC) or rely on the pre-diff update that `mtree table-diff` performs automatically to keep your data fresh automatically.
-- Tune `--max-cpu-ratio` on Merkle commands (`mtree build`, `mtree table-diff`, `mtree update`) to control worker parallelism per host.
+- Tune `--max-cpu-ratio` on Merkle commands (`mtree build`, `mtree table-diff`, `mtree update`) to control worker parallelism per host. The ratio is a share of the CPUs on the machine running ACE, not the database server, and each worker keeps one backend busy on every node. Use `--max-connections` (or `mtree.max_connections` in `ace.yaml`) for an absolute cap when ACE runs on a host with far more cores than the database servers; it works like the same flag on the diff commands, and since one connection holds the tree's transaction, `N` connections means `N - 1` hash workers. ACE logs the worker count it settles on at the start of each phase.
+- ACE sends `max_parallel_workers_per_gather = 0` on every connection it opens by default, for the diff and repair commands as well as the Merkle ones, so its queries do not also fan out into Postgres parallel workers. Change `postgres.max_parallel_workers_per_gather` in `ace.yaml` to allow them.
 
 !!! note
 
