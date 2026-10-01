@@ -17,6 +17,14 @@ All notable changes to ACE will be captured in this document. This project follo
   the connection pool size per node.
 
 ### Fixed
+- **`mtree table-diff` opened a separate connection pool for every compare
+  worker and every node pair, so a per-node connection cap did not hold.**
+  With `W` workers on a three-node cluster, one node could see `W + 2` pools,
+  each as large as the cap. The diff now opens one pool per node and shares
+  it across the tree traversal, the range comparison, and the stale-block
+  refresh, so `--max-connections` is the most connections ACE holds on a
+  node during a diff. Without a cap the pool is one connection per worker
+  plus one.
 - **`--max-cpu-ratio` on `mtree build` and `mtree update` started twice as
   many workers as the ratio implied.** The build and update paths multiplied
   the ratio by two, so `-m 0.1` on a 14-core host ran 3 hash queries per node

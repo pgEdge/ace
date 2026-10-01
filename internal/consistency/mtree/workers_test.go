@@ -1,8 +1,11 @@
 package mtree
 
 import (
+	"context"
+	"slices"
 	"testing"
 
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/pgedge/ace/pkg/config"
 )
 
@@ -96,5 +99,45 @@ func TestConnOptsCarryMaxConnections(t *testing.T) {
 	}
 	if got := m.userConnOpts().Role; got != "app" {
 		t.Fatalf("userConnOpts().Role = %q, want app", got)
+	}
+}
+
+// The diff opens one pool per node and every phase shares it: traversal,
+// range comparison, and the stale-block refresh. So the per-node connection
+// count is the cap when one is set, and otherwise one connection per compare
+// worker plus one for the transaction that the refresh holds.
+func TestDiffPoolSizeIsTheCapOrWorkersPlusOne(t *testing.T) {
+	cases := []struct {
+		name     string
+		workers  int
+		maxConns int
+		expect   int
+	}{
+		{"cap set: the pool is the cap", 3, 4, 4},
+		{"no cap: one per worker plus one", 8, 0, 9},
+		{"one worker and no cap: two connections", 1, 0, 2},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := diffPoolSize(tc.workers, tc.maxConns); got != tc.expect {
+				t.Fatalf("diffPoolSize(%d, %d) = %d, want %d", tc.workers, tc.maxConns, got, tc.expect)
+			}
+		})
+	}
+}
+
+// Compare workers do not open pools of their own. They use the per-node
+// pools the diff opened, so a node without a pool is a lost work item for
+// that pair, not a reason to dial the database.
+func TestCompareRangesWithoutPoolMarksPairIncomplete(t *testing.T) {
+	m := &MerkleTreeTask{Ctx: context.Background(), MaxCpuRatio: 0.1}
+	n1 := map[string]any{"Name": "n1"}
+	n2 := map[string]any{"Name": "n2"}
+	items := []CompareRangesWorkItem{{Node1: n1, Node2: n2, Ranges: [][2][]any{{{int64(1)}, {int64(2)}}}}}
+
+	m.CompareRanges(items, map[string]*pgxpool.Pool{})
+
+	if got := m.incompletePairs(); !slices.Equal(got, []string{"n1/n2"}) {
+		t.Fatalf("incompletePairs() = %v, want [n1/n2]", got)
 	}
 }
