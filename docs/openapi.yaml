@@ -662,6 +662,9 @@ components:
         max_cpu_ratio:
           type: number
           description: Defaults to 0.5.
+        max_connections:
+          type: integer
+          description: Maximum database connections per node (at least 2). Defaults to mtree.max_connections, or derived from max_cpu_ratio.
         override_block_size:
           type: boolean
         analyse:
@@ -691,6 +694,9 @@ components:
         max_cpu_ratio:
           type: number
           description: Defaults to 0.5.
+        max_connections:
+          type: integer
+          description: Maximum database connections per node (at least 2). Defaults to mtree.max_connections, or derived from max_cpu_ratio.
         rebalance:
           type: boolean
         quiet:
@@ -711,6 +717,9 @@ components:
         max_cpu_ratio:
           type: number
           description: Defaults to 0.5.
+        max_connections:
+          type: integer
+          description: Maximum database connections per node (at least 2). Defaults to mtree.max_connections, or derived from max_cpu_ratio.
         output:
           type: string
           enum: [json, html]

@@ -253,6 +253,17 @@ func applyRuntimeParams(params map[string]string, pgCfg config.PostgresConfig) {
 		params["tcp_keepalives_count"] = strconv.Itoa(*pgCfg.TCPKeepalivesCount)
 	}
 
+	// ACE parallelises its hash queries on the client side, so by default it
+	// keeps Postgres from adding parallel workers to each one as well. Without
+	// this, every ACE worker could occupy several server cores.
+	parallelWorkers := 0
+	if pgCfg.MaxParallelWorkersPerGather != nil {
+		parallelWorkers = *pgCfg.MaxParallelWorkersPerGather
+	}
+	if parallelWorkers >= 0 {
+		params["max_parallel_workers_per_gather"] = strconv.Itoa(parallelWorkers)
+	}
+
 	// Suppress Spock's DDL replication and auto-repset-add behaviour on
 	// every ACE connection. ACE only issues DDL against its own pgedge_ace
 	// schema and the ace_mtree_pub publication — never against user

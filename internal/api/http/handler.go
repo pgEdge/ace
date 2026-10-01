@@ -121,6 +121,7 @@ type mtreeBuildRequest struct {
 	Nodes             []string `json:"nodes"`
 	BlockSize         int      `json:"block_size"`
 	MaxCPURatio       float64  `json:"max_cpu_ratio"`
+	MaxConnections    int      `json:"max_connections"`
 	OverrideBlockSize bool     `json:"override_block_size"`
 	Analyse           bool     `json:"analyse"`
 	RecreateObjects   bool     `json:"recreate_objects"`
@@ -130,24 +131,26 @@ type mtreeBuildRequest struct {
 }
 
 type mtreeUpdateRequest struct {
-	Cluster     string   `json:"cluster"`
-	Table       string   `json:"table"`
-	DBName      string   `json:"dbname"`
-	Nodes       []string `json:"nodes"`
-	MaxCPURatio float64  `json:"max_cpu_ratio"`
-	Rebalance   bool     `json:"rebalance"`
-	Quiet       bool     `json:"quiet"`
+	Cluster        string   `json:"cluster"`
+	Table          string   `json:"table"`
+	DBName         string   `json:"dbname"`
+	Nodes          []string `json:"nodes"`
+	MaxCPURatio    float64  `json:"max_cpu_ratio"`
+	MaxConnections int      `json:"max_connections"`
+	Rebalance      bool     `json:"rebalance"`
+	Quiet          bool     `json:"quiet"`
 }
 
 type mtreeDiffRequest struct {
-	Cluster     string   `json:"cluster"`
-	Table       string   `json:"table"`
-	DBName      string   `json:"dbname"`
-	Nodes       []string `json:"nodes"`
-	MaxCPURatio float64  `json:"max_cpu_ratio"`
-	Output      string   `json:"output"`
-	SkipUpdate  bool     `json:"skip_update"`
-	Quiet       bool     `json:"quiet"`
+	Cluster        string   `json:"cluster"`
+	Table          string   `json:"table"`
+	DBName         string   `json:"dbname"`
+	Nodes          []string `json:"nodes"`
+	MaxCPURatio    float64  `json:"max_cpu_ratio"`
+	MaxConnections int      `json:"max_connections"`
+	Output         string   `json:"output"`
+	SkipUpdate     bool     `json:"skip_update"`
+	Quiet          bool     `json:"quiet"`
 }
 
 type taskSubmissionResponse struct {
@@ -948,6 +951,7 @@ func (s *APIServer) handleMtreeBuild(w http.ResponseWriter, r *http.Request) {
 	task.QuietMode = req.Quiet
 	task.BlockSize = s.resolveMtreeBlockSize(req.BlockSize)
 	task.MaxCpuRatio = s.resolveMtreeMaxCPURatio(req.MaxCPURatio)
+	task.MaxConnections = req.MaxConnections
 	task.OverrideBlockSize = req.OverrideBlockSize
 	task.Analyse = req.Analyse
 	task.RecreateObjects = req.RecreateObjects
@@ -1027,6 +1031,7 @@ func (s *APIServer) handleMtreeUpdate(w http.ResponseWriter, r *http.Request) {
 	task.Nodes = s.resolveNodes(req.Nodes)
 	task.QuietMode = req.Quiet
 	task.MaxCpuRatio = s.resolveMtreeMaxCPURatio(req.MaxCPURatio)
+	task.MaxConnections = req.MaxConnections
 	task.Rebalance = req.Rebalance
 	task.Mode = "update"
 	task.Ctx = r.Context()
@@ -1102,6 +1107,7 @@ func (s *APIServer) handleMtreeDiff(w http.ResponseWriter, r *http.Request) {
 	task.Nodes = s.resolveNodes(req.Nodes)
 	task.QuietMode = req.Quiet
 	task.MaxCpuRatio = s.resolveMtreeMaxCPURatio(req.MaxCPURatio)
+	task.MaxConnections = req.MaxConnections
 	task.Output = strings.TrimSpace(req.Output)
 	if task.Output == "" {
 		task.Output = "json"

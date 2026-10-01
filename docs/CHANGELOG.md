@@ -4,7 +4,40 @@ All notable changes to ACE will be captured in this document. This project follo
 
 ## [Unreleased]
 
+### Added
+- `--max-connections` / `-M` on `mtree build`, `mtree update`, and
+  `mtree table-diff`, with `mtree.max_connections` in `ace.yaml` and
+  `max_connections` on the matching HTTP API endpoints. It caps the
+  connection pool per node the same way the flag already does on the diff
+  commands, for when ACE runs on a host with many more cores than the
+  database servers. One connection holds the tree's transaction, so `N`
+  connections means `N - 1` hash workers, and the value must be at least 2.
+- The mtree commands now log the worker count they settle on, along with the
+  host CPU count and the flags it was derived from, and `mtree build` logs
+  the connection pool size per node.
+
 ### Fixed
+- **`mtree table-diff` opened a separate connection pool for every compare
+  worker and every node pair, so a per-node connection cap did not hold.**
+  With `W` workers on a three-node cluster, one node could see `W + 2` pools,
+  each as large as the cap. The diff now opens one pool per node and shares
+  it across the tree traversal, the range comparison, and the stale-block
+  refresh, so `--max-connections` is the most connections ACE holds on a
+  node during a diff. Without a cap the pool is one connection per worker
+  plus one.
+- **`--max-cpu-ratio` on `mtree build` and `mtree update` started twice as
+  many workers as the ratio implied.** The build and update paths multiplied
+  the ratio by two, so `-m 0.1` on a 14-core host ran 3 hash queries per node
+  at once instead of 1. The ratio now means the same thing on every mtree
+  command: that share of the CPUs on the machine running ACE, and never fewer
+  than one worker. The default of `0.5` therefore runs half as many workers
+  for `mtree build` and `mtree update` as before.
+- **ACE's hash queries could each fan out into Postgres parallel workers,
+  multiplying the load on the database server.** ACE now sends
+  `max_parallel_workers_per_gather = 0` as a session setting on every
+  connection, so this covers `table-diff`, `repset-diff`, `schema-diff` and
+  `table-repair` as well as the mtree commands. Set `postgres.max_parallel_workers_per_gather` in `ace.yaml` to
+  allow them again, or to `-1` to leave the server's own setting in place.
 - **`table-diff --output html` was killed by the OOM killer on large diffs.**
   The HTML writer built the whole report in memory: a copy of the diff as
   JSON, the markup of every row, and the final document in one buffer. With
