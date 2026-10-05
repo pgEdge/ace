@@ -27,9 +27,13 @@ import (
 )
 
 // CurrentHashVersion is the version of the hash algorithm used by this build.
-// Increment when the SQL hash computation changes (e.g., switching from
-// whole-row ::text to per-column concat_ws with trim_scale).
-const CurrentHashVersion = 2
+// Increment it when the SQL hash computation changes: mtree update then
+// computes all stored leaf hashes again.
+//
+//	1: string_agg of whole-row ::text, hashed with pgcrypto digest().
+//	2: string_agg of per-column concat_ws with trim_scale.
+//	3: XOR of the sha256 hashes of the rows (see RowHashExpr).
+const CurrentHashVersion = 3
 
 type DBQuerier interface {
 	Exec(context.Context, string, ...interface{}) (pgconn.CommandTag, error)
@@ -611,52 +615,44 @@ func isNumericType(colType string) bool {
 	return strings.HasPrefix(lower, "numeric") || strings.HasPrefix(lower, "decimal")
 }
 
-// buildRowTextExpr builds a SQL expression that converts a single row to text.
-// When allCols is provided, it returns concat_ws('|', col1_expr, col2_expr, ...)
-// with numeric/decimal columns wrapped in trim_scale() to normalize trailing zeros.
-// If allCols is nil/empty, falls back to the table-alias::text whole-row cast.
+// RowHashExpr returns a SQL expression for the sha256 hash of one row, as a
+// 32-byte bytea. The mtree leaf hash, the table-diff block hash and the row
+// hashes of the mtree diff all use it. If they used different row encodings,
+// a leaf could differ while every row hash matches, and the diff would not
+// fetch the rows of that block.
 //
-// PostgreSQL limits functions to 100 arguments. Since concat_ws uses 1 argument
-// for the separator, at most 99 column expressions fit per call. For wider
-// tables, the expressions are batched into nested concat_ws calls.
-func buildRowTextExpr(tableAlias string, allCols []string, colTypes map[string]string) string {
+// The row is encoded as ROW(col1, col2, ...)::text. This text is unambiguous:
+// a NULL prints as nothing, an empty string as "", and a value with a comma,
+// a quote, a parenthesis, a backslash or a space is quoted. Numeric and
+// decimal columns go through trim_scale(), so 1.50 and 1.5 give the same
+// hash.
+//
+// The text is converted to UTF8 before it is hashed, so nodes with different
+// database encodings give the same hash for the same row. sha256 works on
+// bytes, so the hash does not depend on the byte order of the server.
+//
+// tableAlias may be empty; the column names are then not qualified. allCols
+// must not be empty: the whole-row value would be another encoding, without
+// trim_scale() and in the physical column order.
+func RowHashExpr(tableAlias string, allCols []string, colTypes map[string]string) (string, error) {
 	if len(allCols) == 0 {
-		return tableAlias + "::text"
+		return "", fmt.Errorf("row hash needs at least one column")
 	}
-
 	exprs := make([]string, len(allCols))
 	for i, col := range allCols {
-		quoted := pgx.Identifier{col}.Sanitize()
-		qualifiedCol := tableAlias + "." + quoted
+		ref := pgx.Identifier{col}.Sanitize()
+		if tableAlias != "" {
+			ref = tableAlias + "." + ref
+		}
 		if colTypes != nil && isNumericType(colTypes[col]) {
-			exprs[i] = fmt.Sprintf("COALESCE(trim_scale(%s)::text, '')", qualifiedCol)
-		} else {
-			exprs[i] = fmt.Sprintf("COALESCE(%s::text, '')", qualifiedCol)
+			ref = fmt.Sprintf("trim_scale(%s)", ref)
 		}
+		exprs[i] = ref
 	}
-	return concatWSBatched(exprs)
-}
-
-// concatWSBatched produces a concat_ws('|', ...) expression. When len(exprs)
-// exceeds 99 (the max value-arguments per concat_ws call, since the separator
-// takes one slot), it splits the expressions into batches and nests the calls.
-func concatWSBatched(exprs []string) string {
-	const maxArgs = 99 // 100 total - 1 for the separator
-
-	if len(exprs) <= maxArgs {
-		return fmt.Sprintf("concat_ws('|', %s)", strings.Join(exprs, ", "))
-	}
-
-	// Split into batches, wrap each in its own concat_ws, then combine.
-	var batches []string
-	for i := 0; i < len(exprs); i += maxArgs {
-		end := i + maxArgs
-		if end > len(exprs) {
-			end = len(exprs)
-		}
-		batches = append(batches, fmt.Sprintf("concat_ws('|', %s)", strings.Join(exprs[i:end], ", ")))
-	}
-	return fmt.Sprintf("concat_ws('|', %s)", strings.Join(batches, ", "))
+	// ROW() is not a function call, so the limit of 100 arguments does not
+	// apply to it.
+	record := fmt.Sprintf("ROW(%s)::text", strings.Join(exprs, ", "))
+	return fmt.Sprintf(`sha256(convert_to(%s, 'UTF8'))`, record), nil
 }
 
 func BlockHashSQL(schema, table string, primaryKeyCols []string, mode string, includeLower, includeUpper bool, filter string, allCols []string, colTypes map[string]string) (string, error) {
@@ -687,7 +683,6 @@ func BlockHashSQL(schema, table string, primaryKeyCols []string, mode string, in
 	for i, pkCol := range primaryKeyCols {
 		quotedPKColIdents[i] = pgx.Identifier{pkCol}.Sanitize()
 	}
-	pkOrderByStr := strings.Join(quotedPKColIdents, ", ")
 
 	pkComparisonExpression := ""
 	if len(primaryKeyCols) == 1 {
@@ -751,15 +746,17 @@ func BlockHashSQL(schema, table string, primaryKeyCols []string, mode string, in
 		return "", fmt.Errorf("invalid mode: %s", mode)
 	}
 
-	rowTextExpr := buildRowTextExpr(tableAlias, allCols, colTypes)
+	rowHash, err := RowHashExpr(tableAlias, allCols, colTypes)
+	if err != nil {
+		return "", err
+	}
 
 	data := map[string]any{
-		"SchemaIdent":  schemaIdent,
-		"TableIdent":   tableIdent,
-		"TableAlias":   tableAlias,
-		"PkOrderByStr": pkOrderByStr,
-		"WhereClause":  strings.Join(whereParts, " AND "),
-		"RowTextExpr":  rowTextExpr,
+		"SchemaIdent": schemaIdent,
+		"TableIdent":  tableIdent,
+		"TableAlias":  tableAlias,
+		"WhereClause": strings.Join(whereParts, " AND "),
+		"RowHashExpr": rowHash,
 	}
 	return RenderSQL(tmpl, data)
 }

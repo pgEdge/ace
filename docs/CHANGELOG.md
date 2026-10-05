@@ -5,6 +5,23 @@ All notable changes to ACE will be captured in this document. This project follo
 ## [Unreleased]
 
 ### Fixed
+- **Block hashes failed with "out of memory" (SQLSTATE 54000) on large blocks,
+  and some different rows gave the same hash.**
+  The hash of an mtree leaf or a `table-diff` block joined the text of all its
+  rows into one string. When a block held a few million rows, this string grew
+  past the 1 GB limit that Postgres has for one value. The text also lost
+  information: a NULL and an empty string gave the same text, and so did
+  `('a|b', 'c')` and `('a', 'b|c')`, so the diff did not see these
+  differences.
+  Each row is now hashed separately: the `sha256()` of the `ROW(...)::text`
+  form of the row, converted to UTF8. The block hash is the XOR of the row
+  hashes, so its memory does not grow with the number or the width of the
+  rows. The row form keeps NULL, empty strings and delimiters apart. Numeric
+  values still hash without trailing zeros. The hash does not depend on the
+  database encoding or on the byte order of the server. It needs
+  PostgreSQL 14 or later (`bit_xor`).
+  The hash version is now 3: the next `mtree update` computes all stored leaf
+  hashes again, in one transaction per node.
 - **`table-diff` and `mtree` failed on tables with a `numeric[]` column.**
   ACE wrapped such a column in `trim_scale()`, which has no array variant.
 - **`table-diff --output html` was killed by the OOM killer on large diffs.**
