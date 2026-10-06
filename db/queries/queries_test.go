@@ -491,3 +491,35 @@ func TestConcatWSBatched(t *testing.T) {
 		}
 	})
 }
+
+func TestIsNumericType(t *testing.T) {
+	tests := []struct {
+		colType string
+		want    bool
+	}{
+		{"numeric", true},
+		{"numeric(10,2)", true},
+		{"NUMERIC", true},
+		{"decimal", true},
+		{"decimal(18,4)", true},
+		{"DECIMAL", true},
+		{"integer", false},
+		{"bigint", false},
+		{"text", false},
+		{"double precision", false},
+		{"real", false},
+		{"", false},
+		// trim_scale has no array variant.
+		{"numeric[]", false},
+		{"numeric(10,2)[]", false},
+		{"DECIMAL[]", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.colType, func(t *testing.T) {
+			if got := isNumericType(tt.colType); got != tt.want {
+				t.Errorf("isNumericType(%q) = %v, want %v", tt.colType, got, tt.want)
+			}
+		})
+	}
+}

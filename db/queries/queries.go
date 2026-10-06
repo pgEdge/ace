@@ -600,9 +600,14 @@ func GetPkeyOffsets(ctx context.Context, db DBQuerier, schema, table string, key
 	return offsets, nil
 }
 
-// isNumericType returns true if a PostgreSQL type string represents a numeric/decimal type.
+// isNumericType reports whether a column of this type (format_type output)
+// goes through trim_scale(). Arrays do not: trim_scale(numeric[]) does not
+// exist.
 func isNumericType(colType string) bool {
-	lower := strings.ToLower(colType)
+	lower := strings.ToLower(strings.TrimSpace(colType))
+	if strings.HasSuffix(lower, "[]") {
+		return false
+	}
 	return strings.HasPrefix(lower, "numeric") || strings.HasPrefix(lower, "decimal")
 }
 
