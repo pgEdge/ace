@@ -102,9 +102,15 @@ func TestTableDiffAgainstOriginWithUntil(t *testing.T) {
 		t.Fatalf("failed to stop %s: %v", serviceN3, err)
 	}
 	t.Cleanup(func() {
-		// best-effort restart to not break subsequent tests
-		if err := startService(ctx, serviceN3); err != nil {
-			t.Logf("cleanup: failed to restart %s: %v", serviceN3, err)
+		// Restart n3 and wait until replication has no backlog, so that the
+		// table cleanup registered earlier, and the tests after this one,
+		// find a working cluster.
+		if err := startServiceAndWait(ctx, serviceN3); err != nil {
+			t.Errorf("cleanup: restart %s: %v", serviceN3, err)
+			return
+		}
+		if err := waitForSpockSettled(ctx, serviceStartTimeout); err != nil {
+			t.Errorf("cleanup: %v", err)
 		}
 	})
 

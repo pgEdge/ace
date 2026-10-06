@@ -149,8 +149,8 @@ func TestCatastrophicSingleNodeFailure(t *testing.T) {
 	ctx := context.Background()
 
 	// Ensure n1 and n3 are up in case a previous test stopped them.
-	_ = startService(ctx, serviceN1)
-	_ = startService(ctx, serviceN3)
+	require.NoError(t, startServiceAndWait(ctx, serviceN1))
+	require.NoError(t, startServiceAndWait(ctx, serviceN3))
 
 	tableName := "recovery_customers"
 	qualified := fmt.Sprintf("%s.%s", testSchema, tableName)
@@ -175,10 +175,18 @@ func TestCatastrophicSingleNodeFailure(t *testing.T) {
 			t.Logf("repset_add_table on %s (may already exist): %v", allServices[i], err)
 		}
 	}
+	// Cleanups run in reverse order of registration. When this one runs, the
+	// later ones have already restarted n1 and re-enabled n2's subscription,
+	// and replication has no backlog. Dropping the table earlier would make
+	// n2's apply worker fail on the changes it still has to replay.
 	t.Cleanup(func() {
-		_ = startService(ctx, serviceN1)
-		for _, pool := range allPools {
-			pool.Exec(ctx, fmt.Sprintf("DROP TABLE IF EXISTS %s CASCADE;", qualified)) //nolint:errcheck
+		if err := startServiceAndWait(ctx, serviceN1); err != nil {
+			t.Errorf("cleanup: %v", err)
+		}
+		for i, pool := range allPools {
+			if _, err := pool.Exec(ctx, fmt.Sprintf("DROP TABLE IF EXISTS %s CASCADE;", qualified)); err != nil {
+				t.Errorf("cleanup: drop %s on %s: %v", qualified, allServices[i], err)
+			}
 		}
 	})
 
@@ -223,8 +231,14 @@ func TestCatastrophicSingleNodeFailure(t *testing.T) {
 	)
 	require.NoError(t, err, "disable n2 subscription to n1 (%s)", subName)
 	t.Cleanup(func() {
-		_, _ = pgCluster.Node2Pool.Exec(ctx,
-			fmt.Sprintf("SELECT spock.sub_enable('%s')", subName))
+		if _, err := pgCluster.Node2Pool.Exec(ctx,
+			fmt.Sprintf("SELECT spock.sub_enable('%s')", subName)); err != nil {
+			t.Errorf("cleanup: enable n2 subscription %q: %v", subName, err)
+			return
+		}
+		if err := waitForSpockSettled(ctx, serviceStartTimeout); err != nil {
+			t.Errorf("cleanup: %v", err)
+		}
 	})
 	log.Printf("Disabled n2 subscription %q to n1 – real lag begins", subName)
 
@@ -307,8 +321,8 @@ func TestCatastrophicSingleNodeFailure(t *testing.T) {
 	failureTime := time.Now().Add(5 * time.Minute).UTC()
 	require.NoError(t, stopService(ctx, serviceN1), "stop n1 to simulate catastrophic failure")
 	t.Cleanup(func() {
-		if err := startService(ctx, serviceN1); err != nil {
-			t.Logf("cleanup: failed to restart n1: %v", err)
+		if err := startServiceAndWait(ctx, serviceN1); err != nil {
+			t.Errorf("cleanup: restart n1: %v", err)
 		}
 	})
 	log.Printf("n1 stopped. --until fence: %s", failureTime.Format(time.RFC3339))
