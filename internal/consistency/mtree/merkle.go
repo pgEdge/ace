@@ -807,8 +807,14 @@ func (m *MerkleTreeTask) buildRowKey(row types.OrderedMap) (string, error) {
 	return utils.RowKeyFromStrings(values), nil
 }
 
+// isNumericColType reports whether a column of this type (format_type output)
+// goes through trim_scale(). Arrays do not: trim_scale(numeric[]) does not
+// exist.
 func isNumericColType(colType string) bool {
-	lower := strings.ToLower(colType)
+	lower := strings.ToLower(strings.TrimSpace(colType))
+	if strings.HasSuffix(lower, "[]") {
+		return false
+	}
 	return strings.HasPrefix(lower, "numeric") || strings.HasPrefix(lower, "decimal")
 }
 
