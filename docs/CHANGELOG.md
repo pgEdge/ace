@@ -5,6 +5,29 @@ All notable changes to ACE will be captured in this document. This project follo
 ## [Unreleased]
 
 ### Fixed
+- **Equal rows could have different hashes on nodes with different session
+  defaults.** table-diff and mtree hash the text that the server prints for
+  a row, and the CDC walsender prints the values of each change as text.
+  This text depends on `TimeZone`, `DateStyle`, `IntervalStyle`,
+  `extra_float_digits`, `bytea_output` and `lc_monetary`. ACE used the
+  defaults of each server, so, for example, a `timestamptz` column on two
+  nodes with different `TimeZone` gave a false difference. ACE also read
+  text in the encoding of each database, while it expects UTF-8.
+  Every ACE connection, including the replication connection, now sends
+  fixed values for these settings when it connects: `TimeZone = UTC`,
+  `DateStyle = 'ISO, MDY'`, `IntervalStyle = postgres`,
+  `extra_float_digits = 3`, `bytea_output = hex`, `lc_monetary = C`,
+  `standard_conforming_strings = on` and `client_encoding = UTF8`. They
+  have priority over `ALTER ROLE ... SET`, `ALTER DATABASE ... SET` and
+  `PGOPTIONS`. If the server reports another value for `TimeZone`,
+  `DateStyle`, `IntervalStyle`, `standard_conforming_strings` or
+  `client_encoding` (for example, because a connection pooler dropped the
+  parameter), the connection fails with an error that names the setting.
+  The mtree hash version is now 3, so the next `mtree update` recomputes
+  all stored hashes of a tree once.
+  A diff file made by an earlier version of ACE can hold `money` values in
+  the format of the server's `lc_monetary`. Run `table-diff` again before
+  `table-repair` with such a file.
 - **`table-diff --output html` was killed by the OOM killer on large diffs.**
   The HTML writer built the whole report in memory: a copy of the diff as
   JSON, the markup of every row, and the final document in one buffer. With

@@ -29,7 +29,17 @@ import (
 // CurrentHashVersion is the version of the hash algorithm used by this build.
 // Increment when the SQL hash computation changes (e.g., switching from
 // whole-row ::text to per-column concat_ws with trim_scale).
-const CurrentHashVersion = 2
+//
+// The session settings that change how a value is printed are part of the
+// hash too (outputSettings in internal/infra/db). Increment it when they
+// change.
+//
+//	2: per-column concat_ws with trim_scale.
+//	3: every connection pins DateStyle, IntervalStyle, TimeZone,
+//	   extra_float_digits, bytea_output and lc_monetary. Before this, the
+//	   hashes used the defaults of each server, so a timestamptz or money
+//	   column could give a different hash for an equal row.
+const CurrentHashVersion = 3
 
 type DBQuerier interface {
 	Exec(context.Context, string, ...interface{}) (pgconn.CommandTag, error)

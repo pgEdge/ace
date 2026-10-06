@@ -21,6 +21,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/pgedge/ace/db/queries"
+	auth "github.com/pgedge/ace/internal/infra/db"
 )
 
 // CollectSnapshot reads every structural property this package knows how to
@@ -488,22 +489,37 @@ func identifiersToQuote(
 // pg_dump does before deparsing, makes the collected text a function of the
 // catalog alone.
 //
+// The values are the output settings that every ACE connection gets in its
+// startup packet (auth.OutputSettings). They are set here again so that this
+// transaction does not depend on how its connection was opened. money's
+// output function, for one, formats through lc_monetary, so a default or
+// CHECK holding a money constant deparses differently under a different
+// monetary locale. client_encoding is left out: it is a property of the
+// connection, not of the deparsed text, and the startup packet sets it.
+//
 // search_path is pinned too, so any name a deparse routine chooses to
 // qualify is decided the same way on both nodes — every query in this
 // transaction schema-qualifies what it reads, against pg_catalog
 // explicitly.
-var deparseSettings = []string{
-	"SET LOCAL DateStyle = 'ISO, YMD'",
-	"SET LOCAL IntervalStyle = 'postgres'",
-	"SET LOCAL TimeZone = 'UTC'",
-	"SET LOCAL bytea_output = 'hex'",
-	// money's output function formats through lc_monetary, so a default or
-	// CHECK holding a money constant deparses differently under a different
-	// monetary locale.
-	"SET LOCAL lc_monetary = 'C'",
-	"SET LOCAL extra_float_digits = 3",
-	"SET LOCAL standard_conforming_strings = on",
-	"SET LOCAL search_path = pg_catalog",
+var deparseSettings = buildDeparseSettings()
+
+func buildDeparseSettings() []string {
+	settings := auth.OutputSettings()
+	delete(settings, "client_encoding")
+	settings["search_path"] = "pg_catalog"
+
+	names := make([]string, 0, len(settings))
+	for name := range settings {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	stmts := make([]string, 0, len(names))
+	for _, name := range names {
+		value := strings.ReplaceAll(settings[name], "'", "''")
+		stmts = append(stmts, fmt.Sprintf("SET LOCAL %s = '%s'", name, value))
+	}
+	return stmts
 }
 
 // pinDeparseSettings applies deparseSettings inside the snapshot

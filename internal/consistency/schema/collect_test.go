@@ -38,3 +38,26 @@ func TestSortProperties_OrdersByNameThenValue(t *testing.T) {
 		}
 	}
 }
+
+// The snapshot transaction must use the same output settings as every ACE
+// connection, plus search_path, and must not touch client_encoding.
+func TestDeparseSettingsFollowConnectionSettings(t *testing.T) {
+	want := map[string]bool{
+		"SET LOCAL bytea_output = 'hex'":               true,
+		"SET LOCAL datestyle = 'ISO, MDY'":             true,
+		"SET LOCAL extra_float_digits = '3'":           true,
+		"SET LOCAL intervalstyle = 'postgres'":         true,
+		"SET LOCAL lc_monetary = 'C'":                  true,
+		"SET LOCAL search_path = 'pg_catalog'":         true,
+		"SET LOCAL standard_conforming_strings = 'on'": true,
+		"SET LOCAL timezone = 'UTC'":                   true,
+	}
+	if len(deparseSettings) != len(want) {
+		t.Fatalf("deparseSettings has %d statements, want %d: %q", len(deparseSettings), len(want), deparseSettings)
+	}
+	for _, stmt := range deparseSettings {
+		if !want[stmt] {
+			t.Errorf("unexpected statement %q", stmt)
+		}
+	}
+}
