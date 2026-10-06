@@ -163,10 +163,13 @@ func SetupCLI(version string) *cli.Command {
 			Usage: "Optional commit timestamp upper bound (RFC3339) for rows to include",
 			Value: "",
 		},
+		// The block hash no longer uses pgcrypto. The flag is kept, hidden,
+		// so that scripts that still pass it do not fail.
 		&cli.BoolFlag{
-			Name:  "ensure-pgcrypto",
-			Usage: "Ensure pgcrypto extension is installed on each node before diffing",
-			Value: false,
+			Name:   "ensure-pgcrypto",
+			Usage:  "Deprecated: has no effect; table-diff no longer needs pgcrypto",
+			Value:  false,
+			Hidden: true,
 		},
 		&cli.BoolFlag{
 			Name:    "schedule",
@@ -960,7 +963,9 @@ func TableDiffCLI(cmd *cli.Command) error {
 	task.Output = strings.ToLower(cmd.String("output"))
 	task.MaxHTMLRows = cmd.Int64("max-html-rows")
 	task.Nodes = cmd.String("nodes")
-	task.EnsurePgcrypto = cmd.Bool("ensure-pgcrypto")
+	if cmd.Bool("ensure-pgcrypto") {
+		logger.Warn("--ensure-pgcrypto has no effect: table-diff no longer needs pgcrypto")
+	}
 	scheduleEnabled := cmd.Bool("schedule")
 	scheduleEvery := cmd.String("every")
 	task.TableFilter = cmd.String("table-filter")
