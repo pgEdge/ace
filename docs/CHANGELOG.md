@@ -24,6 +24,9 @@ All notable changes to ACE will be captured in this document. This project follo
   hashes again, in one transaction per node.
 - **`table-diff` and `mtree` failed on tables with a `numeric[]` column.**
   ACE wrapped such a column in `trim_scale()`, which has no array variant.
+- **`table-diff` and `mtree` no longer need pgcrypto.** The block hash uses the
+  built-in `sha256()`. `table-diff --ensure-pgcrypto` has no effect now and
+  only prints a warning.
 - **`table-diff --output html` was killed by the OOM killer on large diffs.**
   The HTML writer built the whole report in memory: a copy of the diff as
   JSON, the markup of every row, and the final document in one buffer. With

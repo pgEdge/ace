@@ -1127,17 +1127,6 @@ func GetSpockRepSetInfo(ctx context.Context, db DBQuerier) ([]types.SpockRepSetI
 	return infos, nil
 }
 
-func EnsurePgcrypto(ctx context.Context, db DBQuerier) error {
-	sql, err := RenderSQL(SQLTemplates.EnsurePgcrypto, nil)
-	if err != nil {
-		return fmt.Errorf("failed to render ensure-pgcrypto SQL: %w", err)
-	}
-	if _, err := db.Exec(ctx, sql); err != nil {
-		return fmt.Errorf("failed to ensure pgcrypto extension: %w", err)
-	}
-	return nil
-}
-
 func CheckSchemaExists(ctx context.Context, db DBQuerier, schema string) (bool, error) {
 	sql, err := RenderSQL(SQLTemplates.CheckSchemaExists, nil)
 	if err != nil {
