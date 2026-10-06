@@ -1584,9 +1584,6 @@ func (m *MerkleTreeTask) RunChecks(skipValidation bool) error {
 		}
 		defer pool.Close()
 
-		if err := queries.EnsurePgcrypto(m.Ctx, pool); err != nil {
-			return fmt.Errorf("failed to ensure pgcrypto is installed on %s: %w", nodeInfo["Name"], err)
-		}
 		tx, err := pool.Begin(m.Ctx)
 		if err != nil {
 			return fmt.Errorf("failed to begin transaction for checks on node %s: %w", nodeInfo["Name"], err)

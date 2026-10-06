@@ -115,12 +115,6 @@ func setupNativeCluster(t *testing.T) *nativeClusterState {
 	state.n3Pool, err = connectToNode(state.n3Host, state.n3Port, nativeUser, nativePassword, nativeDBName)
 	require.NoError(t, err, "connect to native-n3")
 
-	// Create pgcrypto extension on all nodes
-	for _, pool := range []*pgxpool.Pool{state.n1Pool, state.n2Pool, state.n3Pool} {
-		_, err = pool.Exec(ctx, "CREATE EXTENSION IF NOT EXISTS pgcrypto")
-		require.NoError(t, err, "create pgcrypto extension")
-	}
-
 	log.Printf("Native PG cluster ready: n1=%s:%s, n2=%s:%s, n3=%s:%s",
 		state.n1Host, state.n1Port, state.n2Host, state.n2Port, state.n3Host, state.n3Port)
 	return state
