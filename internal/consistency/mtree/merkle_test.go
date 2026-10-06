@@ -321,6 +321,10 @@ func TestIsNumericColType(t *testing.T) {
 		{"double precision", false},
 		{"real", false},
 		{"", false},
+		// trim_scale has no array variant.
+		{"numeric[]", false},
+		{"numeric(10,2)[]", false},
+		{"DECIMAL[]", false},
 	}
 
 	for _, tt := range tests {

@@ -28,6 +28,8 @@ All notable changes to ACE will be captured in this document. This project follo
   A diff file made by an earlier version of ACE can hold `money` values in
   the format of the server's `lc_monetary`. Run `table-diff` again before
   `table-repair` with such a file.
+- **`table-diff` and `mtree` failed on tables with a `numeric[]` column.**
+  ACE wrapped such a column in `trim_scale()`, which has no array variant.
 - **`table-diff --output html` was killed by the OOM killer on large diffs.**
   The HTML writer built the whole report in memory: a copy of the diff as
   JSON, the markup of every row, and the final document in one buffer. With
