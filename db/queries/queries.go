@@ -1966,8 +1966,8 @@ func UpdateMetadata(ctx context.Context, db DBQuerier, schema, table string, tot
 }
 
 func ComputeLeafHashes(ctx context.Context, db DBQuerier, schema, table string, _ bool, key []string, start []any, end []any, allCols []string, colTypes map[string]string) ([]byte, error) {
-	hasLower := len(start) > 0 && !sliceAllNil(start)
-	hasUpper := len(end) > 0 && !sliceAllNil(end)
+	hasLower := !AllNil(start)
+	hasUpper := !AllNil(end)
 
 	sql, err := BlockHashSQL(schema, table, key, "MTREE_LEAF_HASH", hasLower, hasUpper, "", allCols, colTypes)
 	if err != nil {
@@ -1989,7 +1989,9 @@ func ComputeLeafHashes(ctx context.Context, db DBQuerier, schema, table string, 
 	return leafHash, nil
 }
 
-func sliceAllNil(vals []any) bool {
+// AllNil reports whether vals is empty or holds only nil values. A block bound
+// like this is open: it puts no limit on that side of the block.
+func AllNil(vals []any) bool {
 	if len(vals) == 0 {
 		return true
 	}

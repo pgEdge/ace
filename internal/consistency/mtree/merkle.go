@@ -398,7 +398,7 @@ func (m *MerkleTreeTask) processWorkItem(work CompareRangesWorkItem, pool1, pool
 
 			var andClauses []string
 
-			if len(startVals) > 0 && !allNil(startVals) {
+			if !queries.AllNil(startVals) {
 				placeholders := make([]string, len(startVals))
 				for i, v := range startVals {
 					placeholders[i] = fmt.Sprintf("$%d", paramIndex)
@@ -407,7 +407,7 @@ func (m *MerkleTreeTask) processWorkItem(work CompareRangesWorkItem, pool1, pool
 				}
 				andClauses = append(andClauses, fmt.Sprintf("ROW(%s) >= ROW(%s)", pkeyColsStr, strings.Join(placeholders, ", ")))
 			}
-			if len(endVals) > 0 && !allNil(endVals) {
+			if !queries.AllNil(endVals) {
 				placeholders := make([]string, len(endVals))
 				for i, v := range endVals {
 					placeholders[i] = fmt.Sprintf("$%d", paramIndex)
@@ -1096,18 +1096,6 @@ func processRows(rows pgx.Rows) ([]types.OrderedMap, error) {
 		return nil, err
 	}
 	return results, nil
-}
-
-func allNil(vals []any) bool {
-	if len(vals) == 0 {
-		return true
-	}
-	for _, v := range vals {
-		if v != nil {
-			return false
-		}
-	}
-	return true
 }
 
 func valueOrNil(end []any) interface{} {
@@ -2237,7 +2225,7 @@ func (m *MerkleTreeTask) splitBlocks(tx pgx.Tx, blocksToSplit []types.BlockRange
 		pos := blk.NodePosition
 		start := blk.RangeStart
 		end := blk.RangeEnd
-		originallyUnbounded := len(end) == 0 || allNil(end)
+		originallyUnbounded := queries.AllNil(end)
 
 		if originallyUnbounded {
 			var maxVal []any
@@ -2827,16 +2815,16 @@ func (m *MerkleTreeTask) getPkeyBatches(pool1, pool2 *pgxpool.Pool, mismatchedPo
 	// otherwise rows past the reference's last_row are never queried.
 	// GetLeafRanges returns NULL bounds as []any{nil} (simple PK) or
 	// []any{nil, nil, ...} (composite PK), not as a Go nil slice — use
-	// allNil to normalise.
+	// queries.AllNil to normalise.
 	boundaries := []any{}
 	hasOpenStart, hasOpenEnd := false, false
 	for _, r := range allRanges {
-		if allNil(r.RangeStart) {
+		if queries.AllNil(r.RangeStart) {
 			hasOpenStart = true
 		} else {
 			boundaries = append(boundaries, r.RangeStart)
 		}
-		if allNil(r.RangeEnd) {
+		if queries.AllNil(r.RangeEnd) {
 			hasOpenEnd = true
 		} else {
 			boundaries = append(boundaries, r.RangeEnd)
