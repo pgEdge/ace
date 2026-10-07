@@ -2234,7 +2234,7 @@ func (m *MerkleTreeTask) splitBlocks(tx pgx.Tx, blocksToSplit []types.BlockRange
 				maxVal, err = queries.GetMaxValComposite(m.Ctx, tx, m.Schema, m.Table, m.Key, start)
 			} else {
 				var simpleMaxVal any
-				simpleMaxVal, err = queries.GetMaxValSimple(m.Ctx, tx, m.Schema, m.Table, m.Key[0], start[0])
+				simpleMaxVal, err = queries.GetMaxValSimple(m.Ctx, tx, m.Schema, m.Table, m.Key[0], valueOrNil(start))
 				if err == nil && simpleMaxVal != nil {
 					maxVal = []any{simpleMaxVal}
 				}

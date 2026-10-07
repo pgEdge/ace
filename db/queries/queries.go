@@ -2266,6 +2266,9 @@ func GetRowCountEstimateFromMetadata(ctx context.Context, db DBQuerier, schema, 
 	return count, nil
 }
 
+// GetMaxValComposite returns the largest key at or above pkeyValues, or the
+// largest key of the table when pkeyValues is empty or all NULL. A primary
+// key never holds NULL, so pkeyValues is either a full key or all NULL.
 func GetMaxValComposite(ctx context.Context, db DBQuerier, schema, table string, pkeyCols []string, pkeyValues []any) ([]interface{}, error) {
 	cols := make([]string, len(pkeyCols))
 	for i, c := range pkeyCols {
@@ -2273,11 +2276,14 @@ func GetMaxValComposite(ctx context.Context, db DBQuerier, schema, table string,
 	}
 	colsStr := strings.Join(cols, ", ")
 
-	valsPh := make([]string, len(pkeyValues))
-	args := make([]any, len(pkeyValues))
-	for i, v := range pkeyValues {
-		valsPh[i] = fmt.Sprintf("$%d", i+1)
-		args[i] = v
+	hasStart := !AllNil(pkeyValues)
+	var valsPh []string
+	var args []any
+	if hasStart {
+		for i, v := range pkeyValues {
+			valsPh = append(valsPh, fmt.Sprintf("$%d", i+1))
+			args = append(args, v)
+		}
 	}
 	valsStr := strings.Join(valsPh, ", ")
 
@@ -2286,6 +2292,7 @@ func GetMaxValComposite(ctx context.Context, db DBQuerier, schema, table string,
 		"TableIdent":  pgx.Identifier{table}.Sanitize(),
 		"PkeyCols":    colsStr,
 		"PkeyValues":  fmt.Sprintf("ROW(%s)", valsStr),
+		"HasStart":    hasStart,
 	}
 	sql, err := RenderSQL(SQLTemplates.GetMaxValComposite, data)
 	if err != nil {
@@ -2323,11 +2330,16 @@ func UpdateMaxVal(ctx context.Context, db DBQuerier, mtreeTable string, rangeEnd
 	return nil
 }
 
+// GetMaxValSimple returns the largest key at or above rangeStart, or the
+// largest key of the table when rangeStart is nil. It returns nil when no row
+// matches.
 func GetMaxValSimple(ctx context.Context, db DBQuerier, schema, table, key string, rangeStart interface{}) (interface{}, error) {
+	hasStart := rangeStart != nil
 	data := map[string]interface{}{
 		"SchemaIdent": pgx.Identifier{schema}.Sanitize(),
 		"TableIdent":  pgx.Identifier{table}.Sanitize(),
 		"Key":         key,
+		"HasStart":    hasStart,
 	}
 
 	sql, err := RenderSQL(SQLTemplates.GetMaxValSimple, data)
@@ -2335,9 +2347,16 @@ func GetMaxValSimple(ctx context.Context, db DBQuerier, schema, table, key strin
 		return nil, fmt.Errorf("failed to render GetMaxValSimple SQL: %w", err)
 	}
 
+	var args []any
+	if hasStart {
+		args = append(args, rangeStart)
+	}
 	var maxVal interface{}
-	err = db.QueryRow(ctx, sql, rangeStart).Scan(&maxVal)
+	err = db.QueryRow(ctx, sql, args...).Scan(&maxVal) // nosemgrep
 	if err != nil {
+		if err == pgx.ErrNoRows {
+			return nil, nil
+		}
 		return nil, fmt.Errorf("query to get max val simple for '%s.%s' failed: %w", schema, table, err)
 	}
 
@@ -2395,7 +2414,8 @@ func GetBlockRowCount(ctx context.Context, db DBQuerier, schema string, table st
 		var conditions []string
 		var startPlaceholders, endPlaceholders []string
 
-		if len(start) > 0 {
+		// An all-NULL bound is an open side, as in the simple-key branch.
+		if !AllNil(start) {
 			for i := range start {
 				startPlaceholders = append(startPlaceholders, fmt.Sprintf("$%d", len(args)+i+1))
 			}
@@ -2403,7 +2423,7 @@ func GetBlockRowCount(ctx context.Context, db DBQuerier, schema string, table st
 			args = append(args, start...)
 		}
 
-		if len(end) > 0 && end[0] != nil {
+		if !AllNil(end) {
 			for i := range end {
 				endPlaceholders = append(endPlaceholders, fmt.Sprintf("$%d", len(args)+i+1))
 			}
@@ -3268,8 +3288,9 @@ func GetBulkSplitPoints(ctx context.Context, db DBQuerier, schema, table string,
 	}
 	pkeyColsStr := strings.Join(sanitisedKeyCols, ", ")
 
+	// A nil or all-NULL bound is an open side.
 	var conditions []string
-	if start != nil {
+	if !AllNil(start) {
 		if isComposite {
 			placeholders := make([]string, len(key))
 			for i := 0; i < len(key); i++ {
@@ -3284,7 +3305,7 @@ func GetBulkSplitPoints(ctx context.Context, db DBQuerier, schema, table string,
 			paramIndex++
 		}
 	}
-	if end != nil {
+	if !AllNil(end) {
 		if isComposite {
 			placeholders := make([]string, len(key))
 			for i := 0; i < len(key); i++ {
