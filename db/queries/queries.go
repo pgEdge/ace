@@ -26,10 +26,41 @@ import (
 	"github.com/pgedge/ace/pkg/types"
 )
 
-// CurrentHashVersion is the version of the hash algorithm used by this build.
-// Increment when the SQL hash computation changes (e.g., switching from
-// whole-row ::text to per-column concat_ws with trim_scale).
-const CurrentHashVersion = 2
+// CurrentHashVersion is the version of the stored leaf hashes. Increment it
+// when a leaf hash changes meaning: the row hash, or the rows a leaf covers.
+// mtree update then computes the leaf hashes again.
+//
+//	1: string_agg of whole-row ::text.
+//	2: per-column concat_ws with trim_scale.
+//	3: the first leaf has no lower bound (see FirstBlockPosition). The row
+//	   hash is the same as in version 2.
+const CurrentHashVersion = 3
+
+// FirstBlockPosition is the node_position of the first leaf block. This block
+// has no lower bound: it covers every key up to its range_end, also the keys
+// below its stored range_start. The SQL templates use the literal 0 for it,
+// and every function here that reads block ranges returns a nil start for it.
+//
+// The bounds come from the reference node only, so another node can have keys
+// below the first block's range_start. With a lower bound, no leaf would cover
+// these rows.
+//
+// Invariant: the first leaf has the smallest range_start, and among leaves
+// with the same range_start it has the smallest node_position. Leaves are
+// numbered again by (range_start, node_position), so it keeps position 0. A
+// merge keeps the start of the lower block, and splitBlocks sets the stored
+// range_start of the first block to the smallest key of the table before it
+// adds split points.
+const FirstBlockPosition = 0
+
+// OpenFirstBlockStart returns start, or nil for the first block. A nil start
+// means "no lower bound" to every function that builds a range condition.
+func OpenFirstBlockStart(nodePosition int64, start []any) []any {
+	if nodePosition == FirstBlockPosition {
+		return nil
+	}
+	return start
+}
 
 type DBQuerier interface {
 	Exec(context.Context, string, ...interface{}) (pgconn.CommandTag, error)
@@ -2180,11 +2211,12 @@ func GetLeafRanges(ctx context.Context, db DBQuerier, mtreeTable string, nodePos
 		var ranges []types.LeafRange
 		for rows.Next() {
 			var r types.LeafRange
+			var pos int64
 			var start, end any
-			if err := rows.Scan(&start, &end); err != nil {
+			if err := rows.Scan(&pos, &start, &end); err != nil {
 				return nil, fmt.Errorf("failed to scan leaf range: %w", err)
 			}
-			r.RangeStart = []any{start}
+			r.RangeStart = OpenFirstBlockStart(pos, []any{start})
 			if end != nil {
 				r.RangeEnd = []any{end}
 			}
@@ -2224,10 +2256,12 @@ func GetLeafRanges(ctx context.Context, db DBQuerier, mtreeTable string, nodePos
 	var ranges []types.LeafRange
 	numKeyCols := len(key)
 	for rows.Next() {
+		var pos int64
 		dest := make([]any, numKeyCols*2)
-		destPtrs := make([]any, numKeyCols*2)
+		destPtrs := make([]any, 1+numKeyCols*2)
+		destPtrs[0] = &pos
 		for i := range dest {
-			destPtrs[i] = &dest[i]
+			destPtrs[1+i] = &dest[i]
 		}
 
 		if err := rows.Scan(destPtrs...); err != nil {
@@ -2240,7 +2274,7 @@ func GetLeafRanges(ctx context.Context, db DBQuerier, mtreeTable string, nodePos
 		copy(endVals, dest[numKeyCols:])
 
 		ranges = append(ranges, types.LeafRange{
-			RangeStart: startVals,
+			RangeStart: OpenFirstBlockStart(pos, startVals),
 			RangeEnd:   endVals,
 		})
 	}
@@ -2498,6 +2532,7 @@ func GetDirtyAndNewBlocks(ctx context.Context, db DBQuerier, mtreeTable string, 
 			if end != nil {
 				br.RangeEnd = []any{end}
 			}
+			br.RangeStart = OpenFirstBlockStart(br.NodePosition, br.RangeStart)
 			blocks = append(blocks, br)
 		}
 		if err := rows.Err(); err != nil {
@@ -2559,7 +2594,7 @@ func GetDirtyAndNewBlocks(ctx context.Context, db DBQuerier, mtreeTable string, 
 		endVals := make([]any, len(key))
 		copy(startVals, dest[1:1+len(key)])
 		copy(endVals, dest[1+len(key):])
-		br.RangeStart = startVals
+		br.RangeStart = OpenFirstBlockStart(br.NodePosition, startVals)
 		br.RangeEnd = endVals
 		blocks = append(blocks, br)
 	}
@@ -2598,6 +2633,7 @@ func FindBlocksToSplit(ctx context.Context, db DBQuerier, mtreeTable string, ins
 			if end != nil {
 				br.RangeEnd = []any{end}
 			}
+			br.RangeStart = OpenFirstBlockStart(br.NodePosition, br.RangeStart)
 			blocks = append(blocks, br)
 		}
 		if err := rows.Err(); err != nil {
@@ -2658,7 +2694,7 @@ func FindBlocksToSplit(ctx context.Context, db DBQuerier, mtreeTable string, ins
 		endVals := make([]any, len(key))
 		copy(startVals, dest[1:1+len(key)])
 		copy(endVals, dest[1+len(key):])
-		br.RangeStart = startVals
+		br.RangeStart = OpenFirstBlockStart(br.NodePosition, startVals)
 		br.RangeEnd = endVals
 		blocks = append(blocks, br)
 	}
@@ -2898,7 +2934,7 @@ func findBlocksToMerge(ctx context.Context, db DBQuerier, mtreeTable, schema, ta
 			if err := rows.Scan(&br.NodePosition, &start, &end); err != nil {
 				return nil, fmt.Errorf("failed to scan block to merge: %w", err)
 			}
-			br.RangeStart = []any{start}
+			br.RangeStart = OpenFirstBlockStart(br.NodePosition, []any{start})
 			br.RangeEnd = []any{end}
 			blocks = append(blocks, br)
 		}
@@ -2961,7 +2997,7 @@ func findBlocksToMerge(ctx context.Context, db DBQuerier, mtreeTable, schema, ta
 		endVals := make([]any, len(key))
 		copy(startVals, dest[1:1+len(key)])
 		copy(endVals, dest[1+len(key):])
-		br.RangeStart = startVals
+		br.RangeStart = OpenFirstBlockStart(br.NodePosition, startVals)
 		br.RangeEnd = endVals
 		blocks = append(blocks, br)
 	}
@@ -3205,7 +3241,7 @@ func GetBlockWithCount(ctx context.Context, db DBQuerier, mtreeTable, schema, ta
 		} else {
 			return nil, fmt.Errorf("unexpected type for count: %T", dest[len(dest)-1])
 		}
-		block.RangeStart = startVals
+		block.RangeStart = OpenFirstBlockStart(block.NodePosition, startVals)
 		block.RangeEnd = endVals
 	} else {
 		err := row.Scan(&block.NodePosition, &start, &end, &count)
@@ -3215,7 +3251,7 @@ func GetBlockWithCount(ctx context.Context, db DBQuerier, mtreeTable, schema, ta
 			}
 			return nil, err
 		}
-		block.RangeStart = []any{start}
+		block.RangeStart = OpenFirstBlockStart(block.NodePosition, []any{start})
 		block.RangeEnd = []any{end}
 	}
 	block.Count = count

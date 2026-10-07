@@ -2159,6 +2159,15 @@ func TestMerkleTreeBidirectionalDiff(t *testing.T) {
 			expectN1Only: []int{10000},
 			expectN2Only: []int{2, 3, 4, 5, 6},
 		},
+		{
+			// n1 is the reference and its smallest key is 100. The first
+			// block has no lower bound, so n2's rows 1..3 are compared too.
+			name:         "N2HasRowsBelowN1Min",
+			seedN1:       []int{100, 101, 102, 103, 104, 105},
+			seedN2:       []int{1, 2, 3, 100},
+			expectN1Only: []int{101, 102, 103, 104, 105},
+			expectN2Only: []int{1, 2, 3},
+		},
 	}
 
 	for _, tc := range cases {

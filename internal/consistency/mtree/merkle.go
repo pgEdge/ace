@@ -1812,6 +1812,15 @@ func (m *MerkleTreeTask) BuildMtree() (err error) {
 		numBlocks = len(blockRanges)
 	}
 
+	// The tree stores blockRanges as they are, but the first block has no
+	// lower bound (see queries.FirstBlockPosition), so its hash must not use
+	// its start key.
+	hashRanges := make([]types.BlockRange, len(blockRanges))
+	for i, r := range blockRanges {
+		r.RangeStart = queries.OpenFirstBlockStart(r.NodePosition, r.RangeStart)
+		hashRanges[i] = r
+	}
+
 	for _, nodeInfo := range m.ClusterNodes {
 		// Per-iteration body in a closure so defer pool.Close and defer
 		// tx.Rollback fire at end-of-iteration in the correct LIFO order.
@@ -1876,7 +1885,7 @@ func (m *MerkleTreeTask) BuildMtree() (err error) {
 			}
 
 			logger.Info("Computing leaf hashes on %s...", nodeInfo["Name"])
-			err = m.computeLeafHashes(pool, tx, blockRanges, numWorkers, "Computing leaf hashes:")
+			err = m.computeLeafHashes(pool, tx, hashRanges, numWorkers, "Computing leaf hashes:")
 			if err != nil {
 				return fmt.Errorf("failed to compute leaf hashes on node %s: %w", nodeInfo["Name"], err)
 			}
@@ -2278,6 +2287,17 @@ func (m *MerkleTreeTask) splitBlocks(tx pgx.Tx, blocksToSplit []types.BlockRange
 			continue
 		}
 
+		// The first block has no lower bound, so it can hold keys below its
+		// stored range_start, and some split points can be below it too. The
+		// leaves are numbered again by range_start after the split, so the
+		// first block must keep the smallest range_start: set it to the
+		// smallest key of the table.
+		if pos == queries.FirstBlockPosition {
+			if err := m.setFirstBlockStartToMin(tx, mtreeTableName, compositeTypeName); err != nil {
+				return nil, err
+			}
+		}
+
 		for _, sp := range splitPoints {
 			if isComposite {
 				err = queries.UpdateBlockRangeEndComposite(m.Ctx, tx, mtreeTableName, compositeTypeName, sp, pos)
@@ -2324,6 +2344,30 @@ func (m *MerkleTreeTask) splitBlocks(tx pgx.Tx, blocksToSplit []types.BlockRange
 	}
 
 	return modifiedPositions, nil
+}
+
+// setFirstBlockStartToMin sets the stored range_start of the first block to
+// the smallest key of the table. It does nothing if the table is empty.
+func (m *MerkleTreeTask) setFirstBlockStartToMin(tx pgx.Tx, mtreeTableName, compositeTypeName string) error {
+	if m.SimplePrimaryKey {
+		minVal, err := queries.GetMinValSimple(m.Ctx, tx, m.Schema, m.Table, pgx.Identifier{m.Key[0]}.Sanitize())
+		if err != nil {
+			return err
+		}
+		if minVal == nil {
+			return nil
+		}
+		return queries.UpdateBlockRangeStart(m.Ctx, tx, mtreeTableName, minVal, queries.FirstBlockPosition)
+	}
+
+	minVals, err := queries.GetMinValComposite(m.Ctx, tx, m.Schema, m.Table, m.Key)
+	if err != nil {
+		return err
+	}
+	if queries.AllNil(minVals) {
+		return nil
+	}
+	return queries.UpdateBlockRangeStartComposite(m.Ctx, tx, mtreeTableName, compositeTypeName, minVals, queries.FirstBlockPosition)
 }
 
 func (m *MerkleTreeTask) performMerges(tx pgx.Tx) ([]int64, error) {
@@ -2810,12 +2854,13 @@ func (m *MerkleTreeTask) getPkeyBatches(pool1, pool2 *pgxpool.Pool, mismatchedPo
 
 	allRanges := append(leafRanges1, leafRanges2...)
 
-	// GeneratePkeyOffsetsQuery always emits a last leaf with range_end =
-	// NULL, so the boundary set must track open sides explicitly —
-	// otherwise rows past the reference's last_row are never queried.
-	// GetLeafRanges returns NULL bounds as []any{nil} (simple PK) or
-	// []any{nil, nil, ...} (composite PK), not as a Go nil slice — use
-	// queries.AllNil to normalise.
+	// The last leaf has range_end = NULL, and the first leaf has no lower
+	// bound (GetLeafRanges returns a nil start for it, see
+	// queries.FirstBlockPosition). So the boundary set must track open sides
+	// explicitly — otherwise rows above the reference's largest key or below
+	// its smallest key are never queried.
+	// A NULL range_end comes as a nil slice (simple PK) or as
+	// []any{nil, nil, ...} (composite PK); queries.AllNil covers both.
 	boundaries := []any{}
 	hasOpenStart, hasOpenEnd := false, false
 	for _, r := range allRanges {
