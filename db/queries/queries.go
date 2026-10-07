@@ -2949,50 +2949,6 @@ func findBlocksToMerge(ctx context.Context, db DBQuerier, mtreeTable, schema, ta
 	return blocks, nil
 }
 
-func GetBlockCountComposite(ctx context.Context, db DBQuerier, mtreeTable, schema, table, pkeyCols string, nodePosition int64) (*types.BlockCountComposite, error) {
-	data := map[string]interface{}{
-		"MtreeTable":  mtreeTable,
-		"SchemaIdent": pgx.Identifier{schema}.Sanitize(),
-		"TableIdent":  pgx.Identifier{table}.Sanitize(),
-		"PkeyCols":    pkeyCols,
-	}
-
-	sql, err := RenderSQL(SQLTemplates.GetBlockCountComposite, data)
-	if err != nil {
-		return nil, fmt.Errorf("failed to render GetBlockCountComposite SQL: %w", err)
-	}
-
-	var blockCount types.BlockCountComposite
-	err = db.QueryRow(ctx, sql, nodePosition).Scan(&blockCount.NodePosition, &blockCount.RangeStart, &blockCount.RangeEnd, &blockCount.Count)
-	if err != nil {
-		return nil, fmt.Errorf("query to get block count composite for '%s' failed: %w", mtreeTable, err)
-	}
-
-	return &blockCount, nil
-}
-
-func GetBlockCountSimple(ctx context.Context, db DBQuerier, mtreeTable, schema, table, key string, nodePosition int64) (*types.BlockCountSimple, error) {
-	data := map[string]interface{}{
-		"MtreeTable":  mtreeTable,
-		"SchemaIdent": pgx.Identifier{schema}.Sanitize(),
-		"TableIdent":  pgx.Identifier{table}.Sanitize(),
-		"Key":         key,
-	}
-
-	sql, err := RenderSQL(SQLTemplates.GetBlockCountSimple, data)
-	if err != nil {
-		return nil, fmt.Errorf("failed to render GetBlockCountSimple SQL: %w", err)
-	}
-
-	var blockCount types.BlockCountSimple
-	err = db.QueryRow(ctx, sql, nodePosition).Scan(&blockCount.NodePosition, &blockCount.RangeStart, &blockCount.RangeEnd, &blockCount.Count)
-	if err != nil {
-		return nil, fmt.Errorf("query to get block count simple for '%s' failed: %w", mtreeTable, err)
-	}
-
-	return &blockCount, nil
-}
-
 func GetBlockSizeFromMetadata(ctx context.Context, db DBQuerier, schema, table string) (int, error) {
 	data := map[string]interface{}{}
 	query, err := RenderSQL(SQLTemplates.GetBlockSizeFromMetadata, data)
@@ -3450,24 +3406,6 @@ func AlterPublicationAddTable(ctx context.Context, db DBQuerier, publicationName
 	_, err = db.Exec(ctx, sql)
 	if err != nil {
 		return fmt.Errorf("query to alter publication failed: %w", err)
-	}
-
-	return nil
-}
-
-func MarkBlockDirty(ctx context.Context, db DBQuerier, mtreeTable, pkeyValue string) error {
-	data := map[string]interface{}{
-		"MtreeTable": mtreeTable,
-		"PkeyValue":  pkeyValue,
-	}
-	sql, err := RenderSQL(SQLTemplates.MarkBlockDirty, data)
-	if err != nil {
-		return fmt.Errorf("failed to render MarkBlockDirty SQL: %w", err)
-	}
-
-	_, err = db.Exec(ctx, sql)
-	if err != nil {
-		return fmt.Errorf("query to mark block dirty failed: %w", err)
 	}
 
 	return nil

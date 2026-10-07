@@ -103,8 +103,6 @@ type Templates struct {
 	FindBlocksToSplit             *template.Template
 	FindBlocksToMerge             *template.Template
 	FindBlocksToMergeExpanded     *template.Template
-	GetBlockCountComposite        *template.Template
-	GetBlockCountSimple           *template.Template
 	GetBlockSizeFromMetadata      *template.Template
 	GetMaxNodeLevel               *template.Template
 	CompareBlocksSQL              *template.Template
@@ -131,7 +129,6 @@ type Templates struct {
 	UpdateBlockRangeStartComposite   *template.Template
 	UpdateBlockRangeEndComposite     *template.Template
 	UpdateAllLeafNodePositionsToTemp *template.Template
-	MarkBlockDirty                   *template.Template
 	CreateCDCMetadataTable           *template.Template
 	UpdateCDCMetadata                *template.Template
 	AlterPublicationAddTable         *template.Template
@@ -204,18 +201,6 @@ var SQLTemplates = Templates{
 		UPDATE {{aceSchema}}.ace_cdc_metadata
 		SET tables = array_remove(tables, $1)
 		WHERE publication_name = $2
-	`)),
-
-	MarkBlockDirty: template.Must(template.New("markBlockDirty").Parse(`
-		UPDATE {{.MtreeTable}}
-		SET dirty = true
-		WHERE
-			node_level = 0
-			AND (
-				'{{.PkeyValue}}' >= range_start AND (
-					'{{.PkeyValue}}' <= range_end OR range_end IS NULL
-				)
-			)
 	`)),
 
 	UpdateCDCMetadata: template.Must(template.New("updateCdcMetadata").Funcs(aceTemplateFuncs).Parse(`
@@ -1769,58 +1754,6 @@ var SQLTemplates = Templates{
 		JOIN BlockCounts bc ON bc.node_position = t1.node_position
 		WHERE bc.actual_rows < {{.MergeValPlaceholder}}
 		ORDER BY t1.node_position;
-	`)),
-	GetBlockCountComposite: template.Must(template.New("getBlockCountComposite").Parse(`
-		WITH block_data AS (
-			SELECT
-				node_position,
-				range_start,
-				range_end
-			FROM
-				{{.MtreeTable}}
-			WHERE
-				node_level = 0
-				AND node_position = $1
-		)
-		SELECT
-			b.node_position,
-			b.range_start,
-			b.range_end,
-			COUNT(t.*) AS cnt
-		FROM
-			block_data b
-			LEFT JOIN {{.SchemaIdent}}.{{.TableIdent}} t ON ROW({{.PkeyCols}}) >= b.range_start
-			AND (
-				ROW({{.PkeyCols}}) <= b.range_end
-				OR b.range_end IS NULL
-			)
-		GROUP BY
-			b.node_position,
-			b.range_start,
-			b.range_end
-		ORDER BY
-			b.node_position
-	`)),
-	GetBlockCountSimple: template.Must(template.New("getBlockCountSimple").Parse(`
-		SELECT
-			node_position,
-			range_start,
-			range_end,
-			count(t.{{.Key}})
-		FROM
-			{{.MtreeTable}} mt
-			LEFT JOIN {{.SchemaIdent}}.{{.TableIdent}} t ON t.{{.Key}} >= mt.range_start
-			AND (
-				t.{{.Key}} <= mt.range_end
-				OR mt.range_end IS NULL
-			)
-		WHERE
-			mt.node_level = 0
-			AND mt.node_position = $1
-		GROUP BY
-			mt.node_position,
-			mt.range_start,
-			mt.range_end
 	`)),
 	GetBlockSizeFromMetadata: template.Must(template.New("getBlockSizeFromMetadata").Funcs(aceTemplateFuncs).Parse(`
 		SELECT
