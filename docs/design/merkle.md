@@ -38,7 +38,7 @@ flowchart TB
 
 ## How Merkle Trees Work in ACE
 
-- **Initial build (full scan once)**: ACE partitions the table into PK-ordered blocks (like table-diff) and computes leaf hashes for every block on each node—this is the only full-table scan. Parent hashes are built upward using XOR to form the root.
+- **Initial build (full scan once)**: ACE partitions the table into PK-ordered blocks (like table-diff) and computes leaf hashes for every block on each node—this is the only full-table scan. The first block has no lower bound and the last block has no upper bound (see "Additional Split/Merge Considerations"). Parent hashes are built upward using XOR to form the root.
 - **Change capture (pgoutput + replication slot)**: The table is added to a publication; pgoutput changes are streamed into a logical replication slot. ACE marks affected blocks as dirty based on PK ranges (no full re-scan).
 - **Update step**: `UpdateMtree` reads accumulated changes from the slot, splits or merges blocks if needed, recomputes hashes only for dirty/new leaves, rebuilds parent XORs, and clears dirty flags. Block size is recovered from metadata to stay consistent with the build.
 - **Diff step**: `DiffMtree` first runs an update (to fold recent changes into the tree), then traverses trees across nodes. Matching hashes at a node mean “skip subtree”; mismatches recurse until leaves are reached, where row-level diffs are fetched if required. When every mismatched block for a node pair compares clean at row level, the diff refreshes those stale leaf hashes from live data (a write to the `ace_mtree_*` tables) so the phantom mismatch does not recur.
@@ -224,6 +224,10 @@ flowchart LR
   After["pos=0 [1..100]"]:::leaf --> Mid["pos=1 [101..500]"]:::leaf --> Tail2["pos=2 [500..nil] (tail reset)"]:::leaf
   classDef leaf fill:#eef2f7,stroke:#5b6f82,color:#0f1c2d;
 ```
+
+- **Open-ended first block handling**  
+  - The block bounds come from one node only, the reference node, so another node can have keys below the smallest key of that node. The first block (`node_position = 0`) has no lower bound: it covers every key up to its `range_end`, also the keys below its stored `range_start`. Leaf hashes, CDC dirty marking, row counts and the diff row fetch all follow this rule.
+  - The stored `range_start` of the first block is still a real key, because leaves are re-sequenced by `range_start`. When ACE splits the first block, it sets this key to the smallest key of the table, so the first block keeps the smallest `range_start` and stays at position 0. Leaves with the same `range_start` keep their old order, so a tie cannot move another leaf to position 0.
 
 - **Composite PK split points**  
   - For composite keys, split points are chosen using ordered tuples (`ROW(col1, col2, ...)`) at roughly the midpoint of the block’s row count. Bounds and inserts are bound component-wise. If a final “sliver” block would be too small, ACE drops the last split point to avoid creating a tiny trailing leaf.
