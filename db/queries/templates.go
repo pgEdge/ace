@@ -1591,8 +1591,10 @@ var SQLTemplates = Templates{
 			{{.PkeyCols}}
 		FROM
 			{{.SchemaIdent}}.{{.TableIdent}}
+		{{- if .HasStart}}
 		WHERE
 			({{.PkeyCols}}) >= ({{.PkeyValues}})
+		{{- end}}
 		ORDER BY
 			({{.PkeyCols}}) DESC
 		LIMIT
@@ -1612,8 +1614,10 @@ var SQLTemplates = Templates{
 			{{.Key}}
 		FROM
 			{{.SchemaIdent}}.{{.TableIdent}}
+		{{- if .HasStart}}
 		WHERE
 			{{.Key}} >= $1
+		{{- end}}
 		ORDER BY
 			{{.Key}} DESC
 		LIMIT
