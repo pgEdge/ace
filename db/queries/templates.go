@@ -103,8 +103,6 @@ type Templates struct {
 	FindBlocksToSplit             *template.Template
 	FindBlocksToMerge             *template.Template
 	FindBlocksToMergeExpanded     *template.Template
-	GetBlockCountComposite        *template.Template
-	GetBlockCountSimple           *template.Template
 	GetBlockSizeFromMetadata      *template.Template
 	GetMaxNodeLevel               *template.Template
 	CompareBlocksSQL              *template.Template
@@ -131,7 +129,6 @@ type Templates struct {
 	UpdateBlockRangeStartComposite   *template.Template
 	UpdateBlockRangeEndComposite     *template.Template
 	UpdateAllLeafNodePositionsToTemp *template.Template
-	MarkBlockDirty                   *template.Template
 	CreateCDCMetadataTable           *template.Template
 	UpdateCDCMetadata                *template.Template
 	AlterPublicationAddTable         *template.Template
@@ -204,18 +201,6 @@ var SQLTemplates = Templates{
 		UPDATE {{aceSchema}}.ace_cdc_metadata
 		SET tables = array_remove(tables, $1)
 		WHERE publication_name = $2
-	`)),
-
-	MarkBlockDirty: template.Must(template.New("markBlockDirty").Parse(`
-		UPDATE {{.MtreeTable}}
-		SET dirty = true
-		WHERE
-			node_level = 0
-			AND (
-				'{{.PkeyValue}}' >= range_start AND (
-					'{{.PkeyValue}}' <= range_end OR range_end IS NULL
-				)
-			)
 	`)),
 
 	UpdateCDCMetadata: template.Must(template.New("updateCdcMetadata").Funcs(aceTemplateFuncs).Parse(`
@@ -313,6 +298,8 @@ var SQLTemplates = Templates{
 			m.publication_name = $1
 	`)),
 
+	// The first leaf (node_position = 0) has no lower bound, see
+	// FirstBlockPosition. A key below its range_start belongs to it.
 	UpdateMtreeCounters: template.Must(template.New("updateMtreeCounters").Parse(`
 		WITH pkeys_to_update AS (
 			SELECT unnest(@inserts::text[]) AS pkey, 'insert' AS op
@@ -320,29 +307,6 @@ var SQLTemplates = Templates{
 			SELECT unnest(@deletes::text[]) AS pkey, 'delete' AS op
 			UNION ALL
 			SELECT unnest(@updates::text[]) AS pkey, 'update' AS op
-		),
-		first_block AS (
-			SELECT
-				node_position,
-				range_start
-			FROM
-				{{.MtreeTable}}
-			WHERE
-				node_level = 0
-			ORDER BY
-				range_start ASC
-			LIMIT 1
-		),
-		new_min_pkey AS (
-			SELECT MIN(p.pkey) as pkey
-			FROM pkeys_to_update p
-			WHERE p.op = 'insert' AND (
-				{{if .IsComposite}}
-					p.pkey::{{.CompositeTypeName}} < (SELECT range_start FROM first_block)
-				{{else}}
-					p.pkey::{{.PkeyType}} < (SELECT range_start FROM first_block)
-				{{end}}
-			)
 		),
 		blocks_to_update AS (
 			SELECT
@@ -352,20 +316,14 @@ var SQLTemplates = Templates{
 			FROM
 				{{.MtreeTable}} mt
 			JOIN
-				pkeys_to_update p ON (
+				pkeys_to_update p ON
 					{{if .IsComposite}}
-						p.pkey::{{.CompositeTypeName}} >= mt.range_start AND (mt.range_end IS NULL OR p.pkey::{{.CompositeTypeName}} <= mt.range_end)
+						(mt.node_position = 0 OR p.pkey::{{.CompositeTypeName}} >= mt.range_start)
+						AND (mt.range_end IS NULL OR p.pkey::{{.CompositeTypeName}} <= mt.range_end)
 					{{else}}
-						p.pkey::{{.PkeyType}} >= mt.range_start AND (mt.range_end IS NULL OR p.pkey::{{.PkeyType}} <= mt.range_end)
+						(mt.node_position = 0 OR p.pkey::{{.PkeyType}} >= mt.range_start)
+						AND (mt.range_end IS NULL OR p.pkey::{{.PkeyType}} <= mt.range_end)
 					{{end}}
-				) OR (
-					mt.node_position = (SELECT node_position FROM first_block) AND
-					{{if .IsComposite}}
-						p.pkey::{{.CompositeTypeName}} < (SELECT range_start FROM first_block)
-					{{else}}
-						p.pkey::{{.PkeyType}} < (SELECT range_start FROM first_block)
-					{{end}}
-				)
 			WHERE
 				mt.node_level = 0
 			GROUP BY
@@ -377,17 +335,7 @@ var SQLTemplates = Templates{
 			dirty = true,
 			inserts_since_tree_update = mt.inserts_since_tree_update + b.insert_count,
 			deletes_since_tree_update = mt.deletes_since_tree_update + b.delete_count,
-			last_modified = current_timestamp,
-			range_start = CASE
-				WHEN mt.node_position = (SELECT node_position FROM first_block) AND (SELECT pkey FROM new_min_pkey) IS NOT NULL
-				THEN
-					{{if .IsComposite}}
-						(SELECT pkey FROM new_min_pkey)::{{.CompositeTypeName}}
-					{{else}}
-						(SELECT pkey FROM new_min_pkey)::{{.PkeyType}}
-					{{end}}
-				ELSE mt.range_start
-			END
+			last_modified = current_timestamp
 		FROM
 			blocks_to_update b
 		WHERE
@@ -1561,6 +1509,7 @@ var SQLTemplates = Templates{
 	`)),
 	GetLeafRanges: template.Must(template.New("getLeafRanges").Parse(`
 		SELECT
+			node_position,
 			range_start,
 			range_end
 		FROM
@@ -1573,6 +1522,7 @@ var SQLTemplates = Templates{
 	`)),
 	GetLeafRangesExpanded: template.Must(template.New("getLeafRangesExpanded").Parse(`
 		SELECT
+			node_position,
 			{{.StartAttrs}},
 			{{.EndAttrs}}
 		FROM
@@ -1597,8 +1547,10 @@ var SQLTemplates = Templates{
 			{{.PkeyCols}}
 		FROM
 			{{.SchemaIdent}}.{{.TableIdent}}
+		{{- if .HasStart}}
 		WHERE
 			({{.PkeyCols}}) >= ({{.PkeyValues}})
+		{{- end}}
 		ORDER BY
 			({{.PkeyCols}}) DESC
 		LIMIT
@@ -1618,8 +1570,10 @@ var SQLTemplates = Templates{
 			{{.Key}}
 		FROM
 			{{.SchemaIdent}}.{{.TableIdent}}
+		{{- if .HasStart}}
 		WHERE
 			{{.Key}} >= $1
+		{{- end}}
 		ORDER BY
 			{{.Key}} DESC
 		LIMIT
@@ -1726,13 +1680,22 @@ var SQLTemplates = Templates{
 			AND inserts_since_tree_update >= $1
 			AND node_position = ANY($2)
 	`)),
+	// Row counts of leaf blocks. The first leaf (node_position = 0) also owns
+	// the keys under its range_start, see FirstBlockPosition. A separate
+	// subquery counts them. An OR in the join condition would do the same, but
+	// for a simple key it would stop the index scan on the lower bound of
+	// every block.
 	FindBlocksToMerge: template.Must(template.New("findBlocksToMerge").Parse(`
 		WITH BlockCounts AS (
 			SELECT
 				t1.node_position,
 				t1.range_start,
 				t1.range_end,
-				COUNT(t2.*) AS actual_rows
+				COUNT(t2.*)
+				+ CASE WHEN t1.node_position = 0 THEN (
+					SELECT count(*) FROM {{.SchemaIdent}}.{{.TableIdent}} t3
+					WHERE {{if .SimplePrimaryKey}}t3.{{index .Key 0}} < t1.range_start{{else}}ROW({{- range $i, $k := .Key}}{{if $i}}, {{end}}t3.{{$k}}{{end}}) < t1.range_start{{end}}
+				) ELSE 0 END AS actual_rows
 			FROM {{.MtreeTable}} t1
 			LEFT JOIN {{.SchemaIdent}}.{{.TableIdent}} t2 ON
 				{{if .SimplePrimaryKey}}
@@ -1750,17 +1713,22 @@ var SQLTemplates = Templates{
 		ORDER BY node_position;
 	`)),
 
+	// Counts the first leaf as FindBlocksToMerge does.
 	FindBlocksToMergeExpanded: template.Must(template.New("findBlocksToMergeExpanded").Parse(`
 		WITH BlockCounts AS (
 			SELECT
 				t1.node_position,
-				COUNT(t2.*) AS actual_rows
+				COUNT(t2.*)
+				+ CASE WHEN t1.node_position = 0 THEN (
+					SELECT count(*) FROM {{.SchemaIdent}}.{{.TableIdent}} t3
+					WHERE ROW({{- range $i, $k := .Key}}{{if $i}}, {{end}}t3.{{$k}}{{end}}) < t1.range_start
+				) ELSE 0 END AS actual_rows
 			FROM {{.MtreeTable}} t1
 			LEFT JOIN {{.SchemaIdent}}.{{.TableIdent}} t2 ON
 				ROW({{- range $i, $k := .Key}}{{if $i}}, {{end}}t2.{{$k}}{{end}}) >= t1.range_start AND (ROW({{- range $i, $k := .Key}}{{if $i}}, {{end}}t2.{{$k}}{{end}}) <= t1.range_end OR t1.range_end IS NULL)
 			WHERE t1.node_level = 0
 			{{if .UsePositionFilter}} AND t1.node_position = ANY({{.PositionPlaceholder}}){{end}}
-			GROUP BY t1.node_position
+			GROUP BY t1.node_position, t1.range_start
 		)
 		SELECT t1.node_position,
 			{{.StartAttrs}},
@@ -1769,58 +1737,6 @@ var SQLTemplates = Templates{
 		JOIN BlockCounts bc ON bc.node_position = t1.node_position
 		WHERE bc.actual_rows < {{.MergeValPlaceholder}}
 		ORDER BY t1.node_position;
-	`)),
-	GetBlockCountComposite: template.Must(template.New("getBlockCountComposite").Parse(`
-		WITH block_data AS (
-			SELECT
-				node_position,
-				range_start,
-				range_end
-			FROM
-				{{.MtreeTable}}
-			WHERE
-				node_level = 0
-				AND node_position = $1
-		)
-		SELECT
-			b.node_position,
-			b.range_start,
-			b.range_end,
-			COUNT(t.*) AS cnt
-		FROM
-			block_data b
-			LEFT JOIN {{.SchemaIdent}}.{{.TableIdent}} t ON ROW({{.PkeyCols}}) >= b.range_start
-			AND (
-				ROW({{.PkeyCols}}) <= b.range_end
-				OR b.range_end IS NULL
-			)
-		GROUP BY
-			b.node_position,
-			b.range_start,
-			b.range_end
-		ORDER BY
-			b.node_position
-	`)),
-	GetBlockCountSimple: template.Must(template.New("getBlockCountSimple").Parse(`
-		SELECT
-			node_position,
-			range_start,
-			range_end,
-			count(t.{{.Key}})
-		FROM
-			{{.MtreeTable}} mt
-			LEFT JOIN {{.SchemaIdent}}.{{.TableIdent}} t ON t.{{.Key}} >= mt.range_start
-			AND (
-				t.{{.Key}} <= mt.range_end
-				OR mt.range_end IS NULL
-			)
-		WHERE
-			mt.node_level = 0
-			AND mt.node_position = $1
-		GROUP BY
-			mt.node_position,
-			mt.range_start,
-			mt.range_end
 	`)),
 	GetBlockSizeFromMetadata: template.Must(template.New("getBlockSizeFromMetadata").Funcs(aceTemplateFuncs).Parse(`
 		SELECT
@@ -1877,8 +1793,14 @@ var SQLTemplates = Templates{
 	DropMtreeTable: template.Must(template.New("dropMtreeTable").Parse(`
 		DROP TABLE IF EXISTS {{.MtreeTable}} CASCADE
 	`)),
+	// Counts the first leaf as FindBlocksToMerge does.
 	GetBlockWithCount: template.Must(template.New("getBlockWithCount").Parse(`
-		SELECT t1.node_position, t1.range_start, t1.range_end, COUNT(t2.*)
+		SELECT t1.node_position, t1.range_start, t1.range_end,
+			COUNT(t2.*)
+			+ CASE WHEN t1.node_position = 0 THEN (
+				SELECT count(*) FROM {{.SchemaIdent}}.{{.TableIdent}} t3
+				WHERE {{if .IsComposite}}ROW({{- range $i, $k := .Key}}{{if $i}}, {{end}}t3.{{$k}}{{end}}) < t1.range_start{{else}}t3.{{index .Key 0}} < t1.range_start{{end}}
+			) ELSE 0 END
 		FROM {{.MtreeTable}} t1
 		LEFT JOIN {{.SchemaIdent}}.{{.TableIdent}} t2 ON
 			{{if .IsComposite}}
@@ -1890,11 +1812,16 @@ var SQLTemplates = Templates{
 		GROUP BY t1.node_position, t1.range_start, t1.range_end
 	`)),
 
+	// Counts the first leaf as FindBlocksToMerge does.
 	GetBlockWithCountExpanded: template.Must(template.New("getBlockWithCountExpanded").Parse(`
 		SELECT t1.node_position,
 			{{.StartAttrs}},
 			{{.EndAttrs}},
 			COUNT(t2.*)
+			+ CASE WHEN t1.node_position = 0 THEN (
+				SELECT count(*) FROM {{.SchemaIdent}}.{{.TableIdent}} t3
+				WHERE ROW({{- range $i, $k := .Key}}{{if $i}}, {{end}}t3.{{$k}}{{end}}) < t1.range_start
+			) ELSE 0 END
 		FROM {{.MtreeTable}} t1
 		LEFT JOIN {{.SchemaIdent}}.{{.TableIdent}} t2 ON
 			ROW({{- range $i, $k := .Key}}{{if $i}}, {{end}}t2.{{$k}}{{end}}) >= t1.range_start AND (ROW({{- range $i, $k := .Key}}{{if $i}}, {{end}}t2.{{$k}}{{end}}) <= t1.range_end OR t1.range_end IS NULL)
@@ -1902,10 +1829,13 @@ var SQLTemplates = Templates{
 		GROUP BY t1.node_position, t1.range_start, t1.range_end
 	`)),
 
+	// Two leaves can share a range_start: a reference node with one row gives
+	// [k, k] and [k, NULL]. The old position breaks the tie, so the first leaf
+	// stays at position 0, see FirstBlockPosition.
 	ResetPositionsByStart: template.Must(template.New("resetPositionsByStart").Parse(`
 		WITH seq AS (
 			SELECT node_position,
-			       row_number() OVER (ORDER BY range_start) - 1 AS pos_seq
+			       row_number() OVER (ORDER BY range_start, node_position) - 1 AS pos_seq
 			FROM {{.MtreeTable}}
 			WHERE node_level = 0
 		)
@@ -1918,7 +1848,7 @@ var SQLTemplates = Templates{
 	ResetPositionsByStartFromTemp: template.Must(template.New("resetPositionsByStartFromTemp").Parse(`
 		WITH seq AS (
 			SELECT node_position,
-				   row_number() OVER (ORDER BY range_start) - 1 AS pos_seq
+				   row_number() OVER (ORDER BY range_start, node_position) - 1 AS pos_seq
 			FROM {{.MtreeTable}}
 			WHERE node_level = 0 AND node_position >= $1
 		)
@@ -1931,7 +1861,7 @@ var SQLTemplates = Templates{
 	ResetPositionsByStartExpanded: template.Must(template.New("resetPositionsByStartExpanded").Parse(`
 		WITH seq AS (
 			SELECT node_position,
-			       row_number() OVER (ORDER BY range_start) - 1 AS pos_seq
+			       row_number() OVER (ORDER BY range_start, node_position) - 1 AS pos_seq
 			FROM {{.MtreeTable}}
 			WHERE node_level = 0
 		)

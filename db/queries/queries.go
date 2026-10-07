@@ -26,10 +26,41 @@ import (
 	"github.com/pgedge/ace/pkg/types"
 )
 
-// CurrentHashVersion is the version of the hash algorithm used by this build.
-// Increment when the SQL hash computation changes (e.g., switching from
-// whole-row ::text to per-column concat_ws with trim_scale).
-const CurrentHashVersion = 2
+// CurrentHashVersion is the version of the stored leaf hashes. Increment it
+// when a leaf hash changes meaning: the row hash, or the rows a leaf covers.
+// mtree update then computes the leaf hashes again.
+//
+//	1: string_agg of whole-row ::text.
+//	2: per-column concat_ws with trim_scale.
+//	3: the first leaf has no lower bound (see FirstBlockPosition). The row
+//	   hash is the same as in version 2.
+const CurrentHashVersion = 3
+
+// FirstBlockPosition is the node_position of the first leaf block. This block
+// has no lower bound: it covers every key up to its range_end, also the keys
+// below its stored range_start. The SQL templates use the literal 0 for it,
+// and every function here that reads block ranges returns a nil start for it.
+//
+// The bounds come from the reference node only, so another node can have keys
+// below the first block's range_start. With a lower bound, no leaf would cover
+// these rows.
+//
+// Invariant: the first leaf has the smallest range_start, and among leaves
+// with the same range_start it has the smallest node_position. Leaves are
+// numbered again by (range_start, node_position), so it keeps position 0. A
+// merge keeps the start of the lower block, and splitBlocks sets the stored
+// range_start of the first block to the smallest key of the table before it
+// adds split points.
+const FirstBlockPosition = 0
+
+// OpenFirstBlockStart returns start, or nil for the first block. A nil start
+// means "no lower bound" to every function that builds a range condition.
+func OpenFirstBlockStart(nodePosition int64, start []any) []any {
+	if nodePosition == FirstBlockPosition {
+		return nil
+	}
+	return start
+}
 
 type DBQuerier interface {
 	Exec(context.Context, string, ...interface{}) (pgconn.CommandTag, error)
@@ -1966,8 +1997,8 @@ func UpdateMetadata(ctx context.Context, db DBQuerier, schema, table string, tot
 }
 
 func ComputeLeafHashes(ctx context.Context, db DBQuerier, schema, table string, _ bool, key []string, start []any, end []any, allCols []string, colTypes map[string]string) ([]byte, error) {
-	hasLower := len(start) > 0 && !sliceAllNil(start)
-	hasUpper := len(end) > 0 && !sliceAllNil(end)
+	hasLower := !AllNil(start)
+	hasUpper := !AllNil(end)
 
 	sql, err := BlockHashSQL(schema, table, key, "MTREE_LEAF_HASH", hasLower, hasUpper, "", allCols, colTypes)
 	if err != nil {
@@ -1989,7 +2020,9 @@ func ComputeLeafHashes(ctx context.Context, db DBQuerier, schema, table string, 
 	return leafHash, nil
 }
 
-func sliceAllNil(vals []any) bool {
+// AllNil reports whether vals is empty or holds only nil values. A block bound
+// like this is open: it puts no limit on that side of the block.
+func AllNil(vals []any) bool {
 	if len(vals) == 0 {
 		return true
 	}
@@ -2178,11 +2211,12 @@ func GetLeafRanges(ctx context.Context, db DBQuerier, mtreeTable string, nodePos
 		var ranges []types.LeafRange
 		for rows.Next() {
 			var r types.LeafRange
+			var pos int64
 			var start, end any
-			if err := rows.Scan(&start, &end); err != nil {
+			if err := rows.Scan(&pos, &start, &end); err != nil {
 				return nil, fmt.Errorf("failed to scan leaf range: %w", err)
 			}
-			r.RangeStart = []any{start}
+			r.RangeStart = OpenFirstBlockStart(pos, []any{start})
 			if end != nil {
 				r.RangeEnd = []any{end}
 			}
@@ -2222,10 +2256,12 @@ func GetLeafRanges(ctx context.Context, db DBQuerier, mtreeTable string, nodePos
 	var ranges []types.LeafRange
 	numKeyCols := len(key)
 	for rows.Next() {
+		var pos int64
 		dest := make([]any, numKeyCols*2)
-		destPtrs := make([]any, numKeyCols*2)
+		destPtrs := make([]any, 1+numKeyCols*2)
+		destPtrs[0] = &pos
 		for i := range dest {
-			destPtrs[i] = &dest[i]
+			destPtrs[1+i] = &dest[i]
 		}
 
 		if err := rows.Scan(destPtrs...); err != nil {
@@ -2238,7 +2274,7 @@ func GetLeafRanges(ctx context.Context, db DBQuerier, mtreeTable string, nodePos
 		copy(endVals, dest[numKeyCols:])
 
 		ranges = append(ranges, types.LeafRange{
-			RangeStart: startVals,
+			RangeStart: OpenFirstBlockStart(pos, startVals),
 			RangeEnd:   endVals,
 		})
 	}
@@ -2264,6 +2300,9 @@ func GetRowCountEstimateFromMetadata(ctx context.Context, db DBQuerier, schema, 
 	return count, nil
 }
 
+// GetMaxValComposite returns the largest key at or above pkeyValues, or the
+// largest key of the table when pkeyValues is empty or all NULL. A primary
+// key never holds NULL, so pkeyValues is either a full key or all NULL.
 func GetMaxValComposite(ctx context.Context, db DBQuerier, schema, table string, pkeyCols []string, pkeyValues []any) ([]interface{}, error) {
 	cols := make([]string, len(pkeyCols))
 	for i, c := range pkeyCols {
@@ -2271,11 +2310,14 @@ func GetMaxValComposite(ctx context.Context, db DBQuerier, schema, table string,
 	}
 	colsStr := strings.Join(cols, ", ")
 
-	valsPh := make([]string, len(pkeyValues))
-	args := make([]any, len(pkeyValues))
-	for i, v := range pkeyValues {
-		valsPh[i] = fmt.Sprintf("$%d", i+1)
-		args[i] = v
+	hasStart := !AllNil(pkeyValues)
+	var valsPh []string
+	var args []any
+	if hasStart {
+		for i, v := range pkeyValues {
+			valsPh = append(valsPh, fmt.Sprintf("$%d", i+1))
+			args = append(args, v)
+		}
 	}
 	valsStr := strings.Join(valsPh, ", ")
 
@@ -2284,6 +2326,7 @@ func GetMaxValComposite(ctx context.Context, db DBQuerier, schema, table string,
 		"TableIdent":  pgx.Identifier{table}.Sanitize(),
 		"PkeyCols":    colsStr,
 		"PkeyValues":  fmt.Sprintf("ROW(%s)", valsStr),
+		"HasStart":    hasStart,
 	}
 	sql, err := RenderSQL(SQLTemplates.GetMaxValComposite, data)
 	if err != nil {
@@ -2321,11 +2364,16 @@ func UpdateMaxVal(ctx context.Context, db DBQuerier, mtreeTable string, rangeEnd
 	return nil
 }
 
+// GetMaxValSimple returns the largest key at or above rangeStart, or the
+// largest key of the table when rangeStart is nil. It returns nil when no row
+// matches.
 func GetMaxValSimple(ctx context.Context, db DBQuerier, schema, table, key string, rangeStart interface{}) (interface{}, error) {
+	hasStart := rangeStart != nil
 	data := map[string]interface{}{
 		"SchemaIdent": pgx.Identifier{schema}.Sanitize(),
 		"TableIdent":  pgx.Identifier{table}.Sanitize(),
 		"Key":         key,
+		"HasStart":    hasStart,
 	}
 
 	sql, err := RenderSQL(SQLTemplates.GetMaxValSimple, data)
@@ -2333,9 +2381,16 @@ func GetMaxValSimple(ctx context.Context, db DBQuerier, schema, table, key strin
 		return nil, fmt.Errorf("failed to render GetMaxValSimple SQL: %w", err)
 	}
 
+	var args []any
+	if hasStart {
+		args = append(args, rangeStart)
+	}
 	var maxVal interface{}
-	err = db.QueryRow(ctx, sql, rangeStart).Scan(&maxVal)
+	err = db.QueryRow(ctx, sql, args...).Scan(&maxVal) // nosemgrep
 	if err != nil {
+		if err == pgx.ErrNoRows {
+			return nil, nil
+		}
 		return nil, fmt.Errorf("query to get max val simple for '%s.%s' failed: %w", schema, table, err)
 	}
 
@@ -2393,7 +2448,8 @@ func GetBlockRowCount(ctx context.Context, db DBQuerier, schema string, table st
 		var conditions []string
 		var startPlaceholders, endPlaceholders []string
 
-		if len(start) > 0 {
+		// An all-NULL bound is an open side, as in the simple-key branch.
+		if !AllNil(start) {
 			for i := range start {
 				startPlaceholders = append(startPlaceholders, fmt.Sprintf("$%d", len(args)+i+1))
 			}
@@ -2401,7 +2457,7 @@ func GetBlockRowCount(ctx context.Context, db DBQuerier, schema string, table st
 			args = append(args, start...)
 		}
 
-		if len(end) > 0 && end[0] != nil {
+		if !AllNil(end) {
 			for i := range end {
 				endPlaceholders = append(endPlaceholders, fmt.Sprintf("$%d", len(args)+i+1))
 			}
@@ -2476,6 +2532,7 @@ func GetDirtyAndNewBlocks(ctx context.Context, db DBQuerier, mtreeTable string, 
 			if end != nil {
 				br.RangeEnd = []any{end}
 			}
+			br.RangeStart = OpenFirstBlockStart(br.NodePosition, br.RangeStart)
 			blocks = append(blocks, br)
 		}
 		if err := rows.Err(); err != nil {
@@ -2537,7 +2594,7 @@ func GetDirtyAndNewBlocks(ctx context.Context, db DBQuerier, mtreeTable string, 
 		endVals := make([]any, len(key))
 		copy(startVals, dest[1:1+len(key)])
 		copy(endVals, dest[1+len(key):])
-		br.RangeStart = startVals
+		br.RangeStart = OpenFirstBlockStart(br.NodePosition, startVals)
 		br.RangeEnd = endVals
 		blocks = append(blocks, br)
 	}
@@ -2576,6 +2633,7 @@ func FindBlocksToSplit(ctx context.Context, db DBQuerier, mtreeTable string, ins
 			if end != nil {
 				br.RangeEnd = []any{end}
 			}
+			br.RangeStart = OpenFirstBlockStart(br.NodePosition, br.RangeStart)
 			blocks = append(blocks, br)
 		}
 		if err := rows.Err(); err != nil {
@@ -2636,7 +2694,7 @@ func FindBlocksToSplit(ctx context.Context, db DBQuerier, mtreeTable string, ins
 		endVals := make([]any, len(key))
 		copy(startVals, dest[1:1+len(key)])
 		copy(endVals, dest[1+len(key):])
-		br.RangeStart = startVals
+		br.RangeStart = OpenFirstBlockStart(br.NodePosition, startVals)
 		br.RangeEnd = endVals
 		blocks = append(blocks, br)
 	}
@@ -2876,7 +2934,7 @@ func findBlocksToMerge(ctx context.Context, db DBQuerier, mtreeTable, schema, ta
 			if err := rows.Scan(&br.NodePosition, &start, &end); err != nil {
 				return nil, fmt.Errorf("failed to scan block to merge: %w", err)
 			}
-			br.RangeStart = []any{start}
+			br.RangeStart = OpenFirstBlockStart(br.NodePosition, []any{start})
 			br.RangeEnd = []any{end}
 			blocks = append(blocks, br)
 		}
@@ -2939,7 +2997,7 @@ func findBlocksToMerge(ctx context.Context, db DBQuerier, mtreeTable, schema, ta
 		endVals := make([]any, len(key))
 		copy(startVals, dest[1:1+len(key)])
 		copy(endVals, dest[1+len(key):])
-		br.RangeStart = startVals
+		br.RangeStart = OpenFirstBlockStart(br.NodePosition, startVals)
 		br.RangeEnd = endVals
 		blocks = append(blocks, br)
 	}
@@ -2947,50 +3005,6 @@ func findBlocksToMerge(ctx context.Context, db DBQuerier, mtreeTable, schema, ta
 		return nil, fmt.Errorf("error iterating over expanded blocks to merge: %w", err)
 	}
 	return blocks, nil
-}
-
-func GetBlockCountComposite(ctx context.Context, db DBQuerier, mtreeTable, schema, table, pkeyCols string, nodePosition int64) (*types.BlockCountComposite, error) {
-	data := map[string]interface{}{
-		"MtreeTable":  mtreeTable,
-		"SchemaIdent": pgx.Identifier{schema}.Sanitize(),
-		"TableIdent":  pgx.Identifier{table}.Sanitize(),
-		"PkeyCols":    pkeyCols,
-	}
-
-	sql, err := RenderSQL(SQLTemplates.GetBlockCountComposite, data)
-	if err != nil {
-		return nil, fmt.Errorf("failed to render GetBlockCountComposite SQL: %w", err)
-	}
-
-	var blockCount types.BlockCountComposite
-	err = db.QueryRow(ctx, sql, nodePosition).Scan(&blockCount.NodePosition, &blockCount.RangeStart, &blockCount.RangeEnd, &blockCount.Count)
-	if err != nil {
-		return nil, fmt.Errorf("query to get block count composite for '%s' failed: %w", mtreeTable, err)
-	}
-
-	return &blockCount, nil
-}
-
-func GetBlockCountSimple(ctx context.Context, db DBQuerier, mtreeTable, schema, table, key string, nodePosition int64) (*types.BlockCountSimple, error) {
-	data := map[string]interface{}{
-		"MtreeTable":  mtreeTable,
-		"SchemaIdent": pgx.Identifier{schema}.Sanitize(),
-		"TableIdent":  pgx.Identifier{table}.Sanitize(),
-		"Key":         key,
-	}
-
-	sql, err := RenderSQL(SQLTemplates.GetBlockCountSimple, data)
-	if err != nil {
-		return nil, fmt.Errorf("failed to render GetBlockCountSimple SQL: %w", err)
-	}
-
-	var blockCount types.BlockCountSimple
-	err = db.QueryRow(ctx, sql, nodePosition).Scan(&blockCount.NodePosition, &blockCount.RangeStart, &blockCount.RangeEnd, &blockCount.Count)
-	if err != nil {
-		return nil, fmt.Errorf("query to get block count simple for '%s' failed: %w", mtreeTable, err)
-	}
-
-	return &blockCount, nil
 }
 
 func GetBlockSizeFromMetadata(ctx context.Context, db DBQuerier, schema, table string) (int, error) {
@@ -3227,7 +3241,7 @@ func GetBlockWithCount(ctx context.Context, db DBQuerier, mtreeTable, schema, ta
 		} else {
 			return nil, fmt.Errorf("unexpected type for count: %T", dest[len(dest)-1])
 		}
-		block.RangeStart = startVals
+		block.RangeStart = OpenFirstBlockStart(block.NodePosition, startVals)
 		block.RangeEnd = endVals
 	} else {
 		err := row.Scan(&block.NodePosition, &start, &end, &count)
@@ -3237,7 +3251,7 @@ func GetBlockWithCount(ctx context.Context, db DBQuerier, mtreeTable, schema, ta
 			}
 			return nil, err
 		}
-		block.RangeStart = []any{start}
+		block.RangeStart = OpenFirstBlockStart(block.NodePosition, []any{start})
 		block.RangeEnd = []any{end}
 	}
 	block.Count = count
@@ -3310,8 +3324,9 @@ func GetBulkSplitPoints(ctx context.Context, db DBQuerier, schema, table string,
 	}
 	pkeyColsStr := strings.Join(sanitisedKeyCols, ", ")
 
+	// A nil or all-NULL bound is an open side.
 	var conditions []string
-	if start != nil {
+	if !AllNil(start) {
 		if isComposite {
 			placeholders := make([]string, len(key))
 			for i := 0; i < len(key); i++ {
@@ -3326,7 +3341,7 @@ func GetBulkSplitPoints(ctx context.Context, db DBQuerier, schema, table string,
 			paramIndex++
 		}
 	}
-	if end != nil {
+	if !AllNil(end) {
 		if isComposite {
 			placeholders := make([]string, len(key))
 			for i := 0; i < len(key); i++ {
@@ -3450,24 +3465,6 @@ func AlterPublicationAddTable(ctx context.Context, db DBQuerier, publicationName
 	_, err = db.Exec(ctx, sql)
 	if err != nil {
 		return fmt.Errorf("query to alter publication failed: %w", err)
-	}
-
-	return nil
-}
-
-func MarkBlockDirty(ctx context.Context, db DBQuerier, mtreeTable, pkeyValue string) error {
-	data := map[string]interface{}{
-		"MtreeTable": mtreeTable,
-		"PkeyValue":  pkeyValue,
-	}
-	sql, err := RenderSQL(SQLTemplates.MarkBlockDirty, data)
-	if err != nil {
-		return fmt.Errorf("failed to render MarkBlockDirty SQL: %w", err)
-	}
-
-	_, err = db.Exec(ctx, sql)
-	if err != nil {
-		return fmt.Errorf("query to mark block dirty failed: %w", err)
 	}
 
 	return nil

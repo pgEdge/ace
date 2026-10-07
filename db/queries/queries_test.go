@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"text/template"
 	"time"
 )
 
@@ -490,4 +491,35 @@ func TestConcatWSBatched(t *testing.T) {
 				strings.Count(result, "concat_ws("), result)
 		}
 	})
+}
+
+// A block with no lower bound reaches the max-value queries with no start key.
+// They must then look at the whole table, not compare the key with NULL.
+func TestGetMaxValOpenStart(t *testing.T) {
+	cases := []struct {
+		name     string
+		tmpl     *template.Template
+		data     map[string]any
+		hasWhere bool
+	}{
+		{"simple/open", SQLTemplates.GetMaxValSimple,
+			map[string]any{"SchemaIdent": `"public"`, "TableIdent": `"t"`, "Key": `"id"`, "HasStart": false}, false},
+		{"simple/bounded", SQLTemplates.GetMaxValSimple,
+			map[string]any{"SchemaIdent": `"public"`, "TableIdent": `"t"`, "Key": `"id"`, "HasStart": true}, true},
+		{"composite/open", SQLTemplates.GetMaxValComposite,
+			map[string]any{"SchemaIdent": `"public"`, "TableIdent": `"t"`, "PkeyCols": `"a", "b"`, "PkeyValues": "ROW()", "HasStart": false}, false},
+		{"composite/bounded", SQLTemplates.GetMaxValComposite,
+			map[string]any{"SchemaIdent": `"public"`, "TableIdent": `"t"`, "PkeyCols": `"a", "b"`, "PkeyValues": "ROW($1, $2)", "HasStart": true}, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			sql, err := RenderSQL(tc.tmpl, tc.data)
+			if err != nil {
+				t.Fatalf("render: %v", err)
+			}
+			if got := strings.Contains(sql, "WHERE"); got != tc.hasWhere {
+				t.Errorf("WHERE present = %v, want %v:\n%s", got, tc.hasWhere, sql)
+			}
+		})
+	}
 }

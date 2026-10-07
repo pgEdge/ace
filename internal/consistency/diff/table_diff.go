@@ -1445,14 +1445,7 @@ func (t *TableDiffTask) ExecuteTask() (err error) {
 
 			endKeyParts := make([]any, numPKCols)
 			copy(endKeyParts, scanDest[numPKCols:2*numPKCols])
-			allNil := true
-			for _, v := range endKeyParts {
-				if v != nil {
-					allNil = false
-					break
-				}
-			}
-			if allNil {
+			if queries.AllNil(endKeyParts) {
 				rEnd = nil
 			} else {
 				rEnd = endKeyParts
@@ -1738,7 +1731,7 @@ func extractRangeBoundValues(bound any, numPKCols int) ([]any, bool, error) {
 		if len(vals) != numPKCols {
 			return nil, false, fmt.Errorf("range bound expected %d values, got %d", numPKCols, len(vals))
 		}
-		if rangeSliceAllNil(vals) {
+		if queries.AllNil(vals) {
 			return nil, false, nil
 		}
 		return vals, true, nil
@@ -1754,18 +1747,6 @@ func extractRangeBoundValues(bound any, numPKCols int) ([]any, bool, error) {
 	}
 
 	return nil, false, fmt.Errorf("unsupported range bound type %T", bound)
-}
-
-func rangeSliceAllNil(vals []any) bool {
-	if len(vals) == 0 {
-		return true
-	}
-	for _, v := range vals {
-		if v != nil {
-			return false
-		}
-	}
-	return true
 }
 
 func (t *TableDiffTask) generateSubRanges(
