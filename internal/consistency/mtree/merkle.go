@@ -354,6 +354,10 @@ func (m *MerkleTreeTask) recordPairCompareErr(pairKey string) {
 	m.pairCompareErrs[pairKey] = true
 }
 
+// processWorkItem compares the rows of the mismatched leaf ranges in work on
+// two nodes. It reads the primary key and the row hash (queries.RowHashExpr)
+// of every row in these ranges from both nodes, and then fetches and records
+// only the rows whose hashes differ or that exist on one node only.
 func (m *MerkleTreeTask) processWorkItem(work CompareRangesWorkItem, pool1, pool2 *pgxpool.Pool) error {
 	logger.Debug("Processing work item with %d ranges for %s and %s", len(work.Ranges), work.Node1["Name"], work.Node2["Name"])
 	var whereClause string
