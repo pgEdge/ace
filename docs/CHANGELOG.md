@@ -14,12 +14,15 @@ All notable changes to ACE will be captured in this document. This project follo
   `('a|b', 'c')` and `('a', 'b|c')`, so the diff did not see these
   differences.
   Each row is now hashed separately: the `sha256()` of the `ROW(...)::text`
-  form of the row, converted to UTF8. The block hash is the XOR of the row
-  hashes, so its memory does not grow with the number or the width of the
-  rows. The row form keeps NULL, empty strings and delimiters apart. Numeric
-  values still hash without trailing zeros. The hash does not depend on the
-  database encoding or on the byte order of the server. It needs
-  PostgreSQL 14 or later (`bit_xor`).
+  form of the row, converted to UTF8. The block hash is built from the row
+  count and from the sums of the four 64-bit words of the row hashes, so its
+  memory does not grow with the number or the width of the rows. It does not
+  depend on the order of the rows, and a row that appears twice counts twice:
+  in an inheritance tree, the parent and a child can hold rows with the same
+  key, and a XOR of the row hashes would cancel two equal rows. The row form
+  keeps NULL, empty strings and delimiters apart. Numeric values still hash
+  without trailing zeros. The hash does not depend on the database encoding
+  or on the byte order of the server.
   The hash version is now 3: the next `mtree update` computes all stored leaf
   hashes again, in one transaction per node.
 - **`table-diff` and `mtree` failed on tables with a `numeric[]` column.**

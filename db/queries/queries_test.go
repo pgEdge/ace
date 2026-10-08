@@ -336,7 +336,9 @@ func TestBlockHashSQL(t *testing.T) {
 			wantQueryContains: []string{
 				`FROM "public"."events" AS _tbl_`,
 				`WHERE "event_id" >= $1 AND "event_id" < $2`,
-				`encode(substring(bit_send(COALESCE(bit_xor(('x' || encode(sha256(convert_to(ROW(_tbl_."event_id", _tbl_."name", trim_scale(_tbl_."amount"))::text, 'UTF8')), 'hex'))::bit(256)), 0::bit(256))) FROM 5), 'hex')`,
+				`SELECT encode(` + BlockHashAggExpr + `, 'hex')`,
+				`SELECT ('x' || encode(sha256(convert_to(ROW(_tbl_."event_id", _tbl_."name", trim_scale(_tbl_."amount"))::text, 'UTF8')), 'hex'))::bit(256) AS _rh`,
+				`OFFSET 0`,
 			},
 			wantErr: false,
 		},
@@ -422,8 +424,8 @@ func TestBlockHashSQL(t *testing.T) {
 						t.Errorf("BlockHashSQL() query = %q, want to contain %q", query, substr)
 					}
 				}
-				// bit_xor does not depend on row order, so the query needs
-				// no ORDER BY.
+				// The block hash does not depend on row order, so the query
+				// needs no ORDER BY.
 				if strings.Contains(query, "ORDER BY") {
 					t.Errorf("BlockHashSQL() query = %q, must not sort", query)
 				}
@@ -439,9 +441,13 @@ func TestBlockHashSQLLeafMode(t *testing.T) {
 		t.Fatalf("BlockHashSQL() error = %v", err)
 	}
 	// The leaf hash is stored as raw bytes, so it is not hex-encoded.
-	want := `SELECT substring(bit_send(COALESCE(bit_xor(('x' || encode(sha256(convert_to(ROW(_tbl_."event_id", _tbl_."name")::text, 'UTF8')), 'hex'))::bit(256)), 0::bit(256))) FROM 5)`
-	if !strings.Contains(query, want) {
-		t.Errorf("query = %q, want to contain %q", query, want)
+	for _, want := range []string{
+		`SELECT ` + BlockHashAggExpr + "\n",
+		`SELECT ('x' || encode(sha256(convert_to(ROW(_tbl_."event_id", _tbl_."name")::text, 'UTF8')), 'hex'))::bit(256) AS _rh`,
+	} {
+		if !strings.Contains(query, want) {
+			t.Errorf("query = %q, want to contain %q", query, want)
+		}
 	}
 	if strings.HasPrefix(strings.TrimSpace(query), "SELECT encode(") {
 		t.Errorf("leaf hash must not be hex-encoded: %q", query)

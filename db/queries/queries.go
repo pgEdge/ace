@@ -32,8 +32,41 @@ import (
 //
 //	1: string_agg of whole-row ::text, hashed with pgcrypto digest().
 //	2: string_agg of per-column concat_ws with trim_scale.
-//	3: XOR of the sha256 hashes of the rows (see RowHashExpr).
+//	3: multiset hash of the sha256 hashes of the rows (see BlockHashAggExpr).
 const CurrentHashVersion = 3
+
+// rowHashBitsCol is the column of the inner block hash query that holds the
+// row hash as bit(256).
+const rowHashBitsCol = "_rh"
+
+// BlockHashAggExpr is the aggregate that combines the row hashes of a block
+// (RowHashExpr, as bit(256) in rowHashBitsCol) into the 32-byte block hash.
+//
+// The row hash is split into four 64-bit words, read as signed big-endian
+// integers. The block hash is the sha256 of the text
+// "count,sum1,sum2,sum3,sum4", where sumN is the exact sum of word N over all
+// rows. sum(bigint) gives a numeric, so the sums do not overflow.
+//
+// This is a multiset hash: it does not depend on the order of the rows, and a
+// row that appears twice counts twice. A XOR of the row hashes does not have
+// the second property: two equal rows cancel each other out. This happens in
+// an inheritance tree, because the primary key of the parent does not stop a
+// child table from having a row with the same key. Then a block with the row
+// in the parent and in the child would hash the same as a block without the
+// row.
+//
+// The aggregate state is one count and four sums, whatever the number and the
+// width of the rows, so a block of any size stays far below the 1 GB limit on
+// one value.
+//
+// An empty block hashes to 32 zero bytes, as before. A parent node of the
+// tree is the XOR of its children, so an empty leaf does not change it.
+const BlockHashAggExpr = `CASE WHEN count(*) = 0 THEN decode(repeat('00', 32), 'hex') ` +
+	`ELSE sha256(convert_to(concat_ws(',', count(*), ` +
+	`sum(substring(` + rowHashBitsCol + ` FROM 1 FOR 64)::bigint), ` +
+	`sum(substring(` + rowHashBitsCol + ` FROM 65 FOR 64)::bigint), ` +
+	`sum(substring(` + rowHashBitsCol + ` FROM 129 FOR 64)::bigint), ` +
+	`sum(substring(` + rowHashBitsCol + ` FROM 193 FOR 64)::bigint)), 'UTF8')) END`
 
 type DBQuerier interface {
 	Exec(context.Context, string, ...interface{}) (pgconn.CommandTag, error)

@@ -240,6 +240,41 @@ func TestNativePG(t *testing.T) {
 		assert.False(t, installed, "spock should not be installed on vanilla PG")
 	})
 
+	t.Run("TableDiff_InheritedDuplicateKey", func(t *testing.T) {
+		// The parent's primary key does not cover the child, so n1 can hold
+		// the same row in the parent and in the child. n2 does not have this
+		// row. A XOR of the row hashes cancels the two copies, and the block
+		// hashes of the nodes match; the block hash must count each copy.
+		const parent = "public.inh_dup_parent"
+		const child = "public.inh_dup_child"
+		for _, pool := range env.pools() {
+			_, err := pool.Exec(ctx, "CREATE TABLE "+parent+" (id int PRIMARY KEY, val text)") // nosemgrep
+			require.NoError(t, err)
+			_, err = pool.Exec(ctx, "CREATE TABLE "+child+" (PRIMARY KEY (id)) INHERITS ("+parent+")") // nosemgrep
+			require.NoError(t, err)
+			_, err = pool.Exec(ctx, "INSERT INTO "+parent+" SELECT i, 'v' || i FROM generate_series(2, 50) AS i") // nosemgrep
+			require.NoError(t, err)
+		}
+		t.Cleanup(func() {
+			for _, pool := range env.pools() {
+				_, _ = pool.Exec(context.Background(), "DROP TABLE IF EXISTS "+parent+" CASCADE") // nosemgrep
+			}
+		})
+		_, err := state.n1Pool.Exec(ctx, "INSERT INTO "+parent+" VALUES (1, 'dup')") // nosemgrep
+		require.NoError(t, err)
+		_, err = state.n1Pool.Exec(ctx, "INSERT INTO "+child+" VALUES (1, 'dup')") // nosemgrep
+		require.NoError(t, err)
+
+		task := env.newTableDiffTask(t, parent, []string{env.ServiceN1, env.ServiceN2})
+		require.NoError(t, task.RunChecks(false))
+		require.NoError(t, task.ExecuteTask())
+
+		pair, ok := task.DiffResult.NodeDiffs[env.pairKey()]
+		require.True(t, ok, "table-diff must find the row that n1 has twice and n2 does not have")
+		require.NotEmpty(t, pair.Rows[env.ServiceN1], "the row must be reported on %s", env.ServiceN1)
+		require.Empty(t, pair.Rows[env.ServiceN2])
+	})
+
 	t.Run("GetNodeOriginNames_NativeSubscription", func(t *testing.T) {
 		// Set up a real publication on n1 and subscription on n2 so that
 		// pg_replication_origin gets populated with a subscription-linked entry.
