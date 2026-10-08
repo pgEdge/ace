@@ -688,6 +688,18 @@ func RowHashExpr(tableAlias string, allCols []string, colTypes map[string]string
 	return fmt.Sprintf(`sha256(convert_to(%s, 'UTF8'))`, record), nil
 }
 
+// BlockHashSQL returns the query that computes the hash of one block of
+// schema.table: BlockHashAggExpr over the row hashes (RowHashExpr) of allCols.
+//
+// mode selects the result type. "TD_BLOCK_HASH" gives the hash as hex text
+// for table-diff; "MTREE_LEAF_HASH" gives the 32 raw bytes stored in an mtree
+// leaf. Both modes give the same hash for the same rows.
+//
+// The block is a range of the primary key. includeLower adds
+// "key >= lower bound" and includeUpper adds "key < upper bound"; the bound
+// values are the query parameters, the lower bound first. A composite key is
+// compared as a row. filter, if not empty, is added to the WHERE clause as
+// it is; the caller must make sure it is safe.
 func BlockHashSQL(schema, table string, primaryKeyCols []string, mode string, includeLower, includeUpper bool, filter string, allCols []string, colTypes map[string]string) (string, error) {
 	if len(primaryKeyCols) == 0 {
 		return "", fmt.Errorf("primaryKeyCols cannot be empty")

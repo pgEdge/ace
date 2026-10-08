@@ -1648,6 +1648,9 @@ func (t *TableDiffTask) ExecuteTask() (err error) {
 	return nil
 }
 
+// hashRange runs the block hash query (queries.BlockHashSQL) for the range r
+// on node and returns the hash as hex text. A bound of r that is nil, or all
+// NULL for a composite key, leaves the range open on that side.
 func (t *TableDiffTask) hashRange(
 	ctx context.Context,
 	node string,
