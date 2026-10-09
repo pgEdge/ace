@@ -5,6 +5,26 @@ All notable changes to ACE will be captured in this document. This project follo
 ## [Unreleased]
 
 ### Fixed
+- **`table-diff` and `mtree build` made blocks much larger than `block_size`.**
+  The block bounds came from a `TABLESAMPLE` of the key split with
+  `ntile(rows / block_size)`. On large tables the sample had fewer rows than
+  buckets, and `SYSTEM` sampling takes whole pages, so with a key in physical
+  order a block could hold a million rows. Such a block could hit the
+  60-second hash timeout and stop the diff, and it made the workers uneven.
+  Now ACE walks the primary-key index on the anchor node and starts a new
+  block every `block_size` rows, so no block is larger than `block_size`
+  there. Several workers cut the table at the same time, each in its own
+  key range, and hashing starts with the first block. The key ranges come
+  from the histogram of the first key column, or from a small sample if
+  there is no histogram. On a 50M-row table `table-diff` ran about twice as
+  fast. The log shows how ACE built the blocks.
+- **`table-diff` reported a match when the anchor node had no rows.** It
+  built no blocks, so rows of the other nodes were never compared. Now the
+  whole key space is one open block in this case.
+- **Every ACE connection now sets `max_parallel_workers_per_gather = 0`**
+  (`postgres.max_parallel_workers_per_gather` in `ace.yaml`; `-1` keeps the
+  server setting). ACE runs its hash queries from many workers already, and
+  without this Postgres could add parallel workers to each of them.
 - **`table-diff --output html` was killed by the OOM killer on large diffs.**
   The HTML writer built the whole report in memory: a copy of the diff as
   JSON, the markup of every row, and the final document in one buffer. With

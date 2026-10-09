@@ -85,27 +85,90 @@ flowchart LR
   Diff2 --> Report["Report & summary<br>(JSON/HTML, taskstore)"]:::report
 ```
 
-### Range Generation Without Full Scans
+### Block Boundaries
 
-For very large tables we cannot afford `SELECT COUNT(*)` or `SELECT pk FROM table ORDER BY pk` to drive block boundaries; both imply full scans and can take hours.
+ACE takes the block boundaries from one anchor node: the node with the
+highest estimated row count. The estimate is used only to choose this node;
+the number and the size of blocks do not depend on it. The code is in
+`internal/consistency/slicer`; `mtree build` uses the same code.
 
-- ACE uses planner estimates (`queries.GetRowCountEstimate`) to gauge table cardinality cheaply. This makes up-to-date statistics important—stale stats skew block sizing and sampling.
-- For filtered diffs (materialized view), ACE performs a real `COUNT(*)` only on the filtered view, accepting the smaller scope to get accurate bounds.
-- Based on the estimated row count, ACE chooses a sampling mode for `TABLESAMPLE` in `GeneratePkeyOffsetsQuery`:
-  - Very large tables (100+ billion rows): `SYSTEM` with ~0.01%
-  - Large tables (1–100 billion rows): `SYSTEM` with ~0.1%
-  - Medium tables (100k–1 million rows): `BERNOULLI` ~1%
-  - Smaller tables (10k–100k rows): `BERNOULLI` with a higher percentage (up to 100%)
-- The sampled PKs are bucketed via `ntile` to yield start/end boundaries for each block. ACE also prepends a synthetic leading range (`Start=nil`) to ensure coverage from the absolute beginning, even if sampling misses tiny early values.
+1. **Parts.** ACE splits the key space of the anchor node into K parts, the
+   units of work for the cutting workers. There is one cutting worker per
+   four hash workers (at most four), and four parts per cutting worker, so
+   K does not depend on the size of the table. The part bounds come from
+   `pg_stats.histogram_bounds` of the first primary-key column: each chosen
+   value becomes the first key of the anchor node that is not less than it.
+   If the column has no histogram (the table was never analyzed, or the
+   first column of a composite key has few distinct values), the bounds
+   come from a `TABLESAMPLE SYSTEM ... REPEATABLE` sample of the key, split
+   with `ntile(K)`. The sample reads about 100 pages per part, at least
+   1000; a smaller table is read in full. ACE does not check how old the
+   histogram is: an old histogram makes some parts larger (on an
+   append-only table, the last one), but the blocks stay the same.
+2. **Blocks.** A cutting worker walks its part in key order on the anchor
+   node and starts a new block every `block_size` rows. One query cuts a
+   chunk of blocks by jumping `block_size` rows forward from the current
+   block start:
+
+   ```sql
+   WITH RECURSIVE b(i, <key>) AS (
+       (SELECT 0, <key> FROM t
+        WHERE <key> >= <block start> AND <key> < <hi> AND <filter>
+        ORDER BY <key> LIMIT 1)
+     UNION ALL
+       SELECT b.i + 1, x.*
+       FROM b CROSS JOIN LATERAL (
+           SELECT <key> FROM t
+           WHERE <key> >= b.<key> AND <key> < <hi> AND <filter>
+           ORDER BY <key> OFFSET <block_size> LIMIT 1) x
+       WHERE b.i < <blocks in chunk>
+   )
+   SELECT i, <key> FROM b ORDER BY i
+   ```
+
+   Each jump is one descent of the primary-key index that reads
+   `block_size` entries, and only one key per block goes back to ACE. When
+   a jump finds no row, the part ends, and ACE counts the rows of its last
+   block. So no block holds more than `block_size` rows on the anchor node,
+   whatever the key distribution, the physical row order or the size of the
+   table. Rows that `table_filter` removes are not counted.
+
+   A chunk runs in a read-only `REPEATABLE READ` transaction with
+   `enable_seqscan` and `enable_sort` off; otherwise, with a selective
+   filter, the planner can choose a sequential scan and a sort for every
+   jump. The first chunk of a part cuts one block; each next chunk cuts
+   twice as many, up to about one million rows. So the first block is ready
+   at once, and no query holds a snapshot for long. On a laptop one cutting
+   worker cuts 5–6 million `bigint` keys per second, and the rate grows
+   linearly with the number of workers.
+
+Workers send each block to the hash queue as soon as they cut it, so
+hashing does not wait for a full pass over the key. Blocks of different
+parts can arrive in any order; the comparison step sorts them by key.
+
+The log shows how ACE built the boundaries: the part source and why, the
+anchor node, the number of parts and workers, and, at the end, the number
+of blocks, the largest block, the time to the first block and the time to
+cut all blocks.
 
 ### Range Alignment Across Nodes
 
-Challenge: block boundaries come from one anchor node (the one with the highest estimated row count). Other nodes may have rows that sort before the anchor’s first PK or after its last PK. If we only used closed intervals from the anchor, those edge rows would never be hashed.
+Challenge: block boundaries come from the anchor node. Other nodes may have
+rows that sort before the anchor’s first PK or after its last PK. If we only
+used closed intervals from the anchor, those edge rows would never be
+hashed.
 
-- The offsets query (`GeneratePkeyOffsetsQuery`) always keeps the anchor’s first and last PKs and leaves the final range open (`End = NULL`). That makes the top end unbounded on every node, so “extra tail” rows are still included and hashed.
-- `table-diff` injects a synthetic leading range with `Start = NULL` and `End = <first anchor boundary>` to catch rows that exist only before the anchor’s first PK on another node.
-- Each range is applied identically to every node. In `hashRange`, `nil` means “no bound,” so the same logical ranges become open at the edges, letting boundary skew surface as hash mismatches.
-- When hashes differ because of leading/trailing skew, recursion splits the offending range until the discrepant rows are isolated and, if needed, materialised.
+- The first block has no lower bound: it is `(NULL, k_first)`, where
+  `k_first` is the first key of the anchor node. On the anchor node it is
+  empty.
+- The last block has no upper bound: it is `[k_last, NULL)`. On the anchor
+  node it holds at most `block_size` rows.
+- Each block is applied identically to every node. In `hashRange`, `nil`
+  means “no bound,” so rows of another node outside the anchor’s key range
+  fall into the first or the last block and surface as hash mismatches.
+  On such a node these two blocks can hold more than `block_size` rows:
+  the extra rows are differences, and recursion splits the block until the
+  discrepant rows are isolated.
 
 ```mermaid
 flowchart LR
@@ -135,7 +198,7 @@ flowchart LR
   - Arrays/UDTs get cast to `TEXT` to avoid OID/scan issues regardless of PK shape.
 - **What users should watch for**
   - Ensure the declared PK is the true business key; otherwise, composite drift can hide behind non-unique or misordered keys.
-  - Keep statistics fresh so sampling and range sizing remain representative for multi-column distributions.
+  - If the first key column has few distinct values, ACE cannot use its histogram and takes the part bounds from a sample. This is a little slower to start, but the blocks keep their size.
   - Avoid nullable or unstable key components (e.g., keys derived from timestamps that can change) to keep comparisons consistent over time.
 
 ```mermaid
@@ -166,7 +229,7 @@ flowchart LR
 - **max_connections**: Hard cap on the connection pool size per node. When set, overrides the concurrency-derived pool size. Useful for environments with limited `max_connections` on the database server. Workers that exceed the pool size will queue for a connection rather than fail.
 - **compare_unit_size**: Lower values push recursion deeper (more queries, smaller fetches); higher values stop earlier (fewer queries, larger fetches on mismatched ranges).
 - **max_diff_rows**: Early-exit guardrail. Lower caps keep runs short and reports small on divergent tables; raising/removing can grow memory and report size when drift is large.
-- **table_filter**: Narrows scope and cost; enables accurate `COUNT(*)` on the filtered view. Must be identical across nodes to avoid false positives.
+- **table_filter**: Narrows scope and cost; rows that do not match the filter do not count toward `block_size`. Must be identical across nodes to avoid false positives.
 - **override_block_size**: Skips safety rails from `ace.yaml`. Oversized blocks can spike memory and slow hashes, especially on wide rows.
 - **output (json/html)**: HTML adds minor post-processing; DB load is unaffected.
 
@@ -176,7 +239,7 @@ flowchart LR
 - **Permission or schema/PK mismatch**: Validation fails before work starts; nothing is executed against the DB.
 - **Bytea >1 MB**: `CheckColumnSize` aborts to avoid runaway memory/IO.
 - **Timeouts/slow ranges**: Hashing is wrapped in timeouts; the first error is recorded and surfaced after workers finish.
-- **Stale stats**: Skewed row-count estimates can mis-size blocks; rerun `ANALYZE` for better sampling.
+- **Stale stats**: Some parts are larger, so the cutting work is less even. Block size does not depend on statistics.
 
 ### Consistency Caveats
 - No cross-node snapshot coordination. Concurrent writes during a run can appear as drift.
@@ -188,13 +251,12 @@ flowchart LR
 - Start conservative on busy systems: smaller `concurrency_factor`, moderate `block_size`.
 - For large but mostly consistent tables: increase `block_size` and `concurrency_factor` to hash faster; keep `compare_unit_size` reasonable to localise mismatches.
 - For drift-heavy tables: lower `block_size`/`compare_unit_size` to localise quickly; keep `max_diff_rows` low to bound runtime and report size.
-- After stats refresh or schema changes, re-evaluate sampling and block sizing.
 
 ### Limits and Edge Cases
 
 - Requires a declared PK; up to three-way diffs only.
 - `table_filter` creates per-node materialized views; filters must match exactly across nodes.
-- Sampling can under-represent skewed PK distributions; synthetic leading/open ranges and recursive narrowing mitigate, but extreme skew may need smaller blocks.
+- Parts from an old histogram or a sample can be uneven. This changes only how the cutting work is shared between workers, not the block size.
 - Wide JSON/bytea/UDT columns increase hash and fetch cost; oversized bytea (>1 MB) blocks execution.
 
 ### Observability

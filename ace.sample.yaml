@@ -18,6 +18,11 @@ postgres:
   tcp_keepalives_idle: 30        # seconds
   tcp_keepalives_interval: 10    # seconds
   tcp_keepalives_count: 5
+  # Sent as a session setting on every ACE connection. ACE already runs its
+  # hash queries from several client-side workers, so 0 (the default) stops
+  # Postgres from adding parallel workers to each of them. Set to -1 to leave
+  # the server's own setting in place.
+  max_parallel_workers_per_gather: 0
 
 table_diff:
   concurrency_factor: 0.5

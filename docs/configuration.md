@@ -28,6 +28,7 @@ The [`ace.sample.yaml` file](https://github.com/pgEdge/ace/blob/main/ace.sample.
 | postgres --> tcp_keepalives_idle | TCP keepalive idle time (s). **Default: 30** |
 | postgres --> tcp_keepalives_interval | TCP keepalive interval (s). **Default: 10** |
 | postgres --> tcp_keepalives_count | Number of keepalive probes before drop. **Default: 5** |
+| postgres --> max_parallel_workers_per_gather | Sent as a session setting on every ACE connection. ACE already runs its hash queries from several client-side workers, so `0` stops Postgres from adding parallel workers to each of them. Set to `-1` to leave the server's own setting in place. **Default: 0** |
 | table_diff --> concurrency_factor | CPU ratio for diff concurrency (0.0–4.0, e.g. 0.5 uses half of available CPUs). **Default: 0.5** |
 | table_diff --> min_diff_block_size | Minimum diff block (row chunk) size. **Default: 1** |
 | table_diff --> max_diff_block_size | Maximum diff block size. **Default: 1000000** |

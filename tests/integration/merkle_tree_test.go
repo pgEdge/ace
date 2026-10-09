@@ -2116,7 +2116,7 @@ func TestUpdateMtreeReflectsUpdates(t *testing.T) {
 // Each scenario varies where the divergence sits relative to the reference
 // node's pkey envelope. The reference node — the one with the most rows; on a
 // tie BuildMtree's strict `count > maxRows` lets n1 win — defines the block
-// ranges via GeneratePkeyOffsetsQuery, whose final range always has
+// ranges with the slicer, whose final range always has
 // range_end IS NULL. getPkeyBatches collects only non-NULL boundaries when
 // slicing, so the open-ended tail contributes no slice and any row on the
 // non-reference node beyond the reference's last_row is never queried by
