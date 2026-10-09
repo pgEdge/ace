@@ -14,6 +14,7 @@ package mtree
 import (
 	"cmp"
 	"context"
+	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -37,6 +38,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/pgedge/ace/db/queries"
 	"github.com/pgedge/ace/internal/infra/cdc"
@@ -352,6 +354,10 @@ func (m *MerkleTreeTask) recordPairCompareErr(pairKey string) {
 	m.pairCompareErrs[pairKey] = true
 }
 
+// processWorkItem compares the rows of the mismatched leaf ranges in work on
+// two nodes. It reads the primary key and the row hash (queries.RowHashExpr)
+// of every row in these ranges from both nodes, and then fetches and records
+// only the rows whose hashes differ or that exist on one node only.
 func (m *MerkleTreeTask) processWorkItem(work CompareRangesWorkItem, pool1, pool2 *pgxpool.Pool) error {
 	logger.Debug("Processing work item with %d ranges for %s and %s", len(work.Ranges), work.Node1["Name"], work.Node2["Name"])
 	var whereClause string
@@ -432,7 +438,10 @@ func (m *MerkleTreeTask) processWorkItem(work CompareRangesWorkItem, pool1, pool
 		whereClause = fmt.Sprintf("(%s) AND %s", whereClause, f)
 	}
 
-	rowHashQuery, orderByStr := buildRowHashQuery(m.Schema, m.Table, m.Key, m.Cols, whereClause, m.ColTypes["_ref"])
+	rowHashQuery, orderByStr, err := buildRowHashQuery(m.Schema, m.Table, m.Key, m.Cols, whereClause, m.ColTypes["_ref"])
+	if err != nil {
+		return fmt.Errorf("failed to build row hash query: %w", err)
+	}
 	logger.Debug("Row-hash Query: %s, Args: %v", rowHashQuery, args)
 
 	rowsH1, err := pool1.Query(m.Ctx, rowHashQuery, args...) // nosemgrep
@@ -807,33 +816,26 @@ func (m *MerkleTreeTask) buildRowKey(row types.OrderedMap) (string, error) {
 	return utils.RowKeyFromStrings(values), nil
 }
 
-func isNumericColType(colType string) bool {
-	lower := strings.ToLower(colType)
-	return strings.HasPrefix(lower, "numeric") || strings.HasPrefix(lower, "decimal")
-}
-
-func buildRowHashQuery(schema, table string, key []string, cols []string, whereClause string, colTypes map[string]string) (string, string) {
+// buildRowHashQuery returns the query that lists the primary key and the
+// hash of every row in the mismatched blocks. The row hash is
+// queries.RowHashExpr, the same one the leaf hash is built from.
+func buildRowHashQuery(schema, table string, key []string, cols []string, whereClause string, colTypes map[string]string) (string, string, error) {
 	pkQuoted := make([]string, len(key))
 	for i, k := range key {
 		pkQuoted[i] = pgx.Identifier{k}.Sanitize()
 	}
-	colExprs := make([]string, len(cols))
-	for i, c := range cols {
-		quoted := pgx.Identifier{c}.Sanitize()
-		if colTypes != nil && isNumericColType(colTypes[c]) {
-			colExprs[i] = fmt.Sprintf("COALESCE(trim_scale(%s)::text, '')", quoted)
-		} else {
-			colExprs[i] = fmt.Sprintf("COALESCE(%s::text, '')", quoted)
-		}
+
+	rowHash, err := queries.RowHashExpr("", cols, colTypes)
+	if err != nil {
+		return "", "", err
 	}
-	concatExpr := fmt.Sprintf("concat_ws('|', %s)", strings.Join(colExprs, ", "))
 
 	qualifiedTable := fmt.Sprintf("%s.%s", pgx.Identifier{schema}.Sanitize(), pgx.Identifier{table}.Sanitize())
 	orderBy := strings.Join(pkQuoted, ", ")
-	selectList := strings.Join(pkQuoted, ", ") + ", encode(digest(" + concatExpr + ",'sha256'),'hex') as row_hash"
+	selectList := strings.Join(pkQuoted, ", ") + ", " + rowHash + " AS row_hash"
 
 	query := fmt.Sprintf("SELECT %s FROM %s WHERE %s ORDER BY %s", selectList, qualifiedTable, whereClause, orderBy)
-	return query, orderBy
+	return query, orderBy, nil
 }
 
 // pkeyKind classifies a primary-key value that pgx decoded into an untyped
@@ -991,20 +993,23 @@ func pkeyIdentity(v any) (string, bool) {
 // Moving the allocation out of the loop would make every entry point at the
 // last row.
 type rowHashEntry struct {
-	hash string
+	hash [sha256.Size]byte
 	pkey []any
 }
 
-// readRowHashes runs once for every row of a mismatched block, so up to
-// mtree.max_block_size times per node per work item. The three allocations
-// below sit on that hot path; pkey points into scan instead of copying it,
-// which is what keeps the count at three.
+// readRowHashes reads the primary key and the row hash of every row. The hash
+// is scanned as pgtype.DriverBytes, which points into the memory of the
+// driver and is valid only until the next rows.Next, so it is copied into
+// the entry at once.
 func readRowHashes(rows pgx.Rows, numPK int) (map[string]rowHashEntry, error) {
 	defer rows.Close()
 	result := make(map[string]rowHashEntry)
+	var h pgtype.DriverBytes
+	scanPtrs := make([]any, numPK+1)
+	scanPtrs[numPK] = &h
 	for rows.Next() {
-		scan := make([]any, numPK+1)
-		scanPtrs := make([]any, numPK+1)
+		// A new buffer for every row: the entry keeps pointing into it.
+		scan := make([]any, numPK)
 		for i := range scan {
 			scanPtrs[i] = &scan[i]
 		}
@@ -1013,9 +1018,8 @@ func readRowHashes(rows pgx.Rows, numPK int) (map[string]rowHashEntry, error) {
 		}
 		// Point into the scan buffer instead of copying it: a mismatched block
 		// can hold up to mtree.max_block_size rows, and this map stays in
-		// memory for the whole work item, on both nodes at once. Limit the
-		// capacity so that an append here cannot reach the hash slot after it.
-		pkey := scan[:numPK:numPK]
+		// memory for the whole work item, on both nodes at once.
+		pkey := scan
 		parts := make([]string, numPK)
 		for i := 0; i < numPK; i++ {
 			id, ok := pkeyIdentity(scan[i])
@@ -1029,8 +1033,12 @@ func readRowHashes(rows pgx.Rows, numPK int) (map[string]rowHashEntry, error) {
 		// pkey value and must never reach SQL, a diff report or repair: use
 		// rowHashEntry.pkey for those.
 		key := utils.RowKeyFromStrings(parts)
-		h, _ := scan[numPK].(string)
-		result[key] = rowHashEntry{hash: h, pkey: pkey}
+		entry := rowHashEntry{pkey: pkey}
+		if len(h) != len(entry.hash) {
+			return nil, fmt.Errorf("row hash has %d bytes, want %d", len(h), len(entry.hash))
+		}
+		copy(entry.hash[:], h)
+		result[key] = entry
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
@@ -1580,9 +1588,6 @@ func (m *MerkleTreeTask) RunChecks(skipValidation bool) error {
 		}
 		defer pool.Close()
 
-		if err := queries.EnsurePgcrypto(m.Ctx, pool); err != nil {
-			return fmt.Errorf("failed to ensure pgcrypto is installed on %s: %w", nodeInfo["Name"], err)
-		}
 		tx, err := pool.Begin(m.Ctx)
 		if err != nil {
 			return fmt.Errorf("failed to begin transaction for checks on node %s: %w", nodeInfo["Name"], err)

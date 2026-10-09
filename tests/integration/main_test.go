@@ -246,28 +246,7 @@ func setupPostgresCluster(t *testing.T) error {
 		},
 	}
 
-	// Need this for using pg's 'digest' function
-	extensionSQL := "CREATE EXTENSION IF NOT EXISTS pgcrypto;"
-	poolsToConfigure := []struct {
-		Name string
-		Pool *pgxpool.Pool
-	}{
-		{serviceN1, pgCluster.Node1Pool},
-		{serviceN2, pgCluster.Node2Pool},
-		{serviceN3, pgCluster.Node3Pool},
-	}
-
-	for _, node := range poolsToConfigure {
-		if node.Pool == nil {
-			log.Printf("Skipping pgcrypto creation for node %s as pool is nil", node.Name)
-			continue
-		}
-		_, err := node.Pool.Exec(context.Background(), extensionSQL)
-		if err != nil {
-			return fmt.Errorf("failed to create pgcrypto extension on node %s: %w", node.Name, err)
-		}
-		log.Printf("Ensured pgcrypto extension exists on node %s", node.Name)
-	}
+	// No pgcrypto here on purpose: ACE must work without it.
 
 	log.Println("Test data loaded into n1.")
 

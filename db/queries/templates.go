@@ -32,7 +32,6 @@ type Templates struct {
 	CheckUserPrivileges      *template.Template
 	SpockNodeAndSubInfo      *template.Template
 	SpockRepSetInfo          *template.Template
-	EnsurePgcrypto           *template.Template
 	GetSpockNodeNames        *template.Template
 	CheckSchemaExists        *template.Template
 	GetTablesInSchema        *template.Template
@@ -653,9 +652,6 @@ var SQLTemplates = Templates{
 			set_name
 		ORDER BY
 			set_name;
-	`)),
-	EnsurePgcrypto: template.Must(template.New("ensurePgcrypto").Parse(`
-		CREATE EXTENSION IF NOT EXISTS pgcrypto;
 	`)),
 	GetSpockNodeNames: template.Must(template.New("getSpockNodeNames").Parse(`
 		SELECT
@@ -1420,15 +1416,28 @@ var SQLTemplates = Templates{
         (0, {{$r.NodePos}}, ROW({{$r.StartList}}), ROW({{$r.EndList}}), current_timestamp)
         {{- end }}
     `)),
+	// The block hash is a multiset hash of the row hashes; see
+	// BlockHashAggExpr. The inner query computes each row hash once, as
+	// bit(256). OFFSET 0 keeps the planner from pulling the subquery up: the
+	// aggregate reads the value four times, and without OFFSET 0 the row hash
+	// would be computed four times.
 	TDBlockHashSQL: template.Must(template.New("tdBlockHashSQL").Parse(`
-        SELECT encode(digest(COALESCE(string_agg({{.RowTextExpr}}, '|' ORDER BY {{.PkOrderByStr}}), 'EMPTY_BLOCK'), 'sha256'), 'hex')
-        FROM {{.SchemaIdent}}.{{.TableIdent}} AS {{.TableAlias}}
-        WHERE {{.WhereClause}}
+        SELECT encode(` + BlockHashAggExpr + `, 'hex')
+        FROM (
+            SELECT ('x' || encode({{.RowHashExpr}}, 'hex'))::bit(256) AS ` + rowHashBitsCol + `
+            FROM {{.SchemaIdent}}.{{.TableIdent}} AS {{.TableAlias}}
+            WHERE {{.WhereClause}}
+            OFFSET 0
+        ) AS _rh_
     `)),
 	MtreeLeafHashSQL: template.Must(template.New("mtreeLeafHashSQL").Parse(`
-        SELECT digest(COALESCE(string_agg({{.RowTextExpr}}, '|' ORDER BY {{.PkOrderByStr}}), 'EMPTY_BLOCK'), 'sha256')
-        FROM {{.SchemaIdent}}.{{.TableIdent}} AS {{.TableAlias}}
-        WHERE {{.WhereClause}}
+        SELECT ` + BlockHashAggExpr + `
+        FROM (
+            SELECT ('x' || encode({{.RowHashExpr}}, 'hex'))::bit(256) AS ` + rowHashBitsCol + `
+            FROM {{.SchemaIdent}}.{{.TableIdent}} AS {{.TableAlias}}
+            WHERE {{.WhereClause}}
+            OFFSET 0
+        ) AS _rh_
     `)),
 	UpdateLeafHashes: template.Must(template.New("updateLeafHashes").Parse(`
 		UPDATE

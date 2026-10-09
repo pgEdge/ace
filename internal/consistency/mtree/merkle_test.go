@@ -1,7 +1,9 @@
 package mtree
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
 	"fmt"
 	"math"
 	"strings"
@@ -10,15 +12,21 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgtype"
+	"github.com/pgedge/ace/db/queries"
 	"github.com/pgedge/ace/pkg/types"
 )
 
 // fakeRows is the smallest pgx.Rows that readRowHashes needs. Scan copies
 // values into *any destinations, which is how an untyped scan buffer receives
-// the driver's own Go values: a uuid arrives as [16]byte, not as text.
+// the driver's own Go values: a uuid arrives as [16]byte, not as text. It
+// also fills *pgtype.DriverBytes destinations, which is how the row hash is
+// scanned. Like the real driver, it hands out the same buffer for every row,
+// so a reader that keeps the slice instead of copying it sees the last row.
 type fakeRows struct {
 	rows [][]any
 	pos  int
+	buf  []byte
 }
 
 func (r *fakeRows) Close()                                       {}
@@ -51,13 +59,26 @@ func (r *fakeRows) Scan(dest ...any) error {
 		return fmt.Errorf("scanning into %d destinations, row has %d values", len(dest), len(row))
 	}
 	for i := range dest {
-		p, ok := dest[i].(*any)
-		if !ok {
-			return fmt.Errorf("dest[%d] is %T, want *any", i, dest[i])
+		switch p := dest[i].(type) {
+		case *any:
+			*p = row[i]
+		case *pgtype.DriverBytes:
+			v, ok := row[i].([]byte)
+			if !ok {
+				return fmt.Errorf("value %d is %T, cannot scan into *pgtype.DriverBytes", i, row[i])
+			}
+			r.buf = append(r.buf[:0], v...)
+			*p = r.buf
+		default:
+			return fmt.Errorf("dest[%d] is %T, want *any or *pgtype.DriverBytes", i, dest[i])
 		}
-		*p = row[i]
 	}
 	return nil
+}
+
+// rowHash returns a 32-byte row hash with every byte set to b.
+func rowHash(b byte) []byte {
+	return bytes.Repeat([]byte{b}, sha256.Size)
 }
 
 func uuidBytes(b byte) [16]byte {
@@ -172,7 +193,7 @@ func TestMtreeDiffRejectsNegativeMaxDiffRows(t *testing.T) {
 // rejects as invalid uuid input.
 func TestReadRowHashesKeepsScannedPkey(t *testing.T) {
 	id := uuidBytes(0x11)
-	rows := &fakeRows{rows: [][]any{{id, "hash-a"}}}
+	rows := &fakeRows{rows: [][]any{{id, rowHash(0xab)}}}
 
 	got, err := readRowHashes(rows, 1)
 	if err != nil {
@@ -182,8 +203,8 @@ func TestReadRowHashesKeepsScannedPkey(t *testing.T) {
 		t.Fatalf("read %d entries, want 1", len(got))
 	}
 	for _, e := range got {
-		if e.hash != "hash-a" {
-			t.Errorf("hash = %q, want %q", e.hash, "hash-a")
+		if !bytes.Equal(e.hash[:], rowHash(0xab)) {
+			t.Errorf("hash = %x, want %x", e.hash, rowHash(0xab))
 		}
 		if len(e.pkey) != 1 {
 			t.Fatalf("pkey has %d values, want 1", len(e.pkey))
@@ -199,8 +220,8 @@ func TestReadRowHashesKeepsScannedPkey(t *testing.T) {
 // the comparison.
 func TestReadRowHashesKeysDoNotCollide(t *testing.T) {
 	rows := &fakeRows{rows: [][]any{
-		{"a|b", "c", "hash-1"},
-		{"a", "b|c", "hash-2"},
+		{"a|b", "c", rowHash(1)},
+		{"a", "b|c", rowHash(2)},
 	}}
 
 	got, err := readRowHashes(rows, 2)
@@ -213,23 +234,38 @@ func TestReadRowHashesKeysDoNotCollide(t *testing.T) {
 }
 
 // pkey points into the scan buffer, so that buffer has to stay inside the
-// loop. Moving it out would leave every entry pointing at the last row.
+// loop. Moving it out would leave every entry pointing at the last row. The
+// hash arrives in a driver buffer that is reused for every row, so each entry
+// must hold its own copy of it.
 func TestReadRowHashesRowsDoNotAlias(t *testing.T) {
 	rows := &fakeRows{rows: [][]any{
-		{uuidBytes(0x01), "hash-1"},
-		{uuidBytes(0x02), "hash-2"},
+		{uuidBytes(0x01), rowHash(1)},
+		{uuidBytes(0x02), rowHash(2)},
 	}}
 
 	got, err := readRowHashes(rows, 1)
 	if err != nil {
 		t.Fatalf("readRowHashes returned error: %v", err)
 	}
-	seen := make(map[[16]byte]bool, len(got))
+	seen := make(map[[16]byte][sha256.Size]byte, len(got))
 	for _, e := range got {
-		seen[e.pkey[0].([16]byte)] = true
+		seen[e.pkey[0].([16]byte)] = e.hash
 	}
 	if len(seen) != 2 {
 		t.Errorf("entries share %d distinct pkeys, want 2", len(seen))
+	}
+	h1, h2 := seen[uuidBytes(0x01)], seen[uuidBytes(0x02)]
+	if !bytes.Equal(h1[:], rowHash(1)) || !bytes.Equal(h2[:], rowHash(2)) {
+		t.Errorf("hashes = %x, %x; want each row to keep its own hash", h1, h2)
+	}
+}
+
+// A row hash that is not 32 bytes means the query and the reader disagree
+// on the hash. Comparing such hashes would give a wrong answer, so stop.
+func TestReadRowHashesRejectsWrongHashSize(t *testing.T) {
+	rows := &fakeRows{rows: [][]any{{uuidBytes(0x01), []byte{1, 2, 3}}}}
+	if _, err := readRowHashes(rows, 1); err == nil {
+		t.Errorf("readRowHashes accepted a 3-byte row hash")
 	}
 }
 
@@ -304,35 +340,6 @@ func TestComparePkeyValuesNaNSortsLast(t *testing.T) {
 	}
 }
 
-func TestIsNumericColType(t *testing.T) {
-	tests := []struct {
-		colType string
-		want    bool
-	}{
-		{"numeric", true},
-		{"numeric(10,2)", true},
-		{"NUMERIC", true},
-		{"decimal", true},
-		{"decimal(18,4)", true},
-		{"DECIMAL", true},
-		{"integer", false},
-		{"bigint", false},
-		{"text", false},
-		{"double precision", false},
-		{"real", false},
-		{"", false},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.colType, func(t *testing.T) {
-			got := isNumericColType(tt.colType)
-			if got != tt.want {
-				t.Errorf("isNumericColType(%q) = %v, want %v", tt.colType, got, tt.want)
-			}
-		})
-	}
-}
-
 func TestBuildRowHashQuery(t *testing.T) {
 	tests := []struct {
 		name           string
@@ -355,11 +362,7 @@ func TestBuildRowHashQuery(t *testing.T) {
 			whereClause: "TRUE",
 			colTypes:    nil,
 			wantContains: []string{
-				`SELECT "id", encode(digest(concat_ws('|',`,
-				`COALESCE("id"::text, '')`,
-				`COALESCE("name"::text, '')`,
-				`COALESCE("amount"::text, '')`,
-				`,'sha256'),'hex') as row_hash`,
+				`SELECT "id", sha256(convert_to(ROW("id", "name", "amount")::text, 'UTF8')) AS row_hash`,
 				`FROM "public"."orders"`,
 				`WHERE TRUE`,
 				`ORDER BY "id"`,
@@ -378,10 +381,7 @@ func TestBuildRowHashQuery(t *testing.T) {
 			whereClause: "TRUE",
 			colTypes:    map[string]string{"id": "integer", "name": "text", "price": "numeric(10,2)"},
 			wantContains: []string{
-				`COALESCE("id"::text, '')`,
-				`COALESCE("name"::text, '')`,
-				`COALESCE(trim_scale("price")::text, '')`,
-				`encode(digest(concat_ws('|',`,
+				`ROW("id", "name", trim_scale("price"))::text`,
 			},
 			wantOrderBy: `"id"`,
 		},
@@ -394,9 +394,7 @@ func TestBuildRowHashQuery(t *testing.T) {
 			whereClause: `"txn_id" >= $1`,
 			colTypes:    map[string]string{"txn_id": "bigint", "debit": "decimal(18,4)", "credit": "DECIMAL"},
 			wantContains: []string{
-				`COALESCE("txn_id"::text, '')`,
-				`COALESCE(trim_scale("debit")::text, '')`,
-				`COALESCE(trim_scale("credit")::text, '')`,
+				`ROW("txn_id", trim_scale("debit"), trim_scale("credit"))::text`,
 				`WHERE "txn_id" >= $1`,
 			},
 			wantOrderBy: `"txn_id"`,
@@ -410,8 +408,8 @@ func TestBuildRowHashQuery(t *testing.T) {
 			whereClause: "TRUE",
 			colTypes:    map[string]string{"order_id": "integer", "line_num": "integer", "qty": "integer", "unit_price": "numeric"},
 			wantContains: []string{
-				`SELECT "order_id", "line_num", encode(digest(`,
-				`COALESCE(trim_scale("unit_price")::text, '')`,
+				`SELECT "order_id", "line_num", sha256(convert_to(`,
+				`ROW("order_id", "line_num", "qty", trim_scale("unit_price"))::text`,
 				`ORDER BY "order_id", "line_num"`,
 			},
 			wantOrderBy: `"order_id", "line_num"`,
@@ -425,9 +423,7 @@ func TestBuildRowHashQuery(t *testing.T) {
 			whereClause: "TRUE",
 			colTypes:    map[string]string{"user_id": "integer", "email": "text", "created_at": "timestamp"},
 			wantContains: []string{
-				`COALESCE("user_id"::text, '')`,
-				`COALESCE("email"::text, '')`,
-				`COALESCE("created_at"::text, '')`,
+				`ROW("user_id", "email", "created_at")::text`,
 			},
 			wantNotContain: []string{
 				`trim_scale`,
@@ -436,9 +432,40 @@ func TestBuildRowHashQuery(t *testing.T) {
 		},
 	}
 
+	// The row hash of the diff and the row hash inside the leaf hash must be
+	// the same expression, or a leaf can differ while every row matches.
+	t.Run("same row hash as the leaf hash", func(t *testing.T) {
+		cols := []string{"id", "price"}
+		colTypes := map[string]string{"price": "numeric"}
+		query, _, err := buildRowHashQuery("public", "orders", []string{"id"}, cols, "TRUE", colTypes)
+		if err != nil {
+			t.Fatalf("buildRowHashQuery() error = %v", err)
+		}
+		want, err := queries.RowHashExpr("", cols, colTypes)
+		if err != nil {
+			t.Fatalf("RowHashExpr() error = %v", err)
+		}
+		if !strings.Contains(query, want) {
+			t.Errorf("row hash query %q does not use %q", query, want)
+		}
+		// readRowHashes scans the hash as bytes.
+		if strings.Contains(query, "::text AS row_hash") {
+			t.Errorf("row hash must stay a bytea: %q", query)
+		}
+	})
+
+	t.Run("no columns is an error", func(t *testing.T) {
+		if _, _, err := buildRowHashQuery("public", "orders", []string{"id"}, nil, "TRUE", nil); err == nil {
+			t.Errorf("buildRowHashQuery() with no columns: want an error")
+		}
+	})
+
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			query, orderBy := buildRowHashQuery(tt.schema, tt.table, tt.key, tt.cols, tt.whereClause, tt.colTypes)
+			query, orderBy, err := buildRowHashQuery(tt.schema, tt.table, tt.key, tt.cols, tt.whereClause, tt.colTypes)
+			if err != nil {
+				t.Fatalf("buildRowHashQuery() error = %v", err)
+			}
 
 			if orderBy != tt.wantOrderBy {
 				t.Errorf("orderBy = %q, want %q", orderBy, tt.wantOrderBy)

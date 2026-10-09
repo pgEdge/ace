@@ -87,8 +87,6 @@ type TableDiffTask struct {
 	InvokeMethod string
 	ClientRole   string
 
-	EnsurePgcrypto bool
-
 	DiffSummary map[string]string
 
 	SkipDBUpdate bool
@@ -331,14 +329,6 @@ func (t *TableDiffTask) buildEffectiveFilter() (string, error) {
 func (t *TableDiffTask) withSpockMetadata(row map[string]any, nodeName string) map[string]any {
 	row["node_origin"] = utils.TranslateNodeOrigin(row["node_origin"], t.NodeOriginNames[nodeName])
 	return utils.AddSpockMetadata(row)
-}
-
-func isPgcryptoMissing(err error) bool {
-	if err == nil {
-		return false
-	}
-	msg := strings.ToLower(err.Error())
-	return strings.Contains(msg, "digest(") || strings.Contains(msg, "function digest") || strings.Contains(msg, "pgcrypto")
 }
 
 type RecursiveDiffTask struct {
@@ -1068,7 +1058,6 @@ func (t *TableDiffTask) CloneForSchedule(ctx context.Context) *TableDiffTask {
 	cloned.CompareUnitSize = t.CompareUnitSize
 	cloned.MaxDiffRows = t.MaxDiffRows
 	cloned.MaxHTMLRows = t.MaxHTMLRows
-	cloned.EnsurePgcrypto = t.EnsurePgcrypto
 	cloned.AgainstOrigin = t.AgainstOrigin
 	cloned.Until = t.Until
 	cloned.Ctx = ctx
@@ -1299,14 +1288,6 @@ func (t *TableDiffTask) ExecuteTask() (err error) {
 		defer pool.Close()
 	}
 	t.Pools = pools
-
-	if t.EnsurePgcrypto {
-		for name, pool := range t.Pools {
-			if err := queries.EnsurePgcrypto(t.Ctx, pool); err != nil {
-				return fmt.Errorf("failed to ensure pgcrypto on node %s: %w", name, err)
-			}
-		}
-	}
 
 	if err := t.loadNodeOriginNames(); err != nil {
 		logger.Warn("table-diff: unable to load node origin names; using raw node_origin values: %v", err)
@@ -1667,6 +1648,9 @@ func (t *TableDiffTask) ExecuteTask() (err error) {
 	return nil
 }
 
+// hashRange runs the block hash query (queries.BlockHashSQL) for the range r
+// on node and returns the hash as hex text. A bound of r that is nil, or all
+// NULL for a composite key, leaves the range open on that side.
 func (t *TableDiffTask) hashRange(
 	ctx context.Context,
 	node string,
@@ -1710,11 +1694,7 @@ func (t *TableDiffTask) hashRange(
 	if err != nil {
 		duration := time.Since(startTime)
 		logger.Debug("[%s] ERROR after %v for range Start=%v, End=%v (using query: '%s', args: %v): %v", node, duration, r.Start, r.End, query, args, err)
-		baseErr := fmt.Errorf("BlockHash query failed for %s range %v-%v: %w", node, r.Start, r.End, err)
-		if isPgcryptoMissing(err) {
-			return "", fmt.Errorf("%w; pgcrypto extension not installed. Re-run with --ensure-pgcrypto or install via CREATE EXTENSION pgcrypto", baseErr)
-		}
-		return "", baseErr
+		return "", fmt.Errorf("BlockHash query failed for %s range %v-%v: %w", node, r.Start, r.End, err)
 	}
 
 	duration := time.Since(startTime)
