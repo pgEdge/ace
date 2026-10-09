@@ -42,6 +42,11 @@ type PostgresConfig struct {
 	TCPKeepalivesIdle     *int   `yaml:"tcp_keepalives_idle"`     // s
 	TCPKeepalivesInterval *int   `yaml:"tcp_keepalives_interval"` // s
 	TCPKeepalivesCount    *int   `yaml:"tcp_keepalives_count"`
+	// MaxParallelWorkersPerGather is sent as a session setting on every ACE
+	// connection. ACE already runs its hash queries from several client-side
+	// workers, so unset (or 0) stops Postgres from adding parallel workers
+	// on top of that. A negative value leaves the server's setting alone.
+	MaxParallelWorkersPerGather *int `yaml:"max_parallel_workers_per_gather"`
 }
 
 type DiffConfig struct {
