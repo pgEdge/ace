@@ -27,6 +27,17 @@ Manually applies changes to a table’s Merkle tree (also supports rebalancing).
 | `--quiet` | `-q` | Suppress output | `false` |
 | `--debug` | `-v` | Debug logging | `false` |
 
+**Hash version**
+
+The metadata of every tree stores the version of the hash algorithm that
+computed its leaves. When the stored version is older than the version of
+this ACE, `mtree update` computes all leaf hashes again. When it is newer,
+the tree was written by a newer ACE: `mtree update` and `mtree table-diff`
+stop with an error and change nothing. Use the newer ACE, or rebuild the tree
+with `mtree build`. ACE does not support a tree that holds hashes of two
+algorithms, so to go back to an older ACE, run `mtree build` of that version
+first.
+
 **Example**
 
 ```sh
