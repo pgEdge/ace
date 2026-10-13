@@ -32,7 +32,7 @@ ACE (Active Consistency Engine) helps keep nodes in a pgEdge Distributed Postgre
 
 **Keep your Statistics Fresh.** 
 
-  - Run `ANALYZE` on large/cold tables before heavy comparisons, since ACE relies on probabilistic sampling (`TABLESAMPLE`) to speed things up. Especially useful for cold tables and when using Merkle trees.
+  - Statistics do not change the block size. ACE uses them to choose the anchor node and, when the first primary-key column has a histogram, to split the cutting work into parts at no cost. Without a histogram ACE reads a small `TABLESAMPLE` (a few thousand pages) instead; the log shows which source it used. Run `ANALYZE` on large tables that changed a lot before heavy comparisons.
 
 **Use a Connection Pooler.** 
 
