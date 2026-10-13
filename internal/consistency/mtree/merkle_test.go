@@ -615,3 +615,46 @@ func TestBoundaryKeyDistinguishesBounds(t *testing.T) {
 		t.Error("a scalar bound and its one-element slice disagree")
 	}
 }
+
+// TestHashVersionError checks which stored hash versions a writer of leaf
+// hashes accepts. A newer version is always refused: this build must not
+// recompute leaves of a tree that a newer ACE wrote. An older version is
+// accepted only by mtree update, which recomputes every leaf and the version
+// in one transaction; any other writer would mix two algorithms in one tree.
+func TestHashVersionError(t *testing.T) {
+	m := &MerkleTreeTask{}
+	m.Schema = "public"
+	m.Table = "t"
+	cur := queries.CurrentHashVersion
+
+	tests := []struct {
+		version    int
+		allowOlder bool
+		wantErr    []string // nil: no error
+	}{
+		{cur, false, nil},
+		{cur, true, nil},
+		{cur - 1, true, nil},
+		{cur - 1, false, []string{"public.t", "n1", fmt.Sprintf("hash version %d, older", cur-1), "mtree update"}},
+		{cur + 1, true, []string{"public.t", "n1", fmt.Sprintf("hash version %d,", cur+1), "mtree build"}},
+		{cur + 1, false, []string{"public.t", "n1", fmt.Sprintf("hash version %d,", cur+1), "mtree build"}},
+	}
+	for _, tt := range tests {
+		err := m.hashVersionError(tt.version, "n1", tt.allowOlder)
+		if tt.wantErr == nil {
+			if err != nil {
+				t.Errorf("hashVersionError(%d, allowOlder=%v) = %v, want nil", tt.version, tt.allowOlder, err)
+			}
+			continue
+		}
+		if err == nil {
+			t.Errorf("hashVersionError(%d, allowOlder=%v) = nil, want an error", tt.version, tt.allowOlder)
+			continue
+		}
+		for _, want := range tt.wantErr {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("hashVersionError(%d, allowOlder=%v) = %q, want it to mention %q", tt.version, tt.allowOlder, err, want)
+			}
+		}
+	}
+}

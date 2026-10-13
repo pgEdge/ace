@@ -48,6 +48,12 @@ All notable changes to ACE will be captured in this document. This project follo
   or on the byte order of the server.
   The hash version is now 4: the next `mtree update` computes all stored leaf
   hashes again, in one transaction per node.
+  `mtree update` and `mtree table-diff` now refuse a tree with a hash version
+  newer than the ACE that runs them, and change nothing on any node. Such a
+  tree was written by a newer ACE, and an older algorithm must not recompute
+  its leaves. ACE versions released before this one do not have this check.
+  To go back to one of them after `mtree update` has moved a tree to
+  version 4, rebuild the tree with `mtree build` of that version first.
 - **`table-diff` and `mtree` failed on tables with a `numeric[]` column.**
   ACE wrapped such a column in `trim_scale()`, which has no array variant.
 - **`table-diff` and `mtree` no longer need pgcrypto.** The block hash uses the

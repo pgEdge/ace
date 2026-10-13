@@ -1921,6 +1921,46 @@ func (m *MerkleTreeTask) BuildMtree() (err error) {
 	return nil
 }
 
+// checkHashVersion reads the hash version of the stored tree on one node and
+// returns hashVersionError for it.
+func (m *MerkleTreeTask) checkHashVersion(db queries.DBQuerier, nodeName any, allowOlder bool) error {
+	version, err := queries.GetHashVersion(m.Ctx, db, m.Schema, m.Table)
+	if err != nil {
+		return fmt.Errorf("error getting hash version on node %s: %w", nodeName, err)
+	}
+	return m.hashVersionError(version, nodeName, allowOlder)
+}
+
+// hashVersionError checks the hash version of the stored tree on a node
+// before ACE writes leaf hashes into it. The rule is that all leaves of a
+// tree are computed by the algorithm that its version names.
+//
+// A version newer than queries.CurrentHashVersion is always an error. Such a
+// tree was written by a newer ACE. This build cannot compute its hashes, and
+// if it recomputed the dirty leaves with its own algorithm, the tree would
+// hold hashes of two algorithms under the newer version number. Nothing would
+// then make the newer ACE recompute them. To use an older ACE after a newer
+// one, rebuild the tree with "mtree build" of the older ACE: a build writes
+// every leaf and the version again.
+//
+// An older version is allowed only if allowOlder is true. Only mtree update
+// sets it: it marks every leaf dirty, recomputes all of them and writes the
+// current version in one transaction. Any other writer would put leaves of
+// the current algorithm into a tree whose version names the older one.
+func (m *MerkleTreeTask) hashVersionError(version int, nodeName any, allowOlder bool) error {
+	switch {
+	case version > queries.CurrentHashVersion:
+		return fmt.Errorf("the Merkle tree of %s.%s on node %s has hash version %d, but this ACE supports versions up to %d; "+
+			"use a newer ACE, or rebuild the tree with 'mtree build'",
+			m.Schema, m.Table, nodeName, version, queries.CurrentHashVersion)
+	case version < queries.CurrentHashVersion && !allowOlder:
+		return fmt.Errorf("the Merkle tree of %s.%s on node %s has hash version %d, older than version %d of this ACE; "+
+			"run 'mtree update' first to recompute all its leaves",
+			m.Schema, m.Table, nodeName, version, queries.CurrentHashVersion)
+	}
+	return nil
+}
+
 func (m *MerkleTreeTask) UpdateMtree(skipAllChecks bool) (err error) { //nolint:gocyclo // orchestrates per-node CDC drain + tree rehash/rebalance; cyclomatic complexity is inherent to the staged flow
 	resultCtx := map[string]any{
 		"rebalance":       m.Rebalance,
@@ -1977,6 +2017,14 @@ func (m *MerkleTreeTask) UpdateMtree(skipAllChecks bool) (err error) { //nolint:
 				return m.missingTreeError(nodeInfo["Name"], err)
 			}
 			return fmt.Errorf("error getting block size from metadata on node %s: %w", nodeInfo["Name"], err)
+		}
+
+		// Refuse a tree written by a newer ACE before any CDC work and before
+		// any node is changed. An older tree is upgraded below. See
+		// hashVersionError.
+		if err := m.checkHashVersion(pool, nodeInfo["Name"], true /* allowOlder */); err != nil {
+			pool.Close()
+			return err
 		}
 
 		pool.Close()
@@ -2101,7 +2149,28 @@ func (m *MerkleTreeTask) UpdateMtree(skipAllChecks bool) (err error) { //nolint:
 		if err != nil {
 			return fmt.Errorf("error getting hash version on node %s: %w", nodeInfo["Name"], err)
 		}
+		// Checked again inside the transaction, because a newer ACE could
+		// have rebuilt the tree after the pre-flight check. This refuses only
+		// a newer version: an older one is upgraded right below.
+		if err := m.hashVersionError(hashVersion, nodeInfo["Name"], true /* allowOlder */); err != nil {
+			return err
+		}
 		hashVersionUpgraded := false
+		// commitNode commits the work on this node. After an upgrade it
+		// first writes the current version: every leaf was marked dirty, and
+		// a leaf stops being dirty only when its hash is computed again, so
+		// no leaf of the older algorithm is left.
+		commitNode := func() error {
+			if hashVersionUpgraded {
+				if err := queries.UpdateHashVersion(m.Ctx, tx, m.Schema, m.Table, queries.CurrentHashVersion); err != nil {
+					return fmt.Errorf("error updating hash version on node %s: %w", nodeInfo["Name"], err)
+				}
+			}
+			if err := tx.Commit(m.Ctx); err != nil {
+				return fmt.Errorf("error committing transaction on node %s: %w", nodeInfo["Name"], err)
+			}
+			return nil
+		}
 		if hashVersion < queries.CurrentHashVersion {
 			marked, err := queries.MarkAllLeavesDirty(m.Ctx, tx, mtreeTableName)
 			if err != nil {
@@ -2118,14 +2187,12 @@ func (m *MerkleTreeTask) UpdateMtree(skipAllChecks bool) (err error) { //nolint:
 		}
 
 		if len(blocksToUpdate) == 0 {
-			if hashVersionUpgraded {
-				// No blocks exist yet, but still update the version marker.
-				if err := queries.UpdateHashVersion(m.Ctx, tx, m.Schema, m.Table, queries.CurrentHashVersion); err != nil {
-					return fmt.Errorf("error updating hash version on node %s: %w", nodeInfo["Name"], err)
-				}
-			}
+			// After an upgrade this means the tree has no leaves; the
+			// version is still updated.
 			fmt.Printf("No updates needed for %s\n", nodeInfo["Name"])
-			tx.Commit(m.Ctx)
+			if err := commitNode(); err != nil {
+				return err
+			}
 			continue
 		}
 
@@ -2172,7 +2239,9 @@ func (m *MerkleTreeTask) UpdateMtree(skipAllChecks bool) (err error) { //nolint:
 
 		if len(blocksToUpdate) == 0 {
 			fmt.Printf("No updates needed for %s after rebalancing\n", nodeInfo["Name"])
-			tx.Commit(m.Ctx)
+			if err := commitNode(); err != nil {
+				return err
+			}
 			continue
 		}
 		fmt.Printf("Found %d blocks to update\n", len(blocksToUpdate))
@@ -2204,14 +2273,8 @@ func (m *MerkleTreeTask) UpdateMtree(skipAllChecks bool) (err error) { //nolint:
 			}
 		}
 
-		if hashVersionUpgraded {
-			if err := queries.UpdateHashVersion(m.Ctx, tx, m.Schema, m.Table, queries.CurrentHashVersion); err != nil {
-				return fmt.Errorf("error updating hash version on node %s: %w", nodeInfo["Name"], err)
-			}
-		}
-
-		if err := tx.Commit(m.Ctx); err != nil {
-			return fmt.Errorf("error committing transaction on node %s: %w", nodeInfo["Name"], err)
+		if err := commitNode(); err != nil {
+			return err
 		}
 		fmt.Printf("Successfully updated %d blocks on %s\n", len(affectedPositions), nodeInfo["Name"])
 	}
@@ -2607,7 +2670,7 @@ func (m *MerkleTreeTask) DiffMtree() (err error) {
 				pool *pgxpool.Pool
 				name any
 			}{{entry.pool1, entry.node1["Name"]}, {entry.pool2, entry.node2["Name"]}} {
-				if err := m.refreshStaleLeaves(side.pool, entry.positions); err != nil {
+				if err := m.refreshStaleLeaves(side.pool, side.name, entry.positions); err != nil {
 					healed = false
 					logger.Warn("failed to refresh stale blocks on %s (the diff result is unaffected; "+
 						"the mismatch may reappear on the next diff): %v", side.name, err)
@@ -2692,7 +2755,7 @@ func (m *MerkleTreeTask) incompletePairs() []string {
 // phantom mismatch would recur on every diff until a full rebuild. Blocks
 // dirtied concurrently by CDC keep their dirty state and counters for the
 // next update.
-func (m *MerkleTreeTask) refreshStaleLeaves(pool *pgxpool.Pool, positions []int64) error { //nolint:gocyclo // linear mark->rehash->rebuild->clear pipeline; the count is per-step error returns, not branching logic
+func (m *MerkleTreeTask) refreshStaleLeaves(pool *pgxpool.Pool, nodeName any, positions []int64) error { //nolint:gocyclo // linear mark->rehash->rebuild->clear pipeline; the count is per-step error returns, not branching logic
 	mtreeTableIdentifier := pgx.Identifier{m.aceSchema(), fmt.Sprintf("ace_mtree_%s_%s", m.Schema, m.Table)}
 	mtreeTableName := mtreeTableIdentifier.Sanitize()
 
@@ -2702,6 +2765,11 @@ func (m *MerkleTreeTask) refreshStaleLeaves(pool *pgxpool.Pool, positions []int6
 	}
 	defer tx.Rollback(m.Ctx)
 
+	// This rewrites some leaves and keeps the version, so the tree must
+	// already have the current version.
+	if err := m.checkHashVersion(tx, nodeName, false /* allowOlder */); err != nil {
+		return err
+	}
 	if err := queries.MarkLeavesDirtyByPositions(m.Ctx, tx, mtreeTableName, positions); err != nil {
 		return err
 	}
