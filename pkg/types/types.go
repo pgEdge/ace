@@ -411,9 +411,3 @@ type MtreeMetadata struct {
 	IsComposite bool      `db:"is_composite"`
 	LastUpdated time.Time `db:"last_updated"`
 }
-
-// PkeyOffset represents a range of primary key values.
-type PkeyOffset struct {
-	RangeStart []any
-	RangeEnd   []any
-}
