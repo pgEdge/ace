@@ -311,7 +311,8 @@ func TestBlockHashSQL(t *testing.T) {
 		wantErr           bool
 	}{
 		{
-			name:           "nil cols - fallback to table alias cast",
+			// The whole-row value would be a second row encoding.
+			name:           "nil cols is an error",
 			schema:         "public",
 			table:          "events",
 			primaryKeyCols: []string{"event_id"},
@@ -320,16 +321,10 @@ func TestBlockHashSQL(t *testing.T) {
 			includeLower:   true,
 			includeUpper:   true,
 			filter:         "",
-			wantQueryContains: []string{
-				`FROM "public"."events" AS _tbl_`,
-				`ORDER BY "event_id"`,
-				`WHERE "event_id" >= $1 AND "event_id" < $2`,
-				`encode(digest(COALESCE(string_agg(_tbl_::text, '|' ORDER BY "event_id"), 'EMPTY_BLOCK'), 'sha256'), 'hex')`,
-			},
-			wantErr: false,
+			wantErr:        true,
 		},
 		{
-			name:           "with columns - per-column concat_ws",
+			name:           "with columns - row constructor",
 			schema:         "public",
 			table:          "events",
 			primaryKeyCols: []string{"event_id"},
@@ -340,10 +335,8 @@ func TestBlockHashSQL(t *testing.T) {
 			filter:         "",
 			wantQueryContains: []string{
 				`FROM "public"."events" AS _tbl_`,
-				`encode(digest(COALESCE(string_agg(concat_ws('|',`,
-				`COALESCE(_tbl_."event_id"::text, '')`,
-				`COALESCE(_tbl_."name"::text, '')`,
-				`COALESCE(trim_scale(_tbl_."amount")::text, '')`,
+				`WHERE "event_id" >= $1 AND "event_id" < $2`,
+				`encode(substring(bit_send(COALESCE(bit_xor(('x' || encode(sha256(convert_to(ROW(_tbl_."event_id", _tbl_."name", trim_scale(_tbl_."amount"))::text, 'UTF8')), 'hex'))::bit(256)), 0::bit(256))) FROM 5), 'hex')`,
 			},
 			wantErr: false,
 		},
@@ -359,10 +352,8 @@ func TestBlockHashSQL(t *testing.T) {
 			filter:         "",
 			wantQueryContains: []string{
 				`FROM "commerce"."line_items" AS _tbl_`,
-				`ORDER BY "order_id", "item_seq"`,
 				`WHERE ROW("order_id", "item_seq") >= ROW($1, $2) AND ROW("order_id", "item_seq") < ROW($3, $4)`,
-				`encode(digest(COALESCE(string_agg(concat_ws('|',`,
-				`COALESCE(trim_scale(_tbl_."price")::text, '')`,
+				`('x' || encode(sha256(convert_to(ROW(_tbl_."order_id", _tbl_."item_seq", trim_scale(_tbl_."price"))::text, 'UTF8')), 'hex'))::bit(256)`,
 			},
 			wantErr: false,
 		},
@@ -403,6 +394,7 @@ func TestBlockHashSQL(t *testing.T) {
 			schema:         "public",
 			table:          "events",
 			primaryKeyCols: []string{"event_id"},
+			allCols:        []string{"event_id", "status"},
 			includeLower:   false,
 			includeUpper:   false,
 			filter:         "status = 'live'",
@@ -430,64 +422,118 @@ func TestBlockHashSQL(t *testing.T) {
 						t.Errorf("BlockHashSQL() query = %q, want to contain %q", query, substr)
 					}
 				}
+				// bit_xor does not depend on row order, so the query needs
+				// no ORDER BY.
+				if strings.Contains(query, "ORDER BY") {
+					t.Errorf("BlockHashSQL() query = %q, must not sort", query)
+				}
 			}
 		})
 	}
 }
 
-func TestConcatWSBatched(t *testing.T) {
-	t.Run("under limit is single concat_ws", func(t *testing.T) {
-		exprs := make([]string, 50)
-		for i := range exprs {
-			exprs[i] = fmt.Sprintf("col%d", i)
+func TestBlockHashSQLLeafMode(t *testing.T) {
+	query, err := BlockHashSQL("public", "events", []string{"event_id"}, "MTREE_LEAF_HASH",
+		true, false, "", []string{"event_id", "name"}, nil)
+	if err != nil {
+		t.Fatalf("BlockHashSQL() error = %v", err)
+	}
+	// The leaf hash is stored as raw bytes, so it is not hex-encoded.
+	want := `SELECT substring(bit_send(COALESCE(bit_xor(('x' || encode(sha256(convert_to(ROW(_tbl_."event_id", _tbl_."name")::text, 'UTF8')), 'hex'))::bit(256)), 0::bit(256))) FROM 5)`
+	if !strings.Contains(query, want) {
+		t.Errorf("query = %q, want to contain %q", query, want)
+	}
+	if strings.HasPrefix(strings.TrimSpace(query), "SELECT encode(") {
+		t.Errorf("leaf hash must not be hex-encoded: %q", query)
+	}
+	if !strings.Contains(query, `WHERE "event_id" >= $1`) || strings.Contains(query, "<") {
+		t.Errorf("expected only a lower bound: %q", query)
+	}
+}
+
+func TestRowHashExpr(t *testing.T) {
+	mustExpr := func(t *testing.T, alias string, cols []string, colTypes map[string]string) string {
+		t.Helper()
+		got, err := RowHashExpr(alias, cols, colTypes)
+		if err != nil {
+			t.Fatalf("RowHashExpr() error = %v", err)
 		}
-		result := concatWSBatched(exprs)
-		// Should be a single concat_ws with all 50 expressions
-		if strings.Count(result, "concat_ws(") != 1 {
-			t.Errorf("expected 1 concat_ws call, got: %s", result)
+		return got
+	}
+
+	t.Run("qualified columns and trim_scale", func(t *testing.T) {
+		got := mustExpr(t, "_tbl_", []string{"id", "Name", "price"},
+			map[string]string{"id": "integer", "Name": "text", "price": "numeric(10,2)"})
+		want := `sha256(convert_to(ROW(_tbl_."id", _tbl_."Name", trim_scale(_tbl_."price"))::text, 'UTF8'))`
+		if got != want {
+			t.Errorf("RowHashExpr() = %q, want %q", got, want)
 		}
 	})
 
-	t.Run("at limit of 99 is single concat_ws", func(t *testing.T) {
-		exprs := make([]string, 99)
-		for i := range exprs {
-			exprs[i] = fmt.Sprintf("col%d", i)
-		}
-		result := concatWSBatched(exprs)
-		if strings.Count(result, "concat_ws(") != 1 {
-			t.Errorf("expected 1 concat_ws call for exactly 99 exprs, got: %s", result)
+	t.Run("empty alias gives unqualified columns", func(t *testing.T) {
+		got := mustExpr(t, "", []string{"id", "debit"}, map[string]string{"debit": "DECIMAL"})
+		want := `sha256(convert_to(ROW("id", trim_scale("debit"))::text, 'UTF8'))`
+		if got != want {
+			t.Errorf("RowHashExpr() = %q, want %q", got, want)
 		}
 	})
 
-	t.Run("100 expressions nests into batches", func(t *testing.T) {
-		exprs := make([]string, 100)
-		for i := range exprs {
-			exprs[i] = fmt.Sprintf("col%d", i)
+	t.Run("no columns is an error", func(t *testing.T) {
+		// The whole-row value would be a second encoding: no trim_scale,
+		// and the physical column order instead of the column list.
+		if got, err := RowHashExpr("_tbl_", nil, nil); err == nil {
+			t.Errorf("RowHashExpr() = %q, want an error", got)
 		}
-		result := concatWSBatched(exprs)
-		// Should have 3 concat_ws calls: 1 outer + 2 inner (99 + 1)
-		if strings.Count(result, "concat_ws(") != 3 {
-			t.Errorf("expected 3 concat_ws calls for 100 exprs, got %d in: %s",
-				strings.Count(result, "concat_ws("), result)
+	})
+
+	t.Run("hash does not depend on encoding or byte order", func(t *testing.T) {
+		// convert_to makes the bytes UTF8 on every node; sha256 is defined
+		// on bytes, not on machine words.
+		got := mustExpr(t, "_tbl_", []string{"a"}, nil)
+		for _, need := range []string{"convert_to(", "'UTF8'", "sha256("} {
+			if !strings.Contains(got, need) {
+				t.Errorf("RowHashExpr() = %q, want to contain %q", got, need)
+			}
 		}
-		// Every expression should be present
-		for _, e := range exprs {
-			if !strings.Contains(result, e) {
-				t.Errorf("missing expression %s in result", e)
+		if strings.Contains(got, "hashtext") {
+			t.Errorf("RowHashExpr() = %q, must not use a byte-order dependent hash", got)
+		}
+	})
+
+	t.Run("no NULL or separator handling in the encoding", func(t *testing.T) {
+		// ROW()::text keeps NULL and '' apart and quotes delimiters itself.
+		// COALESCE or a hand-made separator would bring the collisions back.
+		got := mustExpr(t, "_tbl_", []string{"a", "b"}, nil)
+		for _, bad := range []string{"COALESCE", "concat_ws", "'|'"} {
+			if strings.Contains(got, bad) {
+				t.Errorf("RowHashExpr() = %q, must not contain %q", got, bad)
 			}
 		}
 	})
 
-	t.Run("200 expressions nests into 3 inner batches", func(t *testing.T) {
-		exprs := make([]string, 200)
-		for i := range exprs {
-			exprs[i] = fmt.Sprintf("col%d", i)
+	t.Run("numeric array is not trimmed", func(t *testing.T) {
+		// trim_scale(numeric[]) does not exist.
+		got := mustExpr(t, "", []string{"id", "vals"}, map[string]string{"vals": "numeric(10,2)[]"})
+		if strings.Contains(got, "trim_scale") {
+			t.Errorf("RowHashExpr() = %q, must not trim an array", got)
 		}
-		result := concatWSBatched(exprs)
-		// 99 + 99 + 2 = 3 inner batches + 1 outer = 4 concat_ws calls
-		if strings.Count(result, "concat_ws(") != 4 {
-			t.Errorf("expected 4 concat_ws calls for 200 exprs, got %d in: %s",
-				strings.Count(result, "concat_ws("), result)
+	})
+
+	t.Run("wide table is one row constructor", func(t *testing.T) {
+		// ROW() is not a function call, so the limit of 100 arguments does
+		// not apply to it.
+		cols := make([]string, 250)
+		for i := range cols {
+			cols[i] = fmt.Sprintf("col%d", i)
+		}
+		got := mustExpr(t, "_tbl_", cols, nil)
+		if strings.Count(got, "ROW(") != 1 {
+			t.Errorf("expected one ROW() for 250 columns, got: %s", got)
+		}
+		for _, c := range cols {
+			if !strings.Contains(got, `_tbl_."`+c+`"`) {
+				t.Errorf("missing column %s in %s", c, got)
+			}
 		}
 	})
 }
