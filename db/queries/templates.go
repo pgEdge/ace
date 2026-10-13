@@ -61,7 +61,6 @@ type Templates struct {
 	QuoteIdentifiers         *template.Template
 
 	CreateMetadataTable             *template.Template
-	GetPkeyOffsets                  *template.Template
 	CreateSimpleMtreeTable          *template.Template
 	CreateIndex                     *template.Template
 	CreateCompositeType             *template.Template
@@ -1166,98 +1165,6 @@ var SQLTemplates = Templates{
 		JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
 		WHERE n.nspname = $1
 			AND c.relname = ANY($2::text[]);
-	`)),
-	GetPkeyOffsets: template.Must(template.New("pkeyOffsets").Parse(`
-		WITH sampled_data AS (
-			SELECT
-				{{.KeyColumnsSelect}}
-			FROM
-				{{.SchemaIdent}}.{{.TableIdent}}
-			TABLESAMPLE {{.TableSampleMethod}}({{.SamplePercent}})
-				{{- if .HasFilter }}
-			WHERE
-				{{.Filter}}
-				{{- end }}
-			ORDER BY
-				{{.KeyColumnsOrder}}
-		),
-		first_row AS (
-			SELECT
-				{{.KeyColumnsSelect}}
-			FROM
-				{{.SchemaIdent}}.{{.TableIdent}}
-				{{- if .HasFilter }}
-			WHERE
-				{{.Filter}}
-				{{- end }}
-			ORDER BY
-				{{.KeyColumnsOrder}}
-			LIMIT 1
-		),
-		last_row AS (
-			SELECT
-				{{.KeyColumnsSelect}}
-			FROM
-				{{.SchemaIdent}}.{{.TableIdent}}
-				{{- if .HasFilter }}
-			WHERE
-				{{.Filter}}
-				{{- end }}
-			ORDER BY
-				{{.KeyColumnsOrderDesc}}
-			LIMIT 1
-		),
-		sample_boundaries AS (
-			SELECT
-				{{.KeyColumnsSelect}},
-				ntile({{.NtileCount}}) OVER (
-					ORDER BY
-						{{.KeyColumnsOrder}}
-				) as bucket
-			FROM
-				sampled_data
-		),
-		block_starts AS (
-			SELECT
-				DISTINCT ON (bucket) {{.KeyColumnsSelect}}
-			FROM
-				sample_boundaries
-			ORDER BY
-				bucket,
-				{{.KeyColumnsOrder}}
-		),
-		all_bounds AS (
-			SELECT
-				{{.FirstRowSelects}},
-				0 as seq
-			UNION ALL
-			SELECT
-				{{.KeyColumnsSelect}},
-				1 as seq
-			FROM
-				block_starts
-			WHERE
-				ROW({{.KeyColumnsSelect}}) > {{.FirstRowTupleSelects}}
-			UNION ALL
-			SELECT
-				{{.LastRowSelects}},
-				2 as seq
-		),
-		ranges AS (
-			SELECT
-				{{.KeyColumnsSelect}},
-				{{.RangeStartColumns}},
-				{{.RangeEndColumns}},
-				seq
-			FROM
-				all_bounds
-		)
-		SELECT
-			{{.RangeOutputColumns}}
-		FROM
-			ranges
-		ORDER BY
-			seq;
 	`)),
 	CreateSimpleMtreeTable: template.Must(template.New("createSimpleMtreeTable").Parse(`
 		CREATE TABLE {{.MtreeTable}} (
