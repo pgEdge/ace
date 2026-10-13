@@ -23,11 +23,12 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/pgedge/ace/internal/consistency/slicer"
+	"github.com/pgedge/ace/pkg/config"
 	"github.com/pgedge/ace/pkg/types"
 	"github.com/stretchr/testify/require"
 )
 
-// These tests check how table-diff cuts a table into blocks
+// These tests check how table-diff and mtree build cut a table into blocks
 // (see internal/consistency/slicer): no block on the anchor node holds more
 // than block_size rows, and the blocks cover the whole key space on every
 // node, so table-diff finds rows outside the key range of the anchor.
@@ -305,4 +306,67 @@ func TestTableDiffBlockSlicingEdges(t *testing.T) {
 		diffs := slicingDiff(t, qualified, "n = 0")
 		require.Equal(t, 4000+40, diffs, "4000 rows only on n1; 20 rows moved below the key range on n2: 20 missing, 20 extra")
 	})
+}
+
+// TestBuildMtreeBlockSlicing checks the leaves of a new Merkle tree: they
+// follow each other with no gap, the last one has no upper bound, and no
+// leaf holds more than block_size rows on the reference node.
+func TestBuildMtreeBlockSlicing(t *testing.T) {
+	ctx := context.Background()
+	table := "slicing_mtree"
+	qualified := testSchema + "." + table
+	ident := pgx.Identifier{testSchema, table}.Sanitize()
+	pools := []*pgxpool.Pool{pgCluster.Node1Pool, pgCluster.Node2Pool}
+
+	for _, p := range pools {
+		slicingExec(t, ctx, p, "DROP TABLE IF EXISTS "+ident)
+		slicingExec(t, ctx, p, fmt.Sprintf("CREATE TABLE %s (a int, b int, v text, PRIMARY KEY (a, b))", ident))
+		slicingExec(t, ctx, p, "INSERT INTO "+ident+" SELECT g % 4, g, md5(g::text) FROM generate_series(1, 30000) g")
+		slicingExec(t, ctx, p, "ANALYZE "+ident)
+	}
+
+	task := newTestMerkleTreeTask(t, qualified, []string{serviceN1, serviceN2})
+	require.NoError(t, task.RunChecks(false))
+	require.NoError(t, task.MtreeInit())
+	t.Cleanup(func() {
+		if err := task.MtreeTeardown(); err != nil {
+			t.Logf("Warning: MtreeTeardown failed during cleanup: %v", err)
+		}
+		for _, p := range pools {
+			slicingExec(t, ctx, p, "DROP TABLE IF EXISTS "+ident)
+		}
+	})
+	require.NoError(t, task.BuildMtree())
+
+	mtreeTable := pgx.Identifier{config.Cfg.MTree.Schema, fmt.Sprintf("ace_mtree_%s_%s", testSchema, table)}.Sanitize()
+	for i, p := range pools {
+		var leaves, bad, gaps, openEnd, total int64
+		var maxRows int64
+		err := p.QueryRow(ctx, fmt.Sprintf(`
+			WITH l AS (
+				SELECT node_position, range_start, range_end,
+					lead(range_start) OVER (ORDER BY node_position) AS next_start
+				FROM %[1]s WHERE node_level = 0
+			), c AS (
+				SELECT l.*, (SELECT count(*) FROM %[2]s t
+					WHERE ROW(t.a, t.b) >= ROW((l.range_start).a, (l.range_start).b)
+					  AND (l.range_end IS NULL OR ROW(t.a, t.b) < ROW((l.range_end).a, (l.range_end).b))) AS n
+				FROM l
+			)
+			SELECT count(*),
+				count(*) FILTER (WHERE n > %[3]d),
+				count(*) FILTER (WHERE next_start IS NOT NULL AND next_start IS DISTINCT FROM range_end),
+				count(*) FILTER (WHERE range_end IS NULL),
+				sum(n), max(n)
+			FROM c`, mtreeTable, ident, task.BlockSize)).Scan(&leaves, &bad, &gaps, &openEnd, &total, &maxRows) // nosemgrep
+		require.NoError(t, err)
+		t.Logf("node %d: %d leaves, largest %d rows", i+1, leaves, maxRows)
+		require.Greater(t, leaves, int64(10))
+		require.Zero(t, gaps, "leaves must follow each other with no gap")
+		require.Equal(t, int64(1), openEnd, "only the last leaf has no upper bound")
+		require.Equal(t, int64(30000), total, "leaves hold every row")
+		if i == 0 {
+			require.Zero(t, bad, "no leaf holds more than block_size rows on the reference node")
+		}
+	}
 }

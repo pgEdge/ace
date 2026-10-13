@@ -90,7 +90,7 @@ flowchart LR
 ACE takes the block boundaries from one anchor node: the node with the
 highest estimated row count. The estimate is used only to choose this node;
 the number and the size of blocks do not depend on it. The code is in
-`internal/consistency/slicer`.
+`internal/consistency/slicer`; `mtree build` uses the same code.
 
 1. **Parts.** ACE splits the key space of the anchor node into K parts, the
    units of work for the cutting workers. There is one cutting worker per

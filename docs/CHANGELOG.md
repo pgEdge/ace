@@ -12,6 +12,12 @@ All notable changes to ACE will be captured in this document. This project follo
   insert and delete counters that drive split and merge grew twice. Now
   `range_end` is exclusive everywhere, and such a key goes to the next
   leaf only. Diff results did not change.
+- **`mtree build` made leaves much larger than `block_size`.** It took the
+  leaf bounds from the same kind of sample as `table-diff`. It now cuts the
+  leaves with the same code, so a new leaf holds at most `block_size` rows
+  on the reference node, and it hashes the leaves on all nodes at the same
+  time instead of one node after another. On a 100M-row table the build
+  took about half the time.
 - **`table-diff` made blocks much larger than `block_size`.** The block
   bounds came from a `TABLESAMPLE` of the key split with
   `ntile(rows / block_size)`. On large tables the sample had fewer rows than
