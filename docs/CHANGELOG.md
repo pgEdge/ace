@@ -12,6 +12,10 @@ All notable changes to ACE will be captured in this document. This project follo
   insert and delete counters that drive split and merge grew twice. Now
   `range_end` is exclusive everywhere, and such a key goes to the next
   leaf only. Diff results did not change.
+- **Every ACE connection now sets `max_parallel_workers_per_gather = 0`**
+  (`postgres.max_parallel_workers_per_gather` in `ace.yaml`; `-1` keeps the
+  server setting). ACE runs its hash queries from many workers already, and
+  without this Postgres could add parallel workers to each of them.
 - **Equal rows could have different hashes on nodes with different session
   defaults.** table-diff and mtree hash the text that the server prints for
   a row, and the CDC walsender prints the values of each change as text.
