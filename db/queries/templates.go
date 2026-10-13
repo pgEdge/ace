@@ -1420,13 +1420,22 @@ var SQLTemplates = Templates{
         (0, {{$r.NodePos}}, ROW({{$r.StartList}}), ROW({{$r.EndList}}), current_timestamp)
         {{- end }}
     `)),
+	// The block hash is the XOR of the row hashes (RowHashExpr). Postgres has
+	// no XOR aggregate for bytea, so each hash is cast through hex to bit(256)
+	// for bit_xor. The aggregate state is one bit(256), so a block of any size
+	// stays far below the 1 GB limit on one value. The order of the rows does
+	// not matter: each row hash covers the primary key, which is unique in the
+	// block.
+	//
+	// bit_send returns 4 bytes of bit length and then the data; substring
+	// drops the length. An empty block hashes to 32 zero bytes.
 	TDBlockHashSQL: template.Must(template.New("tdBlockHashSQL").Parse(`
-        SELECT encode(digest(COALESCE(string_agg({{.RowTextExpr}}, '|' ORDER BY {{.PkOrderByStr}}), 'EMPTY_BLOCK'), 'sha256'), 'hex')
+        SELECT encode(substring(bit_send(COALESCE(bit_xor(('x' || encode({{.RowHashExpr}}, 'hex'))::bit(256)), 0::bit(256))) FROM 5), 'hex')
         FROM {{.SchemaIdent}}.{{.TableIdent}} AS {{.TableAlias}}
         WHERE {{.WhereClause}}
     `)),
 	MtreeLeafHashSQL: template.Must(template.New("mtreeLeafHashSQL").Parse(`
-        SELECT digest(COALESCE(string_agg({{.RowTextExpr}}, '|' ORDER BY {{.PkOrderByStr}}), 'EMPTY_BLOCK'), 'sha256')
+        SELECT substring(bit_send(COALESCE(bit_xor(('x' || encode({{.RowHashExpr}}, 'hex'))::bit(256)), 0::bit(256))) FROM 5)
         FROM {{.SchemaIdent}}.{{.TableIdent}} AS {{.TableAlias}}
         WHERE {{.WhereClause}}
     `)),
