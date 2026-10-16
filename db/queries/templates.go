@@ -121,9 +121,7 @@ type Templates struct {
 	GetMinValSimple                  *template.Template
 	GetDirtyAndNewBlocksExpanded     *template.Template
 	FindBlocksToSplitExpanded        *template.Template
-	ResetPositionsByStart            *template.Template
 	ResetPositionsByStartFromTemp    *template.Template
-	ResetPositionsByStartExpanded    *template.Template
 	GetBulkSplitPoints               *template.Template
 	UpdateBlockRangeStartComposite   *template.Template
 	UpdateBlockRangeEndComposite     *template.Template
@@ -1841,19 +1839,6 @@ var SQLTemplates = Templates{
 	// Two leaves can share a range_start: a reference node with one row gives
 	// [k, k] and [k, NULL]. The old position breaks the tie, so the first leaf
 	// stays at position 0, see FirstBlockPosition.
-	ResetPositionsByStart: template.Must(template.New("resetPositionsByStart").Parse(`
-		WITH seq AS (
-			SELECT node_position,
-			       row_number() OVER (ORDER BY range_start, node_position) - 1 AS pos_seq
-			FROM {{.MtreeTable}}
-			WHERE node_level = 0
-		)
-		UPDATE {{.MtreeTable}} mt
-		SET node_position = s.pos_seq
-		FROM seq s
-		WHERE mt.node_level = 0 AND mt.node_position = s.node_position
-	`)),
-
 	ResetPositionsByStartFromTemp: template.Must(template.New("resetPositionsByStartFromTemp").Parse(`
 		WITH seq AS (
 			SELECT node_position,
@@ -1867,18 +1852,6 @@ var SQLTemplates = Templates{
 		WHERE mt.node_level = 0 AND mt.node_position = s.node_position
 `)),
 
-	ResetPositionsByStartExpanded: template.Must(template.New("resetPositionsByStartExpanded").Parse(`
-		WITH seq AS (
-			SELECT node_position,
-			       row_number() OVER (ORDER BY range_start, node_position) - 1 AS pos_seq
-			FROM {{.MtreeTable}}
-			WHERE node_level = 0
-		)
-		UPDATE {{.MtreeTable}} mt
-		SET node_position = s.pos_seq
-		FROM seq s
-		WHERE mt.node_level = 0 AND mt.node_position = s.node_position
-	`)),
 	UpdateNodePosition: template.Must(template.New("updateNodePosition").Parse(`
 		UPDATE {{.MtreeTable}}
 		SET node_position = $1

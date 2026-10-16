@@ -112,17 +112,11 @@ func TestUpdateMtreeCountersKeepsRangeStart(t *testing.T) {
 // Leaves with the same range_start must keep their old order when they are
 // numbered again, or another leaf can take position 0 and lose its lower bound.
 func TestResetPositionsBreaksTiesByPosition(t *testing.T) {
-	for name, tmpl := range map[string]*template.Template{
-		"ResetPositionsByStart":         SQLTemplates.ResetPositionsByStart,
-		"ResetPositionsByStartFromTemp": SQLTemplates.ResetPositionsByStartFromTemp,
-		"ResetPositionsByStartExpanded": SQLTemplates.ResetPositionsByStartExpanded,
-	} {
-		sql, err := RenderSQL(tmpl, map[string]any{"MtreeTable": `"ace"."ace_mtree_public_t"`})
-		if err != nil {
-			t.Fatalf("%s: render: %v", name, err)
-		}
-		if !strings.Contains(sql, "ORDER BY range_start, node_position") {
-			t.Errorf("%s does not break ties by node_position:\n%s", name, sql)
-		}
+	sql, err := RenderSQL(SQLTemplates.ResetPositionsByStartFromTemp, map[string]any{"MtreeTable": `"ace"."ace_mtree_public_t"`})
+	if err != nil {
+		t.Fatalf("render: %v", err)
+	}
+	if !strings.Contains(sql, "ORDER BY range_start, node_position") {
+		t.Errorf("ResetPositionsByStartFromTemp does not break ties by node_position:\n%s", sql)
 	}
 }

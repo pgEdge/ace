@@ -3343,26 +3343,6 @@ func UpdateNodePositionsSequential(ctx context.Context, db DBQuerier, mtreeTable
 	return err
 }
 
-func ResetPositionsByStart(ctx context.Context, db DBQuerier, mtreeTable string, key []string, isComposite bool) error {
-	data := map[string]any{
-		"MtreeTable": mtreeTable,
-	}
-	var query string
-	var err error
-	if isComposite {
-		query, err = RenderSQL(SQLTemplates.ResetPositionsByStartExpanded, data)
-	} else {
-		query, err = RenderSQL(SQLTemplates.ResetPositionsByStart, data)
-	}
-	if err != nil {
-		return fmt.Errorf("failed to render ResetPositionsByStart SQL: %w", err)
-	}
-	if _, err := db.Exec(ctx, query); err != nil {
-		return fmt.Errorf("query to reset positions failed: %w", err)
-	}
-	return nil
-}
-
 func GetBulkSplitPoints(ctx context.Context, db DBQuerier, schema, table string, key []string, pkeyType string, isComposite bool, start, end []any, blockSize int) ([][]any, error) {
 	args := []any{}
 	paramIndex := 1
