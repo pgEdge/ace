@@ -1617,6 +1617,9 @@ func (m *MerkleTreeTask) RunChecks(skipValidation bool) error {
 			}
 			return fmt.Errorf("'%s' %s (node %s).%s", m.QualifiedTableName, reason, nodeInfo["Name"], hint)
 		}
+		if reason := mtreeParentReason(tree); reason != "" {
+			return fmt.Errorf("'%s' %s (node %s)", m.QualifiedTableName, reason, nodeInfo["Name"])
+		}
 
 		currentColsSlice, err := queries.GetColumns(m.Ctx, tx, m.Schema, m.Table)
 		if err != nil {
@@ -1664,6 +1667,41 @@ func (m *MerkleTreeTask) RunChecks(skipValidation bool) error {
 	fmt.Println("Connections successful to all nodes in cluster.")
 	fmt.Printf("Table %s is comparable across nodes.\n", m.QualifiedTableName)
 	return nil
+}
+
+// mtreeParentReason says why mtree refuses a partitioned table or a table
+// with inheritance children, or returns "" for any other table. CDC reports
+// a change under the name of the table that stores the row, so a tree on
+// the parent would not see changes in its partitions or children.
+func mtreeParentReason(tree *queries.RelationTree) string {
+	switch {
+	case tree.Root.RelKind == "p":
+		leaves := tree.HeapLeaves()
+		if len(leaves) == 0 {
+			return "is a partitioned table with no partitions that store rows; there is nothing to build a Merkle tree on"
+		}
+		return fmt.Sprintf("is a partitioned table; ACE builds Merkle trees on partitions, not on the partitioned table. Build a tree on each partition (%s), or use table-diff to compare the whole table",
+			joinQualified(leaves))
+	case tree.IsInherited():
+		return fmt.Sprintf("has child tables through inheritance (%s); ACE does not build a Merkle tree on such a table. Use table-diff to compare it",
+			joinQualified(tree.Descendants))
+	}
+	return ""
+}
+
+// joinQualified lists relations as "schema.name, schema.name, ...". A table
+// can have thousands of partitions, so it names at most maxListed of them.
+func joinQualified(rels []queries.RelationInfo) string {
+	const maxListed = 5
+	var names []string
+	for i, r := range rels {
+		if i == maxListed {
+			names = append(names, fmt.Sprintf("and %d more", len(rels)-maxListed))
+			break
+		}
+		names = append(names, r.Qualified())
+	}
+	return strings.Join(names, ", ")
 }
 
 func (m *MerkleTreeTask) BuildMtree() (err error) {
