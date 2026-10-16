@@ -3070,6 +3070,8 @@ func GetBlockSizeFromMetadata(ctx context.Context, db DBQuerier, schema, table s
 	return blockSize, nil
 }
 
+// EnsureHashVersionColumn adds the hash_version column to a metadata table
+// made by an older ACE, and makes sure that the column has no default.
 func EnsureHashVersionColumn(ctx context.Context, db DBQuerier) error {
 	sql, err := RenderSQL(SQLTemplates.EnsureHashVersionColumn, nil)
 	if err != nil {
@@ -3079,6 +3081,14 @@ func EnsureHashVersionColumn(ctx context.Context, db DBQuerier) error {
 	_, err = db.Exec(ctx, sql)
 	if err != nil {
 		return fmt.Errorf("failed to add hash_version column to metadata table: %w", err)
+	}
+
+	sql, err = RenderSQL(SQLTemplates.DropHashVersionDefault, nil)
+	if err != nil {
+		return fmt.Errorf("failed to render DropHashVersionDefault SQL: %w", err)
+	}
+	if _, err = db.Exec(ctx, sql); err != nil {
+		return fmt.Errorf("failed to drop the default of hash_version in metadata table: %w", err)
 	}
 	return nil
 }

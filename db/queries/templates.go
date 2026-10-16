@@ -150,6 +150,7 @@ type Templates struct {
 	GetReplicationOriginNames        *template.Template
 	GetNativeNodeOriginNames         *template.Template
 	EnsureHashVersionColumn          *template.Template
+	DropHashVersionDefault           *template.Template
 	GetHashVersion                   *template.Template
 	MarkAllLeavesDirty               *template.Template
 	UpdateHashVersion                *template.Template
@@ -165,7 +166,9 @@ type Templates struct {
 }
 
 var SQLTemplates = Templates{
-	// A template isn't needed here; kept for struct uniformity.
+	// hash_version has no default: UpdateMetadata always sets it to the
+	// version that hashed the leaves. A default would record a wrong version
+	// for a row inserted without it.
 	CreateMetadataTable: template.Must(template.New("createMetadataTable").Funcs(aceTemplateFuncs).Parse(`
 		CREATE TABLE IF NOT EXISTS {{aceSchema}}.ace_mtree_metadata (
 			schema_name text,
@@ -174,7 +177,7 @@ var SQLTemplates = Templates{
 			block_size int,
 			num_blocks int,
 			is_composite boolean NOT NULL DEFAULT false,
-			hash_version int NOT NULL DEFAULT 2,
+			hash_version int NOT NULL,
 			last_updated timestamptz,
 			PRIMARY KEY (schema_name, table_name)
 		)`),
@@ -1977,9 +1980,18 @@ var SQLTemplates = Templates{
 		ORDER BY rs.confirmed_flush_lsn DESC
 		LIMIT 1
 	`)),
+	// Rows that exist before the column is added were hashed by version 1.
 	EnsureHashVersionColumn: template.Must(template.New("ensureHashVersionColumn").Funcs(aceTemplateFuncs).Parse(`
 		ALTER TABLE {{aceSchema}}.ace_mtree_metadata
 		ADD COLUMN IF NOT EXISTS hash_version int NOT NULL DEFAULT 1
+	`)),
+	// Run after EnsureHashVersionColumn, as a separate statement: one ALTER
+	// TABLE cannot change a column that it adds. It drops the default of 1
+	// set there and the default of 2 that earlier versions of
+	// CreateMetadataTable set.
+	DropHashVersionDefault: template.Must(template.New("dropHashVersionDefault").Funcs(aceTemplateFuncs).Parse(`
+		ALTER TABLE {{aceSchema}}.ace_mtree_metadata
+		ALTER COLUMN hash_version DROP DEFAULT
 	`)),
 	GetHashVersion: template.Must(template.New("getHashVersion").Funcs(aceTemplateFuncs).Parse(`
 		SELECT COALESCE(
