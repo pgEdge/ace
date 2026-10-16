@@ -2282,9 +2282,15 @@ func TestMerkleTreeBidirectionalDiff(t *testing.T) {
 }
 
 func extractDiffIDs(rows []types.OrderedMap) []int {
+	return extractDiffIDsByColumn(rows, "id")
+}
+
+// extractDiffIDsByColumn returns the sorted integer values of column col in
+// the diff rows.
+func extractDiffIDsByColumn(rows []types.OrderedMap, col string) []int {
 	ids := make([]int, 0, len(rows))
 	for _, row := range rows {
-		v, ok := row.Get("id")
+		v, ok := row.Get(col)
 		if !ok {
 			continue
 		}

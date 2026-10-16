@@ -467,3 +467,85 @@ func TestMerkleTreeFirstLeafKeepsPositionOnTie(t *testing.T) {
 	require.Empty(t, extractDiffIDs(nodeDiffs.Rows[env.ServiceN1]))
 	require.Equal(t, []int{50}, extractDiffIDs(nodeDiffs.Rows[env.ServiceN2]))
 }
+
+// TestMerkleTreeSplitWithMixedCaseKey checks the split queries with a key
+// column whose name needs quotes. After the build, both nodes get new rows
+// below the first block and above the last block, so mtree update splits both
+// of them. Without quotes, Postgres folds "UserId" to userid, the query fails
+// and the transaction is aborted.
+func TestMerkleTreeSplitWithMixedCaseKey(t *testing.T) {
+	ctx := context.Background()
+	shapes := []struct {
+		name string
+		ddl  string
+		ins  string
+	}{
+		{
+			name: "simple",
+			ddl:  `("UserId" INT PRIMARY KEY, payload TEXT)`,
+			ins:  `("UserId", payload) SELECT g, 'row-' || g FROM generate_series($1::int, $2::int) g`,
+		},
+		{
+			name: "composite",
+			ddl:  `("UserId" INT, "Region" INT, payload TEXT, PRIMARY KEY ("UserId", "Region"))`,
+			ins:  `("UserId", "Region", payload) SELECT g, 1, 'row-' || g FROM generate_series($1::int, $2::int) g`,
+		},
+	}
+	for _, shape := range shapes {
+		t.Run(shape.name, func(t *testing.T) {
+			env := newSpockEnv()
+			tableName := "mtree_split_mixed_case_" + shape.name
+			qualified, safe := newUnreplicatedTable(t, env, tableName, shape.ddl)
+
+			for _, pool := range env.pools() {
+				insertIDRange(t, pool, safe, shape.ins, 2001, 4000)
+			}
+			analyzeTable(t, env, safe)
+
+			mtreeTask := env.newMerkleTreeTask(t, qualified, []string{env.ServiceN1, env.ServiceN2})
+			require.NoError(t, mtreeTask.RunChecks(false))
+			require.NoError(t, mtreeTask.MtreeInit())
+			t.Cleanup(func() {
+				if err := mtreeTask.MtreeTeardown(); err != nil {
+					t.Logf("MtreeTeardown cleanup: %v", err)
+				}
+			})
+			require.NoError(t, mtreeTask.BuildMtree())
+
+			mtreeTable := pgx.Identifier{
+				config.Cfg.MTree.Schema,
+				fmt.Sprintf("ace_mtree_%s_%s", testSchema, tableName),
+			}.Sanitize()
+			leafCount := func(pool *pgxpool.Pool) int {
+				var n int
+				require.NoError(t, pool.QueryRow(ctx,
+					"SELECT count(*) FROM "+mtreeTable+" WHERE node_level = 0").Scan(&n)) // nosemgrep
+				return n
+			}
+			leavesBefore := leafCount(env.N1Pool)
+
+			for _, pool := range env.pools() {
+				insertIDRange(t, pool, safe, shape.ins, 1, 1500)
+				insertIDRange(t, pool, safe, shape.ins, 4001, 7000)
+			}
+			_, err := env.N2Pool.Exec(ctx,
+				"UPDATE "+safe+` SET payload = 'changed on n2' WHERE "UserId" = 5000`) // nosemgrep
+			require.NoError(t, err)
+
+			require.NoError(t, mtreeTask.DiffMtree())
+
+			for name, pool := range map[string]*pgxpool.Pool{
+				env.ServiceN1: env.N1Pool, env.ServiceN2: env.N2Pool,
+			} {
+				require.Greater(t, leafCount(pool), leavesBefore+2,
+					"the first and the last block were not split on %s", name)
+			}
+
+			nodeDiffs, ok := mtreeTask.DiffResult.NodeDiffs[env.pairKey()]
+			require.True(t, ok, "no diff for pair %s; result: %+v",
+				env.pairKey(), mtreeTask.DiffResult.NodeDiffs)
+			require.Equal(t, []int{5000}, extractDiffIDsByColumn(nodeDiffs.Rows[env.ServiceN1], "UserId"))
+			require.Equal(t, []int{5000}, extractDiffIDsByColumn(nodeDiffs.Rows[env.ServiceN2], "UserId"))
+		})
+	}
+}

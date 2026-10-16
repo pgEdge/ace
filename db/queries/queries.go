@@ -2406,13 +2406,13 @@ func UpdateMaxVal(ctx context.Context, db DBQuerier, mtreeTable string, rangeEnd
 
 // GetMaxValSimple returns the largest key at or above rangeStart, or the
 // largest key of the table when rangeStart is nil. It returns nil when no row
-// matches.
+// matches. key is a column name, not quoted.
 func GetMaxValSimple(ctx context.Context, db DBQuerier, schema, table, key string, rangeStart interface{}) (interface{}, error) {
 	hasStart := rangeStart != nil
 	data := map[string]interface{}{
 		"SchemaIdent": pgx.Identifier{schema}.Sanitize(),
 		"TableIdent":  pgx.Identifier{table}.Sanitize(),
-		"Key":         key,
+		"Key":         pgx.Identifier{key}.Sanitize(),
 		"HasStart":    hasStart,
 	}
 
@@ -2480,20 +2480,27 @@ func GetCountSimple(ctx context.Context, db DBQuerier, schema, table, key, pkeyT
 	return count, nil
 }
 
+// GetBlockRowCount returns the number of rows between start and end, both
+// included. keyColumns are column names, not quoted. A nil or all-NULL bound
+// is an open side (see AllNil).
 func GetBlockRowCount(ctx context.Context, db DBQuerier, schema string, table string, keyColumns []string, isComposite bool, start, end []any) (int64, error) {
 	var whereClause string
 	var args []any
+
+	cols := make([]string, len(keyColumns))
+	for i, c := range keyColumns {
+		cols[i] = pgx.Identifier{c}.Sanitize()
+	}
 
 	if isComposite {
 		var conditions []string
 		var startPlaceholders, endPlaceholders []string
 
-		// An all-NULL bound is an open side, as in the simple-key branch.
 		if !AllNil(start) {
 			for i := range start {
 				startPlaceholders = append(startPlaceholders, fmt.Sprintf("$%d", len(args)+i+1))
 			}
-			conditions = append(conditions, fmt.Sprintf("ROW(%s) >= ROW(%s)", strings.Join(keyColumns, ", "), strings.Join(startPlaceholders, ", ")))
+			conditions = append(conditions, fmt.Sprintf("ROW(%s) >= ROW(%s)", strings.Join(cols, ", "), strings.Join(startPlaceholders, ", ")))
 			args = append(args, start...)
 		}
 
@@ -2501,18 +2508,18 @@ func GetBlockRowCount(ctx context.Context, db DBQuerier, schema string, table st
 			for i := range end {
 				endPlaceholders = append(endPlaceholders, fmt.Sprintf("$%d", len(args)+i+1))
 			}
-			conditions = append(conditions, fmt.Sprintf("ROW(%s) <= ROW(%s)", strings.Join(keyColumns, ", "), strings.Join(endPlaceholders, ", ")))
+			conditions = append(conditions, fmt.Sprintf("ROW(%s) <= ROW(%s)", strings.Join(cols, ", "), strings.Join(endPlaceholders, ", ")))
 			args = append(args, end...)
 		}
 		whereClause = strings.Join(conditions, " AND ")
 	} else {
 		var conditions []string
-		if len(start) > 0 && start[0] != nil {
-			conditions = append(conditions, fmt.Sprintf("%s >= $1", keyColumns[0]))
+		if !AllNil(start) {
+			conditions = append(conditions, fmt.Sprintf("%s >= $1", cols[0]))
 			args = append(args, start[0])
 		}
-		if len(end) > 0 && end[0] != nil {
-			conditions = append(conditions, fmt.Sprintf("%s <= $%d", keyColumns[0], len(args)+1))
+		if !AllNil(end) {
+			conditions = append(conditions, fmt.Sprintf("%s <= $%d", cols[0], len(args)+1))
 			args = append(args, end[0])
 		}
 		whereClause = strings.Join(conditions, " AND ")
@@ -2886,11 +2893,13 @@ func GetMinValComposite(ctx context.Context, db DBQuerier, schema, table string,
 	return dest, nil
 }
 
+// GetMinValSimple returns the smallest key of the table, or nil when the table
+// is empty. key is a column name, not quoted.
 func GetMinValSimple(ctx context.Context, db DBQuerier, schema, table, key string) (interface{}, error) {
 	data := map[string]interface{}{
 		"SchemaIdent": pgx.Identifier{schema}.Sanitize(),
 		"TableIdent":  pgx.Identifier{table}.Sanitize(),
-		"Key":         key,
+		"Key":         pgx.Identifier{key}.Sanitize(),
 	}
 	sql, err := RenderSQL(SQLTemplates.GetMinValSimple, data)
 	if err != nil {

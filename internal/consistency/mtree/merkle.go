@@ -1106,11 +1106,13 @@ func processRows(rows pgx.Rows) ([]types.OrderedMap, error) {
 	return results, nil
 }
 
-func valueOrNil(end []any) interface{} {
-	if len(end) == 0 || end[0] == nil {
+// valueOrNil returns the value of a simple-key bound, or nil for an open bound
+// (see queries.AllNil).
+func valueOrNil(bound []any) interface{} {
+	if queries.AllNil(bound) {
 		return nil
 	}
-	return end[0]
+	return bound[0]
 }
 
 func (m *MerkleTreeTask) MtreeInit() (err error) {
@@ -2418,7 +2420,7 @@ func (m *MerkleTreeTask) splitBlocks(tx pgx.Tx, blocksToSplit []types.BlockRange
 // the smallest key of the table. It does nothing if the table is empty.
 func (m *MerkleTreeTask) setFirstBlockStartToMin(tx pgx.Tx, mtreeTableName, compositeTypeName string) error {
 	if m.SimplePrimaryKey {
-		minVal, err := queries.GetMinValSimple(m.Ctx, tx, m.Schema, m.Table, pgx.Identifier{m.Key[0]}.Sanitize())
+		minVal, err := queries.GetMinValSimple(m.Ctx, tx, m.Schema, m.Table, m.Key[0])
 		if err != nil {
 			return err
 		}
