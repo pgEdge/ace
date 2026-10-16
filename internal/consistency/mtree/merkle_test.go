@@ -658,3 +658,38 @@ func TestHashVersionError(t *testing.T) {
 		}
 	}
 }
+
+// A ranges file must give the first block position 0, or the first block gets
+// a lower bound. renumberBlockRanges uses the order of the blocks in the file.
+func TestRenumberBlockRanges(t *testing.T) {
+	tests := []struct {
+		name        string
+		positions   []int64
+		wantChanged bool
+	}{
+		{"already numbered", []int64{0, 1, 2}, false},
+		{"starts at 1", []int64{1, 2, 3}, true},
+		{"gap", []int64{0, 2, 3}, true},
+		{"missing positions", []int64{0, 0, 0}, true},
+		{"empty", nil, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ranges := make([]types.BlockRange, len(tt.positions))
+			for i, p := range tt.positions {
+				ranges[i] = types.BlockRange{NodePosition: p, RangeStart: []any{int64(i * 10)}}
+			}
+			if got := renumberBlockRanges(ranges); got != tt.wantChanged {
+				t.Errorf("changed = %v, want %v", got, tt.wantChanged)
+			}
+			for i, r := range ranges {
+				if r.NodePosition != int64(i) {
+					t.Errorf("block %d has position %d", i, r.NodePosition)
+				}
+				if r.RangeStart[0] != int64(i*10) {
+					t.Errorf("block %d moved: start %v", i, r.RangeStart[0])
+				}
+			}
+		})
+	}
+}

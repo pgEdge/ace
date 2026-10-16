@@ -385,22 +385,6 @@ type LeafRange struct {
 	RangeEnd   []any `db:"range_end"`
 }
 
-// BlockCountComposite contains the row count for a block in a table with a composite primary key.
-type BlockCountComposite struct {
-	NodePosition int64 `db:"node_position"`
-	RangeStart   any   `db:"range_start"`
-	RangeEnd     any   `db:"range_end"`
-	Count        int64 `db:"cnt"`
-}
-
-// BlockCountSimple contains the row count for a block in a table with a simple primary key.
-type BlockCountSimple struct {
-	NodePosition int64 `db:"node_position"`
-	RangeStart   any   `db:"range_start"`
-	RangeEnd     any   `db:"range_end"`
-	Count        int64 `db:"count"`
-}
-
 // MtreeMetadata represents a row in the ace_mtree_metadata table.
 type MtreeMetadata struct {
 	SchemaName  string    `db:"schema_name"`
