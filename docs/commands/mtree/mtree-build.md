@@ -32,3 +32,14 @@ Builds a Merkle tree for a table on all nodes (after `mtree init`).
 ```sh
 ./ace mtree build --dbname=mydatabase my-cluster public.my_table
 ```
+
+**Partitioned tables and inheritance**
+
+ACE builds a Merkle tree on a table that stores rows. It does not build one
+on a partitioned table or on a table with child tables through inheritance
+(`INHERITS`). The tree stays current through CDC, and CDC reports each change
+under the name of the table that holds the row: the partition or the child.
+A tree on the parent would not see these changes.
+
+For a partitioned table, build a tree on each partition. To compare the
+whole partitioned table in one run, use `table-diff`.
