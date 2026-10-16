@@ -5,6 +5,17 @@ All notable changes to ACE will be captured in this document. This project follo
 ## [Unreleased]
 
 ### Fixed
+- **`mtree` said "0 rows on all nodes; add data" for a partitioned table that
+  has data.** A partitioned table has no storage, so its row estimate was
+  empty, and a tree on it would not stay current anyway: CDC reports changes
+  under the name of the partition. `mtree` now refuses a partitioned table
+  with a message that names its partitions; build a tree on each partition,
+  or use `table-diff` for the whole table. `mtree` also refuses a table with
+  child tables through inheritance, for the same reason.
+  An earlier version could build a tree on such a table if the table was
+  analyzed. Then a change in a partition or a child makes the CDC drain fail,
+  and `mtree update` and `mtree table-diff` fail for every table on that
+  node. Remove such a tree with `mtree teardown-table`.
 - **A change to a key on the bound between two Merkle tree leaves was
   counted in both leaves.** CDC counters and leaf row counts treated
   `range_end` as part of the leaf, while leaf hashes did not. A key equal
