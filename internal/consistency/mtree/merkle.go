@@ -1106,6 +1106,22 @@ func processRows(rows pgx.Rows) ([]types.OrderedMap, error) {
 	return results, nil
 }
 
+// renumberBlockRanges sets the NodePosition of each block to its index in
+// ranges, and reports whether any position changed. The first block must be
+// at queries.FirstBlockPosition, or it gets a lower bound and rows below its
+// range_start are in no block. A ranges file can have other positions, for
+// example if it was written by hand.
+func renumberBlockRanges(ranges []types.BlockRange) bool {
+	changed := false
+	for i := range ranges {
+		if ranges[i].NodePosition != int64(i) {
+			ranges[i].NodePosition = int64(i)
+			changed = true
+		}
+	}
+	return changed
+}
+
 // valueOrNil returns the value of a simple-key bound, or nil for an open bound
 // (see queries.AllNil).
 func valueOrNil(bound []any) interface{} {
@@ -1698,6 +1714,9 @@ func (m *MerkleTreeTask) BuildMtree() (err error) {
 		}
 		if err := json.Unmarshal(data, &blockRanges); err != nil {
 			return fmt.Errorf("failed to unmarshal ranges file: %w", err)
+		}
+		if renumberBlockRanges(blockRanges) {
+			logger.Warn("Block positions in %s do not go 0, 1, 2, ...; using the order of the blocks in the file instead", m.RangesFile)
 		}
 	}
 
