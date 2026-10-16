@@ -66,7 +66,8 @@ func newUnreplicatedTable(t *testing.T, env *testEnv, tableName, ddl string) (qu
 		for _, pool := range env.pools() {
 			_, _ = pool.Exec(ctx, "DROP TABLE IF EXISTS "+safe+" CASCADE") // nosemgrep
 		}
-		files, _ := filepath.Glob("*_diffs-*.json")
+		// Remove only the diff files of this table: other tests can keep theirs.
+		files, _ := filepath.Glob(fmt.Sprintf("%s_%s_diffs-*.json", testSchema, tableName))
 		for _, f := range files {
 			os.Remove(f)
 		}
