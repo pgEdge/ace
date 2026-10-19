@@ -1355,7 +1355,6 @@ func (t *TableDiffTask) ExecuteTask() (err error) {
 			ConcurrencyFactor: t.ConcurrencyFactor,
 			MaxDiffRows:       t.MaxDiffRows,
 			StartTime:         startTime.Format(time.RFC3339),
-			TotalRowsChecked:  int64(maxCount),
 			DiffRowsCount:     make(map[string]int),
 			AgainstOrigin:     t.AgainstOrigin,
 			AgainstOriginResolved: func() string {
@@ -1507,6 +1506,9 @@ func (t *TableDiffTask) ExecuteTask() (err error) {
 	}
 
 	logger.Info("table-diff: cut %s on %s", cutStats, maxNode)
+	// The cut counted the rows of the anchor node that match the filter.
+	// This is exact, unlike the planner estimate that chose the anchor.
+	t.DiffResult.Summary.TotalRowsChecked = cutStats.Rows
 	t.DiffResult.Summary.InitialRangesCount = len(blocks)
 
 	logger.Info("Initial hash calculations complete. Proceeding with comparisons for mismatches...")

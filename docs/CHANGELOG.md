@@ -31,7 +31,10 @@ All notable changes to ACE will be captured in this document. This project follo
   first block. The key ranges come from the histogram of the first key
   column, or from a small sample if there is no histogram. On a 100M-row
   table with a key in physical order `table-diff` ran 5 to 9 times faster.
-  The log shows how ACE built the blocks.
+  The log shows how ACE built the blocks. The summary field
+  `total_rows_checked` is now the exact number of rows of the anchor node
+  that match the filter, counted by the cut; before, it was the planner
+  estimate of the whole table.
 - **`table-diff` reported a match when the anchor node had no rows.** It
   built no blocks, so rows of the other nodes were never compared. Now the
   whole key space is one open block in this case.

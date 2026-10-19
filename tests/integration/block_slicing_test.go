@@ -138,14 +138,23 @@ func slicingCut(t *testing.T, ctx context.Context, table string, key []string, f
 // slicingDiff runs table-diff and returns the number of differing rows.
 func slicingDiff(t *testing.T, qualified string, filter string) int {
 	t.Helper()
+	diffs, _ := slicingDiffSummary(t, qualified, filter)
+	return diffs
+}
+
+// slicingDiffSummary runs table-diff and returns the number of differing
+// rows and the number of rows that the summary reports as checked.
+func slicingDiffSummary(t *testing.T, qualified string, filter string) (int, int64) {
+	t.Helper()
 	task := newTestTableDiffTask(t, qualified, []string{serviceN1, serviceN2})
 	task.BlockSize = slicingBlockSize
 	task.TableFilter = filter
 	task.DiffResult.Summary.BlockSize = slicingBlockSize
 	require.NoError(t, task.RunChecks(false))
 	require.NoError(t, task.ExecuteTask())
+	rowsChecked := task.DiffResult.Summary.TotalRowsChecked
 	if task.DiffFilePath == "" {
-		return 0
+		return 0, rowsChecked
 	}
 	t.Cleanup(func() { os.Remove(task.DiffFilePath) })
 
@@ -157,7 +166,8 @@ func slicingDiff(t *testing.T, qualified string, filter string) int {
 	for _, n := range out.Summary.DiffRowsCount {
 		total += n
 	}
-	return total
+	require.Equal(t, rowsChecked, out.Summary.TotalRowsChecked, "rows checked in the diff file")
+	return total, rowsChecked
 }
 
 // TestTableDiffBlockSlicing builds two nodes that differ inside the key
@@ -303,8 +313,9 @@ func TestTableDiffBlockSlicingEdges(t *testing.T) {
 		require.LessOrEqual(t, st.MaxBlockRows, int64(slicingBlockSize))
 		require.Equal(t, int64(8000), st.Rows, "only rows that match the filter count")
 
-		diffs := slicingDiff(t, qualified, "n = 0")
+		diffs, rowsChecked := slicingDiffSummary(t, qualified, "n = 0")
 		require.Equal(t, 4000+40, diffs, "4000 rows only on n1; 20 rows moved below the key range on n2: 20 missing, 20 extra")
+		require.Equal(t, int64(8000), rowsChecked, "the summary counts the rows of the anchor that match the filter")
 	})
 }
 
