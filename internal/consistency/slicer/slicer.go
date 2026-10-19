@@ -217,7 +217,7 @@ func (c *Config) validate() error {
 }
 
 func (c *Config) tableIdent() string {
-	return pgx.Identifier{c.Schema}.Sanitize() + "." + pgx.Identifier{c.Table}.Sanitize()
+	return pgx.Identifier{c.Schema, c.Table}.Sanitize()
 }
 
 func (c *Config) keyList(alias string) string {

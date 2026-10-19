@@ -1824,7 +1824,6 @@ func (m *MerkleTreeTask) BuildMtree() (err error) {
 			BlockSize: m.BlockSize,
 			Workers:   cutWorkers,
 		}
-		sliceCfg.Parts = slicer.DefaultParts(sliceCfg.Workers)
 		plan, err := slicer.PlanParts(m.Ctx, refPool, sliceCfg)
 		if err != nil {
 			return fmt.Errorf("failed to plan block boundaries on node %s: %w", refName, err)

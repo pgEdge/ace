@@ -1378,7 +1378,6 @@ func (t *TableDiffTask) ExecuteTask() (err error) {
 		BlockSize: t.BlockSize,
 		Workers:   slicer.DefaultWorkers(maxConcurrent),
 	}
-	sliceCfg.Parts = slicer.DefaultParts(sliceCfg.Workers)
 	plan, err := slicer.PlanParts(ctx, anchorPool, sliceCfg)
 	if err != nil {
 		return fmt.Errorf("failed to plan block boundaries on %s: %w", maxNode, err)
