@@ -5,6 +5,13 @@ All notable changes to ACE will be captured in this document. This project follo
 ## [Unreleased]
 
 ### Fixed
+- **A change to a key on the bound between two Merkle tree leaves was
+  counted in both leaves.** CDC counters and leaf row counts treated
+  `range_end` as part of the leaf, while leaf hashes did not. A key equal
+  to `range_end` went to two leaves: both were marked dirty, and the
+  insert and delete counters that drive split and merge grew twice. Now
+  `range_end` is exclusive everywhere, and such a key goes to the next
+  leaf only. Diff results did not change.
 - **Equal rows could have different hashes on nodes with different session
   defaults.** table-diff and mtree hash the text that the server prints for
   a row, and the CDC walsender prints the values of each change as text.

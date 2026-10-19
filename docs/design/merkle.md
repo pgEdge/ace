@@ -215,6 +215,9 @@ flowchart TB
 
 ### Additional Split/Merge Considerations
 
+- **Block bounds**  
+  - The `range_end` of a leaf is the `range_start` of the next leaf, so `range_end` is exclusive: a key equal to it belongs to the next leaf only. Leaf hashes, CDC counters and leaf row counts all use this rule, so each row is in one leaf and is counted once.
+
 - **Open-ended last block handling**  
   - The trailing block often has `range_end = NULL` so new inserts beyond the current max PK land there. When splitting an unbounded block, ACE temporarily discovers a max PK to create a split point, then ensures the final leaf is unbounded again so future inserts keep hitting a single tail block. This prevents new rows from “falling off” the tree after a split.
 

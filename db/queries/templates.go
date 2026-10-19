@@ -300,6 +300,8 @@ var SQLTemplates = Templates{
 
 	// The first leaf (node_position = 0) has no lower bound, see
 	// FirstBlockPosition. A key below its range_start belongs to it.
+	// range_end is exclusive, as in BlockHashSQL: it is the range_start of the
+	// next leaf, so a key equal to it belongs to the next leaf only.
 	UpdateMtreeCounters: template.Must(template.New("updateMtreeCounters").Parse(`
 		WITH pkeys_to_update AS (
 			SELECT unnest(@inserts::text[]) AS pkey, 'insert' AS op
@@ -319,10 +321,10 @@ var SQLTemplates = Templates{
 				pkeys_to_update p ON
 					{{if .IsComposite}}
 						(mt.node_position = 0 OR p.pkey::{{.CompositeTypeName}} >= mt.range_start)
-						AND (mt.range_end IS NULL OR p.pkey::{{.CompositeTypeName}} <= mt.range_end)
+						AND (mt.range_end IS NULL OR p.pkey::{{.CompositeTypeName}} < mt.range_end)
 					{{else}}
 						(mt.node_position = 0 OR p.pkey::{{.PkeyType}} >= mt.range_start)
-						AND (mt.range_end IS NULL OR p.pkey::{{.PkeyType}} <= mt.range_end)
+						AND (mt.range_end IS NULL OR p.pkey::{{.PkeyType}} < mt.range_end)
 					{{end}}
 			WHERE
 				mt.node_level = 0
@@ -1694,7 +1696,8 @@ var SQLTemplates = Templates{
 	// the keys under its range_start, see FirstBlockPosition. A separate
 	// subquery counts them. An OR in the join condition would do the same, but
 	// for a simple key it would stop the index scan on the lower bound of
-	// every block.
+	// every block. range_end is exclusive, as in BlockHashSQL, so a row on the
+	// bound between two leaves is counted once.
 	FindBlocksToMerge: template.Must(template.New("findBlocksToMerge").Parse(`
 		WITH BlockCounts AS (
 			SELECT
@@ -1709,9 +1712,9 @@ var SQLTemplates = Templates{
 			FROM {{.MtreeTable}} t1
 			LEFT JOIN {{.SchemaIdent}}.{{.TableIdent}} t2 ON
 				{{if .SimplePrimaryKey}}
-					t2.{{index .Key 0}} >= t1.range_start AND (t2.{{index .Key 0}} <= t1.range_end OR t1.range_end IS NULL)
+					t2.{{index .Key 0}} >= t1.range_start AND (t2.{{index .Key 0}} < t1.range_end OR t1.range_end IS NULL)
 				{{else}}
-					ROW({{- range $i, $k := .Key}}{{if $i}}, {{end}}t2.{{$k}}{{end}}) >= t1.range_start AND (ROW({{- range $i, $k := .Key}}{{if $i}}, {{end}}t2.{{$k}}{{end}}) <= t1.range_end OR t1.range_end IS NULL)
+					ROW({{- range $i, $k := .Key}}{{if $i}}, {{end}}t2.{{$k}}{{end}}) >= t1.range_start AND (ROW({{- range $i, $k := .Key}}{{if $i}}, {{end}}t2.{{$k}}{{end}}) < t1.range_end OR t1.range_end IS NULL)
 				{{end}}
 			WHERE t1.node_level = 0
 			{{if .UsePositionFilter}} AND t1.node_position = ANY({{.PositionPlaceholder}}){{end}}
@@ -1735,7 +1738,7 @@ var SQLTemplates = Templates{
 				) ELSE 0 END AS actual_rows
 			FROM {{.MtreeTable}} t1
 			LEFT JOIN {{.SchemaIdent}}.{{.TableIdent}} t2 ON
-				ROW({{- range $i, $k := .Key}}{{if $i}}, {{end}}t2.{{$k}}{{end}}) >= t1.range_start AND (ROW({{- range $i, $k := .Key}}{{if $i}}, {{end}}t2.{{$k}}{{end}}) <= t1.range_end OR t1.range_end IS NULL)
+				ROW({{- range $i, $k := .Key}}{{if $i}}, {{end}}t2.{{$k}}{{end}}) >= t1.range_start AND (ROW({{- range $i, $k := .Key}}{{if $i}}, {{end}}t2.{{$k}}{{end}}) < t1.range_end OR t1.range_end IS NULL)
 			WHERE t1.node_level = 0
 			{{if .UsePositionFilter}} AND t1.node_position = ANY({{.PositionPlaceholder}}){{end}}
 			GROUP BY t1.node_position, t1.range_start
@@ -1814,9 +1817,9 @@ var SQLTemplates = Templates{
 		FROM {{.MtreeTable}} t1
 		LEFT JOIN {{.SchemaIdent}}.{{.TableIdent}} t2 ON
 			{{if .IsComposite}}
-				ROW({{- range $i, $k := .Key}}{{if $i}}, {{end}}t2.{{$k}}{{end}}) >= t1.range_start AND (ROW({{- range $i, $k := .Key}}{{if $i}}, {{end}}t2.{{$k}}{{end}}) <= t1.range_end OR t1.range_end IS NULL)
+				ROW({{- range $i, $k := .Key}}{{if $i}}, {{end}}t2.{{$k}}{{end}}) >= t1.range_start AND (ROW({{- range $i, $k := .Key}}{{if $i}}, {{end}}t2.{{$k}}{{end}}) < t1.range_end OR t1.range_end IS NULL)
 			{{else}}
-				t2.{{index .Key 0}} >= t1.range_start AND (t2.{{index .Key 0}} <= t1.range_end OR t1.range_end IS NULL)
+				t2.{{index .Key 0}} >= t1.range_start AND (t2.{{index .Key 0}} < t1.range_end OR t1.range_end IS NULL)
 			{{end}}
 		WHERE t1.node_position = $1 AND t1.node_level = 0
 		GROUP BY t1.node_position, t1.range_start, t1.range_end
@@ -1834,7 +1837,7 @@ var SQLTemplates = Templates{
 			) ELSE 0 END
 		FROM {{.MtreeTable}} t1
 		LEFT JOIN {{.SchemaIdent}}.{{.TableIdent}} t2 ON
-			ROW({{- range $i, $k := .Key}}{{if $i}}, {{end}}t2.{{$k}}{{end}}) >= t1.range_start AND (ROW({{- range $i, $k := .Key}}{{if $i}}, {{end}}t2.{{$k}}{{end}}) <= t1.range_end OR t1.range_end IS NULL)
+			ROW({{- range $i, $k := .Key}}{{if $i}}, {{end}}t2.{{$k}}{{end}}) >= t1.range_start AND (ROW({{- range $i, $k := .Key}}{{if $i}}, {{end}}t2.{{$k}}{{end}}) < t1.range_end OR t1.range_end IS NULL)
 		WHERE t1.node_position = $1 AND t1.node_level = 0
 		GROUP BY t1.node_position, t1.range_start, t1.range_end
 	`)),
