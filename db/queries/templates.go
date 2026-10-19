@@ -357,6 +357,9 @@ var SQLTemplates = Templates{
 		ALTER TABLE {{aceSchema}}.ace_cdc_metadata
 			ADD COLUMN IF NOT EXISTS pub_commit_lsn text;`),
 	),
+	// The key columns come in the order of the primary-key index. Every
+	// query that compares or sorts keys (ROW(...) comparisons, ORDER BY,
+	// the slicer's index walk) needs this order to use the index.
 	GetPrimaryKey: template.Must(template.New("getPrimaryKey").Parse(`
 		SELECT
 			kcu.column_name
@@ -364,10 +367,13 @@ var SQLTemplates = Templates{
 			information_schema.table_constraints tc
 			JOIN information_schema.key_column_usage kcu ON tc.constraint_name = kcu.constraint_name
 			AND tc.table_schema = kcu.table_schema
+			AND tc.table_name = kcu.table_name
 		WHERE
 			tc.constraint_type = 'PRIMARY KEY'
 			AND tc.table_schema = $1
-			AND tc.table_name = $2;
+			AND tc.table_name = $2
+		ORDER BY
+			kcu.ordinal_position;
 	`)),
 	GetColumnTypes: template.Must(template.New("getColumnTypes").Parse(`
 		SELECT
