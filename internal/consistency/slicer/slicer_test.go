@@ -158,3 +158,27 @@ func TestConfigValidate(t *testing.T) {
 		t.Fatalf("defaults not applied: %+v", c)
 	}
 }
+
+// KeyOrder gives the key order (part, then sequence in the part) of blocks
+// that arrive in any order, and leaves the blocks where they are.
+func TestKeyOrder(t *testing.T) {
+	blocks := []Block{
+		{Part: 1, Seq: 0},
+		{Part: 0, Seq: 1},
+		{Part: 1, Seq: 1},
+		{Part: 0, Seq: 0},
+	}
+	got := KeyOrder(blocks)
+	want := []int{3, 1, 0, 2}
+	if len(got) != len(want) {
+		t.Fatalf("KeyOrder = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("KeyOrder = %v, want %v", got, want)
+		}
+	}
+	if blocks[0].Part != 1 || blocks[0].Seq != 0 {
+		t.Fatalf("KeyOrder moved the blocks: %v", blocks)
+	}
+}

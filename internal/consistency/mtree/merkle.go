@@ -1870,11 +1870,7 @@ func (m *MerkleTreeTask) BuildMtree() (err error) {
 		logger.Info("Cut %s on %s", cutStats, refName)
 
 		// Put the blocks in key order and number them.
-		order := make([]int, len(blocks))
-		for i := range order {
-			order[i] = i
-		}
-		sort.Slice(order, func(i, j int) bool { return blocks[order[i]].Less(blocks[order[j]]) })
+		order := slicer.KeyOrder(blocks)
 
 		numKeyCols := len(m.Key)
 		bound := func(vals []any) []any {

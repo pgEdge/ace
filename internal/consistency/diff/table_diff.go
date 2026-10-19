@@ -1465,11 +1465,10 @@ func (t *TableDiffTask) ExecuteTask() (err error) {
 		}()
 	}
 
-	// ranges are in arrival order; pos[i] is the key order of ranges[i]
-	// (part, then sequence in the part), so the comparison below can walk
-	// the ranges in key order without a second copy of the keys.
-	var ranges []Range
-	var pos [][2]int
+	// blocks are in arrival order, and the hash results are keyed by the
+	// index of the block in it. The comparison below walks them in key
+	// order with slicer.KeyOrder.
+	var blocks []slicer.Block
 	for b := range blockCh {
 		if t.hasError() {
 			// A hash failed and the diff will stop with that error. Stop
@@ -1477,12 +1476,12 @@ func (t *TableDiffTask) ExecuteTask() (err error) {
 			cancelCut()
 			continue
 		}
-		rangeIdx := len(ranges)
-		ranges = append(ranges, t.rangeFromBlock(b))
-		pos = append(pos, [2]int{b.Part, b.Seq})
-		bar.SetTotal(int64(len(ranges)*len(nodeNames)), false)
+		rangeIdx := len(blocks)
+		blocks = append(blocks, b)
+		bar.SetTotal(int64(len(blocks)*len(nodeNames)), false)
+		r := t.rangeFromBlock(b)
 		for _, nodeName := range nodeNames {
-			hashTaskQueue <- HashTask{nodeName: nodeName, rangeIndex: rangeIdx, r: ranges[rangeIdx]}
+			hashTaskQueue <- HashTask{nodeName: nodeName, rangeIndex: rangeIdx, r: r}
 		}
 	}
 	close(hashTaskQueue)
@@ -1497,24 +1496,15 @@ func (t *TableDiffTask) ExecuteTask() (err error) {
 	}
 
 	logger.Info("table-diff: cut %s on %s", cutStats, maxNode)
-	t.DiffResult.Summary.InitialRangesCount = len(ranges)
-
-	keyOrder := make([]int, len(ranges))
-	for i := range keyOrder {
-		keyOrder[i] = i
-	}
-	sort.Slice(keyOrder, func(i, j int) bool {
-		a, b := pos[keyOrder[i]], pos[keyOrder[j]]
-		return a[0] < b[0] || (a[0] == b[0] && a[1] < b[1])
-	})
+	t.DiffResult.Summary.InitialRangesCount = len(blocks)
 
 	logger.Info("Initial hash calculations complete. Proceeding with comparisons for mismatches...")
 
 	var diffWg sync.WaitGroup
 	var mismatchedTasks []RecursiveDiffTask
 
-	for _, rangeIdx := range keyOrder {
-		currentRange := ranges[rangeIdx]
+	for _, rangeIdx := range slicer.KeyOrder(blocks) {
+		currentRange := t.rangeFromBlock(blocks[rangeIdx])
 		for i := 0; i < len(nodeNames); i++ {
 			node1 := nodeNames[i]
 			for j := i + 1; j < len(nodeNames); j++ {

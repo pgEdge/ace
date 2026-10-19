@@ -167,6 +167,18 @@ func SortBlocks(blocks []Block) {
 	sort.Slice(blocks, func(i, j int) bool { return blocks[i].Less(blocks[j]) })
 }
 
+// KeyOrder returns the indexes of blocks in key order and does not move the
+// blocks. Callers that keep results by the arrival index of a block use it
+// to walk the blocks in key order.
+func KeyOrder(blocks []Block) []int {
+	order := make([]int, len(blocks))
+	for i := range order {
+		order[i] = i
+	}
+	sort.Slice(order, func(i, j int) bool { return blocks[order[i]].Less(blocks[order[j]]) })
+	return order
+}
+
 // Stats describes a finished cut.
 type Stats struct {
 	Blocks int64
