@@ -155,6 +155,9 @@ func TestSlicerOnDB(t *testing.T) {
 		chunkRows  int
 		workers    int
 		wantSource string
+		// minBusyParts is the least number of parts that must hold rows,
+		// so that the cutting workers share the work.
+		minBusyParts int
 	}
 	icu := "C"
 	var hasICU bool
@@ -253,7 +256,20 @@ func TestSlicerOnDB(t *testing.T) {
 				`INSERT INTO ace_slicer_test.t SELECT g, g % 7 FROM generate_series(1, 20000) g`,
 				`ANALYZE ace_slicer_test.t`,
 			},
-			key: []string{"id"}, filter: "v = 3", blockSize: 100, workers: 2, wantSource: SourceHistogram,
+			key: []string{"id"}, filter: "v = 3", blockSize: 100, workers: 2, wantSource: SourceSample,
+		},
+		{
+			// The histogram splits the whole key space, but only the top 5%
+			// matches the filter: parts from the histogram would leave all
+			// matching rows to one or two parts.
+			name: "filter on the top of the key space",
+			setup: []string{
+				`CREATE TABLE ace_slicer_test.t (id int PRIMARY KEY, v int)`,
+				`INSERT INTO ace_slicer_test.t SELECT g, 0 FROM generate_series(1, 20000) g`,
+				`ANALYZE ace_slicer_test.t`,
+			},
+			key: []string{"id"}, filter: "id > 19000", blockSize: 20, workers: 4, wantSource: SourceSample,
+			minBusyParts: 8,
 		},
 		{
 			name: "small chunks",
@@ -309,6 +325,15 @@ func TestSlicerOnDB(t *testing.T) {
 				t.Errorf("source %q (%s), want %q", plan.Source, plan.Reason, sc.wantSource)
 			}
 			checkBlocks(t, pool, cfg, blocks, st)
+			busy := map[int]bool{}
+			for _, b := range blocks {
+				if b.Rows > 0 {
+					busy[b.Part] = true
+				}
+			}
+			if len(busy) < sc.minBusyParts {
+				t.Errorf("%d parts hold rows, want at least %d", len(busy), sc.minBusyParts)
+			}
 			t.Logf("%s: %d parts, %d blocks, largest %d rows", plan.Source, len(plan.Parts), len(blocks), st.MaxBlockRows)
 		})
 	}

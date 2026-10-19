@@ -16,7 +16,8 @@
 //
 //   - A part is a share of work for one cutting worker. ACE builds K parts
 //     on the anchor node from pg_stats.histogram_bounds of the leading key
-//     column, or from a small TABLESAMPLE if there is no histogram. K
+//     column, or from a small TABLESAMPLE if there is no histogram or a
+//     table filter is set (the histogram describes the whole table). K
 //     depends on the number of workers, not on the size of the table.
 //     Uneven parts (an old histogram) cost some time but never change the
 //     blocks.
@@ -461,7 +462,12 @@ func PlanParts(ctx context.Context, q Querier, cfg Config) (*Plan, error) {
 
 	// No histogram means no ANALYZE yet, or a column whose values are all
 	// most common values (often the first column of a composite key).
-	if len(st.bounds) >= 2 {
+	// The histogram describes the whole table, not the rows that match a
+	// filter. With a selective filter most parts would hold no matching
+	// rows and one worker would cut nearly all blocks, so a filtered run
+	// takes its bounds from a sample of the matching rows.
+	filtered := strings.TrimSpace(cfg.Filter) != ""
+	if len(st.bounds) >= 2 && !filtered {
 		keys, err := probeBounds(ctx, q, &cfg, st.typeName, pickBounds(st.bounds, cfg.Parts))
 		if err != nil {
 			return nil, err
@@ -473,6 +479,10 @@ func PlanParts(ctx context.Context, q Querier, cfg Config) (*Plan, error) {
 		}, nil
 	}
 
+	reason := fmt.Sprintf("no histogram for column %q", cfg.Key[0])
+	if filtered {
+		reason = "a table filter is set, and the histogram does not describe the matching rows"
+	}
 	pct := samplePercent(st.pages, cfg.Parts)
 	keys, err := sampleBounds(ctx, q, &cfg, cfg.Parts, pct)
 	if err != nil {
@@ -480,7 +490,7 @@ func PlanParts(ctx context.Context, q Querier, cfg Config) (*Plan, error) {
 	}
 	return &Plan{
 		Source:        SourceSample,
-		Reason:        fmt.Sprintf("no histogram for column %q", cfg.Key[0]),
+		Reason:        reason,
 		Parts:         partsFromKeys(keys),
 		SamplePercent: pct,
 	}, nil

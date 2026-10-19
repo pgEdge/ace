@@ -309,7 +309,8 @@ func TestTableDiffBlockSlicingEdges(t *testing.T) {
 			slicingExec(t, ctx, p, "ANALYZE "+ident)
 		}
 		slicingExec(t, ctx, pgCluster.Node2Pool, "UPDATE "+ident+" SET id = -id WHERE id % 1000 = 0")
-		_, st := slicingCut(t, ctx, table, []string{"id"}, "n = 0")
+		plan, st := slicingCut(t, ctx, table, []string{"id"}, "n = 0")
+		require.Equal(t, slicer.SourceSample, plan.Source, "a filtered cut takes its parts from a sample of the matching rows")
 		require.LessOrEqual(t, st.MaxBlockRows, int64(slicingBlockSize))
 		require.Equal(t, int64(8000), st.Rows, "only rows that match the filter count")
 
