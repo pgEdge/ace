@@ -1810,7 +1810,7 @@ func (m *MerkleTreeTask) BuildMtree() (err error) {
 			in <- slicer.Block{Seq: i, Start: start, End: br.RangeEnd}
 		}
 		close(in)
-		_, hashes, err := m.hashBlocksOnNodes(m.Ctx, pools, nodeNames, in, numWorkers, func() {})
+		_, hashes, err := m.hashBlocksOnNodes(m.Ctx, pools, nodeNames, in, numWorkers, "Computing leaf hashes:", func() {})
 		if err != nil {
 			return err
 		}
@@ -1860,7 +1860,7 @@ func (m *MerkleTreeTask) BuildMtree() (err error) {
 			}
 		}()
 
-		blocks, hashes, err := m.hashBlocksOnNodes(m.Ctx, pools, nodeNames, in, numWorkers, cancelCut)
+		blocks, hashes, err := m.hashBlocksOnNodes(m.Ctx, pools, nodeNames, in, numWorkers, "Computing leaf hashes:", cancelCut)
 		if err != nil {
 			return err
 		}
@@ -1908,7 +1908,7 @@ func (m *MerkleTreeTask) BuildMtree() (err error) {
 			first := make(chan slicer.Block, 1)
 			first <- slicer.Block{Seq: 0, End: blocks[order[0]].End}
 			close(first)
-			_, firstHashes, err := m.hashBlocksOnNodes(m.Ctx, pools, nodeNames, first, numWorkers, func() {})
+			_, firstHashes, err := m.hashBlocksOnNodes(m.Ctx, pools, nodeNames, first, numWorkers, "Hashing the first leaf:", func() {})
 			if err != nil {
 				return err
 			}
@@ -2356,7 +2356,7 @@ func (m *MerkleTreeTask) UpdateMtree(skipAllChecks bool) (err error) { //nolint:
 				numWorkers = 1
 			}
 
-			if err := m.computeLeafHashes(pool, tx, blocksToUpdate, numWorkers, "Recomputing leaf hashes:"); err != nil {
+			if err := m.computeLeafHashes(pool, tx, fmt.Sprint(nodeInfo["Name"]), blocksToUpdate, numWorkers, "Recomputing leaf hashes:"); err != nil {
 				return fmt.Errorf("failed to recompute leaf hashes: %w", err)
 			}
 
@@ -2936,7 +2936,7 @@ func (m *MerkleTreeTask) refreshStaleLeaves(pool *pgxpool.Pool, nodeName any, po
 	if numWorkers < 1 {
 		numWorkers = 1
 	}
-	if err := m.computeLeafHashes(pool, tx, blocks, numWorkers, "Refreshing stale blocks:"); err != nil {
+	if err := m.computeLeafHashes(pool, tx, fmt.Sprint(nodeName), blocks, numWorkers, "Refreshing stale blocks:"); err != nil {
 		return err
 	}
 	if err := m.buildParentNodes(tx); err != nil {
@@ -3380,62 +3380,80 @@ func (m *MerkleTreeTask) buildParentNodes(conn queries.DBQuerier) error {
 	return nil
 }
 
-type LeafHashResult struct {
-	BlockID int64
-	Hash    []byte
-	Err     error
-}
+// computeLeafHashes hashes the given leaves on one node and stores the
+// hashes in the tree. mtree update and the refresh of stale leaves use it.
+// It hashes with hashBlocksOnNodes, as mtree build does, so every path
+// computes a leaf hash the same way.
+func (m *MerkleTreeTask) computeLeafHashes(pool *pgxpool.Pool, tx pgx.Tx, nodeName string, ranges []types.BlockRange, numWorkers int, barMessage string) error {
+	mtreeTableName := pgx.Identifier{m.aceSchema(), fmt.Sprintf("ace_mtree_%s_%s", m.Schema, m.Table)}.Sanitize()
 
-func (m *MerkleTreeTask) computeLeafHashes(pool *pgxpool.Pool, tx pgx.Tx, ranges []types.BlockRange, numWorkers int, barMessage string) error {
-	mtreeTableIdentifier := pgx.Identifier{m.aceSchema(), fmt.Sprintf("ace_mtree_%s_%s", m.Schema, m.Table)}
-	mtreeTableName := mtreeTableIdentifier.Sanitize()
+	in := make(chan slicer.Block, len(ranges))
+	for i, r := range ranges {
+		in <- slicer.Block{Seq: i, Start: r.RangeStart, End: r.RangeEnd}
+	}
+	close(in)
 
-	jobs := make(chan types.BlockRange, len(ranges))
-	results := make(chan LeafHashResult, len(ranges))
-
-	p := mpb.New(mpb.WithOutput(os.Stderr))
-	bar := p.AddBar(int64(len(ranges)),
-		mpb.BarRemoveOnComplete(),
-		mpb.PrependDecorators(
-			decor.Name(barMessage, decor.WC{W: 25}),
-			decor.CountersNoUnit("%d / %d", decor.WCSyncWidth),
-		),
-		mpb.AppendDecorators(
-			decor.Elapsed(decor.ET_STYLE_GO),
-			decor.Name(" | "),
-			decor.OnComplete(decor.AverageETA(decor.ET_STYLE_GO), "done"),
-		),
-	)
-
-	var wg sync.WaitGroup
-	for i := 0; i < numWorkers; i++ {
-		wg.Add(1)
-		go m.leafHashWorker(&wg, jobs, results, pool, bar)
+	pools := map[string]*pgxpool.Pool{nodeName: pool}
+	blocks, hashes, err := m.hashBlocksOnNodes(m.Ctx, pools, []string{nodeName}, in, numWorkers, barMessage, func() {})
+	if err != nil {
+		return err
 	}
 
-	for _, r := range ranges {
-		jobs <- r
+	leafHashes := make(map[int64][]byte, len(blocks))
+	for idx, b := range blocks {
+		leafHashes[ranges[b.Seq].NodePosition] = hashes[nodeName][idx]
 	}
-	close(jobs)
-
-	wg.Wait()
-	close(results)
-
-	p.Wait()
-
-	leafHashes := make(map[int64][]byte)
-	for result := range results {
-		if result.Err != nil {
-			return result.Err
-		}
-		leafHashes[result.BlockID] = result.Hash
-	}
-
 	if err := queries.UpdateLeafHashesBatch(m.Ctx, tx, mtreeTableName, leafHashes); err != nil {
 		return fmt.Errorf("failed to update leaf hashes in batch: %w", err)
 	}
-
 	return nil
+}
+
+// blockLog is the list of blocks in arrival order. The producer adds blocks
+// to it, and one feeder per node reads it at its own pace. So a slow node
+// does not hold back the others: each node has its own place in the list.
+type blockLog struct {
+	mu     sync.Mutex
+	cond   *sync.Cond
+	blocks []slicer.Block
+	closed bool
+}
+
+func newBlockLog() *blockLog {
+	l := &blockLog{}
+	l.cond = sync.NewCond(&l.mu)
+	return l
+}
+
+// add appends a block and returns its index in arrival order.
+func (l *blockLog) add(b slicer.Block) int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.blocks = append(l.blocks, b)
+	l.cond.Broadcast()
+	return len(l.blocks) - 1
+}
+
+// close tells the feeders that no more blocks will come.
+func (l *blockLog) close() {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.closed = true
+	l.cond.Broadcast()
+}
+
+// get waits for block i. It returns false when the log is closed and has no
+// block i.
+func (l *blockLog) get(i int) (slicer.Block, bool) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	for i >= len(l.blocks) && !l.closed {
+		l.cond.Wait()
+	}
+	if i < len(l.blocks) {
+		return l.blocks[i], true
+	}
+	return slicer.Block{}, false
 }
 
 // leafHashJob is one block to hash on one node; idx is the place of the
@@ -3452,7 +3470,7 @@ type leafHashers struct {
 	ctx    context.Context
 	bar    *mpb.Bar
 	onErr  func()
-	queues map[string]chan leafHashJob
+	log    *blockLog
 	wg     sync.WaitGroup
 	mu     sync.Mutex
 	hashes map[string]map[int][]byte
@@ -3464,18 +3482,34 @@ type leafHashers struct {
 func (m *MerkleTreeTask) startLeafHashers(ctx context.Context, pools map[string]*pgxpool.Pool, nodeNames []string, numWorkers int, bar *mpb.Bar, onErr func()) *leafHashers {
 	lh := &leafHashers{
 		m: m, ctx: ctx, bar: bar, onErr: onErr,
-		queues: make(map[string]chan leafHashJob, len(nodeNames)),
+		log:    newBlockLog(),
 		hashes: make(map[string]map[int][]byte, len(nodeNames)),
 	}
 	for _, name := range nodeNames {
 		lh.hashes[name] = make(map[int][]byte)
-		lh.queues[name] = make(chan leafHashJob, 2*numWorkers)
+		queue := make(chan leafHashJob, 2*numWorkers)
+		lh.wg.Add(1)
+		go lh.feed(queue)
 		for w := 0; w < numWorkers; w++ {
 			lh.wg.Add(1)
-			go lh.work(name, pools[name], lh.queues[name])
+			go lh.work(name, pools[name], queue)
 		}
 	}
 	return lh
+}
+
+// feed sends every block of the log to the queue of one node, in arrival
+// order, and closes the queue when the log is closed.
+func (lh *leafHashers) feed(queue chan<- leafHashJob) {
+	defer lh.wg.Done()
+	defer close(queue)
+	for i := 0; ; i++ {
+		b, ok := lh.log.get(i)
+		if !ok {
+			return
+		}
+		queue <- leafHashJob{idx: i, block: b}
+	}
 }
 
 func (lh *leafHashers) work(name string, pool *pgxpool.Pool, queue <-chan leafHashJob) {
@@ -3504,11 +3538,9 @@ func (lh *leafHashers) fail(err error) {
 	})
 }
 
-// wait closes the queues and waits for the workers.
+// wait closes the log and waits for the feeders and the workers.
 func (lh *leafHashers) wait() error {
-	for _, q := range lh.queues {
-		close(q)
-	}
+	lh.log.close()
 	lh.wg.Wait()
 	return lh.err
 }
@@ -3519,12 +3551,12 @@ func (lh *leafHashers) wait() error {
 // by its index in that order. It always reads in until it is closed. On the
 // first error it calls onErr, so the producer can stop, and returns that
 // error.
-func (m *MerkleTreeTask) hashBlocksOnNodes(ctx context.Context, pools map[string]*pgxpool.Pool, nodeNames []string, in <-chan slicer.Block, numWorkers int, onErr func()) ([]slicer.Block, map[string]map[int][]byte, error) {
+func (m *MerkleTreeTask) hashBlocksOnNodes(ctx context.Context, pools map[string]*pgxpool.Pool, nodeNames []string, in <-chan slicer.Block, numWorkers int, barMessage string, onErr func()) ([]slicer.Block, map[string]map[int][]byte, error) {
 	p := mpb.New(mpb.WithOutput(os.Stderr))
 	bar := p.AddBar(0,
 		mpb.BarRemoveOnComplete(),
 		mpb.PrependDecorators(
-			decor.Name("Computing leaf hashes:", decor.WC{W: 25}),
+			decor.Name(barMessage, decor.WC{W: 25}),
 			decor.CountersNoUnit("%d / %d", decor.WCSyncWidth),
 		),
 		mpb.AppendDecorators(
@@ -3533,17 +3565,12 @@ func (m *MerkleTreeTask) hashBlocksOnNodes(ctx context.Context, pools map[string
 	)
 	lh := m.startLeafHashers(ctx, pools, nodeNames, numWorkers, bar, onErr)
 
-	var blocks []slicer.Block
 	for b := range in {
 		if lh.failed.Load() {
 			continue
 		}
-		idx := len(blocks)
-		blocks = append(blocks, b)
-		bar.SetTotal(int64(len(blocks)*len(nodeNames)), false)
-		for _, name := range nodeNames {
-			lh.queues[name] <- leafHashJob{idx: idx, block: b}
-		}
+		n := lh.log.add(b) + 1
+		bar.SetTotal(int64(n*len(nodeNames)), false)
 	}
 	err := lh.wait()
 	bar.SetTotal(-1, true)
@@ -3551,25 +3578,7 @@ func (m *MerkleTreeTask) hashBlocksOnNodes(ctx context.Context, pools map[string
 	if err != nil {
 		return nil, nil, err
 	}
-	return blocks, lh.hashes, nil
-}
-
-func (m *MerkleTreeTask) leafHashWorker(wg *sync.WaitGroup, jobs <-chan types.BlockRange, results chan<- LeafHashResult, pool *pgxpool.Pool, bar *mpb.Bar) {
-	defer wg.Done()
-
-	// Use reference column types for hash computation (schemas are validated to match)
-	refColTypes := m.ColTypes["_ref"]
-
-	for block := range jobs {
-		leafHash, err := queries.ComputeLeafHashes(m.Ctx, pool, m.Schema, m.Table, m.SimplePrimaryKey, m.Key, block.RangeStart, block.RangeEnd, m.Cols, refColTypes)
-		if err != nil {
-			results <- LeafHashResult{BlockID: block.NodePosition, Err: fmt.Errorf("failed to compute hash for block %d: %w", block.NodePosition, err)}
-			bar.Increment()
-			continue
-		}
-		results <- LeafHashResult{BlockID: block.NodePosition, Hash: leafHash}
-		bar.Increment()
-	}
+	return lh.log.blocks, lh.hashes, nil
 }
 
 func (m *MerkleTreeTask) insertBlockRanges(conn queries.DBQuerier, ranges []types.BlockRange) error {
