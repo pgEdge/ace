@@ -1065,8 +1065,23 @@ func (t *TableDiffTask) CloneForSchedule(ctx context.Context) *TableDiffTask {
 	return cloned
 }
 
+// hashWorkers returns the number of hash queries that table-diff runs at
+// the same time.
+func (t *TableDiffTask) hashWorkers() int {
+	n := int(math.Round(float64(runtime.NumCPU()) * t.ConcurrencyFactor))
+	if n < 1 {
+		n = 1
+	}
+	return n
+}
+
+// maxPoolSize returns the size of the connection pool of each node. The
+// anchor node runs the hash workers and the cutting workers of the slicer at
+// the same time, so the pool has room for both. MaxConnections caps it; then
+// the cut and the hashing share the connections.
 func (t *TableDiffTask) maxPoolSize() int {
-	poolSize := int(math.Round(float64(runtime.NumCPU()) * t.ConcurrencyFactor))
+	hash := t.hashWorkers()
+	poolSize := hash + slicer.DefaultWorkers(hash)
 	if poolSize < 4 {
 		poolSize = 4
 	}
@@ -1270,11 +1285,8 @@ func (t *TableDiffTask) ExecuteTask() (err error) {
 		ctx = context.Background()
 	}
 
-	maxConcurrent := int(math.Round(float64(runtime.NumCPU()) * t.ConcurrencyFactor))
-	if maxConcurrent < 1 {
-		maxConcurrent = 1
-	}
-	logger.Info("Using %d CPUs, max concurrent workers = %d", runtime.NumCPU(), maxConcurrent)
+	maxConcurrent := t.hashWorkers()
+	logger.Info("Using %d CPUs, max concurrent workers = %d, %d connections per node", runtime.NumCPU(), maxConcurrent, t.maxPoolSize())
 	sem := make(chan struct{}, maxConcurrent)
 	t.diffSem = make(chan struct{}, maxConcurrent)
 
