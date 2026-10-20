@@ -5,6 +5,13 @@ All notable changes to ACE will be captured in this document. This project follo
 ## [Unreleased]
 
 ### Fixed
+- **A change to a key on the bound between two Merkle tree leaves was
+  counted in both leaves.** CDC counters and leaf row counts treated
+  `range_end` as part of the leaf, while leaf hashes did not. A key equal
+  to `range_end` went to two leaves: both were marked dirty, and the
+  insert and delete counters that drive split and merge grew twice. Now
+  `range_end` is exclusive everywhere, and such a key goes to the next
+  leaf only. Diff results did not change.
 - **Equal rows could have different hashes on nodes with different session
   defaults.** table-diff and mtree hash the text that the server prints for
   a row, and the CDC walsender prints the values of each change as text.
@@ -59,6 +66,15 @@ All notable changes to ACE will be captured in this document. This project follo
 - **`table-diff` and `mtree` no longer need pgcrypto.** The block hash uses the
   built-in `sha256()`. `table-diff --ensure-pgcrypto` has no effect now and
   only prints a warning.
+- **Merkle tree diff did not compare rows with keys below the smallest key of
+  the reference node.** The tree takes its block bounds from one node, and the
+  first block started at the smallest key on that node. Rows on other nodes
+  with a smaller key were in no block, so no block hash covered them and the
+  diff reported the nodes as equal. Rows inserted after the build were
+  compared correctly. The first block now has no lower bound, in the same way
+  as the last block has no upper bound. Hash version 4 (see above) also
+  covers this change, so a tree built by an earlier version computes all its
+  block hashes again on the next `mtree update` or `mtree table-diff`.
 - **`table-diff --output html` was killed by the OOM killer on large diffs.**
   The HTML writer built the whole report in memory: a copy of the diff as
   JSON, the markup of every row, and the final document in one buffer. With
