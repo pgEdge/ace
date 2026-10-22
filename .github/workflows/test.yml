@@ -27,90 +27,11 @@ jobs:
       with:
         go-version: '1.26'
 
-    - name: Run table-diff simple pkey tests
-      run: go test -count=1 -v ./tests/integration -run 'TestTableDiffSimplePK'
+    # Run whole packages, not lists of test names, so a new test runs in CI
+    # without a change here, and each test runs once. The integration tests
+    # share one cluster for the whole run; each test cleans up after itself.
+    - name: Run unit tests
+      run: go test -count=1 -v $(go list ./... | grep -v /tests/integration)
 
-    - name: Run table-diff composite pkey tests
-      run: go test -count=1 -v ./tests/integration -run 'TestTableDiffCompositePK'
-
-    - name: Run table-repair tests
-      run: go test -count=1 -v ./tests/integration -run 'TableRepair'
-
-    - name: Run Merkle Tree simple pkey tests
-      run: go test -count=1 -v ./tests/integration -run 'TestMerkleTreeSimplePK'
-
-    - name: Run Merkle Tree composite pkey tests
-      run: go test -count=1 -v ./tests/integration -run 'TestMerkleTreeCompositePK'
-
-    - name: Run mtree regression tests
-      run: go test -count=1 -v ./tests/integration -run 'TestBuildMtree|TestUpdateMtree|TestMtreeInit|TestACEConn'
-
-    - name: Run mtree unit tests
-      run: go test -count=1 -v ./internal/consistency/mtree
-
-    - name: Run common unit tests
-      run: go test -count=1 -v ./pkg/common
-
-    - name: Run query, diff, and repair unit tests
-      run: go test -count=1 -v ./db/queries ./internal/consistency/diff ./internal/consistency/repair
-
-    - name: Run schema-structure comparison unit tests
-      run: go test -count=1 -v ./internal/consistency/schema
-
-    - name: Run mtree missing-tree fail-fast test
-      run: go test -count=1 -v ./tests/integration -run 'TestMtreeDiffFailsFastWhenTreeNotBuilt'
-
-    - name: Run mtree uuid primary-key test
-      run: go test -count=1 -v ./tests/integration -run 'TestMtreeUUIDPrimaryKeyDiff'
-
-    - name: Run mtree primary-key type property test
-      run: go test -count=1 -v ./tests/integration -run 'TestMtreePkeyTypesFindDivergence'
-
-
-    - name: Run CDC regression tests
-      run: go test -count=1 -v ./tests/integration -run 'CDC'
-
-    - name: Run crash recovery origin-filter test
-      run: go test -count=1 -v ./tests/integration -run 'TestTableDiffAgainstOriginWithUntil'
-
-    - name: Run advanced repair plan tests
-      run: go test -count=1 -v ./tests/integration -run 'TestAdvancedRepairPlan'
-
-    - name: Run repset-diff tests
-      run: go test -count=1 -v ./tests/integration -run 'TestRepsetDiff_'
-
-    - name: Run schema-diff tests
-      run: go test -count=1 -v ./tests/integration -run 'TestSchemaDiff_'
-
-    - name: Run schema-diff --compare=structure tests
-      run: go test -count=1 -v ./tests/integration -run 'TestSchemaDiffStructure_'
-
-    - name: Run scope resolution tests
-      run: go test -count=1 -v ./tests/integration -run 'TestSchemaProvider_'
-
-    - name: Run table-diff schema-mismatch diagnosis tests
-      run: go test -count=1 -v ./tests/integration -run 'TestTableDiffSchemaMismatch_'
-
-    - name: Run spock-diff comparison unit tests
-      run: go test -count=1 -v ./internal/consistency/diff -run 'TestCompareSubscriptions'
-
-    - name: Run spock-diff tests
-      run: go test -count=1 -v ./tests/integration -run 'TestSpockDiff_|TestGetSpockNodeAndSubInfo'
-
-    - name: Run Merkle tree numeric scale invariance test
-      run: go test -count=1 -v ./tests/integration -run 'TestMerkleTreeNumericScaleInvariance'
-
-    - name: Run catastrophic single-node failure recovery test
-      run: go test -count=1 -v ./tests/integration -run 'TestCatastrophicSingleNodeFailure'
-
-    - name: Run table-diff --until filter tests
-      run: go test -count=1 -v ./tests/integration -run 'TestTableDiffUntilFilter'
-
-    - name: Run Merkle Tree --until filter tests
-      run: go test -count=1 -v ./tests/integration -run 'TestMerkleTreeUntilFilter'
-
-    - name: Run native PG (no spock) tests
-      run: go test -count=1 -v ./tests/integration -run 'TestNativePG'
-
-    - name: Run timestamp comparison tests
-      run: go test -count=1 -v ./tests/integration -run 'TestCompareTimestampsExact|TestPostgreSQLMicrosecondPrecision|TestOldVsNewComparison'
+    - name: Run integration tests
+      run: go test -count=1 -v -timeout 90m ./tests/integration
