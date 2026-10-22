@@ -319,6 +319,19 @@ type UserPrivileges struct {
 	TableInsert bool `db:"table_insert"`
 	TableUpdate bool `db:"table_update"`
 	TableDelete bool `db:"table_delete"`
+	SchemaUsage bool `db:"schema_usage"`
+	// ColumnSelect is true when SELECT is granted on at least one column.
+	// With TableSelect false, it means the grants are per column.
+	ColumnSelect bool `db:"column_select"`
+}
+
+// SelectHint explains a missing table-level SELECT when the grants are per
+// column, and is empty otherwise. Append it to a missing-SELECT error.
+func (p *UserPrivileges) SelectHint() string {
+	if p.TableSelect || !p.ColumnSelect {
+		return ""
+	}
+	return " (SELECT is granted on individual columns only; ACE needs SELECT on the whole table)"
 }
 
 // SpockNodeAndSubInfo contains information about a spock node and its subscription.

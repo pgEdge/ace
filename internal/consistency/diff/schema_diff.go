@@ -840,7 +840,7 @@ func (task *SchemaDiffCmd) SchemaTableDiff() (err error) {
 				"tables_total":   len(task.tableList),
 				"tables_diffed":  tablesProcessed,
 				"tables_failed":  tablesFailed,
-				"tables_skipped": len(skippedTables),
+				"tables_skipped": len(skippedTables) + summary.NoPrivilegeSkips,
 				"compare":        task.Compare,
 				"ddl_only":       task.DDLOnly,
 			}
@@ -936,6 +936,9 @@ func (task *SchemaDiffCmd) SchemaTableDiff() (err error) {
 		}
 
 		if err := tdTask.RunChecks(true); err != nil {
+			if summary.SkipIfUnreadable(qualifiedTableName, err, task.Quiet) {
+				continue
+			}
 			logger.Warn("checks for table %s failed: %v", qualifiedTableName, err)
 			tablesFailed++
 			failedTables = append(failedTables, FailedTableInfo{Table: qualifiedTableName, Err: err})
@@ -957,7 +960,7 @@ func (task *SchemaDiffCmd) SchemaTableDiff() (err error) {
 	}
 
 	summary.FailedTables = failedTables
-	summary.SkippedTables = skippedTables
+	summary.SkippedTables = append(skippedTables, summary.SkippedTables...)
 	summary.MissingTables = task.missingTables
 	return summary.PrintAndFinalize("Schema diff", "schema "+task.SchemaName)
 }

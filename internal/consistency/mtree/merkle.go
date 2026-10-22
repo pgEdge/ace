@@ -1648,9 +1648,13 @@ func (m *MerkleTreeTask) Validate() error {
 		if err != nil {
 			return fmt.Errorf("failed to check user privileges on node %s: %w", nodeInfo["Name"], err)
 		}
+		if !privs.SchemaUsage {
+			return fmt.Errorf("user \"%s\" does not have USAGE on schema \"%s\" on node \"%s\"",
+				dbUser, m.Schema, nodeInfo["Name"])
+		}
 		if !privs.TableSelect {
-			return fmt.Errorf("user \"%s\" does not have SELECT privilege on table \"%s.%s\" on node \"%s\"",
-				dbUser, m.Schema, m.Table, nodeInfo["Name"])
+			return fmt.Errorf("user \"%s\" does not have SELECT privilege on table \"%s.%s\" on node \"%s\"%s",
+				dbUser, m.Schema, m.Table, nodeInfo["Name"], privs.SelectHint())
 		}
 	}
 
@@ -1699,7 +1703,7 @@ func (m *MerkleTreeTask) RunChecks(skipValidation bool) error {
 			return fmt.Errorf("'%s' %s (node %s)", m.QualifiedTableName, reason, nodeInfo["Name"])
 		}
 
-		currentColsSlice, err := queries.GetColumns(m.Ctx, tx, m.Schema, m.Table)
+		currentColsSlice, colTypes, err := queries.GetColumns(m.Ctx, tx, m.Schema, m.Table)
 		if err != nil {
 			return fmt.Errorf("failed to get columns on node %s: %w", nodeInfo["Name"], err)
 		}
@@ -1723,10 +1727,6 @@ func (m *MerkleTreeTask) RunChecks(skipValidation bool) error {
 			}
 			m.PKeyTypes = pkeyTypes
 
-			colTypes, err := queries.GetColumnTypes(m.Ctx, tx, m.Schema, m.Table)
-			if err != nil {
-				return fmt.Errorf("failed to get column types on node %s: %w", nodeInfo["Name"], err)
-			}
 			if m.ColTypes == nil {
 				m.ColTypes = make(map[string]map[string]string)
 			}

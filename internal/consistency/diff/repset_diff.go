@@ -359,7 +359,7 @@ func RepsetDiff(task *RepsetDiffCmd) (err error) {
 				"tables_total":   len(task.tableList),
 				"tables_diffed":  tablesProcessed,
 				"tables_failed":  tablesFailed,
-				"tables_skipped": len(skippedTables),
+				"tables_skipped": len(skippedTables) + summary.NoPrivilegeSkips,
 			}
 			if len(failedTables) > 0 {
 				names := make([]string, len(failedTables))
@@ -441,6 +441,9 @@ func RepsetDiff(task *RepsetDiffCmd) (err error) {
 		}
 
 		if err := tdTask.RunChecks(true); err != nil {
+			if summary.SkipIfUnreadable(tableName, err, task.Quiet) {
+				continue
+			}
 			logger.Warn("checks for table %s failed: %v", tableName, err)
 			tablesFailed++
 			failedTables = append(failedTables, FailedTableInfo{Table: tableName, Err: err})
@@ -462,7 +465,7 @@ func RepsetDiff(task *RepsetDiffCmd) (err error) {
 	}
 
 	summary.FailedTables = failedTables
-	summary.SkippedTables = skippedTables
+	summary.SkippedTables = append(skippedTables, summary.SkippedTables...)
 	summary.MissingTables = task.missingTables
 	return summary.PrintAndFinalize("Repset diff", "repset "+task.RepsetName)
 }

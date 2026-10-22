@@ -477,7 +477,7 @@ func (t *TableRepairTask) ValidateAndPrepare() error {
 				return fmt.Errorf("'%s.%s' %s (node %s).%s", t.Schema, t.Table, reason, nodeName, hint)
 			}
 
-			cols, err := queries.GetColumns(t.Ctx, connPool, t.Schema, t.Table)
+			cols, colTypes, err := queries.GetColumns(t.Ctx, connPool, t.Schema, t.Table)
 			if err != nil {
 				return fmt.Errorf("failed to get columns for %s.%s on node %s: %w", t.Schema, t.Table, nodeName, err)
 			}
@@ -508,10 +508,6 @@ func (t *TableRepairTask) ValidateAndPrepare() error {
 
 			publicIP, _ := nodeInfo["PublicIP"].(string)
 			port, _ := nodeInfo["Port"].(string)
-			colTypes, err := queries.GetColumnTypes(t.Ctx, connPool, t.Schema, t.Table)
-			if err != nil {
-				return fmt.Errorf("failed to get column types for %s on node %s: %w", t.Table, nodeName, err)
-			}
 			if t.ColTypes == nil {
 				t.ColTypes = make(map[string]map[string]string)
 			}
@@ -533,8 +529,11 @@ func (t *TableRepairTask) ValidateAndPrepare() error {
 			}
 
 			missingPrivs := []string{}
+			if !privs.SchemaUsage {
+				missingPrivs = append(missingPrivs, "USAGE on schema "+t.Schema)
+			}
 			if requiredPrivileges.TableSelect && !privs.TableSelect {
-				missingPrivs = append(missingPrivs, "SELECT")
+				missingPrivs = append(missingPrivs, "SELECT"+privs.SelectHint())
 			}
 			if requiredPrivileges.TableInsert && !privs.TableInsert {
 				missingPrivs = append(missingPrivs, "INSERT")
