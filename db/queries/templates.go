@@ -60,7 +60,6 @@ type Templates struct {
 	QuoteIdentifiers         *template.Template
 
 	CreateMetadataTable             *template.Template
-	GetPkeyOffsets                  *template.Template
 	CreateSimpleMtreeTable          *template.Template
 	CreateIndex                     *template.Template
 	CreateCompositeType             *template.Template
@@ -358,6 +357,9 @@ var SQLTemplates = Templates{
 		ALTER TABLE {{aceSchema}}.ace_cdc_metadata
 			ADD COLUMN IF NOT EXISTS pub_commit_lsn text;`),
 	),
+	// The key columns come in the order of the primary-key index. Every
+	// query that compares or sorts keys (ROW(...) comparisons, ORDER BY,
+	// the slicer's index walk) needs this order to use the index.
 	GetPrimaryKey: template.Must(template.New("getPrimaryKey").Parse(`
 		SELECT
 			kcu.column_name
@@ -365,10 +367,13 @@ var SQLTemplates = Templates{
 			information_schema.table_constraints tc
 			JOIN information_schema.key_column_usage kcu ON tc.constraint_name = kcu.constraint_name
 			AND tc.table_schema = kcu.table_schema
+			AND tc.table_name = kcu.table_name
 		WHERE
 			tc.constraint_type = 'PRIMARY KEY'
 			AND tc.table_schema = $1
-			AND tc.table_name = $2;
+			AND tc.table_name = $2
+		ORDER BY
+			kcu.ordinal_position;
 	`)),
 	GetColumnTypes: template.Must(template.New("getColumnTypes").Parse(`
 		SELECT
@@ -1113,98 +1118,6 @@ var SQLTemplates = Templates{
 		JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
 		WHERE n.nspname = $1
 			AND c.relname = ANY($2::text[]);
-	`)),
-	GetPkeyOffsets: template.Must(template.New("pkeyOffsets").Parse(`
-		WITH sampled_data AS (
-			SELECT
-				{{.KeyColumnsSelect}}
-			FROM
-				{{.SchemaIdent}}.{{.TableIdent}}
-			TABLESAMPLE {{.TableSampleMethod}}({{.SamplePercent}})
-				{{- if .HasFilter }}
-			WHERE
-				{{.Filter}}
-				{{- end }}
-			ORDER BY
-				{{.KeyColumnsOrder}}
-		),
-		first_row AS (
-			SELECT
-				{{.KeyColumnsSelect}}
-			FROM
-				{{.SchemaIdent}}.{{.TableIdent}}
-				{{- if .HasFilter }}
-			WHERE
-				{{.Filter}}
-				{{- end }}
-			ORDER BY
-				{{.KeyColumnsOrder}}
-			LIMIT 1
-		),
-		last_row AS (
-			SELECT
-				{{.KeyColumnsSelect}}
-			FROM
-				{{.SchemaIdent}}.{{.TableIdent}}
-				{{- if .HasFilter }}
-			WHERE
-				{{.Filter}}
-				{{- end }}
-			ORDER BY
-				{{.KeyColumnsOrderDesc}}
-			LIMIT 1
-		),
-		sample_boundaries AS (
-			SELECT
-				{{.KeyColumnsSelect}},
-				ntile({{.NtileCount}}) OVER (
-					ORDER BY
-						{{.KeyColumnsOrder}}
-				) as bucket
-			FROM
-				sampled_data
-		),
-		block_starts AS (
-			SELECT
-				DISTINCT ON (bucket) {{.KeyColumnsSelect}}
-			FROM
-				sample_boundaries
-			ORDER BY
-				bucket,
-				{{.KeyColumnsOrder}}
-		),
-		all_bounds AS (
-			SELECT
-				{{.FirstRowSelects}},
-				0 as seq
-			UNION ALL
-			SELECT
-				{{.KeyColumnsSelect}},
-				1 as seq
-			FROM
-				block_starts
-			WHERE
-				ROW({{.KeyColumnsSelect}}) > {{.FirstRowTupleSelects}}
-			UNION ALL
-			SELECT
-				{{.LastRowSelects}},
-				2 as seq
-		),
-		ranges AS (
-			SELECT
-				{{.KeyColumnsSelect}},
-				{{.RangeStartColumns}},
-				{{.RangeEndColumns}},
-				seq
-			FROM
-				all_bounds
-		)
-		SELECT
-			{{.RangeOutputColumns}}
-		FROM
-			ranges
-		ORDER BY
-			seq;
 	`)),
 	CreateSimpleMtreeTable: template.Must(template.New("createSimpleMtreeTable").Parse(`
 		CREATE TABLE {{.MtreeTable}} (

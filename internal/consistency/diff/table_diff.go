@@ -35,6 +35,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/pgedge/ace/db/queries"
 	"github.com/pgedge/ace/internal/consistency/schema"
+	"github.com/pgedge/ace/internal/consistency/slicer"
 	auth "github.com/pgedge/ace/internal/infra/db"
 	utils "github.com/pgedge/ace/pkg/common"
 	"github.com/pgedge/ace/pkg/config"
@@ -1064,8 +1065,23 @@ func (t *TableDiffTask) CloneForSchedule(ctx context.Context) *TableDiffTask {
 	return cloned
 }
 
+// hashWorkers returns the number of hash queries that table-diff runs at
+// the same time.
+func (t *TableDiffTask) hashWorkers() int {
+	n := int(math.Round(float64(runtime.NumCPU()) * t.ConcurrencyFactor))
+	if n < 1 {
+		n = 1
+	}
+	return n
+}
+
+// maxPoolSize returns the size of the connection pool of each node. The
+// anchor node runs the hash workers and the cutting workers of the slicer at
+// the same time, so the pool has room for both. MaxConnections caps it; then
+// the cut and the hashing share the connections.
 func (t *TableDiffTask) maxPoolSize() int {
-	poolSize := int(math.Round(float64(runtime.NumCPU()) * t.ConcurrencyFactor))
+	hash := t.hashWorkers()
+	poolSize := hash + slicer.DefaultWorkers(hash)
 	if poolSize < 4 {
 		poolSize = 4
 	}
@@ -1269,11 +1285,8 @@ func (t *TableDiffTask) ExecuteTask() (err error) {
 		ctx = context.Background()
 	}
 
-	maxConcurrent := int(math.Round(float64(runtime.NumCPU()) * t.ConcurrencyFactor))
-	if maxConcurrent < 1 {
-		maxConcurrent = 1
-	}
-	logger.Info("Using %d CPUs, max concurrent workers = %d", runtime.NumCPU(), maxConcurrent)
+	maxConcurrent := t.hashWorkers()
+	logger.Info("Using %d CPUs, max concurrent workers = %d, %d connections per node", runtime.NumCPU(), maxConcurrent, t.maxPoolSize())
 	sem := make(chan struct{}, maxConcurrent)
 	t.diffSem = make(chan struct{}, maxConcurrent)
 
@@ -1342,7 +1355,6 @@ func (t *TableDiffTask) ExecuteTask() (err error) {
 			ConcurrencyFactor: t.ConcurrencyFactor,
 			MaxDiffRows:       t.MaxDiffRows,
 			StartTime:         startTime.Format(time.RFC3339),
-			TotalRowsChecked:  int64(maxCount),
 			DiffRowsCount:     make(map[string]int),
 			AgainstOrigin:     t.AgainstOrigin,
 			AgainstOriginResolved: func() string {
@@ -1364,92 +1376,24 @@ func (t *TableDiffTask) ExecuteTask() (err error) {
 		},
 	}
 
-	sampleMethod := "BERNOULLI"
-	samplePercent := 0.0
-	switch {
-	case maxCount > 1e8:
-		sampleMethod = "SYSTEM"
-		samplePercent = 0.01
-	case maxCount > 1e6:
-		sampleMethod = "SYSTEM"
-		samplePercent = 0.1
-	case maxCount > 1e5:
-		samplePercent = 1
-	case maxCount > 1e4:
-		samplePercent = 10
-	default:
-		samplePercent = 100
+	// Block boundaries come from the anchor node (the highest row estimate).
+	// The slicer cuts its key space into blocks of at most BlockSize rows
+	// and sends them while the cut is still running, so hashing starts at
+	// once.
+	anchorPool := pools[maxNode]
+	sliceCfg := slicer.Config{
+		Schema:    t.Schema,
+		Table:     t.Table,
+		Key:       t.Key,
+		Filter:    t.EffectiveFilter,
+		BlockSize: t.BlockSize,
+		Workers:   slicer.DefaultWorkers(maxConcurrent),
 	}
-
-	var ranges []Range
-	ntileCount := int(math.Ceil(float64(maxCount) / float64(t.BlockSize)))
-	if ntileCount == 0 && maxCount > 0 {
-		ntileCount = 1
-	}
-
-	querySQL, err := queries.GeneratePkeyOffsetsQuery(t.Schema, t.Table, t.Key, sampleMethod, samplePercent, ntileCount, t.EffectiveFilter)
-	logger.Debug("Generated offsets query: %s", querySQL)
+	plan, err := slicer.PlanParts(ctx, anchorPool, sliceCfg)
 	if err != nil {
-		return fmt.Errorf("failed to generate offsets query: %w", err)
+		return fmt.Errorf("failed to plan block boundaries on %s: %w", maxNode, err)
 	}
-	pkRangesRows, err := pools[maxNode].Query(t.Ctx, querySQL)
-	if err != nil {
-		return fmt.Errorf("offsets query execution failed on %s: %w", maxNode, err)
-	}
-	defer pkRangesRows.Close()
-
-	numPKCols := len(t.Key)
-	totalScanCols := 2 * numPKCols
-	if totalScanCols == 0 {
-		return fmt.Errorf("primary key not defined, cannot determine columns to scan for ranges")
-	}
-	scanDest := make([]any, totalScanCols)
-	scanDestPtrs := make([]any, totalScanCols)
-	for i := range scanDest {
-		scanDestPtrs[i] = &scanDest[i]
-	}
-
-	for pkRangesRows.Next() {
-		if err := pkRangesRows.Scan(scanDestPtrs...); err != nil {
-			return fmt.Errorf("scanning offset row failed (expected %d columns for %d PKs): %w", totalScanCols, numPKCols, err)
-		}
-
-		var rStart, rEnd any
-
-		if numPKCols == 1 {
-			rStart = scanDest[0]
-			rEnd = scanDest[1]
-		} else {
-			startKeyParts := make([]any, numPKCols)
-			copy(startKeyParts, scanDest[0:numPKCols])
-			rStart = startKeyParts
-
-			endKeyParts := make([]any, numPKCols)
-			copy(endKeyParts, scanDest[numPKCols:2*numPKCols])
-			if queries.AllNil(endKeyParts) {
-				rEnd = nil
-			} else {
-				rEnd = endKeyParts
-			}
-		}
-		ranges = append(ranges, Range{Start: rStart, End: rEnd})
-	}
-	if err := pkRangesRows.Err(); err != nil {
-		return fmt.Errorf("offset rows iteration error: %w", err)
-	}
-
-	if len(ranges) > 0 && ranges[0].Start != nil {
-		firstOriginalStart := ranges[0].Start
-		newInitialRange := Range{Start: nil, End: firstOriginalStart}
-		ranges = append([]Range{newInitialRange}, ranges...)
-	}
-
-	logger.Debug("Created %d initial ranges to compare", len(ranges))
-	logger.Debug("Ranges: %v", ranges)
-	t.DiffResult.Summary.InitialRangesCount = len(ranges)
-
-	resultsMap := make(map[int]RangeResults)
-	var resultsMutex sync.Mutex
+	logger.Info("table-diff: block boundaries: %s", slicer.Describe(plan, sliceCfg, maxNode))
 
 	var nodeNames []string
 	for name := range pools {
@@ -1457,9 +1401,10 @@ func (t *TableDiffTask) ExecuteTask() (err error) {
 	}
 	sort.Strings(nodeNames)
 
-	totalHashTasks := len(nodeNames) * len(ranges)
 	p := mpb.New(mpb.WithOutput(os.Stderr))
-	bar := p.AddBar(int64(totalHashTasks),
+	// The number of blocks is known only when the cut ends, so the bar
+	// starts with no total and grows.
+	bar := p.AddBar(0,
 		mpb.BarRemoveOnComplete(),
 		mpb.PrependDecorators(
 			decor.Name("Hashing initial ranges: ", decor.WC{W: 18}),
@@ -1467,19 +1412,34 @@ func (t *TableDiffTask) ExecuteTask() (err error) {
 		),
 		mpb.AppendDecorators(
 			decor.Elapsed(decor.ET_STYLE_GO),
-			decor.Name(" | "),
-			decor.OnComplete(decor.AverageETA(decor.ET_STYLE_GO), "done"),
 		),
 	)
 
 	/*
 		We use the following approach:
-		1. Generate a list of ranges to hash, and create a HashTask for each range.
-		2. Each HashTask is independent of the others, and can be executed in parallel.
+		1. The slicer cuts the table into blocks on the anchor node and sends
+		   them to blockCh as soon as it cuts them.
+		2. For each block we queue one HashTask per node. Each HashTask is
+		   independent of the others, and can be executed in parallel.
 		3. We don't immediately perform the comparisons, but instead store the results in a map.
 		4. Once they're ready, we use a binary search approach to narrow down the ranges that have mismatches.
 	*/
-	hashTaskQueue := make(chan HashTask, totalHashTasks)
+	cutCtx, cancelCut := context.WithCancel(ctx)
+	defer cancelCut()
+	blockCh := make(chan slicer.Block, 4*maxConcurrent)
+	var (
+		cutStats *slicer.Stats
+		cutErr   error
+	)
+	go func() {
+		defer close(blockCh)
+		cutStats, cutErr = slicer.Cut(cutCtx, anchorPool, sliceCfg, plan, blockCh)
+	}()
+
+	resultsMap := make(map[int]RangeResults)
+	var resultsMutex sync.Mutex
+
+	hashTaskQueue := make(chan HashTask, 2*maxConcurrent)
 	var initialHashWg sync.WaitGroup
 	for i := 0; i < maxConcurrent; i++ {
 		initialHashWg.Add(1)
@@ -1515,25 +1475,49 @@ func (t *TableDiffTask) ExecuteTask() (err error) {
 		}()
 	}
 
-	for rangeIdx, currentRange := range ranges {
+	// blocks are in arrival order, and the hash results are keyed by the
+	// index of the block in it. The comparison below walks them in key
+	// order with slicer.KeyOrder.
+	var blocks []slicer.Block
+	for b := range blockCh {
+		if t.hasError() {
+			// A hash failed and the diff will stop with that error. Stop
+			// cutting too, but keep reading so the cut can exit.
+			cancelCut()
+			continue
+		}
+		rangeIdx := len(blocks)
+		blocks = append(blocks, b)
+		bar.SetTotal(int64(len(blocks)*len(nodeNames)), false)
+		r := t.rangeFromBlock(b)
 		for _, nodeName := range nodeNames {
-			hashTaskQueue <- HashTask{nodeName: nodeName, rangeIndex: rangeIdx, r: currentRange}
+			hashTaskQueue <- HashTask{nodeName: nodeName, rangeIndex: rangeIdx, r: r}
 		}
 	}
 	close(hashTaskQueue)
 	initialHashWg.Wait()
+	bar.SetTotal(-1, true)
 
 	if err := t.getFirstError(); err != nil {
 		return err
 	}
+	if cutErr != nil {
+		return fmt.Errorf("failed to cut block boundaries on %s: %w", maxNode, cutErr)
+	}
+
+	logger.Info("table-diff: cut %s on %s", cutStats, maxNode)
+	// The cut counted the rows of the anchor node that match the filter.
+	// This is exact, unlike the planner estimate that chose the anchor.
+	t.DiffResult.Summary.TotalRowsChecked = cutStats.Rows
+	t.DiffResult.Summary.InitialRangesCount = len(blocks)
 
 	logger.Info("Initial hash calculations complete. Proceeding with comparisons for mismatches...")
 
 	var diffWg sync.WaitGroup
 	var mismatchedTasks []RecursiveDiffTask
 
-	for rangeIdx := 0; rangeIdx < len(ranges); rangeIdx++ {
-		currentRange := ranges[rangeIdx]
+	for _, rangeIdx := range slicer.KeyOrder(blocks) {
+		currentRange := t.rangeFromBlock(blocks[rangeIdx])
 		for i := 0; i < len(nodeNames); i++ {
 			node1 := nodeNames[i]
 			for j := i + 1; j < len(nodeNames); j++ {
@@ -1727,6 +1711,22 @@ func extractRangeBoundValues(bound any, numPKCols int) ([]any, bool, error) {
 	}
 
 	return nil, false, fmt.Errorf("unsupported range bound type %T", bound)
+}
+
+// rangeFromBlock converts a slicer block into a Range: a simple key uses the
+// value itself, a composite key uses a []any of all key values. nil means no
+// bound.
+func (t *TableDiffTask) rangeFromBlock(b slicer.Block) Range {
+	conv := func(vals []any) any {
+		if vals == nil {
+			return nil
+		}
+		if len(t.Key) == 1 {
+			return vals[0]
+		}
+		return vals
+	}
+	return Range{Start: conv(b.Start), End: conv(b.End)}
 }
 
 func (t *TableDiffTask) generateSubRanges(
