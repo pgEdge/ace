@@ -825,9 +825,6 @@ func CheckUserPrivileges(ctx context.Context, db DBQuerier, username, schema, ta
 		&privileges.TableInsert,
 		&privileges.TableUpdate,
 		&privileges.TableDelete,
-		&privileges.ColumnsSelect,
-		&privileges.TableConstraintsSelect,
-		&privileges.KeyColumnUsageSelect,
 	)
 	if err != nil {
 		return nil, err

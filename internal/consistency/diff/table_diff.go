@@ -829,7 +829,7 @@ func (t *TableDiffTask) RunChecks(skipValidation bool) (err error) {
 				return fmt.Errorf("failed to read inheritance tree for %s.%s on node %s: %w", schema, table, hostname, err)
 			}
 			if tree == nil {
-				return fmt.Errorf("table '%s.%s' not found on %s, or the current user does not have adequate privileges", schema, table, hostname)
+				return fmt.Errorf("table '%s.%s' not found on %s", schema, table, hostname)
 			}
 			if reason := tree.UnsupportedReason(); reason != "" {
 				hint := ""
@@ -847,7 +847,7 @@ func (t *TableDiffTask) RunChecks(skipValidation bool) (err error) {
 				return fmt.Errorf("failed to get columns for table %s.%s on node %s: %w", schema, table, hostname, err)
 			}
 			if len(currCols) == 0 {
-				return fmt.Errorf("table '%s.%s' not found on %s, or the current user does not have adequate privileges", schema, table, hostname)
+				return fmt.Errorf("table '%s.%s' has no columns on %s", schema, table, hostname)
 			}
 
 			currKey, err := queries.GetPrimaryKey(t.Ctx, conn, schema, table)

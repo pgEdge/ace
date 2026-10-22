@@ -314,14 +314,11 @@ type ColumnType struct {
 
 // UserPrivileges describes the privileges a user has.
 type UserPrivileges struct {
-	TableSelect            bool `db:"table_select"`
-	TableCreate            bool `db:"table_create"`
-	TableInsert            bool `db:"table_insert"`
-	TableUpdate            bool `db:"table_update"`
-	TableDelete            bool `db:"table_delete"`
-	ColumnsSelect          bool `db:"columns_select"`
-	TableConstraintsSelect bool `db:"table_constraints_select"`
-	KeyColumnUsageSelect   bool `db:"key_column_usage_select"`
+	TableSelect bool `db:"table_select"`
+	TableCreate bool `db:"table_create"`
+	TableInsert bool `db:"table_insert"`
+	TableUpdate bool `db:"table_update"`
+	TableDelete bool `db:"table_delete"`
 }
 
 // SpockNodeAndSubInfo contains information about a spock node and its subscription.
