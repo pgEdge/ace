@@ -46,6 +46,21 @@ import (
 	"github.com/vbauerster/mpb/v8/decor"
 )
 
+// NoSelectPrivilegeError is returned by RunChecks when the user cannot read
+// the table on Node. schema-diff and repset-diff skip such tables instead
+// of failing.
+type NoSelectPrivilegeError struct {
+	User  string
+	Table string // schema-qualified
+	Node  string
+	Hint  string // from UserPrivileges.SelectHint
+}
+
+func (e *NoSelectPrivilegeError) Error() string {
+	return fmt.Sprintf("user \"%s\" cannot read table \"%s\" on node \"%s\"%s",
+		e.User, e.Table, e.Node, e.Hint)
+}
+
 type Range struct {
 	Start any
 	End   any
@@ -842,7 +857,26 @@ func (t *TableDiffTask) RunChecks(skipValidation bool) (err error) {
 				return fmt.Errorf("'%s.%s' %s (node %s).%s", schema, table, reason, hostname, hint)
 			}
 
-			currCols, err := queries.GetColumns(t.Ctx, conn, schema, table)
+			// Checked before the key and columns, so a table the user cannot
+			// read is reported as such even if it would also fail those.
+			actualPrivs, err := queries.CheckUserPrivileges(t.Ctx, conn, user, schema, table)
+			if err != nil {
+				return fmt.Errorf("failed to check user privileges on node %s: %w", hostname, err)
+			}
+			if !actualPrivs.SchemaUsage {
+				return fmt.Errorf("user \"%s\" does not have USAGE on schema \"%s\" on node \"%s\"",
+					user, schema, hostname)
+			}
+			if !actualPrivs.TableSelect {
+				return &NoSelectPrivilegeError{
+					User:  user,
+					Table: schema + "." + table,
+					Node:  hostname,
+					Hint:  actualPrivs.SelectHint(),
+				}
+			}
+
+			currCols, colTypes, err := queries.GetColumns(t.Ctx, conn, schema, table)
 			if err != nil {
 				return fmt.Errorf("failed to get columns for table %s.%s on node %s: %w", schema, table, hostname, err)
 			}
@@ -872,27 +906,12 @@ func (t *TableDiffTask) RunChecks(skipValidation bool) (err error) {
 			cols = currCols
 			key = currKey
 
-			colTypes, err := queries.GetColumnTypes(t.Ctx, conn, schema, table)
-			if err != nil {
-				return fmt.Errorf("failed to get column types for table %s on node %s: %w", table, hostname, err)
-			}
-
 			colTypesKey := fmt.Sprintf("%s:%s", hostIP, port)
 
 			if t.ColTypes == nil {
 				t.ColTypes = make(map[string]map[string]string)
 			}
 			t.ColTypes[colTypesKey] = colTypes
-
-			actualPrivs, err := queries.CheckUserPrivileges(t.Ctx, conn, user, schema, table)
-			if err != nil {
-				return fmt.Errorf("failed to check user privileges on node %s: %w", hostname, err)
-			}
-
-			if !actualPrivs.TableSelect {
-				return fmt.Errorf("user \"%s\" does not have the necessary privileges to run table-diff on table \"%s.%s\" on node \"%s\"",
-					user, schema, table, hostname)
-			}
 
 			hostMap[hostIP+":"+port] = hostname
 

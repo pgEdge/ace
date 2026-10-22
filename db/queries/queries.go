@@ -707,39 +707,6 @@ func BlockHashSQL(schema, table string, primaryKeyCols []string, mode string, in
 	return RenderSQL(tmpl, data)
 }
 
-// GetColumns retrieves the column names for a given table.
-func GetColumns(ctx context.Context, db DBQuerier, schema, table string) ([]string, error) {
-	sql, err := RenderSQL(SQLTemplates.GetColumns, nil)
-	if err != nil {
-		return nil, fmt.Errorf("failed to render GetColumns SQL: %w", err)
-	}
-
-	rows, err := db.Query(ctx, sql, schema, table)
-	if err != nil {
-		return nil, fmt.Errorf("query to get columns failed for %s.%s: %w", schema, table, err)
-	}
-	defer rows.Close()
-
-	var columns []string
-	for rows.Next() {
-		var columnName string
-		if err := rows.Scan(&columnName); err != nil {
-			return nil, fmt.Errorf("failed to scan column name: %w", err)
-		}
-		columns = append(columns, columnName)
-	}
-
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("error iterating over columns: %w", err)
-	}
-
-	if len(columns) == 0 {
-		return nil, nil
-	}
-
-	return columns, nil
-}
-
 func GetPrimaryKey(ctx context.Context, db DBQuerier, schema, table string) ([]string, error) {
 	sql, err := RenderSQL(SQLTemplates.GetPrimaryKey, nil)
 	if err != nil {
@@ -779,35 +746,50 @@ func GetSimplePrimaryKey(ctx context.Context, db DBQuerier, schema, table string
 	return len(keys) == 1, nil
 }
 
-func GetColumnTypes(ctx context.Context, db DBQuerier, schema, table string) (map[string]string, error) {
-	sql, err := RenderSQL(SQLTemplates.GetColumnTypes, nil)
+// GetColumns returns the column names of a table in column order, and the
+// type of each column. A missing table returns no columns and no error.
+func GetColumns(ctx context.Context, db DBQuerier, schema, table string) ([]string, map[string]string, error) {
+	sql, err := RenderSQL(SQLTemplates.GetColumns, nil)
 	if err != nil {
-		return nil, fmt.Errorf("failed to render GetColumnTypes SQL: %w", err)
+		return nil, nil, fmt.Errorf("failed to render GetColumns SQL: %w", err)
 	}
 
 	rows, err := db.Query(ctx, sql, schema, table)
 	if err != nil {
-		return nil, fmt.Errorf("query to get column types failed for %s.%s: %w", schema, table, err)
+		return nil, nil, fmt.Errorf("query to get columns failed for %s.%s: %w", schema, table, err)
 	}
 	defer rows.Close()
 
+	var columns []string
 	types := make(map[string]string)
 	for rows.Next() {
 		var columnName, dataType string
 		if err := rows.Scan(&columnName, &dataType); err != nil {
-			return nil, fmt.Errorf("failed to scan column type: %w", err)
+			return nil, nil, fmt.Errorf("failed to scan column: %w", err)
 		}
+		columns = append(columns, columnName)
 		types[columnName] = dataType
 	}
 
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("error iterating over column types: %w", err)
+		return nil, nil, fmt.Errorf("error iterating over columns: %w", err)
 	}
 
+	if len(columns) == 0 {
+		return nil, nil, nil
+	}
+
+	return columns, types, nil
+}
+
+func GetColumnTypes(ctx context.Context, db DBQuerier, schema, table string) (map[string]string, error) {
+	_, types, err := GetColumns(ctx, db, schema, table)
+	if err != nil {
+		return nil, err
+	}
 	if len(types) == 0 {
 		return nil, fmt.Errorf("could not fetch column types for %s.%s", schema, table)
 	}
-
 	return types, nil
 }
 
@@ -825,6 +807,8 @@ func CheckUserPrivileges(ctx context.Context, db DBQuerier, username, schema, ta
 		&privileges.TableInsert,
 		&privileges.TableUpdate,
 		&privileges.TableDelete,
+		&privileges.SchemaUsage,
+		&privileges.ColumnSelect,
 	)
 	if err != nil {
 		return nil, err
@@ -1085,83 +1069,50 @@ func CheckSchemaExists(ctx context.Context, db DBQuerier, schema string) (bool, 
 	return exists, nil
 }
 
-func GetTablesInSchema(ctx context.Context, db DBQuerier, schema string) ([]string, error) {
-	sql, err := RenderSQL(SQLTemplates.GetTablesInSchema, nil)
+// getRelationsInSchema lists the relations of schema whose relkind is one
+// of relkinds, sorted by name. kind names them in errors.
+func getRelationsInSchema(ctx context.Context, db DBQuerier, schema, kind string, relkinds []string) ([]string, error) {
+	sql, err := RenderSQL(SQLTemplates.GetRelationsInSchema, nil)
 	if err != nil {
-		return nil, fmt.Errorf("failed to render GetTablesInSchema SQL: %w", err)
+		return nil, fmt.Errorf("failed to render GetRelationsInSchema SQL: %w", err)
 	}
 
-	rows, err := db.Query(ctx, sql, schema)
+	rows, err := db.Query(ctx, sql, schema, relkinds)
 	if err != nil {
-		return nil, fmt.Errorf("query to get tables in schema '%s' failed: %w", schema, err)
+		return nil, fmt.Errorf("query to get %s in schema '%s' failed: %w", kind, schema, err)
 	}
 	defer rows.Close()
 
-	var tables []string
+	var names []string
 	for rows.Next() {
-		var tableName string
-		if err := rows.Scan(&tableName); err != nil {
-			return nil, fmt.Errorf("failed to scan table name: %w", err)
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return nil, fmt.Errorf("failed to scan %s name: %w", kind, err)
 		}
-		tables = append(tables, tableName)
+		names = append(names, name)
 	}
 
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("error iterating over tables: %w", err)
+		return nil, fmt.Errorf("error iterating over %s: %w", kind, err)
 	}
 
-	return tables, nil
+	return names, nil
+}
+
+// GetTablesInSchema lists the heap and partitioned tables in a schema.
+// Partitions are heap tables, so they are listed too.
+func GetTablesInSchema(ctx context.Context, db DBQuerier, schema string) ([]string, error) {
+	return getRelationsInSchema(ctx, db, schema, "tables", []string{"r", "p"})
 }
 
 // GetForeignTablesInSchema lists the foreign tables in a schema so callers
 // can say which tables a schema diff skipped.
 func GetForeignTablesInSchema(ctx context.Context, db DBQuerier, schema string) ([]string, error) {
-	sql, err := RenderSQL(SQLTemplates.GetForeignTablesInSchema, nil)
-	if err != nil {
-		return nil, fmt.Errorf("failed to render GetForeignTablesInSchema SQL: %w", err)
-	}
-	rows, err := db.Query(ctx, sql, schema)
-	if err != nil {
-		return nil, fmt.Errorf("query to get foreign tables in schema %s failed: %w", schema, err)
-	}
-	defer rows.Close()
-	var tables []string
-	for rows.Next() {
-		var name string
-		if err := rows.Scan(&name); err != nil {
-			return nil, fmt.Errorf("failed to scan foreign table name: %w", err)
-		}
-		tables = append(tables, name)
-	}
-	return tables, rows.Err()
+	return getRelationsInSchema(ctx, db, schema, "foreign tables", []string{"f"})
 }
 
 func GetViewsInSchema(ctx context.Context, db DBQuerier, schema string) ([]string, error) {
-	sql, err := RenderSQL(SQLTemplates.GetViewsInSchema, nil)
-	if err != nil {
-		return nil, fmt.Errorf("failed to render GetViewsInSchema SQL: %w", err)
-	}
-
-	rows, err := db.Query(ctx, sql, schema)
-	if err != nil {
-		return nil, fmt.Errorf("query to get views in schema '%s' failed: %w", schema, err)
-	}
-	defer rows.Close()
-
-	var views []string
-	for rows.Next() {
-		var viewName string
-		if err := rows.Scan(&viewName); err != nil {
-			return nil, fmt.Errorf("failed to scan view name: %w", err)
-		}
-		views = append(views, viewName)
-	}
-
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("error iterating over views: %w", err)
-	}
-
-	return views, nil
+	return getRelationsInSchema(ctx, db, schema, "views", []string{"v"})
 }
 
 func GetFunctionsInSchema(ctx context.Context, db DBQuerier, schema string) ([]string, error) {

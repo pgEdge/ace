@@ -12,6 +12,7 @@
 package diff
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 
@@ -39,6 +40,26 @@ type DiffSummary struct {
 	FailedTables   []FailedTableInfo
 	MissingTables  []MissingTableInfo
 	SkippedTables  []string
+	// NoPrivilegeSkips counts the SkippedTables entries added by
+	// SkipIfUnreadable.
+	NoPrivilegeSkips int
+}
+
+// SkipIfUnreadable records table as skipped when err says the user cannot
+// read it, and reports whether it did. The list of tables comes from the
+// catalogs, which also show tables the user cannot read.
+func (s *DiffSummary) SkipIfUnreadable(table string, err error, quiet bool) bool {
+	var privErr *NoSelectPrivilegeError
+	if !errors.As(err, &privErr) {
+		return false
+	}
+	if !quiet {
+		logger.Info("Skipping table %s: %v", table, err)
+	}
+	s.SkippedTables = append(s.SkippedTables,
+		fmt.Sprintf("%s (no SELECT privilege on %s)", table, privErr.Node))
+	s.NoPrivilegeSkips++
+	return true
 }
 
 // PrintAndFinalize logs the summary and returns an error if any tables failed.
@@ -82,6 +103,11 @@ func (s *DiffSummary) PrintAndFinalize(commandName, label string) error {
 			names = append(names, ft.Table)
 		}
 		return fmt.Errorf("%d table(s) failed during %s: %v", len(s.FailedTables), commandName, names)
+	}
+	// Skipping what the user cannot read must not turn a run that
+	// compared nothing into a success.
+	if s.NoPrivilegeSkips > 0 && len(s.MatchedTables)+len(s.DifferedTables) == 0 {
+		return fmt.Errorf("%s compared no tables in %s: the user cannot read any of them", commandName, label)
 	}
 
 	return nil

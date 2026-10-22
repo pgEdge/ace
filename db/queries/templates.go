@@ -25,24 +25,21 @@ var aceTemplateFuncs = template.FuncMap{
 }
 
 type Templates struct {
-	EstimateRowCount         *template.Template
-	GetPrimaryKey            *template.Template
-	GetColumnTypes           *template.Template
-	GetColumns               *template.Template
-	CheckUserPrivileges      *template.Template
-	SpockNodeAndSubInfo      *template.Template
-	SpockRepSetInfo          *template.Template
-	GetSpockNodeNames        *template.Template
-	CheckSchemaExists        *template.Template
-	GetTablesInSchema        *template.Template
-	GetForeignTablesInSchema *template.Template
-	GetViewsInSchema         *template.Template
-	GetFunctionsInSchema     *template.Template
-	GetIndicesInSchema       *template.Template
-	CheckRepSetExists        *template.Template
-	GetTablesInRepSet        *template.Template
-	GetPkeyColumnTypes       *template.Template
-	GetRelationTree          *template.Template
+	EstimateRowCount     *template.Template
+	GetPrimaryKey        *template.Template
+	GetColumns           *template.Template
+	CheckUserPrivileges  *template.Template
+	SpockNodeAndSubInfo  *template.Template
+	SpockRepSetInfo      *template.Template
+	GetSpockNodeNames    *template.Template
+	CheckSchemaExists    *template.Template
+	GetRelationsInSchema *template.Template
+	GetFunctionsInSchema *template.Template
+	GetIndicesInSchema   *template.Template
+	CheckRepSetExists    *template.Template
+	GetTablesInRepSet    *template.Template
+	GetPkeyColumnTypes   *template.Template
+	GetRelationTree      *template.Template
 
 	// Structure-comparison descriptors. Each reads one aspect of table
 	// structure for every table named in $2, scoped to schema $1. Each
@@ -377,7 +374,7 @@ var SQLTemplates = Templates{
 		ORDER BY
 			k.ord;
 	`)),
-	GetColumnTypes: template.Must(template.New("getColumnTypes").Parse(`
+	GetColumns: template.Must(template.New("getColumns").Parse(`
 		SELECT
 			a.attname AS column_name,
 			pg_catalog.format_type(a.atttypid, a.atttypmod) AS data_type
@@ -389,21 +386,7 @@ var SQLTemplates = Templates{
 		WHERE
 			c.relname = $2
 			AND n.nspname = $1
-			AND a.attnum > 0
-			AND NOT a.attisdropped
-		ORDER BY
-			a.attnum;
-	`)),
-	GetColumns: template.Must(template.New("getColumns").Parse(`
-		SELECT
-			a.attname
-		FROM
-			pg_catalog.pg_attribute a
-			JOIN pg_catalog.pg_class c ON a.attrelid = c.oid
-			JOIN pg_catalog.pg_namespace n ON c.relnamespace = n.oid
-		WHERE
-			n.nspname = $1
-			AND c.relname = $2
+			AND c.relkind IN ('r', 'p', 'f', 'v')
 			AND a.attnum > 0
 			AND NOT a.attisdropped
 		ORDER BY
@@ -416,10 +399,11 @@ var SQLTemplates = Templates{
 				$2 :: text AS schema_name,
 				$3 :: text AS table_name
 		),
+		-- The privilege checks take the table's OID: resolving a name
+		-- needs schema USAGE and would fail instead of returning false.
 		table_check AS (
 			SELECT
-				c.relname AS table_name,
-				n.nspname AS table_schema
+				c.oid
 			FROM
 				pg_class c
 				JOIN pg_namespace n ON n.oid = c.relnamespace
@@ -453,7 +437,7 @@ var SQLTemplates = Templates{
 					),
 					(
 						SELECT
-							quote_ident(table_schema) || '.' || quote_ident(table_name)
+							oid
 						FROM
 							table_check
 					),
@@ -491,7 +475,7 @@ var SQLTemplates = Templates{
 					),
 					(
 						SELECT
-							quote_ident(table_schema) || '.' || quote_ident(table_name)
+							oid
 						FROM
 							table_check
 					),
@@ -514,7 +498,7 @@ var SQLTemplates = Templates{
 					),
 					(
 						SELECT
-							quote_ident(table_schema) || '.' || quote_ident(table_name)
+							oid
 						FROM
 							table_check
 					),
@@ -537,14 +521,56 @@ var SQLTemplates = Templates{
 					),
 					(
 						SELECT
-							quote_ident(table_schema) || '.' || quote_ident(table_name)
+							oid
 						FROM
 							table_check
 					),
 					'DELETE'
 				)
 				ELSE FALSE
-			END AS table_delete;
+			END AS table_delete,
+			-- has_table_privilege ignores schema USAGE, which every query
+			-- on the table also needs.
+			has_schema_privilege(
+				(
+					SELECT
+						username
+					FROM
+						params
+				),
+				(
+					SELECT
+						schema_name
+					FROM
+						params
+				),
+				'USAGE'
+			) AS schema_usage,
+			-- True when SELECT is granted on some columns. Lets callers
+			-- explain a false table_select caused by column-level grants.
+			CASE
+				WHEN EXISTS (
+					SELECT
+						1
+					FROM
+						table_check
+				) THEN has_any_column_privilege(
+					(
+						SELECT
+							username
+						FROM
+							params
+					),
+					(
+						SELECT
+							oid
+						FROM
+							table_check
+					),
+					'SELECT'
+				)
+				ELSE FALSE
+			END AS column_select;
 	`)),
 	SpockNodeAndSubInfo: template.Must(template.New("spockNodeAndSubInfo").Parse(`
 		SELECT
@@ -623,7 +649,10 @@ var SQLTemplates = Templates{
 		LEFT JOIN pg_catalog.pg_namespace pn ON pn.oid = pc.relnamespace
 		ORDER BY t.depth, n.nspname, c.relname;
 	`)),
-	GetTablesInSchema: template.Must(template.New("getTablesInSchema").Parse(`
+	// GetRelationsInSchema lists the relations of one schema whose relkind
+	// is in $2. GetTablesInSchema, GetForeignTablesInSchema and
+	// GetViewsInSchema pass the relkinds they want.
+	GetRelationsInSchema: template.Must(template.New("getRelationsInSchema").Parse(`
 		SELECT
 			c.relname
 		FROM
@@ -631,28 +660,9 @@ var SQLTemplates = Templates{
 			JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
 		WHERE
 			n.nspname = $1
-			AND c.relkind IN ('r', 'p');
-	`)),
-	GetForeignTablesInSchema: template.Must(template.New("getForeignTablesInSchema").Parse(`
-		SELECT
-			c.relname
-		FROM
-			pg_catalog.pg_class c
-			JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
-		WHERE
-			n.nspname = $1
-			AND c.relkind = 'f'
-		ORDER BY c.relname;
-	`)),
-	GetViewsInSchema: template.Must(template.New("getViewsInSchema").Parse(`
-		SELECT
-			c.relname
-		FROM
-			pg_catalog.pg_class c
-			JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
-		WHERE
-			n.nspname = $1
-			AND c.relkind = 'v';
+			AND c.relkind = ANY($2::text[]::"char"[])
+		ORDER BY
+			c.relname;
 	`)),
 	GetFunctionsInSchema: template.Must(template.New("getFunctionsInSchema").Parse(`
 		SELECT
