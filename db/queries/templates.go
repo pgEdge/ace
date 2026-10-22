@@ -362,18 +362,20 @@ var SQLTemplates = Templates{
 	// the slicer's index walk) needs this order to use the index.
 	GetPrimaryKey: template.Must(template.New("getPrimaryKey").Parse(`
 		SELECT
-			kcu.column_name
+			a.attname
 		FROM
-			information_schema.table_constraints tc
-			JOIN information_schema.key_column_usage kcu ON tc.constraint_name = kcu.constraint_name
-			AND tc.table_schema = kcu.table_schema
-			AND tc.table_name = kcu.table_name
+			pg_catalog.pg_constraint con
+			JOIN pg_catalog.pg_class c ON c.oid = con.conrelid
+			JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+			CROSS JOIN LATERAL unnest(con.conkey) WITH ORDINALITY AS k(attnum, ord)
+			JOIN pg_catalog.pg_attribute a ON a.attrelid = c.oid
+			AND a.attnum = k.attnum
 		WHERE
-			tc.constraint_type = 'PRIMARY KEY'
-			AND tc.table_schema = $1
-			AND tc.table_name = $2
+			con.contype = 'p'
+			AND n.nspname = $1
+			AND c.relname = $2
 		ORDER BY
-			kcu.ordinal_position;
+			k.ord;
 	`)),
 	GetColumnTypes: template.Must(template.New("getColumnTypes").Parse(`
 		SELECT
@@ -394,14 +396,18 @@ var SQLTemplates = Templates{
 	`)),
 	GetColumns: template.Must(template.New("getColumns").Parse(`
 		SELECT
-			column_name
+			a.attname
 		FROM
-			information_schema.columns
+			pg_catalog.pg_attribute a
+			JOIN pg_catalog.pg_class c ON a.attrelid = c.oid
+			JOIN pg_catalog.pg_namespace n ON c.relnamespace = n.oid
 		WHERE
-			table_schema = $1
-			AND table_name = $2
+			n.nspname = $1
+			AND c.relname = $2
+			AND a.attnum > 0
+			AND NOT a.attisdropped
 		ORDER BY
-			ordinal_position;
+			a.attnum;
 	`)),
 	CheckUserPrivileges: template.Must(template.New("checkUserPrivileges").Parse(`
 		WITH params AS (
@@ -538,37 +544,7 @@ var SQLTemplates = Templates{
 					'DELETE'
 				)
 				ELSE FALSE
-			END AS table_delete,
-			has_table_privilege(
-				(
-					SELECT
-						username
-					FROM
-						params
-				),
-				'information_schema.columns',
-				'SELECT'
-			) AS columns_select,
-			has_table_privilege(
-				(
-					SELECT
-						username
-					FROM
-						params
-				),
-				'information_schema.table_constraints',
-				'SELECT'
-			) AS table_constraints_select,
-			has_table_privilege(
-				(
-					SELECT
-						username
-					FROM
-						params
-				),
-				'information_schema.key_column_usage',
-				'SELECT'
-			) AS key_column_usage_select;
+			END AS table_delete;
 	`)),
 	SpockNodeAndSubInfo: template.Must(template.New("spockNodeAndSubInfo").Parse(`
 		SELECT
@@ -649,30 +625,34 @@ var SQLTemplates = Templates{
 	`)),
 	GetTablesInSchema: template.Must(template.New("getTablesInSchema").Parse(`
 		SELECT
-			table_name
+			c.relname
 		FROM
-			information_schema.tables
+			pg_catalog.pg_class c
+			JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
 		WHERE
-			table_schema = $1
-			AND table_type = 'BASE TABLE';
+			n.nspname = $1
+			AND c.relkind IN ('r', 'p');
 	`)),
 	GetForeignTablesInSchema: template.Must(template.New("getForeignTablesInSchema").Parse(`
 		SELECT
-			table_name
+			c.relname
 		FROM
-			information_schema.tables
+			pg_catalog.pg_class c
+			JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
 		WHERE
-			table_schema = $1
-			AND table_type = 'FOREIGN'
-		ORDER BY table_name;
+			n.nspname = $1
+			AND c.relkind = 'f'
+		ORDER BY c.relname;
 	`)),
 	GetViewsInSchema: template.Must(template.New("getViewsInSchema").Parse(`
 		SELECT
-			table_name
+			c.relname
 		FROM
-			information_schema.views
+			pg_catalog.pg_class c
+			JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
 		WHERE
-			table_schema = $1;
+			n.nspname = $1
+			AND c.relkind = 'v';
 	`)),
 	GetFunctionsInSchema: template.Must(template.New("getFunctionsInSchema").Parse(`
 		SELECT
