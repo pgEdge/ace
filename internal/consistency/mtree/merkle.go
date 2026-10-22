@@ -307,6 +307,28 @@ func (m *MerkleTreeTask) workerCount(phase string) int {
 	return n
 }
 
+// buildWorkerPlan sizes a build: hash workers per node, cutting workers on
+// the reference node, and the pool opened on every node. The cutting workers
+// share the reference node's pool with the hash workers and the tree
+// transaction, so under --max-connections they count against the cap, and
+// the hash workers give way until all three fit. A cap of 2 cannot hold one
+// hash worker, one cutting worker and the transaction, so a build needs 3.
+func buildWorkerPlan(numCPU int, ratio float64, maxConnections int) (hashWorkers, cutWorkers, poolSize int, err error) {
+	hashWorkers = workerCount(numCPU, ratio, maxConnections)
+	cutWorkers = slicer.DefaultWorkers(hashWorkers)
+	if maxConnections > 0 {
+		for hashWorkers > 1 && hashWorkers+cutWorkers+1 > maxConnections {
+			hashWorkers--
+			cutWorkers = slicer.DefaultWorkers(hashWorkers)
+		}
+		if hashWorkers+cutWorkers+1 > maxConnections {
+			return 0, 0, 0, fmt.Errorf("max_connections must be at least %d for mtree build: one hash worker, one cutting worker and the tree transaction",
+				hashWorkers+cutWorkers+1)
+		}
+	}
+	return hashWorkers, cutWorkers, hashWorkers + cutWorkers + 1, nil
+}
+
 // diffPoolSize is the size of the one pool the diff opens per node. Every
 // phase of the diff shares it: the tree traversal, the range comparison
 // workers, and the stale-block refresh. Under --max-connections the pool is
@@ -1795,13 +1817,14 @@ func (m *MerkleTreeTask) BuildMtree() (err error) {
 		}
 	}()
 
-	numWorkers := m.workerCount("Building tree")
-	cutWorkers := slicer.DefaultWorkers(numWorkers)
 	// Per node: numWorkers connections for hashing, one for the tree
 	// transaction, and on the reference node more for the cutting workers.
-	poolSize := numWorkers + cutWorkers + 1
-	logger.Info("mtree build: %d hash workers per node, %d cutting workers, %d connections per node",
-		numWorkers, cutWorkers, poolSize)
+	numWorkers, cutWorkers, poolSize, planErr := buildWorkerPlan(runtime.NumCPU(), m.MaxCpuRatio, m.MaxConnections)
+	if planErr != nil {
+		return planErr
+	}
+	logger.Info("mtree build: %d hash workers per node, %d cutting workers, %d connections per node (host cpus=%d, max_cpu_ratio=%.2f, max_connections=%d)",
+		numWorkers, cutWorkers, poolSize, runtime.NumCPU(), m.MaxCpuRatio, m.MaxConnections)
 
 	if m.RangesFile != "" {
 		logger.Info("Reading block ranges from %s", m.RangesFile)

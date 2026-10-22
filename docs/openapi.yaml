@@ -664,7 +664,7 @@ components:
           description: Defaults to 0.5.
         max_connections:
           type: integer
-          description: Maximum database connections per node (at least 2). Defaults to mtree.max_connections, or derived from max_cpu_ratio.
+          description: Maximum database connections per node (at least 3). Defaults to mtree.max_connections, or derived from max_cpu_ratio.
         override_block_size:
           type: boolean
         analyse:

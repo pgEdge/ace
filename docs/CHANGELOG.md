@@ -11,10 +11,12 @@ All notable changes to ACE will be captured in this document. This project follo
   connection pool per node the same way the flag already does on the diff
   commands, for when ACE runs on a host with many more cores than the
   database servers. One connection holds the tree's transaction, so `N`
-  connections means `N - 1` hash workers, and the value must be at least 2.
-- The mtree commands now log the worker count they settle on, along with the
-  host CPU count and the flags it was derived from, and `mtree build` logs
-  the connection pool size per node.
+  connections means `N - 1` hash workers on `mtree update` and
+  `mtree table-diff`. `mtree build` also runs cutting workers on the
+  reference node out of the same pool, so they count against the cap and a
+  build needs at least 3.
+- The mtree commands log the worker count they settle on, along with the
+  host CPU count and the flags it was derived from.
 
 ### Fixed
 - **`mtree` said "0 rows on all nodes; add data" for a partitioned table that

@@ -40,6 +40,38 @@ func TestWorkerCountIsRatioOfCores(t *testing.T) {
 	}
 }
 
+// The build also runs cutting workers on the reference node, out of the same
+// pool as the hash workers and the tree transaction, so under a cap the hash
+// workers give way until all three fit, and a cap of 2 is not enough.
+func TestBuildWorkerPlanFitsCuttingWorkersUnderCap(t *testing.T) {
+	cases := []struct {
+		name              string
+		cpus              int
+		ratio             float64
+		maxConns          int
+		wantHash, wantCut int
+		wantPool          int
+		wantErr           bool
+	}{
+		{"no cap: 8 hash workers, 2 cutting, pool 11", 16, 0.5, 0, 8, 2, 11, false},
+		{"cap 4: hash workers give way to one cutter", 16, 0.5, 4, 2, 1, 4, false},
+		{"cap 3: one of each beside the transaction", 64, 1.0, 3, 1, 1, 3, false},
+		{"cap 2: a build cannot fit", 8, 0.5, 2, 0, 0, 0, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			hash, cut, pool, err := buildWorkerPlan(tc.cpus, tc.ratio, tc.maxConns)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("buildWorkerPlan(%d, %v, %d) err = %v, wantErr %v", tc.cpus, tc.ratio, tc.maxConns, err, tc.wantErr)
+			}
+			if hash != tc.wantHash || cut != tc.wantCut || pool != tc.wantPool {
+				t.Fatalf("buildWorkerPlan(%d, %v, %d) = %d, %d, %d, want %d, %d, %d",
+					tc.cpus, tc.ratio, tc.maxConns, hash, cut, pool, tc.wantHash, tc.wantCut, tc.wantPool)
+			}
+		})
+	}
+}
+
 const wantMaxConnsErr = "max_connections must be >= 2 for mtree commands (one connection holds the tree transaction), or 0 to derive from max_cpu_ratio"
 
 func TestValidateRejectsBadMaxConnections(t *testing.T) {

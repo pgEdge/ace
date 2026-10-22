@@ -54,7 +54,8 @@ mtree:
   # Max DB connections per node for mtree build, update and table-diff, like
   # table_diff.max_connections. One connection holds the tree's transaction
   # and the rest run hash queries, so this also caps the busy backends per
-  # node. Must be at least 2 when set. 0 = derive from --max-cpu-ratio.
+  # node. Must be at least 2 when set, and 3 for mtree build, which also
+  # runs cutting workers. 0 = derive from --max-cpu-ratio.
   max_connections: 0
 
   diff:
