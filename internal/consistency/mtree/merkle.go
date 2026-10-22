@@ -1683,7 +1683,7 @@ func (m *MerkleTreeTask) RunChecks(skipValidation bool) error {
 			return fmt.Errorf("failed to read inheritance tree on node %s: %w", nodeInfo["Name"], err)
 		}
 		if tree == nil {
-			return fmt.Errorf("table '%s' not found on %s, or the current user does not have adequate privileges", m.QualifiedTableName, nodeInfo["Name"])
+			return fmt.Errorf("table '%s' not found on %s", m.QualifiedTableName, nodeInfo["Name"])
 		}
 		if reason := tree.UnsupportedReason(); reason != "" {
 			hint := ""
@@ -1709,7 +1709,7 @@ func (m *MerkleTreeTask) RunChecks(skipValidation bool) error {
 		}
 
 		if len(currentColsSlice) == 0 {
-			return fmt.Errorf("table '%s' not found on %s, or the current user does not have adequate privileges", m.QualifiedTableName, nodeInfo["Name"])
+			return fmt.Errorf("table '%s' has no columns on %s", m.QualifiedTableName, nodeInfo["Name"])
 		}
 		if len(currentKeySlice) == 0 {
 			return fmt.Errorf("no primary key found for '%s'", m.QualifiedTableName)

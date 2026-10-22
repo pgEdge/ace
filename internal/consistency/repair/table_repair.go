@@ -464,7 +464,7 @@ func (t *TableRepairTask) ValidateAndPrepare() error {
 				return fmt.Errorf("failed to read inheritance tree for %s.%s on node %s: %w", t.Schema, t.Table, nodeName, err)
 			}
 			if tree == nil {
-				return fmt.Errorf("table '%s.%s' not found on node %s, or the current user does not have adequate privileges", t.Schema, t.Table, nodeName)
+				return fmt.Errorf("table '%s.%s' not found on node %s", t.Schema, t.Table, nodeName)
 			}
 			if reason := tree.UnsupportedReason(); reason != "" {
 				hint := ""
