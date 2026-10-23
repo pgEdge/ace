@@ -111,7 +111,6 @@ type Templates struct {
 	GetBlockWithCount                *template.Template
 	GetBlockWithCountExpanded        *template.Template
 	UpdateNodePosition               *template.Template
-	GetMaxColumnSize                 *template.Template
 	UpdateBlockRangeStart            *template.Template
 	GetMinValComposite               *template.Template
 	GetMinValSimple                  *template.Template
@@ -1765,9 +1764,6 @@ var SQLTemplates = Templates{
 		UPDATE {{.MtreeTable}}
 		SET node_position = $1
 		WHERE node_position = $2
-	`)),
-	GetMaxColumnSize: template.Must(template.New("getMaxColumnSize").Parse(`
-		SELECT COALESCE(MAX(octet_length({{.ColumnIdent}})), 0) FROM {{.SchemaIdent}}.{{.TableIdent}}
 	`)),
 	UpdateBlockRangeStart: template.Must(template.New("updateBlockRangeStart").Parse(`
 			UPDATE

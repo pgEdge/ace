@@ -966,10 +966,6 @@ func (t *TableDiffTask) RunChecks(skipValidation bool) (err error) {
 
 	logger.Info("Table %s is comparable across nodes", t.QualifiedTableName)
 
-	if err := t.CheckColumnSize(); err != nil {
-		return err
-	}
-
 	return nil
 }
 
@@ -1112,73 +1108,6 @@ func (t *TableDiffTask) maxPoolSize() int {
 
 func (t *TableDiffTask) connOpts() auth.ConnectionOptions {
 	return auth.ConnectionOptions{PoolSize: t.maxPoolSize()}
-}
-
-func (t *TableDiffTask) CheckColumnSize() error {
-	for hostPort, types := range t.ColTypes {
-		parts := strings.Split(hostPort, ":")
-		if len(parts) != 2 {
-			continue
-		}
-
-		host, portStr := parts[0], parts[1]
-		port, _ := strconv.Atoi(portStr)
-
-		var pool *pgxpool.Pool
-		for _, nodeInfo := range t.ClusterNodes {
-			nodeHost, _ := nodeInfo["PublicIP"].(string)
-
-			var nodePort float64
-			if nodePortVal, ok := nodeInfo["Port"]; ok {
-				switch v := nodePortVal.(type) {
-				case string:
-					nodePort, _ = strconv.ParseFloat(v, 64)
-				case float64:
-					nodePort = v
-				}
-			}
-
-			if nodePort == 0 {
-				nodePort = 5432
-			}
-
-			if nodeHost == host && int(nodePort) == port {
-				var err error
-				pool, err = auth.GetClusterNodeConnection(t.Ctx, nodeInfo, t.connOpts())
-				if err != nil {
-					return fmt.Errorf("failed to connect to node %s:%d: %w", host, port, err)
-				}
-				break
-			}
-		}
-
-		if pool == nil {
-			continue
-		}
-
-		for colName, colType := range types {
-			if !strings.Contains(colType, "bytea") {
-				continue
-			}
-
-			maxSize, err := queries.MaxColumnSize(context.Background(), pool, t.Schema, t.Table, colName)
-			logger.Debug("Column %s of table %s.%s has max size %d", colName, t.Schema, t.Table, maxSize)
-			if err != nil {
-				pool.Close()
-				return fmt.Errorf("failed to check size of bytea column %s: %w", colName, err)
-			}
-
-			if maxSize > 1000000 {
-				pool.Close()
-				return fmt.Errorf("refusing to perform table-diff. Data in column %s of table %s.%s is larger than 1 MB",
-					colName, t.Schema, t.Table)
-			}
-
-		}
-		pool.Close()
-	}
-
-	return nil
 }
 
 func (t *TableDiffTask) ExecuteTask() (err error) {

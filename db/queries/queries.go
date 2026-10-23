@@ -138,32 +138,6 @@ func RenderSQL(t *template.Template, data any) (string, error) {
 	return buf.String(), nil
 }
 
-func MaxColumnSize(ctx context.Context, db DBQuerier, schema, table, column string) (int64, error) {
-	data := map[string]interface{}{
-		"SchemaIdent": pgx.Identifier{schema}.Sanitize(),
-		"TableIdent":  pgx.Identifier{table}.Sanitize(),
-		"ColumnIdent": pgx.Identifier{column}.Sanitize(),
-	}
-
-	query, err := RenderSQL(SQLTemplates.GetMaxColumnSize, data)
-	if err != nil {
-		return 0, fmt.Errorf("failed to render MaxColumnSize SQL: %w", err)
-	}
-
-	var maxSize int64
-	if err := db.QueryRow(ctx, query).Scan(&maxSize); err != nil {
-		return 0, fmt.Errorf(
-			"MaxColumnSize query failed for %s.%s.%s: %w",
-			schema,
-			table,
-			column,
-			err,
-		)
-	}
-
-	return maxSize, nil
-}
-
 func CreateXORFunction(ctx context.Context, db DBQuerier) error {
 	sql, err := RenderSQL(SQLTemplates.CreateXORFunction, nil)
 	if err != nil {

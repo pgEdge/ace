@@ -378,9 +378,6 @@ func TestNativePG(t *testing.T) {
 		t.Run("UUIDColumn", func(t *testing.T) {
 			testTableDiff_UUIDColumn(t, env, false)
 		})
-		t.Run("ByteaColumnSizeCheck", func(t *testing.T) {
-			testTableDiff_ByteaColumnSizeCheck(t, env, false)
-		})
 	})
 
 	// ── Shared table-diff tests (composite PK) ───────────────────────────
@@ -407,9 +404,6 @@ func TestNativePG(t *testing.T) {
 		})
 		t.Run("UUIDColumn", func(t *testing.T) {
 			testTableDiff_UUIDColumn(t, env, true)
-		})
-		t.Run("ByteaColumnSizeCheck", func(t *testing.T) {
-			testTableDiff_ByteaColumnSizeCheck(t, env, true)
 		})
 	})
 

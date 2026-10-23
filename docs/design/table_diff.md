@@ -243,7 +243,6 @@ flowchart LR
 
 - **Diff limit hit**: `max_diff_rows` stops recursion early and marks the report; more differences may exist.
 - **Permission or schema/PK mismatch**: Validation fails before work starts; nothing is executed against the DB.
-- **Bytea >1 MB**: `CheckColumnSize` aborts to avoid runaway memory/IO.
 - **Timeouts/slow ranges**: Hashing is wrapped in timeouts; the first error is recorded and surfaced after workers finish.
 - **Stale stats**: Some parts are larger, so the cutting work is less even. Block size does not depend on statistics.
 
@@ -263,7 +262,7 @@ flowchart LR
 - Requires a declared PK; up to three-way diffs only.
 - `table_filter` creates per-node materialized views; filters must match exactly across nodes.
 - Parts from an old histogram or a sample can be uneven. This changes only how the cutting work is shared between workers, not the block size.
-- Wide JSON/bytea/UDT columns increase hash and fetch cost; oversized bytea (>1 MB) blocks execution.
+- Wide JSON/bytea/UDT columns increase hash and fetch cost.
 
 ### Observability
 
