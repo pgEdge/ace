@@ -136,6 +136,8 @@ type Templates struct {
 	CheckPIDExists                   *template.Template
 	CreateSchema                     *template.Template
 	AlterPublicationDropTable        *template.Template
+	PublicationExists                *template.Template
+	GetPublicationRelations          *template.Template
 	DeleteMetadata                   *template.Template
 	RemoveTableFromCDCMetadata       *template.Template
 	GetSpockOriginLSNForNode         *template.Template
@@ -188,8 +190,26 @@ var SQLTemplates = Templates{
 		ALTER PUBLICATION {{.PublicationName}} ADD TABLE {{.TableName}}
 	`)),
 
+	// ONLY: without it, PostgreSQL drops the inheritance children too and
+	// fails if one of them is not in the publication.
 	AlterPublicationDropTable: template.Must(template.New("alterPublicationDropTable").Parse(`
-		ALTER PUBLICATION {{.PublicationName}} DROP TABLE {{.TableName}}
+		ALTER PUBLICATION {{.PublicationName}} DROP TABLE ONLY {{.TableName}}
+	`)),
+
+	PublicationExists: template.Must(template.New("publicationExists").Parse(`
+		SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_publication WHERE pubname = $1)
+	`)),
+
+	// The relations named in the publication itself; a partition that is
+	// published through its root is not listed.
+	GetPublicationRelations: template.Must(template.New("getPublicationRelations").Parse(`
+		SELECT n.nspname, c.relname
+		FROM pg_catalog.pg_publication p
+		JOIN pg_catalog.pg_publication_rel pr ON pr.prpubid = p.oid
+		JOIN pg_catalog.pg_class c ON c.oid = pr.prrelid
+		JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+		WHERE p.pubname = $1
+		ORDER BY n.nspname, c.relname
 	`)),
 
 	RemoveTableFromCDCMetadata: template.Must(template.New("removeTableFromCDCMetadata").Funcs(aceTemplateFuncs).Parse(`

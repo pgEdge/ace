@@ -30,6 +30,14 @@ All notable changes to ACE will be captured in this document. This project follo
   analyzed. Then a change in a partition or a child makes the CDC drain fail,
   and `mtree update` and `mtree table-diff` fail for every table on that
   node. Remove such a tree with `mtree teardown-table`.
+- **`mtree teardown-table` left an inheritance parent in the CDC
+  publication.** It dropped the table from the publication without `ONLY`,
+  so PostgreSQL also tried to drop the child tables and failed on a child
+  that was not in the publication; ACE then logged that the publication was
+  not found. Teardown now drops the table with `ONLY`, and also takes out a
+  child that is in the publication but has no tree of its own, as an
+  earlier ACE added the children of a parent along with it. A child with
+  its own tree stays.
 - **A change to a key on the bound between two Merkle tree leaves was
   counted in both leaves.** CDC counters and leaf row counts treated
   `range_end` as part of the leaf, while leaf hashes did not. A key equal

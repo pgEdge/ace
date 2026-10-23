@@ -19,6 +19,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/pgedge/ace/pkg/config"
 	"github.com/stretchr/testify/require"
 )
 
@@ -144,4 +145,160 @@ func TestMerkleTreeRefusesInheritanceParent(t *testing.T) {
 	err := task.RunChecks(false)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "inheritance (public.mtree_inh_child)")
+	require.Contains(t, err.Error(), "table-diff")
+}
+
+// TestMerkleTreeOnPartitionSeesRowsMovedBetweenPartitions checks that a tree
+// on a partition sees a row that an UPDATE of the partition key moves into
+// or out of it. CDC reports such a row as a delete in one partition and an
+// insert in the other.
+func TestMerkleTreeOnPartitionSeesRowsMovedBetweenPartitions(t *testing.T) {
+	ctx := context.Background()
+	env := newSpockEnv()
+	table := "mtree_part_move"
+	parent := createPartitionedTable(t, ctx, env, table)
+
+	task := env.newMerkleTreeTask(t, testSchema+"."+table+"_2027", []string{env.ServiceN1, env.ServiceN2})
+	require.NoError(t, task.RunChecks(false))
+	require.NoError(t, task.MtreeInit())
+	t.Cleanup(func() {
+		if err := task.MtreeTeardown(); err != nil {
+			t.Logf("MtreeTeardown cleanup: %v", err)
+		}
+	})
+	require.NoError(t, task.BuildMtree())
+
+	// Odd ids are stored in the 2026 partition, even ids in 2027. On n2,
+	// 151 moves into 2027 and 152 moves out of it.
+	env.withRepairMode(t, ctx, env.N2Pool, func(conn *pgxpool.Conn) {
+		_, err := conn.Exec(ctx, "UPDATE "+parent+" SET created = DATE '2027-06-01' WHERE id = 151") // nosemgrep
+		require.NoError(t, err)
+		_, err = conn.Exec(ctx, "UPDATE "+parent+" SET created = DATE '2026-06-01' WHERE id = 152") // nosemgrep
+		require.NoError(t, err)
+	})
+
+	require.NoError(t, task.DiffMtree())
+	nodeDiffs, ok := task.DiffResult.NodeDiffs[env.pairKey()]
+	require.True(t, ok, "the rows moved on n2 were not seen")
+	require.Equal(t, []int{152}, extractDiffIDs(nodeDiffs.Rows[env.ServiceN1]), "152 left the partition on n2 only")
+	require.Equal(t, []int{151}, extractDiffIDs(nodeDiffs.Rows[env.ServiceN2]), "151 entered the partition on n2 only")
+}
+
+// TestMerkleTreeRefusesTablePartitionedOnOneNode checks that mtree checks
+// every node: a table that is plain on n1 but partitioned on n2 is refused,
+// and the message names n2.
+func TestMerkleTreeRefusesTablePartitionedOnOneNode(t *testing.T) {
+	ctx := context.Background()
+	env := newSpockEnv()
+	parent := pgx.Identifier{testSchema, "mtree_part_drift"}.Sanitize()
+	leaf := pgx.Identifier{testSchema, "mtree_part_drift_2026"}.Sanitize()
+	t.Cleanup(func() {
+		for _, pool := range env.pools() {
+			_, _ = pool.Exec(ctx, "DROP TABLE IF EXISTS "+parent+" CASCADE") // nosemgrep
+		}
+	})
+
+	_, err := env.N1Pool.Exec(ctx, "CREATE TABLE "+parent+" (id int, created date, payload text, PRIMARY KEY (id, created))") // nosemgrep
+	require.NoError(t, err)
+	for _, sql := range []string{
+		"CREATE TABLE " + parent + " (id int, created date, payload text, PRIMARY KEY (id, created)) PARTITION BY RANGE (created)",
+		"CREATE TABLE " + leaf + " PARTITION OF " + parent + " FOR VALUES FROM ('2026-01-01') TO ('2027-01-01')",
+	} {
+		_, err := env.N2Pool.Exec(ctx, sql) // nosemgrep
+		require.NoError(t, err, "exec %q on n2", sql)
+	}
+
+	task := env.newMerkleTreeTask(t, testSchema+".mtree_part_drift", []string{env.ServiceN1, env.ServiceN2})
+	err = task.RunChecks(false)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "is a partitioned table")
+	require.Contains(t, err.Error(), "(node "+env.ServiceN2+")")
+}
+
+// TestMerkleTreeTeardownTableAfterTableBecameParent covers a tree on a table
+// that became an inheritance parent after the tree was built: mtree update
+// and table-diff refuse the table, and mtree teardown-table still removes the
+// tree and takes the table out of the publication. An earlier ACE could build
+// a tree on a parent, and ALTER PUBLICATION ADD TABLE then added the children
+// too, so teardown must also take out a child that is in the publication.
+func TestMerkleTreeTeardownTableAfterTableBecameParent(t *testing.T) {
+	t.Run("child not in the publication", func(t *testing.T) {
+		testTeardownTableOfParent(t, "mtree_late_parent", false)
+	})
+	t.Run("child in the publication", func(t *testing.T) {
+		testTeardownTableOfParent(t, "mtree_old_parent", true)
+	})
+}
+
+func testTeardownTableOfParent(t *testing.T, tableName string, childPublished bool) {
+	ctx := context.Background()
+	env := newSpockEnv()
+	childName := tableName + "_child"
+	parent := pgx.Identifier{testSchema, tableName}.Sanitize()
+	child := pgx.Identifier{testSchema, childName}.Sanitize()
+	publication := config.Cfg.MTree.CDC.PublicationName
+	t.Cleanup(func() {
+		for _, pool := range env.pools() {
+			_, _ = pool.Exec(ctx, "DROP TABLE IF EXISTS "+parent+" CASCADE") // nosemgrep
+		}
+	})
+	for _, pool := range env.pools() {
+		_, err := pool.Exec(ctx, "CREATE TABLE IF NOT EXISTS "+parent+" (id int PRIMARY KEY, payload text)") // nosemgrep
+		require.NoError(t, err)
+		env.withRepairMode(t, ctx, pool, func(conn *pgxpool.Conn) {
+			_, err := conn.Exec(ctx, "INSERT INTO "+parent+" SELECT g, 'row-' || g FROM generate_series(1, 100) g") // nosemgrep
+			require.NoError(t, err)
+		})
+	}
+
+	task := env.newMerkleTreeTask(t, testSchema+"."+tableName, []string{env.ServiceN1, env.ServiceN2})
+	require.NoError(t, task.RunChecks(false))
+	require.NoError(t, task.MtreeInit())
+	t.Cleanup(func() {
+		if err := task.MtreeTeardown(); err != nil {
+			t.Logf("MtreeTeardown cleanup: %v", err)
+		}
+	})
+	require.NoError(t, task.BuildMtree())
+
+	for _, pool := range env.pools() {
+		_, err := pool.Exec(ctx, "CREATE TABLE "+child+" () INHERITS ("+parent+")") // nosemgrep
+		require.NoError(t, err)
+		if childPublished {
+			_, err = pool.Exec(ctx, "ALTER PUBLICATION "+pgx.Identifier{publication}.Sanitize()+" ADD TABLE ONLY "+child) // nosemgrep
+			require.NoError(t, err)
+		}
+	}
+
+	// mtree table-diff runs these checks before the diff.
+	err := task.RunChecks(false)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "has child tables through inheritance")
+	err = task.UpdateMtree(false)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "has child tables through inheritance")
+
+	require.NoError(t, task.MtreeTeardownTable())
+
+	aceSchema := config.Cfg.MTree.Schema
+	meta := pgx.Identifier{aceSchema, "ace_mtree_metadata"}.Sanitize()
+	mt := pgx.Identifier{aceSchema, "ace_mtree_" + testSchema + "_" + tableName}.Sanitize()
+	for i, pool := range env.pools() {
+		var rows int
+		require.NoError(t, pool.QueryRow(ctx, "SELECT count(*) FROM "+meta+" WHERE schema_name = $1 AND table_name = $2", // nosemgrep
+			testSchema, tableName).Scan(&rows))
+		require.Zero(t, rows, "metadata left on node %d", i+1)
+
+		var treeExists bool
+		require.NoError(t, pool.QueryRow(ctx, "SELECT to_regclass($1) IS NOT NULL", mt).Scan(&treeExists))
+		require.False(t, treeExists, "tree table left on node %d", i+1)
+
+		pubRows, err := pool.Query(ctx,
+			"SELECT tablename FROM pg_publication_tables WHERE pubname = $1 AND schemaname = $2 AND tablename IN ($3, $4)",
+			publication, testSchema, tableName, childName)
+		require.NoError(t, err)
+		published, err := pgx.CollectRows(pubRows, pgx.RowTo[string])
+		require.NoError(t, err)
+		require.Empty(t, published, "tables left in the publication on node %d", i+1)
+	}
 }

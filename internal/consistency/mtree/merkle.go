@@ -1381,17 +1381,7 @@ func (m *MerkleTreeTask) MtreeTeardownTable() (err error) {
 			m.SimplePrimaryKey = isSimple
 		}
 
-		err = queries.AlterPublicationDropTable(m.Ctx, pool, cfg.PublicationName, m.QualifiedTableName)
-		if err != nil {
-			var pgErr *pgconn.PgError
-			if errors.As(err, &pgErr) && pgErr.Code == "42704" { // undefined_object
-				logger.Warn("Publication %s not found on node %s, continuing...", cfg.PublicationName, nodeInfo["Name"])
-			} else {
-				logger.Warn("Could not remove table %s from publication %s on node %s: %v", m.QualifiedTableName, cfg.PublicationName, nodeInfo["Name"], err)
-			}
-		} else {
-			logger.Info("Table %s removed from publication %s on node %s", m.QualifiedTableName, cfg.PublicationName, nodeInfo["Name"])
-		}
+		m.removeFromPublication(pool, cfg.PublicationName, nodeInfo["Name"])
 
 		tx, err := pool.Begin(m.Ctx)
 		if err != nil {
@@ -1439,6 +1429,73 @@ func (m *MerkleTreeTask) MtreeTeardownTable() (err error) {
 		logger.Info("Merkle tree objects for table '%s' torn down on node: %s", m.QualifiedTableName, nodeInfo["Name"])
 	}
 	return nil
+}
+
+// removeFromPublication takes the table out of the publication on one node.
+// An earlier ACE could build a tree on an inheritance parent, and ALTER
+// PUBLICATION ADD TABLE on a parent adds its children too; a child left in
+// the publication without a tree makes the CDC drain fail. So a child in the
+// publication goes as well, unless it has a tree of its own. Failures are
+// logged, not returned, so that teardown still removes the tree.
+func (m *MerkleTreeTask) removeFromPublication(pool *pgxpool.Pool, publication string, nodeName any) {
+	exists, published, err := queries.GetPublicationRelations(m.Ctx, pool, publication)
+	if err != nil {
+		logger.Warn("Could not remove table %s from publication %s on node %s: %v", m.QualifiedTableName, publication, nodeName, err)
+		return
+	}
+	if !exists {
+		logger.Warn("Publication %s not found on node %s, continuing...", publication, nodeName)
+		return
+	}
+	tree, err := queries.GetRelationTree(m.Ctx, pool, m.Schema, m.Table)
+	if err != nil {
+		logger.Warn("Could not remove table %s from publication %s on node %s: %v", m.QualifiedTableName, publication, nodeName, err)
+		return
+	}
+	if tree == nil {
+		// A dropped table is no longer in any publication.
+		return
+	}
+	_, _, tracked, _, err := queries.GetCDCMetadata(m.Ctx, pool, publication)
+	if err != nil {
+		// Without the list of trees, a child may have a tree of its own;
+		// leave the children alone.
+		logger.Warn("Could not read CDC metadata on node %s; leaving child tables of %s in publication %s: %v", nodeName, m.QualifiedTableName, publication, err)
+		tree = &queries.RelationTree{Root: tree.Root}
+	}
+
+	toDrop := publicationRelsToDrop(tree, published, tracked)
+	if len(toDrop) == 0 {
+		logger.Info("Table %s is not in publication %s on node %s", m.QualifiedTableName, publication, nodeName)
+	}
+	for _, r := range toDrop {
+		name := pgx.Identifier{r.Schema, r.Name}.Sanitize()
+		if err := queries.AlterPublicationDropTable(m.Ctx, pool, publication, name); err != nil {
+			logger.Warn("Could not remove table %s from publication %s on node %s: %v", r.Qualified(), publication, nodeName, err)
+		} else {
+			logger.Info("Table %s removed from publication %s on node %s", r.Qualified(), publication, nodeName)
+		}
+	}
+}
+
+// publicationRelsToDrop returns the relations of tree that teardown-table
+// takes out of the publication: the table itself, and each descendant that
+// is in the publication and has no tree of its own (is not in tracked).
+func publicationRelsToDrop(tree *queries.RelationTree, published []queries.RelationInfo, tracked []string) []queries.RelationInfo {
+	inPub := make(map[[2]string]bool, len(published))
+	for _, r := range published {
+		inPub[[2]string{r.Schema, r.Name}] = true
+	}
+	var out []queries.RelationInfo
+	if inPub[[2]string{tree.Root.Schema, tree.Root.Name}] {
+		out = append(out, tree.Root)
+	}
+	for _, d := range tree.Descendants {
+		if inPub[[2]string{d.Schema, d.Name}] && !slices.Contains(tracked, d.Qualified()) {
+			out = append(out, d)
+		}
+	}
+	return out
 }
 
 func (m *MerkleTreeTask) validateTeardownTable() error {
