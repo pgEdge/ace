@@ -29,7 +29,8 @@ holding the node's slot, then re-run, if you need a guaranteed-current drain.
 |------|-------|-------------|---------|
 | `--dbname` | `-d` | Database name |  |
 | `--nodes` | `-n` | Nodes to include (comma or `all`) | `all` |
-| `--max-cpu-ratio` | `-m` | Max CPU ratio | `0.5` |
+| `--max-cpu-ratio` | `-m` | Share of this host's CPUs to use as parallel workers per node | `0.5` |
+| `--max-connections` | `-M` | Maximum database connections per node (`0` = use `mtree.max_connections`, else derive from `--max-cpu-ratio`) | `0` |
 | `--output` | `-o` | `json` or `html` | `json` |
 | `--max-html-rows` |  | Max rows per node pair in the HTML report (`0` = use `mtree.diff.max_html_rows`, or `10000`) | `0` |
 | `--skip-cdc` | `-U` | Skip CDC processing (only rehash and compare) | `false` |

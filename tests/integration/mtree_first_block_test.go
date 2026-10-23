@@ -408,11 +408,13 @@ func TestMerkleTreeSplitFirstBlockOnOneNode(t *testing.T) {
 	}
 }
 
-// TestMerkleTreeFirstLeafKeepsPositionOnTie builds a tree from a reference
-// node with one row, key 100. The build gives two leaves with the same
-// range_start: [100, 100] and [100, NULL]. A split of the second leaf numbers
-// the leaves again, and [100, 100] must stay at position 0. Then a row below
-// 100 on n2 only must be reported.
+// TestMerkleTreeFirstLeafKeepsPositionOnTie builds a tree with two leaves
+// that have the same range_start: [100, 100] and [100, NULL]. Earlier
+// versions of ACE built such a pair from a reference node with one row, key
+// 100, and a tree they built keeps it; the build now cuts one leaf from that
+// node, so the test takes the leaves from a ranges file. A split of the
+// second leaf numbers the leaves again, and [100, 100] must stay at
+// position 0. Then a row below 100 on n2 only must be reported.
 func TestMerkleTreeFirstLeafKeepsPositionOnTie(t *testing.T) {
 	ctx := context.Background()
 	env := newSpockEnv()
@@ -425,7 +427,14 @@ func TestMerkleTreeFirstLeafKeepsPositionOnTie(t *testing.T) {
 	}
 	analyzeTable(t, env, safe)
 
+	rangesFile := filepath.Join(t.TempDir(), "ranges.json")
+	require.NoError(t, os.WriteFile(rangesFile, []byte(`[
+		{"NodePosition": 0, "RangeStart": [100], "RangeEnd": [100]},
+		{"NodePosition": 1, "RangeStart": [100], "RangeEnd": null}
+	]`), 0o600))
+
 	mtreeTask := env.newMerkleTreeTask(t, qualified, []string{env.ServiceN1, env.ServiceN2})
+	mtreeTask.RangesFile = rangesFile
 	require.NoError(t, mtreeTask.RunChecks(false))
 	require.NoError(t, mtreeTask.MtreeInit())
 	t.Cleanup(func() {
