@@ -1764,9 +1764,8 @@ var SQLTemplates = Templates{
 		GROUP BY t1.node_position, t1.range_start, t1.range_end
 	`)),
 
-	// Two leaves can share a range_start: a reference node with one row gives
-	// [k, k] and [k, NULL]. The old position breaks the tie, so the first leaf
-	// stays at position 0, see FirstBlockPosition.
+	// Two leaves can share a range_start, for example when a ranges file gives
+	// them. The old position breaks the tie, so the first leaf keeps position 0.
 	ResetPositionsByStartFromTemp: template.Must(template.New("resetPositionsByStartFromTemp").Parse(`
 		WITH seq AS (
 			SELECT node_position,
