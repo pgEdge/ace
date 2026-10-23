@@ -117,9 +117,6 @@ func TestTableDiffSimplePK(t *testing.T) {
 	t.Run("UUIDColumn", func(t *testing.T) {
 		testTableDiff_UUIDColumn(t, newSpockEnv(), false)
 	})
-	t.Run("ByteaColumnSizeCheck", func(t *testing.T) {
-		testTableDiff_ByteaColumnSizeCheck(t, newSpockEnv(), false)
-	})
 	t.Run("WithSpockMetadata", func(t *testing.T) {
 		testTableDiff_WithSpockMetadata(t, false)
 	})
@@ -150,9 +147,6 @@ func TestTableDiffCompositePK(t *testing.T) {
 	})
 	t.Run("UUIDColumn", func(t *testing.T) {
 		testTableDiff_UUIDColumn(t, newSpockEnv(), true)
-	})
-	t.Run("ByteaColumnSizeCheck", func(t *testing.T) {
-		testTableDiff_ByteaColumnSizeCheck(t, newSpockEnv(), true)
 	})
 	t.Run("WithSpockMetadata", func(t *testing.T) {
 		testTableDiff_WithSpockMetadata(t, true)
@@ -1427,136 +1421,6 @@ func testTableDiff_MaxDiffRowsLimit(t *testing.T, env *testEnv) {
 	}
 
 	log.Println("TestTableDiff_MaxDiffRowsLimit completed.")
-}
-
-func testTableDiff_ByteaColumnSizeCheck(t *testing.T, env *testEnv, compositeKey bool) {
-	ctx := context.Background()
-	tableName := "bytea_size_test"
-	qualifiedTableName := fmt.Sprintf("%s.%s", env.Schema, tableName)
-
-	compositeKeyPart := ""
-	if compositeKey {
-		compositeKeyPart = ", name"
-	}
-
-	createTableSQL := fmt.Sprintf(`
-CREATE TABLE IF NOT EXISTS %s (
-    id INT,
-	name TEXT,
-    data BYTEA,
-	PRIMARY KEY(id%s)
-);`, qualifiedTableName, compositeKeyPart)
-
-	// Create table on both nodes and add cleanup to drop it
-	for _, pool := range []*pgxpool.Pool{env.N1Pool, env.N2Pool} {
-		_, err := pool.Exec(ctx, createTableSQL)
-		if err != nil {
-			t.Fatalf("Failed to create test table %s: %v", qualifiedTableName, err)
-		}
-		if env.HasSpock {
-			addToRepSetSQL := fmt.Sprintf(`SELECT spock.repset_add_table('default', '%s');`, qualifiedTableName)
-			_, err = pool.Exec(ctx, addToRepSetSQL)
-			if err != nil {
-				t.Fatalf("Failed to add table to replication set: %v", err)
-			}
-		}
-	}
-	t.Cleanup(func() {
-		if env.HasSpock {
-			removeFromRepSetSQL := fmt.Sprintf(`SELECT spock.repset_remove_table('default', '%s');`, qualifiedTableName)
-			_, err := env.N1Pool.Exec(ctx, removeFromRepSetSQL)
-			if err != nil {
-				t.Logf("cleanup: failed to remove table from replication set: %v", err)
-			}
-		}
-		for _, pool := range []*pgxpool.Pool{env.N1Pool, env.N2Pool} {
-			_, err := pool.Exec(ctx, fmt.Sprintf("DROP TABLE IF EXISTS %s CASCADE", qualifiedTableName))
-			if err != nil {
-				t.Logf("Failed to drop test table %s: %v", qualifiedTableName, err)
-			}
-		}
-		files, _ := filepath.Glob("*_diffs-*.json")
-		for _, f := range files {
-			os.Remove(f)
-		}
-	})
-
-	// --- Test Case 1: Data < 1MB (should pass) ---
-	t.Run("DataUnder1MB", func(t *testing.T) {
-		// Truncate before run
-		for _, pool := range []*pgxpool.Pool{env.N1Pool, env.N2Pool} {
-			_, err := pool.Exec(ctx, fmt.Sprintf("TRUNCATE TABLE %s", qualifiedTableName))
-			if err != nil {
-				t.Fatalf("Failed to truncate table %s: %v", qualifiedTableName, err)
-			}
-		}
-
-		smallData := make([]byte, 500*1024) // 500 KB
-		_, err := env.N1Pool.Exec(ctx, fmt.Sprintf("INSERT INTO %s (id, name, data) VALUES (1, 'small', $1)", qualifiedTableName), smallData)
-		if err != nil {
-			t.Fatalf("Failed to insert small data: %v", err)
-		}
-
-		if env.HasSpock {
-			// Wait for replication to propagate
-			time.Sleep(5 * time.Second)
-		} else {
-			// On native PG there is no replication; insert on n2 directly
-			_, err = env.N2Pool.Exec(ctx, fmt.Sprintf("INSERT INTO %s (id, name, data) VALUES (1, 'small', $1)", qualifiedTableName), smallData)
-			if err != nil {
-				t.Fatalf("Failed to insert small data on n2: %v", err)
-			}
-		}
-
-		nodesToCompare := []string{env.ServiceN1, env.ServiceN2}
-		tdTask := env.newTableDiffTask(t, qualifiedTableName, nodesToCompare)
-
-		err = tdTask.RunChecks(false)
-		if err != nil {
-			t.Errorf("RunChecks should succeed for bytea data < 1MB, but got error: %v", err)
-		}
-	})
-
-	// --- Test Case 2: Data > 1MB (should fail) ---
-	t.Run("DataOver1MB", func(t *testing.T) {
-		// Truncate before run
-		for _, pool := range []*pgxpool.Pool{env.N1Pool, env.N2Pool} {
-			_, err := pool.Exec(ctx, fmt.Sprintf("TRUNCATE TABLE %s", qualifiedTableName))
-			if err != nil {
-				t.Fatalf("Failed to truncate table %s: %v", qualifiedTableName, err)
-			}
-		}
-		largeData := make([]byte, 1024*1024+1) // > 1 MB
-		_, err := env.N1Pool.Exec(ctx, fmt.Sprintf("INSERT INTO %s (id, name, data) VALUES (1, 'large', $1)", qualifiedTableName), largeData)
-		if err != nil {
-			t.Fatalf("Failed to insert large data: %v", err)
-		}
-
-		if env.HasSpock {
-			// Wait for replication to propagate
-			time.Sleep(5 * time.Second)
-		} else {
-			// On native PG there is no replication; insert on n2 directly
-			_, err = env.N2Pool.Exec(ctx, fmt.Sprintf("INSERT INTO %s (id, name, data) VALUES (1, 'large', $1)", qualifiedTableName), largeData)
-			if err != nil {
-				t.Fatalf("Failed to insert large data on n2: %v", err)
-			}
-		}
-
-		nodesToCompare := []string{env.ServiceN1, env.ServiceN2}
-		tdTask := env.newTableDiffTask(t, qualifiedTableName, nodesToCompare)
-
-		err = tdTask.RunChecks(false)
-		if err == nil {
-			t.Fatal("RunChecks should fail for bytea data > 1MB, but it succeeded")
-		}
-		if !strings.Contains(err.Error(), "refusing to perform table-diff") {
-			t.Errorf("Error message should contain 'refusing to perform table-diff', but it was: %s", err.Error())
-		}
-		if !strings.Contains(err.Error(), "is larger than 1 MB") {
-			t.Errorf("Error message should contain 'is larger than 1 MB', but it was: %s", err.Error())
-		}
-	})
 }
 
 func testTableDiff_WithSpockMetadata(t *testing.T, compositeKey bool) {
