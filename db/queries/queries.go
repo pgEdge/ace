@@ -3620,6 +3620,42 @@ func AlterPublicationDropTable(ctx context.Context, db DBQuerier, publicationNam
 	return nil
 }
 
+// GetPublicationRelations returns the relations named in the publication, or
+// exists = false if there is no such publication.
+func GetPublicationRelations(ctx context.Context, db DBQuerier, publicationName string) (exists bool, rels []RelationInfo, err error) {
+	existsSQL, err := RenderSQL(SQLTemplates.PublicationExists, nil)
+	if err != nil {
+		return false, nil, fmt.Errorf("failed to render PublicationExists SQL: %w", err)
+	}
+	if err := db.QueryRow(ctx, existsSQL, publicationName).Scan(&exists); err != nil {
+		return false, nil, fmt.Errorf("query to check publication %s failed: %w", publicationName, err)
+	}
+	if !exists {
+		return false, nil, nil
+	}
+
+	sql, err := RenderSQL(SQLTemplates.GetPublicationRelations, nil)
+	if err != nil {
+		return false, nil, fmt.Errorf("failed to render GetPublicationRelations SQL: %w", err)
+	}
+	rows, err := db.Query(ctx, sql, publicationName)
+	if err != nil {
+		return false, nil, fmt.Errorf("query to list the tables of publication %s failed: %w", publicationName, err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var r RelationInfo
+		if err := rows.Scan(&r.Schema, &r.Name); err != nil {
+			return false, nil, fmt.Errorf("failed to scan publication relation row: %w", err)
+		}
+		rels = append(rels, r)
+	}
+	if err := rows.Err(); err != nil {
+		return false, nil, fmt.Errorf("error iterating publication relation rows: %w", err)
+	}
+	return true, rels, nil
+}
+
 func DeleteMetadata(ctx context.Context, db DBQuerier, schema, table string) error {
 	sql, err := RenderSQL(SQLTemplates.DeleteMetadata, nil)
 	if err != nil {
