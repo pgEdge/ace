@@ -191,6 +191,20 @@ func TestBlockHashEncoding(t *testing.T) {
 		require.Equal(t, left, right)
 	})
 
+	t.Run("numeric_array", func(t *testing.T) {
+		// trim_scale(numeric[]) does not exist, so an array column must not
+		// be wrapped in it: the hash queries used to fail on every table with
+		// such a column. A scalar numeric column next to it is still trimmed.
+		defs := "amts numeric[], amt numeric"
+		cols := []string{"amts", "amt"}
+		colTypes := map[string]string{"id": "integer", "amts": "numeric[]", "amt": "numeric"}
+		base, _ := blockHashes(t, ctx, conn, "bh_arr", defs, cols, colTypes, `(1, '{1.50,2}', 1.50), (2, '{3}', 7.000)`)
+		trimmed, _ := blockHashes(t, ctx, conn, "bh_arr_trim", defs, cols, colTypes, `(1, '{1.50,2}', 1.5), (2, '{3}', 7)`)
+		require.Equal(t, base, trimmed, "trailing zeros of the scalar numeric column must not change the hash")
+		changed, _ := blockHashes(t, ctx, conn, "bh_arr_chg", defs, cols, colTypes, `(1, '{1.50,3}', 1.50), (2, '{3}', 7.000)`)
+		require.NotEqual(t, base, changed, "a change in an array element must change the hash")
+	})
+
 	t.Run("equal/insert_order", func(t *testing.T) {
 		// The block hash depends on the rows, not on their physical order.
 		left, _ := blockHashes(t, ctx, conn, "bh_ord_l", textDefs, textCols, nil, `(1, 'a', 'x'), (2, 'b', 'y'), (3, 'c', 'z')`)
