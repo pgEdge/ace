@@ -2,7 +2,152 @@
 
 All notable changes to ACE will be captured in this document. This project follows semantic versioning; the latest changes appear first.
 
-## [Unreleased]
+## [v3.0.0]
+
+> **⚠️ This release has breaking changes. Read Breaking Change and
+> Upgrading below before you upgrade.** In short:
+> - Upgrade every host that runs ACE at the same time, before any of them
+>   runs `mtree update` or `mtree table-diff`. The first update moves each
+>   Merkle tree to a new hash format, and ACE 2.1.x can write leaves into
+>   the new format without an error, which can hide differences.
+> - Going back to 2.1.x after that needs `mtree build` of each tree.
+> - `mtree` now refuses partitioned tables and inheritance parents. Earlier
+>   versions could build a tree on one only in rare cases, and the tree broke
+>   at the first change to a partition or child, so few installs have one.
+> - Connections fail if a connection pooler does not pass ACE's session
+>   settings through to the server.
+> - Windows and Debian bullseye are no longer supported.
+
+### ⚠️ Breaking Change
+- **Merkle trees move from hash version 2 to hash version 4, and an earlier
+  ACE cannot use them after that.** The hash version is an internal number
+  of the Merkle tree format, not an ACE release: it is stored with each
+  tree, on each node, and names the algorithm of every leaf hash in it.
+  ACE 2.1.x writes version 2. This release changes the leaf hash twice, and
+  both changes ship together (version 3 was never released):
+  - Version 3: every ACE connection fixes the session settings that change
+    how a value is printed (`TimeZone`, `DateStyle`, `IntervalStyle`,
+    `extra_float_digits`, `bytea_output`, `lc_monetary`). With version 2,
+    equal rows with a `timestamptz`, `money`, `float` or `interval` column
+    could hash differently on nodes with different settings, and the diff
+    reported rows that were equal.
+  - Version 4: each row is hashed on its own with `sha256()`, and a leaf
+    combines the row hashes with a count and four sums instead of joining
+    the text of all its rows. Version 2 joined the column values with `|`
+    and printed NULL as an empty string, so a NULL and an empty string, or
+    `('a|b', 'c')` and `('a', 'b|c')`, gave the same leaf hash and
+    `mtree table-diff` reported the nodes as equal. Its single string per
+    leaf also failed with "out of memory" past 1 GB. Version 4 also gives
+    the first leaf no lower bound: with version 2, rows that were already
+    on another node at build time, with a key below the smallest key of
+    the reference node, were in no leaf and were never compared.
+
+  A version 2 tree goes to version 4 on its first `mtree update`, or on
+  the first `mtree table-diff`, which runs an update first. That update
+  marks every leaf, hashes the whole table again on each node and writes
+  version 4, in one transaction per node; no rebuild is needed, and the
+  leaf bounds stay as they are.
+
+  The upgrade is one way. The tree lives in the database, not on the host
+  that runs ACE, so any host with ACE and access to the cluster can update
+  it: a scheduler, an API server, a cron job. ACE 2.1.x upgrades a tree
+  whose version is older than its own, but accepts a newer one as it is.
+  If a 2.1.x host updates a version 4 tree, it recomputes the changed
+  leaves with the version 2 algorithm and leaves the version at 4, without
+  an error. Those leaves bring back the false matches above, and no later
+  run recomputes them, because the version says they are current. This
+  release refuses a tree with a version newer than its own and changes
+  nothing on any node, so this cannot happen again in later upgrades. To
+  go back to 2.1.x, rebuild each tree with `mtree build` of 2.1.x. See
+  Upgrading below, and the block hash and first block entries under Fixed.
+- **Windows is no longer supported.** ACE now supports Linux and macOS
+  only, and the release has no Windows archives. ACE protects its reports
+  with POSIX file modes (see Security below), and on Windows these do not
+  stop other local users from reading the table rows in them, so the build
+  now stops on Windows. On a Windows host, run ACE in WSL or in the
+  container image, with its output directory on the Linux file system.
+  Reports written by earlier Windows builds keep their Windows ACLs after a
+  move to WSL: delete them, or restrict their ACLs by hand.
+- **Debian bullseye packages are no longer built.** Packages are built for
+  Debian bookworm and trixie, and Ubuntu jammy, noble and resolute.
+- **Connections fail when a session setting does not reach the server.**
+  ACE sends fixed values for `TimeZone`, `DateStyle`, `IntervalStyle`,
+  `standard_conforming_strings`, `client_encoding` and other settings when
+  it connects. If the server reports another value, for example because a
+  connection pooler dropped the parameter, the connection fails with an
+  error that names the setting. See the session defaults entry under Fixed.
+- **`mtree` refuses partitioned tables and tables with inheritance
+  children.** This takes away nothing that kept working. Earlier versions
+  built a tree on such a table only in rare cases, and the tree did not
+  stay current:
+  - A partitioned table stores no rows itself, and autovacuum never
+    analyzes it, so its row estimate was 0 and `mtree build` failed with
+    "0 rows on all nodes; add data". It built only if someone had run
+    `ANALYZE` on the parent by hand.
+  - An inheritance parent usually built only if it held rows of its own,
+    not just in its children.
+  - Once built, the tree broke at the first change to a partition or a
+    child: CDC reports the change under the name of the partition or
+    child, which has no tree, so the CDC drain failed, and with it
+    `mtree update` and `mtree table-diff` for every table on that node.
+
+  Build a tree on each partition instead; CDC reports its changes under
+  its own name, so it stays current. `table-diff` still compares the whole
+  partitioned table. A tree left by an earlier version must be removed
+  with `mtree teardown-table`; see Upgrading below.
+- **A role with `SELECT` on only some columns of a table is refused.** It
+  used to compare only the columns it could read. See the catalog entry
+  under Changed.
+- **Output and defaults that scripts may depend on:**
+  - `mtree table-diff` exits with an error when part of the comparison
+    failed. It used to report "TABLES MATCH" and exit 0.
+  - The `total_rows_checked` summary field is the exact number of rows of
+    the anchor node that match the filter, not the planner estimate for
+    the whole table.
+  - The HTML report shows at most `max_html_rows` rows per node pair,
+    10,000 by default. The JSON report still has every row.
+  - `--max-cpu-ratio` starts half as many workers on `mtree build` and
+    `mtree update` as before, for the same value.
+  - ACE connections set `max_parallel_workers_per_gather = 0`, so the
+    server no longer adds parallel workers to ACE's queries.
+  - `table-diff --ensure-pgcrypto` has no effect and prints a warning.
+
+### Upgrading
+1. Upgrade every host that runs ACE, including the scheduler and the API
+   server, before any of them runs `mtree update` or `mtree table-diff`
+   with the new version. An ACE 2.1.x left running can write old leaves
+   into a tree that the new version has upgraded.
+2. If ACE connects through a connection pooler, check that the pooler
+   passes the session parameters through, for example with a `table-diff`
+   on a small table. If it does not, connections fail and the error names
+   the setting.
+3. If you have a Merkle tree on a partitioned table or on a table with
+   inheritance children, remove it with `mtree teardown-table` of the new
+   version, which also takes the children out of the CDC publication; the
+   `teardown-table` of 2.1.x left an inheritance parent in it. Most
+   installs have none: earlier versions built such a tree only in rare
+   cases (see Breaking Change), and if you have one, `mtree update` has
+   most likely been failing on that node since the first change to a
+   partition or child. Build trees on the partitions instead, or use
+   `table-diff` for the whole table.
+4. Plan the first `mtree update` or `mtree table-diff` of each tree. It
+   hashes the whole table on each node in one transaction, which takes
+   about as long as the hashing part of `mtree build`. Trees keep their
+   leaf bounds; rebuild a tree with `mtree build` if you want leaves of at
+   most `block_size` rows.
+5. Run `table-diff` again before `table-repair` with a diff file made by
+   an earlier version if the table has `money` columns.
+6. Check scripts and jobs that read the exit code of `mtree table-diff`,
+   the `total_rows_checked` field, or the HTML report, or that set
+   `--max-cpu-ratio`.
+7. Grant `SELECT` on the whole table, and `USAGE` on its schema, to roles
+   that ACE runs as.
+8. Remove the leftover `#` operator before the next Spock `add_node`, as
+   described in the `bytea_xor` entry under Fixed.
+
+To roll back to an earlier ACE, rebuild each Merkle tree with `mtree build`
+of that version, and recreate the `#` operator as described in the
+`bytea_xor` entry.
 
 ### Added
 - `--max-connections` / `-M` on `mtree build`, `mtree update`, and
@@ -17,8 +162,110 @@ All notable changes to ACE will be captured in this document. This project follo
   build needs at least 3.
 - The mtree commands log the worker count they settle on, along with the
   host CPU count and the flags it was derived from.
+- **`schema-diff --compare=structure` checks table definitions directly,
+  without reading any data.** This new mode checks column type, `NOT NULL`,
+  identity, generated, storage options, default, and collation; the replica
+  identity key and its operator classes; `PRIMARY KEY`, `UNIQUE`, `CHECK`,
+  `FOREIGN KEY`, and `EXCLUDE` constraints; partition bounds; and the full
+  definition of every domain, range, composite, and enum type used by a
+  compared column, not just its name. Types are matched by name and
+  definition, never by OID, because two nodes set up on their own can give
+  the same user-defined type a different OID. Each difference found gets one
+  of five ranks (`cosmetic`, `equivalent-differing`, `narrowed`,
+  `incompatible`, `absent`), and the process exits with the code of the
+  single worst rank found (`0`, `16`, `32`, `48`, or `64`). `--skip-tables`
+  and `--skip-file` work the same way as they do for the default data diff.
+  `--output=json` prints a structured report instead of text, but only when
+  `--output` is given by hand on the command line, since `json` is also
+  `--output`'s default value for every other mode. Not yet supported:
+  `--schedule` and `--output=html`. Not checked by this mode:
+  non-constraint indexes, triggers, rules, sequences, views, materialized
+  views, storage parameters, column order, comments, and ACLs. See the
+  `schema-diff` command docs for the full list of findings and exit codes.
+- **`table-diff` says what differs when the table definitions do not
+  match.** It used to say only that the table schemas do not match between
+  nodes. It now runs the same comparison as `--compare=structure` on the
+  two nodes and prints the differences, naming the nodes and columns. If
+  that comparison finds nothing or cannot connect, it prints the column and
+  key lists of both nodes.
+- **Foreign tables, views, and partitioned tables with foreign partitions
+  are refused with a clear message.** `table-diff`, `table-repair`, and
+  `mtree` previously failed on these with "no primary key found", or in the
+  case of an inheritance parent with a foreign child, hashed the foreign rows
+  and then failed on a system column. ACE now reads the table's partitions and
+  children in one catalog query and says what the relation is and why it
+  cannot be compared. Other relations that are not tables, such as a
+  sequence or an index, get a message that names what they are. A view
+  with an underscore-prefixed table of the same name beside it gets a
+  message mentioning that table, since it may be the table behind the view
+  (the coldfront tiered layout). `schema-diff` and `repset-diff` list the
+  foreign tables and views they skip. `repset-diff` also leaves out any
+  other relation it cannot compare, such as a partitioned table with a
+  foreign partition, instead of failing the run on it; when one node
+  refuses a relation, it is left out on every node, with a warning that
+  names the node and the reason. Comparing the heap parts of a partitioned
+  table that has foreign partitions is future work.
+
+### Changed
+- **ACE reads table metadata from the system catalogs, so a read-only role
+  can run it.** The `information_schema` views show only objects the user
+  has privileges on, and `table_constraints` ignores `SELECT`, so a role
+  that could only read a table saw no primary key: `table-diff` and `mtree`
+  failed with "no primary key found". ACE now reads `pg_class`,
+  `pg_attribute` and `pg_constraint`, which show every object. With this:
+  - `table-diff`, `mtree` and `table-repair` check `USAGE` on the schema
+    and say when it is missing, instead of failing with a raw "permission
+    denied for schema" error.
+  - A role with `SELECT` on only some columns of a table is refused with a
+    message that says so. Before, the columns it could not read were left
+    out of the comparison without a warning.
+  - `schema-diff` and `repset-diff` list the tables the role cannot read as
+    skipped, naming the node, the same way as foreign tables and views.
+    `schema-diff` used to leave these tables out without a word. A run that
+    compares nothing because the role can read none of its tables fails.
+- **`table-diff` no longer refuses a table with a `bytea` value larger than
+  1 MB.** Before each run it read the longest value of every `bytea`
+  column on every node, which read the whole table, and refused to run if
+  one was over 1,000,000 bytes. The check was not needed: rows reach ACE
+  only for blocks whose hashes differ.
+- **The reference config in the repository is now `ace.sample.yaml`.** The
+  tracked `ace.yaml` made `ace config init --path ace.yaml` fail in a
+  checkout with "config file already exists". `ace.sample.yaml` is the same
+  file that `ace config init` writes, which now also includes
+  `max_connections` and the `adaptive_drain_*` settings. The example had
+  `concurrency_factor: 1`; the default is `0.5`. Running `./ace` from a
+  fresh checkout now needs `ace config init` first. The container still
+  reads `/etc/ace/ace.yaml`.
 
 ### Fixed
+- **`mtree table-diff` failed on a table with a `uuid` primary key** as soon
+  as the nodes had a different row, with `invalid input syntax for type
+  uuid`. It sent the Go rendering of the key back to the server instead of
+  the key itself.
+- **`mtree table-diff` missed rows on tables with a `uuid` or `bytea`
+  primary key.** It sorted the bounds of the blocks that differ in Go, in an
+  order that did not match the server's, and a block whose bounds came out
+  reversed selected no rows. In one test it reported 6 of 9 differing rows,
+  with no error. These keys are now sorted the way the server sorts them,
+  and so is `NaN` in a float key. A `text` key with a collation other than
+  `C`, and `enum` or `citext` keys, can still sort differently, and keys
+  such as `numeric` are not ordered correctly at all; use `table-diff` for
+  those tables. The `mtree table-diff` docs list the key types.
+- **`table-diff` and `mtree table-diff` could miss a row with a composite
+  key that holds the delimiter `|`.** The keys `('a|b', 'c')` and
+  `('a', 'b|c')` were joined into the same text, so the two rows were taken
+  for one and a change between them was not reported. `mtree` also dropped
+  one of two block bounds that printed the same way, such as
+  `('a b', 'c')` and `('a', 'b c')`, which could leave rows out of the
+  comparison.
+- **`mtree table-diff` reported "TABLES MATCH" and exited 0 when part of
+  the comparison failed.** A worker that failed to compare a range logged
+  the error and dropped the range. Now the summary lists the node pairs
+  that were not fully compared and the command fails. The summary file is
+  still written.
+- **`mtree update` failed on every run once it had to split the last block
+  of a table whose key column has upper-case letters**, such as `"UserId"`.
+  The split queries did not quote the column name.
 - **`mtree` said "0 rows on all nodes; add data" for a partitioned table that
   has data.** A partitioned table has no storage, so its row estimate was
   empty, and a tree on it would not stay current anyway: CDC reports changes
@@ -93,8 +340,9 @@ All notable changes to ACE will be captured in this document. This project follo
   `DateStyle`, `IntervalStyle`, `standard_conforming_strings` or
   `client_encoding` (for example, because a connection pooler dropped the
   parameter), the connection fails with an error that names the setting.
-  The mtree hash version is now 3, so the next `mtree update` recomputes
-  all stored hashes of a tree once.
+  This change raised the internal Merkle tree hash version to 3, which was
+  never released; this release ships version 4 (see Breaking Change), and
+  the next `mtree update` recomputes all stored hashes of a tree once.
   A diff file made by an earlier version of ACE can hold `money` values in
   the format of the server's `lc_monetary`. Run `table-diff` again before
   `table-repair` with such a file.
@@ -116,8 +364,8 @@ All notable changes to ACE will be captured in this document. This project follo
   keeps NULL, empty strings and delimiters apart. Numeric values still hash
   without trailing zeros. The hash does not depend on the database encoding
   or on the byte order of the server.
-  The hash version is now 4: the next `mtree update` computes all stored leaf
-  hashes again, in one transaction per node.
+  The internal Merkle tree hash version is now 4: the next `mtree update`
+  computes all stored leaf hashes again, in one transaction per node.
   `mtree update` and `mtree table-diff` now refuse a tree with a hash version
   newer than the ACE that runs them, and change nothing on any node. Such a
   tree was written by a newer ACE, and an older algorithm must not recompute
@@ -236,41 +484,19 @@ All notable changes to ACE will be captured in this document. This project follo
   Merkle trees are lost. Don't re-run it just to remove the operator unless
   you plan to rebuild the trees.
 
+### Security
+- **Reports and the task database were readable by every local user.** ACE
+  created diff, repair, dry-run and HTML reports, stale-skip logs, the
+  `reports/` directories and `ace_tasks.db` with the mode the umask allowed,
+  usually 0644, and the reports hold rows copied from the compared tables.
+  ACE now sets 0600 on these files and 0700 on the directories, also on a
+  file left by an earlier version when it writes it again. Files written by
+  earlier versions keep their mode until then; restrict them by hand.
+- Updated Go dependencies to address recent CVEs.
+
 ## [v2.1.1]
 
 ### Added
-- **`schema-diff --compare=structure` checks table definitions directly,
-  without reading any data.** This new mode checks column type, `NOT NULL`,
-  identity, generated, storage options, default, and collation; the replica
-  identity key and its operator classes; `PRIMARY KEY`, `UNIQUE`, `CHECK`,
-  `FOREIGN KEY`, and `EXCLUDE` constraints; partition bounds; and the full
-  definition of every domain, range, composite, and enum type used by a
-  compared column, not just its name. Types are matched by name and
-  definition, never by OID, because two nodes set up on their own can give
-  the same user-defined type a different OID. Each difference found gets one
-  of five ranks (`cosmetic`, `equivalent-differing`, `narrowed`,
-  `incompatible`, `absent`), and the process exits with the code of the
-  single worst rank found (`0`, `16`, `32`, `48`, or `64`). `--skip-tables`
-  and `--skip-file` work the same way as they do for the default data diff.
-  `--output=json` prints a structured report instead of text, but only when
-  `--output` is given by hand on the command line, since `json` is also
-  `--output`'s default value for every other mode. Not yet supported:
-  `--schedule` and `--output=html`. Not checked by this mode:
-  non-constraint indexes, triggers, rules, sequences, views, materialized
-  views, storage parameters, column order, comments, and ACLs. See the
-  `schema-diff` command docs for the full list of findings and exit codes.
-- **Foreign tables, views, and partitioned tables with foreign partitions
-  are refused with a clear message.** `table-diff`, `table-repair`, and
-  `mtree` previously failed on these with "no primary key found", or in the
-  case of an inheritance parent with a foreign child, hashed the foreign rows
-  and then failed on a system column. ACE now reads the table's partitions and
-  children in one catalog query and says what the relation is and why it
-  cannot be compared. A view with an underscore-prefixed table of the same
-  name beside it gets a message mentioning that table, since it may be the
-  table behind the view (the coldfront tiered layout). `schema-diff` and
-  `repset-diff` list the foreign tables and views they skip. Comparing the
-  heap parts of a partitioned table that has foreign partitions is future
-  work.
 - **`repair` can now resolve `pick_freshest` by spock `commit_ts`
   (latest-commit-wins).** `pick_freshest` previously only compared ordinary data
   columns (e.g. `updated_at`); keying it on `commit_ts` silently fell back to

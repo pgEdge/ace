@@ -26,7 +26,7 @@ import (
 // version is the ACE release version. It defaults to the value below for
 // local builds and is overridden at release time via -ldflags "-X main.version=..."
 // (see .goreleaser.yaml).
-var version = "2.1.1"
+var version = "3.0.0"
 
 func main() {
 	var cfgPath string
