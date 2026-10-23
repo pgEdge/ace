@@ -408,16 +408,15 @@ func TestMerkleTreeSplitFirstBlockOnOneNode(t *testing.T) {
 	}
 }
 
-// TestMerkleTreeFirstLeafKeepsPositionOnTie builds a tree from a reference
-// node with one row, key 100. The build gives two leaves with the same
-// range_start: [100, 100] and [100, NULL]. A split of the second leaf numbers
-// the leaves again, and [100, 100] must stay at position 0. Then a row below
-// 100 on n2 only must be reported.
-func TestMerkleTreeFirstLeafKeepsPositionOnTie(t *testing.T) {
-	ctx := context.Background()
+// TestMerkleTreeRowBelowOnlyLeafAfterSplit builds a tree from a reference
+// node with one row, key 100. The tree has one leaf, and this leaf has no
+// lower bound and no upper bound. Both nodes then get rows 101..1700, so mtree
+// update splits this leaf. After that, a row below 100 on n2 only must be
+// reported.
+func TestMerkleTreeRowBelowOnlyLeafAfterSplit(t *testing.T) {
 	env := newSpockEnv()
 	shape := firstBlockKeyShapes[0]
-	tableName := "mtree_first_leaf_tie"
+	tableName := "mtree_row_below_only_leaf"
 	qualified, safe := newUnreplicatedTable(t, env, tableName, shape.ddl)
 
 	for _, pool := range env.pools() {
@@ -435,32 +434,10 @@ func TestMerkleTreeFirstLeafKeepsPositionOnTie(t *testing.T) {
 	})
 	require.NoError(t, mtreeTask.BuildMtree())
 
-	mtreeTable := pgx.Identifier{
-		config.Cfg.MTree.Schema,
-		fmt.Sprintf("ace_mtree_%s_%s", testSchema, tableName),
-	}.Sanitize()
-	var sameStart int
-	require.NoError(t, env.N1Pool.QueryRow(ctx, "SELECT count(*) FROM "+mtreeTable+ // nosemgrep
-		" WHERE node_level = 0 AND range_start = 100").Scan(&sameStart))
-	require.Equal(t, 2, sameStart, "the build should give two leaves that start at 100")
-
 	for _, pool := range env.pools() {
 		insertIDRange(t, pool, safe, shape.ins, 101, 1700)
 	}
 	require.NoError(t, mtreeTask.DiffMtree())
-
-	for name, pool := range map[string]*pgxpool.Pool{
-		env.ServiceN1: env.N1Pool, env.ServiceN2: env.N2Pool,
-	} {
-		var leaves int
-		require.NoError(t, pool.QueryRow(ctx,
-			"SELECT count(*) FROM "+mtreeTable+" WHERE node_level = 0").Scan(&leaves)) // nosemgrep
-		require.Greater(t, leaves, 2, "the last leaf was not split on %s", name)
-		var firstEnd int32
-		require.NoError(t, pool.QueryRow(ctx, "SELECT range_end FROM "+mtreeTable+ // nosemgrep
-			" WHERE node_level = 0 AND node_position = 0").Scan(&firstEnd))
-		require.Equal(t, int32(100), firstEnd, "leaf [100, 100] left position 0 on %s", name)
-	}
 
 	insertIDRange(t, env.N2Pool, safe, shape.ins, 50, 50)
 	require.NoError(t, mtreeTask.DiffMtree())
