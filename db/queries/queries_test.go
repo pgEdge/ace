@@ -316,6 +316,37 @@ func TestBlockHashSQLLeafMode(t *testing.T) {
 	}
 }
 
+// TestBlockHashSQLHasNoWholeBlockString guards the fix for "out of memory"
+// (SQLSTATE 54000) on large blocks: the block hash must not build one value
+// out of all rows of the block. string_agg did that, and its result is
+// limited to 1 GB. The aggregate state of the block hash is one count and
+// four sums, and it needs no row order.
+func TestBlockHashSQLHasNoWholeBlockString(t *testing.T) {
+	cols := []string{"id", "name", "amount"}
+	colTypes := map[string]string{"id": "integer", "name": "text", "amount": "numeric"}
+	for _, mode := range []string{"TD_BLOCK_HASH", "MTREE_LEAF_HASH"} {
+		for _, bounds := range []struct{ lower, upper bool }{{false, false}, {true, false}, {false, true}, {true, true}} {
+			for _, pk := range [][]string{{"id"}, {"id", "name"}} {
+				name := fmt.Sprintf("%s/lower=%v/upper=%v/pk=%d", mode, bounds.lower, bounds.upper, len(pk))
+				t.Run(name, func(t *testing.T) {
+					query, err := BlockHashSQL("public", "t", pk, mode, bounds.lower, bounds.upper, `"amount" > 0`, cols, colTypes)
+					if err != nil {
+						t.Fatalf("BlockHashSQL() error = %v", err)
+					}
+					for _, bad := range []string{"string_agg", "array_agg", "ORDER BY", "digest(", "EMPTY_BLOCK"} {
+						if strings.Contains(query, bad) {
+							t.Errorf("query must not contain %q: %q", bad, query)
+						}
+					}
+					if !strings.Contains(query, BlockHashAggExpr) {
+						t.Errorf("query = %q, want the aggregate BlockHashAggExpr", query)
+					}
+				})
+			}
+		}
+	}
+}
+
 func TestRowHashExpr(t *testing.T) {
 	mustExpr := func(t *testing.T, alias string, cols []string, colTypes map[string]string) string {
 		t.Helper()
