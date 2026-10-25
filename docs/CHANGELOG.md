@@ -8,6 +8,10 @@ All notable changes to ACE will be captured in this document. This project follo
 - Diff reports have a `format_version` field. `table-repair` and
   `table-rerun` refuse a report with a version they do not know. A report
   from an earlier ACE has no such field and is read as version 0.
+- `table-repair` and `table-rerun` read the numeric values of a version 0
+  report in the current form, without trailing zeros. The stale check of a
+  repair plan then finds their keys on the target, and the rerun counts a
+  row that the report holds under two keys once.
 
 ### Changed
 - **A numeric value in a diff report has no trailing zeros.** The row fetch

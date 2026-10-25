@@ -77,6 +77,25 @@ func readDiffReport(t *testing.T, path string) types.DiffOutput {
 	return out
 }
 
+// rewriteAsVersion0 writes a copy of a diff report as an earlier ACE wrote
+// it: edit is applied, and the format_version field is removed. It returns
+// the path of the copy.
+func rewriteAsVersion0(t *testing.T, diffFile string, edit func(*types.DiffOutput)) string {
+	t.Helper()
+	data, err := os.ReadFile(rewriteReport(t, diffFile, edit))
+	require.NoError(t, err)
+	var raw map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(data, &raw))
+	require.Contains(t, raw, "format_version")
+	delete(raw, "format_version")
+	data, err = json.Marshal(raw)
+	require.NoError(t, err)
+	out := filepath.Join(t.TempDir(), "v0_"+filepath.Base(diffFile))
+	require.NoError(t, os.WriteFile(out, data, 0o600))
+	require.Equal(t, 0, readDiffReport(t, out).FormatVersion)
+	return out
+}
+
 // TestDiffReportFormatVersionChecked checks that table-diff writes the
 // report format version, and that repair and rerun refuse a report written
 // in a format this build does not know.

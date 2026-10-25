@@ -1445,6 +1445,46 @@ func NormalizeNumericString(s string) string {
 	return trimmed
 }
 
+// UpgradeDiffOutput brings a diff report of format version 0 to the current
+// version, in memory. A report of another version is not changed.
+//
+// Version 0 differs from version 1 in one way: a scalar numeric value can
+// have trailing zeros ("7.50"), while the same value read from the database
+// now has none ("7.5"). A row key built from such a report does not match
+// the key of the same row read now, and one row can be in the report under
+// two keys.
+//
+// numericCols is the set of the numeric columns of the table. A column that
+// is not in it is not changed. A version 0 report with a nil set is an
+// error: the report would be marked as upgraded while nothing was converted.
+func UpgradeDiffOutput(d *types.DiffOutput, numericCols map[string]bool) error {
+	if d.FormatVersion != 0 {
+		return nil
+	}
+	if numericCols == nil {
+		return fmt.Errorf("cannot read a diff report of format version 0 without the column types of the table")
+	}
+	for _, pair := range d.NodeDiffs {
+		for _, rows := range pair.Rows {
+			for _, row := range rows {
+				for i, kv := range row {
+					if !numericCols[kv.Key] {
+						continue
+					}
+					switch v := kv.Value.(type) {
+					case string:
+						row[i].Value = NormalizeNumericString(v)
+					case json.Number:
+						row[i].Value = json.Number(NormalizeNumericString(string(v)))
+					}
+				}
+			}
+		}
+	}
+	d.FormatVersion = types.DiffFormatVersion
+	return nil
+}
+
 // stringifyValue converts a value to its string representation for comparison,
 // normalizing numeric types to strip trailing fractional zeros.
 func stringifyValue(val any) string {

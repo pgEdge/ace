@@ -563,6 +563,15 @@ func (t *TableRepairTask) ValidateAndPrepare() error {
 		return fmt.Errorf("failed to establish a connection to the source_of_truth node: %s", t.SourceOfTruth)
 	}
 
+	// The stale check matches the keys of the report with keys read from the
+	// target now, so the report must have the current value form.
+	if t.RawDiffs.FormatVersion == 0 {
+		logger.Info("Diff file %s has no format version; reading it as version 0", t.DiffFilePath)
+	}
+	if err := utils.UpgradeDiffOutput(&t.RawDiffs, queries.NumericColumns(refColTypes)); err != nil {
+		return fmt.Errorf("diff file %s: %w", t.DiffFilePath, err)
+	}
+
 	logger.Debug("Table repair task validated and prepared successfully.")
 	success = true
 	return nil

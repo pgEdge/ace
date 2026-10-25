@@ -732,3 +732,59 @@ func TestCompareRowSetsIgnoresRowOrder(t *testing.T) {
 	require.Len(t, want.Node2OnlyRows, 1)
 	require.Len(t, want.ModifiedRows, 1)
 }
+
+// A version 0 report keeps the trailing zeros of a numeric value. After the
+// upgrade its numeric values have the form of version 1, so a row key built
+// from the report matches the key of the same row read from a database now.
+func TestUpgradeDiffOutput(t *testing.T) {
+	// note is text and prices is numeric[]: they are not in the set.
+	numericCols := map[string]bool{"id": true, "price": true}
+	row := func(id, price any) types.OrderedMap {
+		return types.OrderedMap{
+			{Key: "id", Value: id},
+			{Key: "price", Value: price},
+			{Key: "note", Value: "7.50"},
+			{Key: "prices", Value: "{1.50,2}"},
+			{Key: "_spock_metadata_", Value: map[string]any{"commit_ts": "x"}},
+		}
+	}
+	report := func(version int) types.DiffOutput {
+		return types.DiffOutput{
+			FormatVersion: version,
+			NodeDiffs: map[string]types.DiffByNodePair{
+				"n1/n2": {Rows: map[string][]types.OrderedMap{
+					"n1": {row("1.50", json.Number("7.50"))},
+					"n2": {row(json.Number("2.000"), nil)},
+				}},
+			},
+		}
+	}
+
+	t.Run("version 0", func(t *testing.T) {
+		d := report(0)
+		require.NoError(t, UpgradeDiffOutput(&d, numericCols))
+		require.Equal(t, types.DiffFormatVersion, d.FormatVersion)
+
+		n1 := d.NodeDiffs["n1/n2"].Rows["n1"][0]
+		require.Equal(t, row("1.5", json.Number("7.5")), n1)
+		require.Equal(t, row(json.Number("2"), nil), d.NodeDiffs["n1/n2"].Rows["n2"][0])
+
+		key, err := StringifyOrderedMapKey(n1, []string{"id"})
+		require.NoError(t, err)
+		require.Equal(t, RowKeyFromStrings([]string{"1.5"}), key)
+	})
+
+	t.Run("current version is not changed", func(t *testing.T) {
+		d := report(types.DiffFormatVersion)
+		require.NoError(t, UpgradeDiffOutput(&d, numericCols))
+		require.Equal(t, report(types.DiffFormatVersion), d)
+	})
+
+	// Without the types nothing can be converted, so the report must not be
+	// marked as upgraded.
+	t.Run("version 0 without column types", func(t *testing.T) {
+		d := report(0)
+		require.Error(t, UpgradeDiffOutput(&d, nil))
+		require.Equal(t, report(0), d)
+	})
+}

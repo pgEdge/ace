@@ -509,6 +509,28 @@ func TestIsNumericType(t *testing.T) {
 	}
 }
 
+func TestNumericColumns(t *testing.T) {
+	got := NumericColumns(map[string]string{
+		"id":     "integer",
+		"price":  "numeric(10,2)",
+		"amount": "DECIMAL",
+		"prices": "numeric[]",
+		"note":   "text",
+	})
+	want := map[string]bool{"price": true, "amount": true}
+	if len(got) != len(want) {
+		t.Fatalf("NumericColumns() = %v, want %v", got, want)
+	}
+	for col := range want {
+		if !got[col] {
+			t.Errorf("NumericColumns() = %v, want %v", got, want)
+		}
+	}
+	if got := NumericColumns(nil); got != nil {
+		t.Errorf("NumericColumns(nil) = %v, want nil", got)
+	}
+}
+
 // A block with no lower bound reaches the max-value queries with no start key.
 // They must then look at the whole table, not compare the key with NULL.
 func TestGetMaxValOpenStart(t *testing.T) {
