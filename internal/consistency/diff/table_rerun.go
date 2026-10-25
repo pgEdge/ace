@@ -22,7 +22,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/jackc/pgtype"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/pgedge/ace/db/queries"
@@ -302,9 +301,10 @@ func fetchRowsByPkeys(ctx context.Context, pool *pgxpool.Pool, t *TableDiffTask,
 	}
 	defer pgRows.Close()
 
+	// The values are read in the form of a diff report.
 	results := make(map[string]types.OrderedMap)
 	for pgRows.Next() {
-		rowData, err := scanRow(pgRows)
+		rowData, err := utils.ScanRow(pgRows)
 		if err != nil {
 			return nil, fmt.Errorf("failed to scan re-run row: %w", err)
 		}
@@ -418,82 +418,4 @@ func areRowsDifferent(row1, row2 types.OrderedMap, dataCols []string) (bool, err
 		}
 	}
 	return false, nil
-}
-
-func scanRow(pgRows pgx.Rows) (types.OrderedMap, error) {
-	colsDesc := pgRows.FieldDescriptions()
-	rowValues := make([]any, len(colsDesc))
-	rowValPtrs := make([]any, len(colsDesc))
-	for i := range rowValues {
-		rowValPtrs[i] = &rowValues[i]
-	}
-
-	if err := pgRows.Scan(rowValPtrs...); err != nil {
-		return nil, fmt.Errorf("failed to scan row: %w", err)
-	}
-
-	rowData := make(types.OrderedMap, len(colsDesc))
-	for i, colD := range colsDesc {
-		val := rowValues[i]
-		var processedVal any
-		switch v := val.(type) {
-		case pgtype.Numeric:
-			if v.Status == pgtype.Present {
-				text, err := v.EncodeText(nil, nil)
-				if err == nil {
-					processedVal = utils.NormalizeNumericString(string(text))
-				} else {
-					processedVal = v
-				}
-			} else {
-				processedVal = nil
-			}
-		case pgtype.Timestamp:
-			if v.Status == pgtype.Present {
-				processedVal = v.Time
-			} else {
-				processedVal = nil
-			}
-		case pgtype.Timestamptz:
-			if v.Status == pgtype.Present {
-				processedVal = v.Time
-			} else {
-				processedVal = nil
-			}
-		case pgtype.Date:
-			if v.Status == pgtype.Present {
-				processedVal = v.Time
-			} else {
-				processedVal = nil
-			}
-		case pgtype.Bytea:
-			if v.Status == pgtype.Present {
-				processedVal = v.Bytes
-			} else {
-				processedVal = nil
-			}
-		case string:
-			processedVal = v
-		case pgtype.JSON, pgtype.JSONB:
-			if v == nil || v.(interface{ GetStatus() pgtype.Status }).GetStatus() != pgtype.Present {
-				processedVal = nil
-			} else {
-				var dataHolder any
-				if assignable, ok := v.(interface{ AssignTo(dst any) error }); ok {
-					err := assignable.AssignTo(&dataHolder)
-					if err != nil {
-						processedVal = nil
-					} else {
-						processedVal = dataHolder
-					}
-				} else {
-					processedVal = nil
-				}
-			}
-		default:
-			processedVal = val
-		}
-		rowData[i] = types.KVPair{Key: string(colD.Name), Value: processedVal}
-	}
-	return rowData, nil
 }

@@ -1164,28 +1164,10 @@ func buildFetchRowsSQLComposite(schema, table string, pk []string, selectCols st
 	return q, args
 }
 
+// processRows reads the fetched rows of a mismatched block, with the values
+// in the form of a diff report.
 func processRows(rows pgx.Rows) ([]types.OrderedMap, error) {
-	var results []types.OrderedMap
-	defer rows.Close()
-	fields := rows.FieldDescriptions()
-	for rows.Next() {
-		values, err := rows.Values()
-		if err != nil {
-			return nil, err
-		}
-		rowMap := make(types.OrderedMap, len(fields))
-		for i, field := range fields {
-			// Normalise driver structs (pgtype.Time, [16]byte UUIDs, ...) to
-			// the canonical diff-report representation; raw pgx values would
-			// serialise as JSON objects that table-repair cannot convert back.
-			rowMap[i] = types.KVPair{Key: string(field.Name), Value: utils.NormalizeScannedValue(values[i])}
-		}
-		results = append(results, rowMap)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return results, nil
+	return utils.ScanRows(rows)
 }
 
 // renumberBlockRanges sets the NodePosition of each block to its index in

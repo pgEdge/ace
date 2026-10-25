@@ -1656,7 +1656,17 @@ func (t *TableRepairTask) runUnidirectionalRepair(startTime time.Time) error {
 		if !skipDeletes {
 			nodeDeletes := fullDeletes[nodeName]
 			if len(nodeDeletes) > 0 {
-				deletedCount, err := executeDeletes(t.Ctx, tx, t, nodeName, nodeDeletes, nil)
+				// The stale check of a repair plan reads the key columns by
+				// their type, so the deletes need the column types too.
+				targetNodeColTypes, _, err := t.getColTypesForNode(nodeName)
+				if err != nil {
+					tx.Rollback(t.Ctx)
+					errStr := fmt.Sprintf("column types for target node '%s' not found for deletes: %v", nodeName, err)
+					logger.Error("%s", errStr)
+					repairErrors = append(repairErrors, errStr)
+					continue
+				}
+				deletedCount, err := executeDeletes(t.Ctx, tx, t, nodeName, nodeDeletes, targetNodeColTypes)
 				if err != nil {
 					tx.Rollback(t.Ctx)
 					logger.Error("executing deletes on node %s: %v", nodeName, err)

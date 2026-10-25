@@ -133,9 +133,17 @@ func fetchCommitTimestamps(ctx context.Context, tx pgx.Tx, task *TableRepairTask
 		return results, nil
 	}
 
+	// The key columns are selected by their type, so that a key read here has
+	// the form of the key in the diff report. Without the type a numeric key
+	// would be read with its trailing zeros, would not match the report, and the
+	// check would be skipped for the row with no message. So a missing type is
+	// an error.
 	if colTypes == nil {
-		if derived, _, err := task.getColTypesForNode(nodeName); err == nil {
-			colTypes = derived
+		return nil, fmt.Errorf("stale check on %s: no column types", nodeName)
+	}
+	for _, col := range task.Key {
+		if colTypes[col] == "" {
+			return nil, fmt.Errorf("stale check on %s: no type for primary key column %s", nodeName, col)
 		}
 	}
 
@@ -145,10 +153,7 @@ func fetchCommitTimestamps(ctx context.Context, tx pgx.Tx, task *TableRepairTask
 	if task.SimplePrimaryKey {
 		pkCol := task.Key[0]
 		pkIdent := pgx.Identifier{pkCol}.Sanitize()
-		var pkType string
-		if colTypes != nil {
-			pkType = colTypes[pkCol]
-		}
+		pkType := colTypes[pkCol]
 
 		keys := make([]any, 0, len(rows))
 		for _, row := range rows {
@@ -156,14 +161,11 @@ func fetchCommitTimestamps(ctx context.Context, tx pgx.Tx, task *TableRepairTask
 			if !ok {
 				return nil, fmt.Errorf("primary key column %s not found in row data", pkCol)
 			}
-			if pkType != "" {
-				converted, err := convertValueForType(val, pkType)
-				if err != nil {
-					return nil, fmt.Errorf("convert primary key %s value: %w", pkCol, err)
-				}
-				val = converted
+			converted, err := convertValueForType(val, pkType)
+			if err != nil {
+				return nil, fmt.Errorf("convert primary key %s value: %w", pkCol, err)
 			}
-			keys = append(keys, val)
+			keys = append(keys, converted)
 		}
 
 		for i := 0; i < len(keys); i += batchSize {
@@ -177,8 +179,8 @@ func fetchCommitTimestamps(ctx context.Context, tx pgx.Tx, task *TableRepairTask
 			args := make([]any, 0, len(batchKeys))
 			paramIdx := 1
 			sb.WriteString("SELECT ")
-			sb.WriteString(pkIdent)
-			sb.WriteString(", pg_xact_commit_timestamp(xmin) as commit_ts FROM ")
+			sb.WriteString(utils.SelectColExpr("", pkCol, pkType))
+			sb.WriteString(", pg_xact_commit_timestamp(xmin) FROM ")
 			sb.WriteString(tableIdent)
 			sb.WriteString(" WHERE ")
 			sb.WriteString(pkIdent)
@@ -197,44 +199,19 @@ func fetchCommitTimestamps(ctx context.Context, tx pgx.Tx, task *TableRepairTask
 			if err != nil {
 				return nil, fmt.Errorf("query current commit timestamp on %s: %w", nodeName, err)
 			}
-			for rows.Next() {
-				values, err := rows.Values()
-				if err != nil {
-					rows.Close()
-					return nil, fmt.Errorf("read commit timestamp result: %w", err)
-				}
-				if len(values) < 2 {
-					rows.Close()
-					return nil, fmt.Errorf("unexpected commit timestamp result size: %d", len(values))
-				}
-				pkMap := map[string]any{pkCol: values[0]}
-				pkStr, err := utils.StringifyKey(pkMap, task.Key)
-				if err != nil {
-					rows.Close()
-					return nil, fmt.Errorf("stringify primary key: %w", err)
-				}
-				commitTS, err := parseCommitTimestamp(values[1])
-				if err != nil {
-					rows.Close()
-					return nil, err
-				}
-				if commitTS != nil {
-					results[pkStr] = *commitTS
-				}
+			if err := collectCommitTimestamps(rows, task.Key, results); err != nil {
+				return nil, err
 			}
-			if err := rows.Err(); err != nil {
-				rows.Close()
-				return nil, fmt.Errorf("iterate commit timestamp results: %w", err)
-			}
-			rows.Close()
 		}
 
 		return results, nil
 	}
 
 	colIdents := make([]string, len(task.Key))
+	selectKey := make([]string, len(task.Key))
 	for i, col := range task.Key {
 		colIdents[i] = pgx.Identifier{col}.Sanitize()
+		selectKey[i] = utils.SelectColExpr("", col, colTypes[col])
 	}
 	pkSQL := strings.Join(colIdents, ", ")
 
@@ -246,16 +223,11 @@ func fetchCommitTimestamps(ctx context.Context, tx pgx.Tx, task *TableRepairTask
 			if !ok {
 				return nil, fmt.Errorf("composite primary key column %s not found in row data", col)
 			}
-			if colTypes != nil {
-				if pkType := colTypes[col]; pkType != "" {
-					converted, err := convertValueForType(val, pkType)
-					if err != nil {
-						return nil, fmt.Errorf("convert primary key %s value: %w", col, err)
-					}
-					val = converted
-				}
+			converted, err := convertValueForType(val, colTypes[col])
+			if err != nil {
+				return nil, fmt.Errorf("convert primary key %s value: %w", col, err)
 			}
-			tuple[i] = val
+			tuple[i] = converted
 		}
 		keys = append(keys, tuple)
 	}
@@ -271,8 +243,8 @@ func fetchCommitTimestamps(ctx context.Context, tx pgx.Tx, task *TableRepairTask
 		args := make([]any, 0, len(batchKeys)*len(task.Key))
 		paramIdx := 1
 		sb.WriteString("SELECT ")
-		sb.WriteString(pkSQL)
-		sb.WriteString(", pg_xact_commit_timestamp(xmin) as commit_ts FROM ")
+		sb.WriteString(strings.Join(selectKey, ", "))
+		sb.WriteString(", pg_xact_commit_timestamp(xmin) FROM ")
 		sb.WriteString(tableIdent)
 		sb.WriteString(" WHERE (")
 		sb.WriteString(pkSQL)
@@ -298,42 +270,46 @@ func fetchCommitTimestamps(ctx context.Context, tx pgx.Tx, task *TableRepairTask
 		if err != nil {
 			return nil, fmt.Errorf("query current commit timestamp on %s: %w", nodeName, err)
 		}
-		for rows.Next() {
-			values, err := rows.Values()
-			if err != nil {
-				rows.Close()
-				return nil, fmt.Errorf("read commit timestamp result: %w", err)
-			}
-			if len(values) < len(task.Key)+1 {
-				rows.Close()
-				return nil, fmt.Errorf("unexpected commit timestamp result size: %d", len(values))
-			}
-			pkMap := make(map[string]any, len(task.Key))
-			for idx, col := range task.Key {
-				pkMap[col] = values[idx]
-			}
-			pkStr, err := utils.StringifyKey(pkMap, task.Key)
-			if err != nil {
-				rows.Close()
-				return nil, fmt.Errorf("stringify primary key: %w", err)
-			}
-			commitTS, err := parseCommitTimestamp(values[len(task.Key)])
-			if err != nil {
-				rows.Close()
-				return nil, err
-			}
-			if commitTS != nil {
-				results[pkStr] = *commitTS
-			}
+		if err := collectCommitTimestamps(rows, task.Key, results); err != nil {
+			return nil, err
 		}
-		if err := rows.Err(); err != nil {
-			rows.Close()
-			return nil, fmt.Errorf("iterate commit timestamp results: %w", err)
-		}
-		rows.Close()
 	}
 
 	return results, nil
+}
+
+// collectCommitTimestamps reads rows of the key columns followed by the
+// commit timestamp, and adds them to results by row key. The key columns
+// are selected and read in the form of the diff report, so that the key of a
+// row here is the key of the same row in the report. A key in another form
+// would not match, and the stale check would be skipped for that row with no
+// message.
+func collectCommitTimestamps(rows pgx.Rows, key []string, results map[string]time.Time) error {
+	defer rows.Close()
+	for rows.Next() {
+		row, err := utils.ScanRow(rows)
+		if err != nil {
+			return fmt.Errorf("read commit timestamp result: %w", err)
+		}
+		if len(row) != len(key)+1 {
+			return fmt.Errorf("unexpected commit timestamp result size: %d", len(row))
+		}
+		pkStr, err := utils.StringifyOrderedMapKey(row[:len(key)], key)
+		if err != nil {
+			return fmt.Errorf("stringify primary key: %w", err)
+		}
+		commitTS, err := parseCommitTimestamp(row[len(key)].Value)
+		if err != nil {
+			return err
+		}
+		if commitTS != nil {
+			results[pkStr] = *commitTS
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("iterate commit timestamp results: %w", err)
+	}
+	return nil
 }
 
 func parseCommitTimestamp(raw any) (*time.Time, error) {

@@ -18,6 +18,14 @@ All notable changes to ACE will be captured in this document. This project follo
   affected.
 
 ### Fixed
+- **`table-rerun` dropped rows with a uuid, numeric or time key.** It read
+  the rows of the nodes in another form than the report, so the keys did
+  not match. It then reported such a row as a difference with no row to
+  show.
+- **The stale check of a repair plan was skipped for numeric and uuid
+  keys.** With `allow_stale_repairs: false`, repair overwrote such a row
+  even when it had changed after the diff. The check now reads the keys in
+  the form of the report.
 - **A numeric primary key stored with another scale on two nodes was
   reported as two rows.** The diff reported the row `1.50` on one node and
   the row `1.5` on the other as a row missing on each node, so a repair plan
