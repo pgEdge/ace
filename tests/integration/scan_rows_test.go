@@ -120,6 +120,9 @@ func TestAdvancedRepairPlan_StaleCheckFindsKey(t *testing.T) {
 		n1, n2   []string
 		modified string // key of the modified row, as SQL
 		extra    string // key of the row only on n2, as SQL
+		// v0 rewrites the report as an earlier ACE wrote it: no format
+		// version, and numeric keys with trailing zeros.
+		v0 bool
 	}{
 		{
 			name:     "numeric",
@@ -130,6 +133,19 @@ func TestAdvancedRepairPlan_StaleCheckFindsKey(t *testing.T) {
 			n2:       []string{"(1.5, 'b')", "(2.00, 'x')"},
 			modified: "1.5",
 			extra:    "2",
+		},
+		{
+			// Repair must bring the keys of a version 0 report to the form
+			// of the keys read from the target.
+			name:     "numeric_v0",
+			defs:     "id numeric PRIMARY KEY, v text",
+			cols:     "id, v",
+			key:      "id",
+			n1:       []string{"(1.50, 'a')"},
+			n2:       []string{"(1.5, 'b')", "(2.00, 'x')"},
+			modified: "1.5",
+			extra:    "2",
+			v0:       true,
 		},
 		{
 			name:     "uuid",
@@ -159,6 +175,11 @@ func TestAdvancedRepairPlan_StaleCheckFindsKey(t *testing.T) {
 			env := newSpockEnv()
 			qualifiedTable := typedKeyTable(t, env, "ace_stale_key_"+tc.name, tc.defs, tc.cols, tc.n1, tc.n2)
 			diffFile := env.runTableDiff(t, qualifiedTable, []string{env.ServiceN1, env.ServiceN2})
+			if tc.v0 {
+				diffFile = rewriteAsVersion0(t, diffFile, func(r *types.DiffOutput) {
+					require.Equal(t, 3, setColumnValues(r, "id", map[string]string{"1.5": "1.50", "2": "2.00"}))
+				})
+			}
 			beforeLogs := listStaleSkipLogs(t)
 
 			// Change both rows on n2 after the diff: their commit timestamps
@@ -301,6 +322,56 @@ func TestTableDiffRerunMatchesRowsByPosition(t *testing.T) {
 	require.Len(t, files, 1, "the rerun must write a report: the difference is still there")
 	rerun := readDiffReport(t, files[0])
 	require.Equal(t, 1, rerun.Summary.DiffRowsCount[pairKey])
+	for _, node := range nodes {
+		rows := rerun.NodeDiffs[pairKey].Rows[node]
+		require.Len(t, rows, 1, "rows of %s in the rerun report", node)
+		id, ok := rows[0].Get("id")
+		require.True(t, ok)
+		require.Equal(t, "1.5", fmt.Sprint(id))
+	}
+}
+
+// TestTableDiffRerunVersion0SplitKey runs a rerun of a version 0 report that
+// holds one row under two keys: "1.50" in the rows of n1 and "1.5" in the
+// rows of n2, as an earlier ACE reported a numeric key stored with another
+// scale on each node. Both keys find the same row, so the rerun must report
+// the row once.
+func TestTableDiffRerunVersion0SplitKey(t *testing.T) {
+	env := newSpockEnv()
+	qualifiedTable := typedKeyTable(t, env, "ace_rerun_v0_split", "id numeric PRIMARY KEY, v text", "id, v",
+		[]string{"(1.50, 'a')"}, []string{"(1.5, 'b')"})
+	nodes := []string{env.ServiceN1, env.ServiceN2}
+	pairKey := env.pairKey()
+	diffFile := env.runTableDiff(t, qualifiedTable, nodes)
+	v0File := rewriteAsVersion0(t, diffFile, func(r *types.DiffOutput) {
+		rows := r.NodeDiffs[pairKey].Rows[env.ServiceN1]
+		require.Len(t, rows, 1)
+		for i, kv := range rows[0] {
+			if kv.Key == "id" {
+				rows[0][i].Value = "1.50"
+			}
+		}
+	})
+
+	rerunGlob := strings.ReplaceAll(qualifiedTable, ".", "_") + "_rerun-diffs-*.json"
+	removeRerunFiles := func() {
+		files, _ := filepath.Glob(rerunGlob)
+		for _, f := range files {
+			_ = os.Remove(f)
+		}
+	}
+	removeRerunFiles()
+	t.Cleanup(removeRerunFiles)
+
+	task := env.newTableDiffTask(t, qualifiedTable, nodes)
+	task.DiffFilePath = v0File
+	require.NoError(t, task.ExecuteRerunTask())
+
+	files, err := filepath.Glob(rerunGlob)
+	require.NoError(t, err)
+	require.Len(t, files, 1, "the rerun must write a report: the difference is still there")
+	rerun := readDiffReport(t, files[0])
+	require.Equal(t, 1, rerun.Summary.DiffRowsCount[pairKey], "one row, not one per key")
 	for _, node := range nodes {
 		rows := rerun.NodeDiffs[pairKey].Rows[node]
 		require.Len(t, rows, 1, "rows of %s in the rerun report", node)

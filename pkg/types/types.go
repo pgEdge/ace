@@ -94,7 +94,8 @@ type DerivedFields struct {
 //
 //	0: a report without the format_version field, written before the field
 //	   existed. A scalar numeric value can have trailing zeros ("7.50"), as
-//	   the driver printed it.
+//	   the driver printed it. Such a report is brought to version 1 after it is
+//	   read.
 //	1: values as the pgx driver decoded them, with driver structs turned into
 //	   plain values. A scalar numeric value has no trailing zeros ("7.5"),
 //	   because the row fetch wraps it in trim_scale(), as the row hash does.
@@ -111,7 +112,8 @@ type DiffOutput struct {
 
 // CheckFormatVersion returns an error if this build cannot read the report:
 // it was written by a newer ACE with a format this build does not know.
-// Version 0, a report written before the field existed, is accepted.
+// Version 0 is accepted; the caller must bring it to the current version
+// before it compares row keys with rows read from a database.
 func (d DiffOutput) CheckFormatVersion() error {
 	if d.FormatVersion < 0 || d.FormatVersion > DiffFormatVersion {
 		return fmt.Errorf("unsupported diff report format version %d: this ACE reads versions up to %d",

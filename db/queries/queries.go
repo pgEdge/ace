@@ -513,7 +513,7 @@ func InsertBlockRangesBatchComposite(ctx context.Context, db DBQuerier, mtreeTab
 }
 
 // isNumericType reports whether a column of this type (format_type output)
-// goes through trim_scale(). Arrays do not: trim_scale(numeric[]) does not
+// is wrapped in trim_scale(). Arrays are not: trim_scale(numeric[]) does not
 // exist.
 func isNumericType(colType string) bool {
 	lower := strings.ToLower(strings.TrimSpace(colType))
@@ -521,6 +521,22 @@ func isNumericType(colType string) bool {
 		return false
 	}
 	return strings.HasPrefix(lower, "numeric") || strings.HasPrefix(lower, "decimal")
+}
+
+// NumericColumns returns the set of the columns that are wrapped in
+// trim_scale(), by the column types of a table (format_type output). It
+// returns nil when there are no column types.
+func NumericColumns(colTypes map[string]string) map[string]bool {
+	if len(colTypes) == 0 {
+		return nil
+	}
+	cols := make(map[string]bool)
+	for col, colType := range colTypes {
+		if isNumericType(colType) {
+			cols[col] = true
+		}
+	}
+	return cols
 }
 
 // ColExpr returns the SQL expression that stands for one column wherever ACE

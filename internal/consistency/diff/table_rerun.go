@@ -56,6 +56,22 @@ func (t *TableDiffTask) ExecuteRerunTask() error {
 		return fmt.Errorf("pre-run checks failed for rerun: %w", err)
 	}
 
+	// A report of format version 0 can hold one row under two keys, such as
+	// "1.50" from one node and "1.5" from the other. Both keys find the same
+	// row, so the report is brought to the current form first. The column
+	// types are the same on every node.
+	if t.DiffResult.FormatVersion == 0 {
+		logger.Info("Diff file %s has no format version; reading it as version 0", t.DiffFilePath)
+	}
+	var colTypes map[string]string
+	for _, nodeColTypes := range t.ColTypes {
+		colTypes = nodeColTypes
+		break
+	}
+	if err := utils.UpgradeDiffOutput(&t.DiffResult, queries.NumericColumns(colTypes)); err != nil {
+		return fmt.Errorf("diff file %s: %w", t.DiffFilePath, err)
+	}
+
 	pools := make(map[string]*pgxpool.Pool)
 	for _, nodeInfo := range t.ClusterNodes {
 		name := nodeInfo["Name"].(string)
