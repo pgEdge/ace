@@ -2,6 +2,23 @@
 
 All notable changes to ACE will be captured in this document. This project follows semantic versioning; the latest changes appear first.
 
+## [Unreleased]
+
+### Changed
+- **A numeric value in a diff report has no trailing zeros.** The row fetch
+  now reads a numeric column with `trim_scale()`, as the row hash does, so
+  the report shows `7.5`, not `7.50`. Repair writes this form: a `numeric`
+  column without a fixed scale gets the value without the trailing zeros on
+  the target. A column with a fixed scale, such as `numeric(10,2)`, is not
+  affected.
+
+### Fixed
+- **A numeric primary key stored with another scale on two nodes was
+  reported as two rows.** The diff reported the row `1.50` on one node and
+  the row `1.5` on the other as a row missing on each node, so a repair plan
+  applied the rules for missing rows to them, for example a `delete` rule.
+  Now they are one row.
+
 ## [v3.0.0]
 
 > **⚠️ This release has breaking changes. Read Breaking Change and

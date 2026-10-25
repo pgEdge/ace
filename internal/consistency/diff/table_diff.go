@@ -518,8 +518,7 @@ func (t *TableDiffTask) fetchRows(nodeName string, r Range) ([]types.OrderedMap,
 	selectCols = append(selectCols, "pg_xact_commit_timestamp(xmin) as commit_ts", "to_json(pg_xact_commit_timestamp_origin(xmin))->>'roident' as node_origin")
 
 	for _, colName := range t.Cols {
-		quotedColName := pgx.Identifier{colName}.Sanitize()
-		selectCols = append(selectCols, utils.SelectColExpr(quotedColName, colTypes[colName]))
+		selectCols = append(selectCols, utils.SelectColExpr("", colName, colTypes[colName]))
 	}
 
 	selectColsStr := strings.Join(selectCols, ", ")
@@ -527,11 +526,6 @@ func (t *TableDiffTask) fetchRows(nodeName string, r Range) ([]types.OrderedMap,
 	quotedKeyCols := make([]string, len(t.Key))
 	for i, k := range t.Key {
 		quotedKeyCols[i] = pgx.Identifier{k}.Sanitize()
-	}
-
-	orderByClause := ""
-	if len(t.Key) > 0 {
-		orderByClause = "ORDER BY " + strings.Join(quotedKeyCols, ", ")
 	}
 
 	var querySQL string
@@ -601,7 +595,12 @@ func (t *TableDiffTask) fetchRows(nodeName string, r Range) ([]types.OrderedMap,
 		whereClause = "WHERE " + strings.Join(conditions, " AND ")
 	}
 
-	querySQL = fmt.Sprintf("SELECT %s FROM %s %s %s", selectColsStr, quotedSchemaTable, whereClause, orderByClause)
+	// No ORDER BY: the rows of the two nodes are matched by key, so their order
+	// is not used. An ORDER BY on the key would also refer to the select-list
+	// entry of the same name, which can be an expression (trim_scale, ::TEXT).
+	// Then the database cannot take the order from the primary key index and
+	// must sort the whole block.
+	querySQL = fmt.Sprintf("SELECT %s FROM %s %s", selectColsStr, quotedSchemaTable, whereClause)
 
 	logger.Debug("[%s] Fetching rows for range: Start=%v, End=%v. SQL: %s, Args: %v", nodeName, r.Start, r.End, querySQL, args)
 

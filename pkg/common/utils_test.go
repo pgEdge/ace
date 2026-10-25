@@ -4,12 +4,15 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"sort"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/jackc/pgtype"
 	pgxv5type "github.com/jackc/pgx/v5/pgtype"
+	"github.com/pgedge/ace/db/queries"
 	"github.com/pgedge/ace/pkg/types"
 	"github.com/stretchr/testify/require"
 )
@@ -124,7 +127,8 @@ func TestConvertToPgxType_Money(t *testing.T) {
 }
 
 // Complex and unknown types are fetched as ::TEXT so their Postgres text form
-// round-trips through the diff report; known scalars stay native.
+// round-trips through the diff report; known scalars stay native. A scalar
+// numeric goes through trim_scale, as in the row hash.
 func TestSelectColExpr(t *testing.T) {
 	tests := []struct {
 		colType string
@@ -133,7 +137,9 @@ func TestSelectColExpr(t *testing.T) {
 		{"integer", `"c"`},
 		{"timestamp without time zone", `"c"`},
 		{"timestamp(3) with time zone", `"c"`},
-		{"numeric(10,2)", `"c"`},
+		{"numeric(10,2)", `trim_scale("c") AS "c"`},
+		{"numeric", `trim_scale("c") AS "c"`},
+		{"numeric(10,2)[]", `"c"::TEXT AS "c"`},
 		{"date", `"c"`},
 		{"uuid", `"c"`},
 		{"integer[]", `"c"::TEXT AS "c"`},
@@ -154,7 +160,35 @@ func TestSelectColExpr(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.colType, func(t *testing.T) {
-			require.Equal(t, tt.want, SelectColExpr(`"c"`, tt.colType))
+			require.Equal(t, tt.want, SelectColExpr("", "c", tt.colType))
+		})
+	}
+
+	// A qualified column must still give a result column with the name of the
+	// column, and the name must be quoted.
+	qualified := []struct {
+		colType string
+		want    string
+	}{
+		{"integer", `t."Name"`},
+		{"numeric", `trim_scale(t."Name") AS "Name"`},
+		{"jsonb", `t."Name"::TEXT AS "Name"`},
+	}
+	for _, tt := range qualified {
+		t.Run("qualified/"+tt.colType, func(t *testing.T) {
+			require.Equal(t, tt.want, SelectColExpr("t", "Name", tt.colType))
+		})
+	}
+}
+
+// The fetch must start from the expression of the row hash: a fetched value
+// is then the value that was hashed.
+func TestFetchColExprStartsFromColExpr(t *testing.T) {
+	for _, colType := range []string{"integer", "text", "numeric", "numeric(12,4)", "DECIMAL", "numeric[]", "jsonb", "inet", ""} {
+		t.Run(colType, func(t *testing.T) {
+			hashExpr := queries.ColExpr("_tbl_", "c", colType)
+			require.True(t, strings.HasPrefix(FetchColExpr("_tbl_", "c", colType), hashExpr),
+				"FetchColExpr must start with %q", hashExpr)
 		})
 	}
 }
@@ -655,4 +689,46 @@ func TestSortPKKeysIsDeterministicOnTiedDisplays(t *testing.T) {
 	keys = []string{"id-10", "id-2"}
 	sortPKKeys(keys, map[string]string{"id-2": "2", "id-10": "10"})
 	require.Equal(t, []string{"id-2", "id-10"}, keys, "2 must still sort before 10")
+}
+
+// The rows are matched by key, so the order of the input rows must not change
+// the result.
+func TestCompareRowSetsIgnoresRowOrder(t *testing.T) {
+	r := func(id int, v string) types.OrderedMap {
+		return types.OrderedMap{{Key: "id", Value: id}, {Key: "v", Value: v}}
+	}
+	n1 := []types.OrderedMap{r(1, "a"), r(2, "b"), r(3, "c"), r(4, "d")}
+	n2 := []types.OrderedMap{r(2, "b"), r(3, "x"), r(5, "e")}
+	reversed := func(rows []types.OrderedMap) []types.OrderedMap {
+		out := make([]types.OrderedMap, len(rows))
+		for i, row := range rows {
+			out[len(rows)-1-i] = row
+		}
+		return out
+	}
+	summary := func(res DiffResult) [3][]string {
+		var s [3][]string
+		for _, row := range res.Node1OnlyRows {
+			s[0] = append(s[0], fmt.Sprint(row))
+		}
+		for _, row := range res.Node2OnlyRows {
+			s[1] = append(s[1], fmt.Sprint(row))
+		}
+		for _, m := range res.ModifiedRows {
+			s[2] = append(s[2], m.PKey)
+		}
+		for i := range s {
+			sort.Strings(s[i])
+		}
+		return s
+	}
+
+	want, err := CompareRowSets(n1, n2, []string{"id"}, []string{"id", "v"})
+	require.NoError(t, err)
+	got, err := CompareRowSets(reversed(n1), reversed(n2), []string{"id"}, []string{"id", "v"})
+	require.NoError(t, err)
+	require.Equal(t, summary(want), summary(got))
+	require.Len(t, want.Node1OnlyRows, 2)
+	require.Len(t, want.Node2OnlyRows, 1)
+	require.Len(t, want.ModifiedRows, 1)
 }

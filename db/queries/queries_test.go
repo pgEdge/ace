@@ -434,6 +434,49 @@ func TestRowHashExpr(t *testing.T) {
 	})
 }
 
+func TestColExpr(t *testing.T) {
+	tests := []struct {
+		alias, col, colType string
+		want                string
+	}{
+		{"", "id", "integer", `"id"`},
+		{"_tbl_", "id", "integer", `_tbl_."id"`},
+		{"", "Name", "text", `"Name"`},
+		{"", `we"ird`, "text", `"we""ird"`},
+		{"", "price", "numeric(10,2)", `trim_scale("price")`},
+		{"_tbl_", "price", "DECIMAL", `trim_scale(_tbl_."price")`},
+		// trim_scale has no array variant.
+		{"", "prices", "numeric[]", `"prices"`},
+		// Unknown type: the plain column.
+		{"", "c", "", `"c"`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.alias+"."+tt.col+":"+tt.colType, func(t *testing.T) {
+			if got := ColExpr(tt.alias, tt.col, tt.colType); got != tt.want {
+				t.Errorf("ColExpr(%q, %q, %q) = %q, want %q", tt.alias, tt.col, tt.colType, got, tt.want)
+			}
+		})
+	}
+}
+
+// The row hash must take each column in the same form as the row fetch.
+func TestRowHashExprUsesColExpr(t *testing.T) {
+	cols := []string{"id", "price", "prices", "Name"}
+	colTypes := map[string]string{"id": "integer", "price": "numeric", "prices": "numeric[]", "Name": "text"}
+	got, err := RowHashExpr("_tbl_", cols, colTypes)
+	if err != nil {
+		t.Fatalf("RowHashExpr() error = %v", err)
+	}
+	exprs := make([]string, len(cols))
+	for i, c := range cols {
+		exprs[i] = ColExpr("_tbl_", c, colTypes[c])
+	}
+	want := "sha256(convert_to(ROW(" + strings.Join(exprs, ", ") + ")::text, 'UTF8'))"
+	if got != want {
+		t.Errorf("RowHashExpr() = %q, want %q", got, want)
+	}
+}
+
 func TestIsNumericType(t *testing.T) {
 	tests := []struct {
 		colType string

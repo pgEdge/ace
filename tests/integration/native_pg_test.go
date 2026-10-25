@@ -470,6 +470,14 @@ func TestNativePG(t *testing.T) {
 		testMerkleTreeNumericScaleInvariance(t, env)
 	})
 
+	t.Run("NumericScaleInMismatchedBlock", func(t *testing.T) {
+		testNumericScaleInMismatchedBlock(t, env)
+	})
+
+	t.Run("NumericKeyRepair", func(t *testing.T) {
+		testNumericKeyRepair(t, env)
+	})
+
 	// ── Native PG preserve-origin test ───────────────────────────────────
 	// This test verifies the full diff → preserve-origin repair → verify
 	// cycle on native PG with real logical replication, including that
