@@ -351,7 +351,6 @@ func TestBuildRowHashQuery(t *testing.T) {
 		colTypes       map[string]string
 		wantContains   []string
 		wantNotContain []string
-		wantOrderBy    string
 	}{
 		{
 			name:        "nil colTypes - no trim_scale",
@@ -365,12 +364,10 @@ func TestBuildRowHashQuery(t *testing.T) {
 				`SELECT "id", sha256(convert_to(ROW("id", "name", "amount")::text, 'UTF8')) AS row_hash`,
 				`FROM "public"."orders"`,
 				`WHERE TRUE`,
-				`ORDER BY "id"`,
 			},
 			wantNotContain: []string{
 				`trim_scale`,
 			},
-			wantOrderBy: `"id"`,
 		},
 		{
 			name:        "numeric column gets trim_scale",
@@ -383,7 +380,6 @@ func TestBuildRowHashQuery(t *testing.T) {
 			wantContains: []string{
 				`ROW("id", "name", trim_scale("price"))::text`,
 			},
-			wantOrderBy: `"id"`,
 		},
 		{
 			name:        "decimal column gets trim_scale",
@@ -397,7 +393,6 @@ func TestBuildRowHashQuery(t *testing.T) {
 				`ROW("txn_id", trim_scale("debit"), trim_scale("credit"))::text`,
 				`WHERE "txn_id" >= $1`,
 			},
-			wantOrderBy: `"txn_id"`,
 		},
 		{
 			name:        "composite primary key",
@@ -410,9 +405,7 @@ func TestBuildRowHashQuery(t *testing.T) {
 			wantContains: []string{
 				`SELECT "order_id", "line_num", sha256(convert_to(`,
 				`ROW("order_id", "line_num", "qty", trim_scale("unit_price"))::text`,
-				`ORDER BY "order_id", "line_num"`,
 			},
-			wantOrderBy: `"order_id", "line_num"`,
 		},
 		{
 			name:        "no numeric columns - no trim_scale even with colTypes",
@@ -428,7 +421,6 @@ func TestBuildRowHashQuery(t *testing.T) {
 			wantNotContain: []string{
 				`trim_scale`,
 			},
-			wantOrderBy: `"user_id"`,
 		},
 	}
 
@@ -437,7 +429,7 @@ func TestBuildRowHashQuery(t *testing.T) {
 	t.Run("same row hash as the leaf hash", func(t *testing.T) {
 		cols := []string{"id", "price"}
 		colTypes := map[string]string{"price": "numeric"}
-		query, _, err := buildRowHashQuery("public", "orders", []string{"id"}, cols, "TRUE", colTypes)
+		query, err := buildRowHashQuery("public", "orders", []string{"id"}, cols, "TRUE", colTypes)
 		if err != nil {
 			t.Fatalf("buildRowHashQuery() error = %v", err)
 		}
@@ -455,20 +447,21 @@ func TestBuildRowHashQuery(t *testing.T) {
 	})
 
 	t.Run("no columns is an error", func(t *testing.T) {
-		if _, _, err := buildRowHashQuery("public", "orders", []string{"id"}, nil, "TRUE", nil); err == nil {
+		if _, err := buildRowHashQuery("public", "orders", []string{"id"}, nil, "TRUE", nil); err == nil {
 			t.Errorf("buildRowHashQuery() with no columns: want an error")
 		}
 	})
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			query, orderBy, err := buildRowHashQuery(tt.schema, tt.table, tt.key, tt.cols, tt.whereClause, tt.colTypes)
+			query, err := buildRowHashQuery(tt.schema, tt.table, tt.key, tt.cols, tt.whereClause, tt.colTypes)
 			if err != nil {
 				t.Fatalf("buildRowHashQuery() error = %v", err)
 			}
 
-			if orderBy != tt.wantOrderBy {
-				t.Errorf("orderBy = %q, want %q", orderBy, tt.wantOrderBy)
+			// The hashes are matched by key, so the database must not sort them.
+			if strings.Contains(query, "ORDER BY") {
+				t.Errorf("row hash query sorts the rows: %s", query)
 			}
 
 			for _, substr := range tt.wantContains {
@@ -482,6 +475,18 @@ func TestBuildRowHashQuery(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// The fetched rows of the two nodes are matched by key, so the fetch must not
+// make the database sort them.
+func TestBuildFetchRowsSQLHasNoOrderBy(t *testing.T) {
+	simple, _ := buildFetchRowsSQLSimple("public", "orders", "id", `trim_scale("id") AS "id"`, []any{1, 2})
+	composite, _ := buildFetchRowsSQLComposite("public", "orders", []string{"a", "b"}, `"a", "b"`, [][]any{{1, 2}})
+	for _, q := range []string{simple, composite} {
+		if strings.Contains(q, "ORDER BY") {
+			t.Errorf("row fetch sorts the rows: %s", q)
+		}
 	}
 }
 

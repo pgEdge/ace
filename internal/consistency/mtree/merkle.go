@@ -513,7 +513,7 @@ func (m *MerkleTreeTask) processWorkItem(work CompareRangesWorkItem, pool1, pool
 		whereClause = fmt.Sprintf("(%s) AND %s", whereClause, f)
 	}
 
-	rowHashQuery, orderByStr, err := buildRowHashQuery(m.Schema, m.Table, m.Key, m.Cols, whereClause, m.ColTypes["_ref"])
+	rowHashQuery, err := buildRowHashQuery(m.Schema, m.Table, m.Key, m.Cols, whereClause, m.ColTypes["_ref"])
 	if err != nil {
 		return fmt.Errorf("failed to build row hash query: %w", err)
 	}
@@ -582,7 +582,7 @@ func (m *MerkleTreeTask) processWorkItem(work CompareRangesWorkItem, pool1, pool
 	refTypes := m.ColTypes["_ref"]
 	colExprs := make([]string, 0, len(m.Cols))
 	for _, c := range m.Cols {
-		colExprs = append(colExprs, utils.SelectColExpr(pgx.Identifier{c}.Sanitize(), refTypes[c]))
+		colExprs = append(colExprs, utils.SelectColExpr("", c, refTypes[c]))
 	}
 	selectCols := "pg_xact_commit_timestamp(xmin) as commit_ts, " +
 		"to_json(pg_xact_commit_timestamp_origin(xmin))->>'roident' as node_origin, " +
@@ -601,7 +601,7 @@ func (m *MerkleTreeTask) processWorkItem(work CompareRangesWorkItem, pool1, pool
 			}
 			batch := mismatchedComposite[i:end]
 
-			q, qArgs := buildFetchRowsSQLComposite(m.Schema, m.Table, m.Key, selectCols, orderByStr, batch)
+			q, qArgs := buildFetchRowsSQLComposite(m.Schema, m.Table, m.Key, selectCols, batch)
 
 			r1, err := pool1.Query(m.Ctx, q, qArgs...) // nosemgrep
 			if err != nil {
@@ -638,7 +638,7 @@ func (m *MerkleTreeTask) processWorkItem(work CompareRangesWorkItem, pool1, pool
 			}
 			batch := mismatchedSimple[i:end]
 
-			q, qArgs := buildFetchRowsSQLSimple(m.Schema, m.Table, m.Key[0], selectCols, orderByStr, batch)
+			q, qArgs := buildFetchRowsSQLSimple(m.Schema, m.Table, m.Key[0], selectCols, batch)
 
 			r1, err := pool1.Query(m.Ctx, q, qArgs...) // nosemgrep
 			if err != nil {
@@ -893,8 +893,10 @@ func (m *MerkleTreeTask) buildRowKey(row types.OrderedMap) (string, error) {
 
 // buildRowHashQuery returns the query that lists the primary key and the
 // hash of every row in the mismatched blocks. The row hash is
-// queries.RowHashExpr, the same one the leaf hash is built from.
-func buildRowHashQuery(schema, table string, key []string, cols []string, whereClause string, colTypes map[string]string) (string, string, error) {
+// queries.RowHashExpr, the same one the leaf hash is built from. There is no
+// ORDER BY: the hashes of the two nodes are matched by key, so their order is
+// not used.
+func buildRowHashQuery(schema, table string, key []string, cols []string, whereClause string, colTypes map[string]string) (string, error) {
 	pkQuoted := make([]string, len(key))
 	for i, k := range key {
 		pkQuoted[i] = pgx.Identifier{k}.Sanitize()
@@ -902,15 +904,14 @@ func buildRowHashQuery(schema, table string, key []string, cols []string, whereC
 
 	rowHash, err := queries.RowHashExpr("", cols, colTypes)
 	if err != nil {
-		return "", "", err
+		return "", err
 	}
 
 	qualifiedTable := fmt.Sprintf("%s.%s", pgx.Identifier{schema}.Sanitize(), pgx.Identifier{table}.Sanitize())
-	orderBy := strings.Join(pkQuoted, ", ")
 	selectList := strings.Join(pkQuoted, ", ") + ", " + rowHash + " AS row_hash"
 
-	query := fmt.Sprintf("SELECT %s FROM %s WHERE %s ORDER BY %s", selectList, qualifiedTable, whereClause, orderBy)
-	return query, orderBy, nil
+	query := fmt.Sprintf("SELECT %s FROM %s WHERE %s", selectList, qualifiedTable, whereClause)
+	return query, nil
 }
 
 // pkeyKind classifies a primary-key value that pgx decoded into an untyped
@@ -1121,7 +1122,13 @@ func readRowHashes(rows pgx.Rows, numPK int) (map[string]rowHashEntry, error) {
 	return result, nil
 }
 
-func buildFetchRowsSQLSimple(schema, table, pk, selectCols, orderBy string, keys []any) (string, []any) {
+// buildFetchRowsSQLSimple and buildFetchRowsSQLComposite build the fetch of
+// the rows of a mismatched block. There is no ORDER BY: the rows of the two
+// nodes are matched by key, so their order is not used. An ORDER BY on the
+// key would refer to the select-list entry of the same name, which can be an
+// expression (trim_scale, ::TEXT), and the database would have to sort the
+// rows.
+func buildFetchRowsSQLSimple(schema, table, pk, selectCols string, keys []any) (string, []any) {
 	placeholders := make([]string, len(keys))
 	args := make([]any, len(keys))
 	for i := range keys {
@@ -1130,11 +1137,11 @@ func buildFetchRowsSQLSimple(schema, table, pk, selectCols, orderBy string, keys
 	}
 	qualifiedTable := fmt.Sprintf("%s.%s", pgx.Identifier{schema}.Sanitize(), pgx.Identifier{table}.Sanitize())
 	where := fmt.Sprintf("%s IN (%s)", pgx.Identifier{pk}.Sanitize(), strings.Join(placeholders, ","))
-	q := fmt.Sprintf("SELECT %s FROM %s WHERE %s ORDER BY %s", selectCols, qualifiedTable, where, orderBy)
+	q := fmt.Sprintf("SELECT %s FROM %s WHERE %s", selectCols, qualifiedTable, where)
 	return q, args
 }
 
-func buildFetchRowsSQLComposite(schema, table string, pk []string, selectCols, orderBy string, keys [][]any) (string, []any) {
+func buildFetchRowsSQLComposite(schema, table string, pk []string, selectCols string, keys [][]any) (string, []any) {
 	tupleCols := make([]string, len(pk))
 	for i, k := range pk {
 		tupleCols[i] = pgx.Identifier{k}.Sanitize()
@@ -1153,7 +1160,7 @@ func buildFetchRowsSQLComposite(schema, table string, pk []string, selectCols, o
 	}
 	qualifiedTable := fmt.Sprintf("%s.%s", pgx.Identifier{schema}.Sanitize(), pgx.Identifier{table}.Sanitize())
 	where := fmt.Sprintf("( %s ) IN ( %s )", strings.Join(tupleCols, ","), strings.Join(tuples, ","))
-	q := fmt.Sprintf("SELECT %s FROM %s WHERE %s ORDER BY %s", selectCols, qualifiedTable, where, orderBy)
+	q := fmt.Sprintf("SELECT %s FROM %s WHERE %s", selectCols, qualifiedTable, where)
 	return q, args
 }
 

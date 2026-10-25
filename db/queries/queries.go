@@ -523,17 +523,41 @@ func isNumericType(colType string) bool {
 	return strings.HasPrefix(lower, "numeric") || strings.HasPrefix(lower, "decimal")
 }
 
+// ColExpr returns the SQL expression that stands for one column wherever ACE
+// reads its value: in the row hash and in the row fetch. The hash and the
+// fetch must take a column in the same form. Otherwise two rows could hash
+// the same and still be reported as different when their block is fetched
+// for another reason, or the reverse.
+//
+// A scalar numeric or decimal column is wrapped in trim_scale(), so 1.50 and
+// 1.5 are the same value. An array is not, because trim_scale(numeric[])
+// does not exist.
+//
+// col is the column name, not quoted. tableAlias may be empty; the column is
+// then not qualified. colType is pg_catalog.format_type output; an empty type
+// gives the plain column.
+func ColExpr(tableAlias, col, colType string) string {
+	ref := pgx.Identifier{col}.Sanitize()
+	if tableAlias != "" {
+		ref = tableAlias + "." + ref
+	}
+	if isNumericType(colType) {
+		ref = fmt.Sprintf("trim_scale(%s)", ref)
+	}
+	return ref
+}
+
 // RowHashExpr returns a SQL expression for the sha256 hash of one row, as a
 // 32-byte bytea. The mtree leaf hash, the table-diff block hash and the row
 // hashes of the mtree diff all use it. If they used different row encodings,
 // a leaf could differ while every row hash matches, and the diff would not
 // fetch the rows of that block.
 //
-// The row is encoded as ROW(col1, col2, ...)::text. This text is unambiguous:
-// a NULL prints as nothing, an empty string as "", and a value with a comma,
-// a quote, a parenthesis, a backslash or a space is quoted. Numeric and
-// decimal columns go through trim_scale(), so 1.50 and 1.5 give the same
-// hash.
+// The row is encoded as ROW(col1, col2, ...)::text, each column in the form
+// that the row fetch also uses. This text is unambiguous: a NULL prints as
+// nothing, an empty string as "", and a value with a comma, a quote, a
+// parenthesis, a backslash or a space is quoted. Numeric and decimal columns
+// are wrapped in trim_scale(), so 1.50 and 1.5 give the same hash.
 //
 // The text is converted to UTF8 before it is hashed, so nodes with different
 // database encodings give the same hash for the same row. sha256 works on
@@ -548,14 +572,7 @@ func RowHashExpr(tableAlias string, allCols []string, colTypes map[string]string
 	}
 	exprs := make([]string, len(allCols))
 	for i, col := range allCols {
-		ref := pgx.Identifier{col}.Sanitize()
-		if tableAlias != "" {
-			ref = tableAlias + "." + ref
-		}
-		if colTypes != nil && isNumericType(colTypes[col]) {
-			ref = fmt.Sprintf("trim_scale(%s)", ref)
-		}
-		exprs[i] = ref
+		exprs[i] = ColExpr(tableAlias, col, colTypes[col])
 	}
 	// ROW() is not a function call, so the limit of 100 arguments does not
 	// apply to it.

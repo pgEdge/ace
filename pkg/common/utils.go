@@ -31,7 +31,9 @@ import (
 	"time"
 
 	"github.com/jackc/pgtype"
+	"github.com/jackc/pgx/v5"
 	pgxv5type "github.com/jackc/pgx/v5/pgtype"
+	"github.com/pgedge/ace/db/queries"
 	"github.com/pgedge/ace/pkg/config"
 	"github.com/pgedge/ace/pkg/logger"
 	"github.com/pgedge/ace/pkg/types"
@@ -994,25 +996,42 @@ func SafeCut(s string, n int) string {
 	return s[:n]
 }
 
-// SelectColExpr returns the SELECT-list expression for one column of a diff
-// row fetch: the quoted name for known scalar types the driver scans
-// losslessly, or a ::TEXT cast (aliased back to the column name) for arrays,
-// json, bytea and any type the driver would surface as an opaque Go struct
-// (geometric, network, range, enum, xml, ...). Postgres parses its own text
-// form on repair, so text values round-trip for every type without per-type
-// conversion code. Both diff engines must build their row-fetch SELECTs with
-// it so reports stay engine-independent and repairable.
-func SelectColExpr(quotedCol, colType string) string {
+// FetchColExpr returns the expression for one column in a diff row fetch,
+// without a name. It starts from the expression of the row hash, so a
+// fetched value is the value that was hashed. Then it casts to ::TEXT the
+// columns the driver cannot scan without loss: arrays, json, bytea and any
+// type the driver would give as an opaque Go struct (geometric, network,
+// range, enum, xml, ...). Postgres parses its own text form on repair, so
+// text values round-trip for every type without per-type conversion code.
+//
+// An empty or unknown type is cast to ::TEXT here, while the row hash takes
+// the plain column for it. Both forms print the same text inside ROW(), so
+// the fetched value is still the hashed value.
+//
+// col is the column name, not quoted. tableAlias may be empty.
+func FetchColExpr(tableAlias, col, colType string) string {
+	expr := queries.ColExpr(tableAlias, col, colType)
 	if NeedsTextCast(colType) {
-		return fmt.Sprintf("%s::TEXT AS %s", quotedCol, quotedCol)
+		expr += "::TEXT"
 	}
-	return quotedCol
+	return expr
+}
+
+// SelectColExpr returns the SELECT-list entry for one column of a diff row
+// fetch: the fetch expression, named after the column when it is more than
+// the plain column. Rows are read by the names of the result columns, so the
+// name must not change. Every row fetch of the diff engines must use it, so
+// that diff reports do not depend on the engine and stay repairable.
+func SelectColExpr(tableAlias, col, colType string) string {
+	expr := FetchColExpr(tableAlias, col, colType)
+	if expr == queries.ColExpr(tableAlias, col, "") {
+		return expr
+	}
+	return expr + " AS " + pgx.Identifier{col}.Sanitize()
 }
 
 // NeedsTextCast reports whether a diff row fetch must cast the column to
-// ::TEXT for its value to round-trip through a diff report (see
-// SelectColExpr). Row-fetch sites that cannot use SelectColExpr verbatim
-// (e.g. table-qualified selects) must still consult this policy.
+// ::TEXT for its value to round-trip through a diff report.
 func NeedsTextCast(colType string) bool {
 	return strings.HasSuffix(colType, "[]") ||
 		strings.Contains(strings.ToLower(colType), "json") ||
@@ -1191,6 +1210,8 @@ type ModifiedRow struct {
 	Node2Data types.OrderedMap
 }
 
+// CompareRowSets compares two sets of rows by primary key. The order of the
+// rows in rows1 and rows2 does not matter: they are matched by key.
 func CompareRowSets(rows1, rows2 []types.OrderedMap, pkeyCols []string, dataCols []string) (DiffResult, error) {
 	map1, err := rowsToMap(rows1, pkeyCols)
 	if err != nil {
