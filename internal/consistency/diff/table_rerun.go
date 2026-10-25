@@ -177,6 +177,9 @@ func CheckDiffFileFormat(filePath string, task *TableDiffTask) error {
 	if err := json.Unmarshal(data, &diffOutput); err != nil {
 		return fmt.Errorf("failed to unmarshal diff file %s: %w", filePath, err)
 	}
+	if err := diffOutput.CheckFormatVersion(); err != nil {
+		return fmt.Errorf("diff file %s: %w", filePath, err)
+	}
 
 	summary := diffOutput.Summary
 	if summary.Schema == "" || summary.Table == "" || len(summary.Nodes) == 0 || len(summary.PrimaryKey) == 0 {
@@ -326,8 +329,9 @@ func fetchRowsByPkeys(ctx context.Context, pool *pgxpool.Pool, t *TableDiffTask,
 
 func (t *TableDiffTask) reCompareDiffs(fetchedRowsByNode map[string]map[string]types.OrderedMap) (*types.DiffOutput, error) {
 	newDiffResult := &types.DiffOutput{
-		NodeDiffs: make(map[string]types.DiffByNodePair),
-		Summary:   t.DiffResult.Summary,
+		FormatVersion: types.DiffFormatVersion,
+		NodeDiffs:     make(map[string]types.DiffByNodePair),
+		Summary:       t.DiffResult.Summary,
 	}
 	newDiffResult.Summary.DiffRowsCount = make(map[string]int)
 	newDiffResult.Summary.TotalRowsChecked = 0

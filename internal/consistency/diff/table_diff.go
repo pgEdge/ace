@@ -1290,7 +1290,8 @@ func (t *TableDiffTask) ExecuteTask() (err error) {
 	}
 
 	t.DiffResult = types.DiffOutput{
-		NodeDiffs: make(map[string]types.DiffByNodePair),
+		FormatVersion: types.DiffFormatVersion,
+		NodeDiffs:     make(map[string]types.DiffByNodePair),
 		Summary: types.DiffSummary{
 			Schema:            t.Schema,
 			Table:             t.BaseTable,

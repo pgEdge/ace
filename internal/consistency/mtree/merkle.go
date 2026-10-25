@@ -2861,7 +2861,8 @@ func (m *MerkleTreeTask) DiffMtree() (err error) {
 	m.diffLimitWarned = false
 	m.pairCompareErrs = make(map[string]bool)
 	m.DiffResult = types.DiffOutput{
-		NodeDiffs: make(map[string]types.DiffByNodePair),
+		FormatVersion: types.DiffFormatVersion,
+		NodeDiffs:     make(map[string]types.DiffByNodePair),
 		Summary: types.DiffSummary{
 			Schema:          m.Schema,
 			Table:           m.Table,
