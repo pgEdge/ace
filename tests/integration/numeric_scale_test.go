@@ -274,3 +274,28 @@ func requireDiffAmount(t *testing.T, res types.DiffOutput, pairKey, want string)
 		}
 	}
 }
+
+// TestNumericNamedEnum runs table-diff on a table with a column of an enum
+// whose name starts with "numeric". The enum is not a numeric type and has no
+// trim_scale(), so the column must be read as it is.
+func TestNumericNamedEnum(t *testing.T) {
+	ctx := context.Background()
+	env := newSpockEnv()
+	enumType := testSchema + ".numeric_level"
+	for _, pool := range env.pools() {
+		_, err := pool.Exec(ctx, "CREATE TYPE "+enumType+" AS ENUM ('low', 'high')") // nosemgrep
+		require.NoError(t, err)
+	}
+	// Cleanups run in reverse order: the type is dropped after the table.
+	t.Cleanup(func() {
+		for _, pool := range env.pools() {
+			_, _ = pool.Exec(context.Background(), "DROP TYPE IF EXISTS "+enumType) // nosemgrep
+		}
+	})
+	qualifiedTable := typedKeyTable(t, env, "ace_numeric_enum", "id int PRIMARY KEY, level "+enumType, "id, level",
+		[]string{"(1, 'low')", "(2, 'low')"}, []string{"(1, 'low')", "(2, 'high')"})
+
+	diffFile := env.runTableDiff(t, qualifiedTable, []string{env.ServiceN1, env.ServiceN2})
+	report := readDiffReport(t, diffFile)
+	require.Equal(t, 1, report.Summary.DiffRowsCount[env.pairKey()])
+}

@@ -42,6 +42,13 @@ All notable changes to ACE will be captured in this document. This project follo
   the row `1.5` on the other as a row missing on each node, so a repair plan
   applied the rules for missing rows to them, for example a `delete` rule.
   Now they are one row.
+- **`table-diff` and the mtree commands failed on a column of an enum whose
+  name starts with `numeric` or `decimal`.** ACE took such a type for a
+  numeric type and wrapped the column in `trim_scale()`, which does not
+  exist for it. Now only `numeric` and `decimal` themselves are numeric
+  types. A column of a domain over numeric whose name starts with these words
+  is not wrapped in `trim_scale()` any more, so a Merkle tree of such a table
+  must be built again.
 
 ## [v3.0.0]
 
