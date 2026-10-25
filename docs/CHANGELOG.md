@@ -18,6 +18,13 @@ All notable changes to ACE will be captured in this document. This project follo
   affected.
 
 ### Fixed
+- **`table-rerun` reported rows it could not find in the report as
+  differences with no row to show.** It matched the rows it read to the
+  report by a printed key, so a key that prints in another form, such as a
+  numeric key `1.50` in a report from an earlier ACE, did not match, and a
+  row deleted on both nodes was counted too. The rerun now matches rows to
+  the report by key position, and a row deleted on both nodes is not a
+  difference: the nodes agree on it.
 - **`table-rerun` dropped rows with a uuid, numeric or time key.** It read
   the rows of the nodes in another form than the report, so the keys did
   not match. It then reported such a row as a difference with no row to
