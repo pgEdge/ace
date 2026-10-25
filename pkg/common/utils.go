@@ -1551,6 +1551,8 @@ func WriteDiffReport(diffResult types.DiffOutput, schema, table, format string, 
 		}
 	}
 
+	diffResult.FormatVersion = types.DiffFormatVersion
+
 	outputPrefix := fmt.Sprintf("%s_%s_diffs-%s",
 		strings.ReplaceAll(schema, ".", "_"),
 		strings.ReplaceAll(table, ".", "_"),

@@ -361,6 +361,9 @@ func (t *TableRepairTask) ValidateAndPrepare() error {
 	if err := json.Unmarshal(diffData, &t.RawDiffs); err != nil {
 		return fmt.Errorf("failed to unmarshal diff file %s: %w", t.DiffFilePath, err)
 	}
+	if err := t.RawDiffs.CheckFormatVersion(); err != nil {
+		return fmt.Errorf("diff file %s: %w", t.DiffFilePath, err)
+	}
 
 	diffSchema := strings.TrimSpace(t.RawDiffs.Summary.Schema)
 	diffTable := strings.TrimSpace(t.RawDiffs.Summary.Table)

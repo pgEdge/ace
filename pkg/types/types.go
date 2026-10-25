@@ -87,10 +87,37 @@ type DerivedFields struct {
 	PKeyTypes        map[string]string
 }
 
+// DiffFormatVersion is the version of the diff report format this build
+// writes. Increment it when the meaning of the stored rows changes, so that
+// a reader can tell an old report from a new one and read each the right
+// way.
+//
+//	0: a report without the format_version field, written before the field
+//	   existed. A scalar numeric value can have trailing zeros ("7.50"), as
+//	   the driver printed it.
+//	1: values as the pgx driver decoded them, with driver structs turned into
+//	   plain values. A scalar numeric value has no trailing zeros ("7.5"),
+//	   because the row fetch wraps it in trim_scale(), as the row hash does.
+const DiffFormatVersion = 1
+
 // DiffOutput holds the structured diff data.
 type DiffOutput struct {
-	NodeDiffs map[string]DiffByNodePair `json:"diffs"` // Key: "nodeA/nodeB" (sorted names)
-	Summary   DiffSummary               `json:"summary"`
+	// FormatVersion is the version of the report format. A report without this
+	// field is version 0.
+	FormatVersion int                       `json:"format_version"`
+	NodeDiffs     map[string]DiffByNodePair `json:"diffs"` // Key: "nodeA/nodeB" (sorted names)
+	Summary       DiffSummary               `json:"summary"`
+}
+
+// CheckFormatVersion returns an error if this build cannot read the report:
+// it was written by a newer ACE with a format this build does not know.
+// Version 0, a report written before the field existed, is accepted.
+func (d DiffOutput) CheckFormatVersion() error {
+	if d.FormatVersion < 0 || d.FormatVersion > DiffFormatVersion {
+		return fmt.Errorf("unsupported diff report format version %d: this ACE reads versions up to %d",
+			d.FormatVersion, DiffFormatVersion)
+	}
+	return nil
 }
 
 // DiffByNodePair holds the differing rows for a pair of nodes.

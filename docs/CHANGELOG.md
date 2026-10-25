@@ -4,6 +4,11 @@ All notable changes to ACE will be captured in this document. This project follo
 
 ## [Unreleased]
 
+### Added
+- Diff reports have a `format_version` field. `table-repair` and
+  `table-rerun` refuse a report with a version they do not know. A report
+  from an earlier ACE has no such field and is read as version 0.
+
 ### Changed
 - **A numeric value in a diff report has no trailing zeros.** The row fetch
   now reads a numeric column with `trim_scale()`, as the row hash does, so
