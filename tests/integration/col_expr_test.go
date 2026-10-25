@@ -18,7 +18,6 @@ import (
 	"testing"
 
 	"github.com/pgedge/ace/db/queries"
-	utils "github.com/pgedge/ace/pkg/common"
 	"github.com/stretchr/testify/require"
 )
 
@@ -128,7 +127,7 @@ func TestRowFetchMatchesRowHash(t *testing.T) {
 		hashCols = append(hashCols, col)
 		t.Run(col, func(t *testing.T) {
 			hashExpr := queries.ColExpr("", col, typ)
-			fetchExpr := utils.FetchColExpr("", col, typ)
+			fetchExpr := queries.FetchColExpr("", col, typ)
 			var mismatch []string
 			q := fmt.Sprintf(`SELECT id, ROW(%s)::text, ROW(%s)::text FROM pg_temp.%s
 				WHERE ROW(%s)::text IS DISTINCT FROM ROW(%s)::text ORDER BY id`,
@@ -152,7 +151,7 @@ func TestRowFetchMatchesRowHash(t *testing.T) {
 		require.NoError(t, err)
 		fetchExprs := make([]string, len(hashCols))
 		for i, col := range hashCols {
-			fetchExprs[i] = utils.FetchColExpr("", col, colTypes[col])
+			fetchExprs[i] = queries.FetchColExpr("", col, colTypes[col])
 		}
 		recomputed := fmt.Sprintf("sha256(convert_to(ROW(%s)::text, 'UTF8'))", strings.Join(fetchExprs, ", "))
 		var same bool

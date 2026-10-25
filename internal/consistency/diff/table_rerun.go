@@ -335,7 +335,7 @@ func fetchRowsByPkeys(ctx context.Context, pool *pgxpool.Pool, t *TableDiffTask,
 	for _, col := range t.Cols {
 		// The columns are fetched in the form of a diff report, so that the rerun
 		// report compares and repairs the same way.
-		selectCols = append(selectCols, utils.SelectColExpr("t", col, colTypes[col]))
+		selectCols = append(selectCols, queries.SelectColExpr("t", col, colTypes[col]))
 	}
 
 	fetchSQL := fmt.Sprintf("SELECT %s FROM %s t JOIN %s temp ON %s",

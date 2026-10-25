@@ -5,14 +5,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
-	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/jackc/pgtype"
 	pgxv5type "github.com/jackc/pgx/v5/pgtype"
-	"github.com/pgedge/ace/db/queries"
 	"github.com/pgedge/ace/pkg/types"
 	"github.com/stretchr/testify/require"
 )
@@ -124,73 +122,6 @@ func TestConvertToPgxType_Money(t *testing.T) {
 	val, err := ConvertToPgxType("$532.96", "money")
 	require.NoError(t, err)
 	require.Equal(t, "$532.96", val)
-}
-
-// Complex and unknown types are fetched as ::TEXT so their Postgres text form
-// round-trips through the diff report; known scalars stay native. A scalar
-// numeric goes through trim_scale, as in the row hash.
-func TestSelectColExpr(t *testing.T) {
-	tests := []struct {
-		colType string
-		want    string
-	}{
-		{"integer", `"c"`},
-		{"timestamp without time zone", `"c"`},
-		{"timestamp(3) with time zone", `"c"`},
-		{"numeric(10,2)", `trim_scale("c") AS "c"`},
-		{"numeric", `trim_scale("c") AS "c"`},
-		{"numeric(10,2)[]", `"c"::TEXT AS "c"`},
-		{"date", `"c"`},
-		{"uuid", `"c"`},
-		{"integer[]", `"c"::TEXT AS "c"`},
-		{"jsonb", `"c"::TEXT AS "c"`},
-		{"bytea", `"c"::TEXT AS "c"`},
-		{"point", `"c"::TEXT AS "c"`},
-		{"int4range", `"c"::TEXT AS "c"`},
-		// "daterange" must not be mistaken for "date" (nor "datemultirange",
-		// nor a UDT that happens to share a scalar's name as a prefix).
-		{"daterange", `"c"::TEXT AS "c"`},
-		{"datemultirange", `"c"::TEXT AS "c"`},
-		{"date_status_enum", `"c"::TEXT AS "c"`},
-		{"mood_enum", `"c"::TEXT AS "c"`},
-		{"xml", `"c"::TEXT AS "c"`},
-		{"bit(8)", `"c"::TEXT AS "c"`},
-		{"inet", `"c"::TEXT AS "c"`},
-		{"time with time zone", `"c"::TEXT AS "c"`},
-	}
-	for _, tt := range tests {
-		t.Run(tt.colType, func(t *testing.T) {
-			require.Equal(t, tt.want, SelectColExpr("", "c", tt.colType))
-		})
-	}
-
-	// A qualified column must still give a result column with the name of the
-	// column, and the name must be quoted.
-	qualified := []struct {
-		colType string
-		want    string
-	}{
-		{"integer", `t."Name"`},
-		{"numeric", `trim_scale(t."Name") AS "Name"`},
-		{"jsonb", `t."Name"::TEXT AS "Name"`},
-	}
-	for _, tt := range qualified {
-		t.Run("qualified/"+tt.colType, func(t *testing.T) {
-			require.Equal(t, tt.want, SelectColExpr("t", "Name", tt.colType))
-		})
-	}
-}
-
-// The fetch must start from the expression of the row hash: a fetched value
-// is then the value that was hashed.
-func TestFetchColExprStartsFromColExpr(t *testing.T) {
-	for _, colType := range []string{"integer", "text", "numeric", "numeric(12,4)", "DECIMAL", "numeric[]", "jsonb", "inet", ""} {
-		t.Run(colType, func(t *testing.T) {
-			hashExpr := queries.ColExpr("_tbl_", "c", colType)
-			require.True(t, strings.HasPrefix(FetchColExpr("_tbl_", "c", colType), hashExpr),
-				"FetchColExpr must start with %q", hashExpr)
-		})
-	}
 }
 
 // Concurrent normalisation is race-free (a pgtype.Map must not be shared

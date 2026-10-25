@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/pgedge/ace/db/queries"
 	utils "github.com/pgedge/ace/pkg/common"
 	"github.com/pgedge/ace/pkg/logger"
 )
@@ -179,7 +180,7 @@ func fetchCommitTimestamps(ctx context.Context, tx pgx.Tx, task *TableRepairTask
 			args := make([]any, 0, len(batchKeys))
 			paramIdx := 1
 			sb.WriteString("SELECT ")
-			sb.WriteString(utils.SelectColExpr("", pkCol, pkType))
+			sb.WriteString(queries.SelectColExpr("", pkCol, pkType))
 			sb.WriteString(", pg_xact_commit_timestamp(xmin) FROM ")
 			sb.WriteString(tableIdent)
 			sb.WriteString(" WHERE ")
@@ -211,7 +212,7 @@ func fetchCommitTimestamps(ctx context.Context, tx pgx.Tx, task *TableRepairTask
 	selectKey := make([]string, len(task.Key))
 	for i, col := range task.Key {
 		colIdents[i] = pgx.Identifier{col}.Sanitize()
-		selectKey[i] = utils.SelectColExpr("", col, colTypes[col])
+		selectKey[i] = queries.SelectColExpr("", col, colTypes[col])
 	}
 	pkSQL := strings.Join(colIdents, ", ")
 

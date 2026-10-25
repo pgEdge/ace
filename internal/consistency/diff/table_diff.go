@@ -518,7 +518,7 @@ func (t *TableDiffTask) fetchRows(nodeName string, r Range) ([]types.OrderedMap,
 	selectCols = append(selectCols, "pg_xact_commit_timestamp(xmin) as commit_ts", "to_json(pg_xact_commit_timestamp_origin(xmin))->>'roident' as node_origin")
 
 	for _, colName := range t.Cols {
-		selectCols = append(selectCols, utils.SelectColExpr("", colName, colTypes[colName]))
+		selectCols = append(selectCols, queries.SelectColExpr("", colName, colTypes[colName]))
 	}
 
 	selectColsStr := strings.Join(selectCols, ", ")

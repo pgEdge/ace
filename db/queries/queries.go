@@ -563,6 +563,82 @@ func ColExpr(tableAlias, col, colType string) string {
 	return ref
 }
 
+// FetchColExpr returns the expression for one column in a diff row fetch,
+// without a name. It starts from the expression of the row hash, so a
+// fetched value is the value that was hashed. Then it casts to ::TEXT the
+// columns the driver cannot scan without loss: arrays, json, bytea and any
+// type the driver would give as an opaque Go struct (geometric, network,
+// range, enum, xml, ...). Postgres parses its own text form on repair, so
+// text values round-trip for every type without per-type conversion code.
+//
+// An empty or unknown type is cast to ::TEXT here, while the row hash takes
+// the plain column for it. Both forms print the same text inside ROW(), so
+// the fetched value is still the hashed value.
+//
+// col is the column name, not quoted. tableAlias may be empty.
+func FetchColExpr(tableAlias, col, colType string) string {
+	expr := ColExpr(tableAlias, col, colType)
+	if NeedsTextCast(colType) {
+		expr += "::TEXT"
+	}
+	return expr
+}
+
+// SelectColExpr returns the SELECT-list entry for one column of a diff row
+// fetch: the fetch expression, named after the column when it is more than
+// the plain column. Rows are read by the names of the result columns, so the
+// name must not change. Every row fetch of the diff engines must use it, so
+// that diff reports do not depend on the engine and stay repairable.
+func SelectColExpr(tableAlias, col, colType string) string {
+	expr := FetchColExpr(tableAlias, col, colType)
+	if expr == ColExpr(tableAlias, col, "") {
+		return expr
+	}
+	return expr + " AS " + pgx.Identifier{col}.Sanitize()
+}
+
+// NeedsTextCast reports whether a diff row fetch must cast the column to
+// ::TEXT for its value to round-trip through a diff report.
+func NeedsTextCast(colType string) bool {
+	return strings.HasSuffix(colType, "[]") ||
+		strings.Contains(strings.ToLower(colType), "json") ||
+		strings.Contains(strings.ToLower(colType), "bytea") ||
+		!IsKnownScalarType(colType)
+}
+
+func IsKnownScalarType(colType string) bool {
+	// colType is pg_catalog.format_type output. Strip the typmod so
+	// "numeric(10,2)" and "timestamp(3) with time zone" match their base
+	// names, then require an exact match: prefix matching mistook types that
+	// merely start like a scalar ("daterange" for "date") for the scalar
+	// itself, so they were never cast to ::TEXT and reached diff reports as
+	// unrepairable Go-formatted structs.
+	base := colType
+	if i := strings.IndexByte(base, '('); i >= 0 {
+		if j := strings.IndexByte(base[i:], ')'); j >= 0 {
+			base = strings.TrimSpace(base[:i] + base[i+j+1:])
+		}
+	}
+
+	switch base {
+	case "character varying", "character", "text",
+		"integer", "bigint", "smallint",
+		"numeric", "decimal", "real", "double precision",
+		"boolean",
+		"bytea",
+		"json", "jsonb",
+		"uuid",
+		"date",
+		"timestamp without time zone", "timestamp with time zone",
+		// "time with time zone" (timetz) is deliberately absent: it is not
+		// registered in the pgx v5 default type map, so it cannot be scanned
+		// into *interface{} and must be cast to ::TEXT by the diff layer.
+		"time without time zone":
+		return true
+	}
+	return false
+}
+
 // RowHashExpr returns a SQL expression for the sha256 hash of one row, as a
 // 32-byte bytea. The mtree leaf hash, the table-diff block hash and the row
 // hashes of the mtree diff all use it. If they used different row encodings,
