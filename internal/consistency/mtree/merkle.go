@@ -582,7 +582,7 @@ func (m *MerkleTreeTask) processWorkItem(work CompareRangesWorkItem, pool1, pool
 	refTypes := m.ColTypes["_ref"]
 	colExprs := make([]string, 0, len(m.Cols))
 	for _, c := range m.Cols {
-		colExprs = append(colExprs, utils.SelectColExpr("", c, refTypes[c]))
+		colExprs = append(colExprs, queries.SelectColExpr("", c, refTypes[c]))
 	}
 	selectCols := "pg_xact_commit_timestamp(xmin) as commit_ts, " +
 		"to_json(pg_xact_commit_timestamp_origin(xmin))->>'roident' as node_origin, " +
