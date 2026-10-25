@@ -567,6 +567,10 @@ func TestIsNumericType(t *testing.T) {
 		{"numeric[]", false},
 		{"numeric(10,2)[]", false},
 		{"DECIMAL[]", false},
+		// A type whose name only starts like numeric, such as an enum.
+		{"numeric_level", false},
+		{"decimal_kind", false},
+		{"numericx", false},
 	}
 
 	for _, tt := range tests {

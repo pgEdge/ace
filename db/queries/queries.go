@@ -513,14 +513,19 @@ func InsertBlockRangesBatchComposite(ctx context.Context, db DBQuerier, mtreeTab
 }
 
 // isNumericType reports whether a column of this type (format_type output)
-// is wrapped in trim_scale(). Arrays are not: trim_scale(numeric[]) does not
-// exist.
+// is wrapped in trim_scale(). The type must be numeric or decimal itself, with
+// or without a typmod: a type whose name only starts with these words, such
+// as an enum, has no trim_scale(). Arrays are not wrapped either:
+// trim_scale(numeric[]) does not exist.
 func isNumericType(colType string) bool {
 	lower := strings.ToLower(strings.TrimSpace(colType))
 	if strings.HasSuffix(lower, "[]") {
 		return false
 	}
-	return strings.HasPrefix(lower, "numeric") || strings.HasPrefix(lower, "decimal")
+	if i := strings.IndexByte(lower, '('); i >= 0 {
+		lower = strings.TrimSpace(lower[:i])
+	}
+	return lower == "numeric" || lower == "decimal"
 }
 
 // NumericColumns returns the set of the columns that are wrapped in
