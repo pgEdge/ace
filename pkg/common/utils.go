@@ -1273,6 +1273,44 @@ func timeOrInfinity(t time.Time, inf pgtype.InfinityModifier) any {
 	}
 }
 
+// ScanRow reads the current row of rows: one entry per result column, named
+// after it, with each value in the form that ACE stores in diff reports.
+// Every place that reads table rows for a diff report, for a comparison or
+// for a key match must read them in this way, so that the values have one Go
+// form wherever they meet.
+func ScanRow(rows pgx.Rows) (types.OrderedMap, error) {
+	values, err := rows.Values()
+	if err != nil {
+		return nil, err
+	}
+	fields := rows.FieldDescriptions()
+	if len(values) != len(fields) {
+		return nil, fmt.Errorf("row has %d values for %d columns", len(values), len(fields))
+	}
+	row := make(types.OrderedMap, len(fields))
+	for i, f := range fields {
+		row[i] = types.KVPair{Key: f.Name, Value: NormalizeScannedValue(values[i])}
+	}
+	return row, nil
+}
+
+// ScanRows reads all rows in the same form and closes them.
+func ScanRows(rows pgx.Rows) ([]types.OrderedMap, error) {
+	defer rows.Close()
+	var result []types.OrderedMap
+	for rows.Next() {
+		row, err := ScanRow(rows)
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, row)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
 // NormalizeScannedValue converts a value scanned from a database row into the
 // canonical representation ACE stores in diff reports: pgx driver structs
 // (pgtype.Time, [16]byte UUIDs, intervals, numerics, ...) become plain strings

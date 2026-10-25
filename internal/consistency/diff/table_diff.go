@@ -608,30 +608,9 @@ func (t *TableDiffTask) fetchRows(nodeName string, r Range) ([]types.OrderedMap,
 	if err != nil {
 		return nil, fmt.Errorf("failed to query rows for range on node %s (SQL: %s, Args: %v): %w", nodeName, querySQL, args, err)
 	}
-	defer pgRows.Close()
-
-	var results []types.OrderedMap
-	colsDesc := pgRows.FieldDescriptions()
-
-	for pgRows.Next() {
-		rowValues := make([]any, len(colsDesc))
-		rowValPtrs := make([]any, len(colsDesc))
-		for i := range rowValues {
-			rowValPtrs[i] = &rowValues[i]
-		}
-
-		if err := pgRows.Scan(rowValPtrs...); err != nil {
-			return nil, fmt.Errorf("failed to scan row on node %s: %w", nodeName, err)
-		}
-
-		rowData := make(types.OrderedMap, len(colsDesc))
-		for i, colD := range colsDesc {
-			rowData[i] = types.KVPair{Key: string(colD.Name), Value: utils.NormalizeScannedValue(rowValues[i])}
-		}
-		results = append(results, rowData)
-	}
-	if err := pgRows.Err(); err != nil {
-		return nil, fmt.Errorf("row iteration error on node %s: %w", nodeName, err)
+	results, err := utils.ScanRows(pgRows)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read rows on node %s: %w", nodeName, err)
 	}
 	return results, nil
 }
