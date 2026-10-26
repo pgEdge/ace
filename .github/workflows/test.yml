@@ -25,7 +25,7 @@ jobs:
     - name: Set up Go
       uses: actions/setup-go@v4
       with:
-        go-version: '1.26'
+        go-version-file: go.mod
 
     # Run whole packages, not lists of test names, so a new test runs in CI
     # without a change here, and each test runs once. The integration tests

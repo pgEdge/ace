@@ -11,7 +11,7 @@
 
 module github.com/pgedge/ace
 
-go 1.26.5
+go 1.26.10
 
 require (
 	github.com/charmbracelet/log v0.4.2

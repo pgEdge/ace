@@ -501,6 +501,11 @@ of that version, and recreate the `#` operator as described in the
   file left by an earlier version when it writes it again. Files written by
   earlier versions keep their mode until then; restrict them by hand.
 - Updated Go dependencies to address recent CVEs.
+- **ACE is built with Go 1.26.10.** ACE 2.1.1 was built with Go
+  1.26.5. The newer Go has security fixes to `crypto/tls`, `net/http`,
+  `net/url`, `encoding/asn1` and `os`, and makes `crypto/x509` reject
+  certificate chains through the compromised eMudhra intermediate CAs
+  (CVE-2026-111943).
 
 ## [v2.1.1]
 
