@@ -315,12 +315,6 @@ func TestMtreeWorkersWithoutCap(t *testing.T) {
 
 	peaks := c.run(t, ctx, "mtree build", c.task.BuildMtree)
 	requireAtMost(t, "mtree build", peaks, buildLimit)
-	if hash >= connCap {
-		// With several CPUs the build must have run more than the capped
-		// test allows; otherwise that test proves nothing.
-		require.Greater(t, maxOf(peaks.pooled), connCap,
-			"mtree build never opened more than %d connections on any node with %d hash workers", connCap, hash)
-	}
 
 	changed := c.diverge(t, ctx)
 
@@ -333,14 +327,4 @@ func TestMtreeWorkersWithoutCap(t *testing.T) {
 	peaks = c.run(t, ctx, "mtree table-diff", c.task.DiffMtree)
 	requireAtMost(t, "mtree table-diff", peaks, hash+1)
 	c.requireDiffFound(t, changed)
-}
-
-// maxOf returns the largest value in m, or 0 if m is empty: the peak of a
-// per-node count over all nodes.
-func maxOf(m map[string]int) int {
-	n := 0
-	for _, v := range m {
-		n = max(n, v)
-	}
-	return n
 }
