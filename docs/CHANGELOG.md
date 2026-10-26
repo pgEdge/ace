@@ -223,6 +223,14 @@ of that version, and recreate the `#` operator as described in the
     skipped, naming the node, the same way as foreign tables and views.
     `schema-diff` used to leave these tables out without a word. A run that
     compares nothing because the role can read none of its tables fails.
+- **The columns of a composite primary key are read in the order of the
+  constraint.** ACE read them from `information_schema.key_column_usage`
+  without an `ORDER BY`, so their order was not guaranteed, although
+  PostgreSQL returned them in the order of the constraint in practice. ACE
+  builds its `ROW(...)` comparisons and `ORDER BY` from that list, and in
+  another order those queries could not use the primary key index. No
+  wrong or slow result from this has been seen; the order is now
+  guaranteed, and the key is read from `pg_constraint`.
 - **`table-diff` no longer refuses a table with a `bytea` value larger than
   1 MB.** Before each run it read the longest value of every `bytea`
   column on every node, which read the whole table, and refused to run if
