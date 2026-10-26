@@ -47,18 +47,27 @@ const (
 // aceConnPeaks is the most ACE connections seen on each node during one
 // phase. Pooled are client backends; walsenders are the replication
 // connections of the CDC drain, which are not part of any pool. Combined is
-// the most of both seen in one sample.
+// the most of both seen in one sample. Samples counts the successful samples
+// of each node, and errs holds the last error of a sample that failed while
+// the phase was still running.
 type aceConnPeaks struct {
 	pooled     map[string]int
 	walsenders map[string]int
 	combined   map[string]int
-	samples    int
+	samples    map[string]int
+	errs       map[string]error
 }
 
 // watchACEConnections samples pg_stat_activity on every node until stop is
 // called, and returns the peaks.
 func watchACEConnections(ctx context.Context, pools map[string]*pgxpool.Pool) (stop func() aceConnPeaks) {
-	peaks := aceConnPeaks{pooled: map[string]int{}, walsenders: map[string]int{}, combined: map[string]int{}}
+	peaks := aceConnPeaks{
+		pooled:     map[string]int{},
+		walsenders: map[string]int{},
+		combined:   map[string]int{},
+		samples:    map[string]int{},
+		errs:       map[string]error{},
+	}
 	var mu sync.Mutex
 	watchCtx, cancel := context.WithCancel(ctx)
 	done := make(chan struct{})
@@ -70,14 +79,17 @@ func watchACEConnections(ctx context.Context, pools map[string]*pgxpool.Pool) (s
 				       count(*) FILTER (WHERE backend_type = 'walsender')
 				FROM pg_stat_activity
 				WHERE application_name = 'ACE' AND pid <> pg_backend_pid()`).Scan(&pooled, &walsenders)
-			if err != nil {
-				continue // the context was cancelled
-			}
 			mu.Lock()
-			peaks.pooled[name] = max(peaks.pooled[name], pooled)
-			peaks.walsenders[name] = max(peaks.walsenders[name], walsenders)
-			peaks.combined[name] = max(peaks.combined[name], pooled+walsenders)
-			peaks.samples++
+			switch {
+			case err != nil && watchCtx.Err() == nil:
+				peaks.errs[name] = err
+			case err == nil:
+				peaks.pooled[name] = max(peaks.pooled[name], pooled)
+				peaks.walsenders[name] = max(peaks.walsenders[name], walsenders)
+				peaks.combined[name] = max(peaks.combined[name], pooled+walsenders)
+				peaks.samples[name]++
+			}
+			// An error after stop is the cancelled context, not a failure.
 			mu.Unlock()
 		}
 	}
@@ -201,8 +213,15 @@ func (c *connCapEnv) run(t *testing.T, ctx context.Context, phase string, fn fun
 	err := fn()
 	peaks := stop()
 	require.NoError(t, err, phase)
-	require.NotZero(t, peaks.samples, "%s: no pg_stat_activity samples", phase)
-	t.Logf("%s: peak pooled ACE connections per node %v, walsenders %v, both at once %v", phase, peaks.pooled, peaks.walsenders, peaks.combined)
+	// A node without a sample would be left out of requireAtMost, so the
+	// cap would go unchecked on it.
+	for node := range c.pools {
+		require.NotZero(t, peaks.samples[node], "%s: no pg_stat_activity sample from %s (last error: %v)", phase, node, peaks.errs[node])
+	}
+	t.Logf("%s: peak pooled ACE connections per node %v, walsenders %v, both at once %v, samples %v", phase, peaks.pooled, peaks.walsenders, peaks.combined, peaks.samples)
+	if len(peaks.errs) > 0 {
+		t.Logf("%s: some pg_stat_activity samples failed: %v", phase, peaks.errs)
+	}
 	return peaks
 }
 
