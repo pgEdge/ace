@@ -140,6 +140,11 @@ type connCapEnv struct {
 	task      *mtree.MerkleTreeTask
 }
 
+// newConnCapEnv creates table with connCapRows equal rows on n1, n2 and n3,
+// and a Merkle tree task for it on the three-node cluster with
+// max_cpu_ratio 1.0 and the given max_connections (0 means no cap). It runs
+// the checks and mtree init, and tears the tree and the table down when the
+// test ends.
 func newConnCapEnv(t *testing.T, ctx context.Context, table string, maxConnections int) *connCapEnv {
 	t.Helper()
 	env := newSpockEnv()
@@ -311,6 +316,8 @@ func TestMtreeWorkersWithoutCap(t *testing.T) {
 	c.requireDiffFound(t, changed)
 }
 
+// maxOf returns the largest value in m, or 0 if m is empty: the peak of a
+// per-node count over all nodes.
 func maxOf(m map[string]int) int {
 	n := 0
 	for _, v := range m {
