@@ -26,7 +26,7 @@ table instead of its data or its mere presence.
 | `--skip-tables` | `-T` | Comma list of tables to exclude. Applies to `--compare=structure` too. |  |
 | `--skip-file` | `-s` | File with list of tables to exclude. Applies to `--compare=structure` too. |  |
 | `--block-size <int>` | `-b` | Rows per block when diffing tables. Default `100000`. |
-| `--concurrency-factor <float>` | `-c` | CPU ratio for concurrency (0.0–4.0). Default `0.5`. |
+| `--concurrency-factor <float>` | `-c` | CPU ratio for the comparison of the blocks that differ (0.0–4.0); the number of hash workers comes from `--max-connections`. Default `0.5`. |
 | `--compare-unit-size <int>` | `-u` | Recursive split size for mismatched blocks. Default `10000`. |
 | `--output <json\|html>` | `-o` | Per-table diff report format. Default `json`. With `--compare=structure`, only `json` is accepted, and it only takes effect when given by hand (see below). |
 | `--override-block-size` | `-B` | Allow block sizes outside `ace.yaml` guardrails. |

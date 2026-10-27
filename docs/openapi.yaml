@@ -458,7 +458,7 @@ components:
           description: Defaults to table_diff.diff_block_size or 100000.
         concurrency_factor:
           type: number
-          description: CPU ratio for concurrency (0.0–4.0). Defaults to table_diff.concurrency_factor or 0.5.
+          description: CPU ratio for the comparison of the blocks that differ (0.0–4.0); the number of hash workers comes from max_connections. Defaults to table_diff.concurrency_factor or 0.5.
         compare_unit_size:
           type: integer
           description: Defaults to table_diff.compare_unit_size or 10000.
@@ -467,7 +467,7 @@ components:
           description: Defaults to table_diff.max_diff_rows or 0 (no limit).
         max_connections:
           type: integer
-          description: Maximum database connections per node. Defaults to table_diff.max_connections or derived from concurrency factor.
+          description: Connections per node for each table-diff task; a value that is set is a strict limit for the whole task. 0 or missing takes, in this order, max_connections.nodes.<cluster>.<node> or max_connections.default from ace.yaml, then table_diff.max_connections; if none is set, the task opens 4 for cutting and hashing, and the comparison can open more.
         table_filter:
           type: string
           description: SQL WHERE predicate (without WHERE).
@@ -566,13 +566,13 @@ components:
           description: Defaults to table_diff.diff_block_size or 100000.
         concurrency_factor:
           type: number
-          description: CPU ratio for concurrency (0.0–4.0). Defaults to table_diff.concurrency_factor or 0.5.
+          description: CPU ratio for the comparison of the blocks that differ (0.0–4.0); the number of hash workers comes from max_connections. Defaults to table_diff.concurrency_factor or 0.5.
         compare_unit_size:
           type: integer
           description: Defaults to table_diff.compare_unit_size or 10000.
         max_connections:
           type: integer
-          description: Maximum database connections per node. Defaults to table_diff.max_connections or derived from concurrency factor.
+          description: Connections per node for each table-diff task; a value that is set is a strict limit for the whole task. 0 or missing takes, in this order, max_connections.nodes.<cluster>.<node> or max_connections.default from ace.yaml, then table_diff.max_connections; if none is set, the task opens 4 for cutting and hashing, and the comparison can open more.
         output:
           type: string
           enum: [json, html]
@@ -603,13 +603,13 @@ components:
           description: Defaults to table_diff.diff_block_size or 100000.
         concurrency_factor:
           type: number
-          description: CPU ratio for concurrency (0.0–4.0). Defaults to table_diff.concurrency_factor or 0.5.
+          description: CPU ratio for the comparison of the blocks that differ (0.0–4.0); the number of hash workers comes from max_connections. Defaults to table_diff.concurrency_factor or 0.5.
         compare_unit_size:
           type: integer
           description: Defaults to table_diff.compare_unit_size or 10000.
         max_connections:
           type: integer
-          description: Maximum database connections per node. Defaults to table_diff.max_connections or derived from concurrency factor.
+          description: Connections per node for each table-diff task; a value that is set is a strict limit for the whole task. 0 or missing takes, in this order, max_connections.nodes.<cluster>.<node> or max_connections.default from ace.yaml, then table_diff.max_connections; if none is set, the task opens 4 for cutting and hashing, and the comparison can open more.
         output:
           type: string
           enum: [json, html]

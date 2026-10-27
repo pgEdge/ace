@@ -14,7 +14,7 @@ ACE parallelizes work across multiple processes, hashing blocks of rows and only
 
 If you notice a pronounced change in a node's performance:
 
-* Review your ACE commands; experiment with the [table-diff tuning flags](#command-options-that-impact-performance) such as `--block-size`, `--concurrency-factor`, and `--compare-unit-size`.
+* Review your ACE commands; experiment with the [table-diff tuning flags](#command-options-that-impact-performance) such as `--block-size`, `--max-connections`, `--concurrency-factor`, and `--compare-unit-size`.
 * Confirm that your table has been `ANALYZE`d recently.
 * Use `--table-filter`/`-F` and `--nodes` to target hot ranges.
 * If you're using ACE on huge tables, use Merkle trees.
@@ -29,13 +29,13 @@ When invoking [ACE commands](commands/index.md), review the available command op
     Controls the number of rows hashed per block. Larger blocks reduce round-trips but can increase memory usage or hash time. Defaults to `100000`, and respects the guardrails defined in `ace.yaml` unless `--override-block-size`/`-B` is set.
 
 - **`--concurrency-factor`**
-    CPU ratio that controls how many workers ACE spawns relative to available CPUs (0.0–4.0). For example, `0.5` on a 16-CPU machine creates 8 workers. Higher values improve throughput on machines with spare CPU, but can create contention on smaller or busier hosts. Default is `0.5`.
+    CPU ratio that controls how many comparisons of the blocks that differ ACE runs at the same time, relative to available CPUs (0.0–4.0). For example, `0.5` on a 16-CPU machine runs 8 comparisons. Higher values find the differing rows faster on machines with spare CPU, but can create contention on smaller or busier hosts. It does not change the speed of hashing; for that, see `--max-connections`. Default is `0.5`.
 
 - **`--compare-unit-size`**
     Sets the minimum block size used when ACE recursively drills into mismatched blocks. Smaller values provide more granular comparisons at the cost of additional round-trips. Default is `10000`.
 
 - **`--max-connections`**
-    Caps the number of database connections ACE opens per node. By default, the pool size is derived from `--concurrency-factor` and the number of CPUs. On machines with many cores, this can result in a large number of connections. Use `--max-connections` to set a hard upper limit, or set `table_diff.max_connections` in `ace.yaml` to apply it globally. This is especially useful when running ACE against databases with limited `max_connections` or when sharing the database with other applications.
+    The number of connections that ACE opens to each node to cut and hash a table. The default is 4, or the value from the `max_connections` section of `ace.yaml`, which can also give a different value for each node. More connections hash faster but keep more backends busy on the server. If a server has fewer free connection slots, ACE works with the connections it gets and writes a warning. A value that you set is a strict limit for the whole task. Without one, comparing the blocks that differ can use more connections, up to the number that `--concurrency-factor` gives. See [Connections per node](configuration.md#connections-per-node).
 
 - **`--override-block-size` (`-B`)**
     Override the safety limits defined in `ace.yaml`. Use cautiously: extremely large blocks can lead to `array_agg` memory pressure.

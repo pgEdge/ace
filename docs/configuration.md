@@ -29,12 +29,14 @@ The [`ace.sample.yaml` file](https://github.com/pgEdge/ace/blob/main/ace.sample.
 | postgres --> tcp_keepalives_interval | TCP keepalive interval (s). **Default: 10** |
 | postgres --> tcp_keepalives_count | Number of keepalive probes before drop. **Default: 5** |
 | postgres --> max_parallel_workers_per_gather | Sent as a session setting on every ACE connection. ACE already runs its hash queries from several client-side workers, so `0` stops Postgres from adding parallel workers to each of them. Set to `-1` to leave the server's own setting in place. **Default: 0** |
-| table_diff --> concurrency_factor | CPU ratio for diff concurrency (0.0–4.0, e.g. 0.5 uses half of available CPUs). **Default: 0.5** |
+| table_diff --> concurrency_factor | CPU ratio for the comparison of the blocks that differ (0.0–4.0, e.g. 0.5 uses half of available CPUs): the number of comparison tasks that run at the same time. The number of hash workers comes from `max_connections`. **Default: 0.5** |
 | table_diff --> min_diff_block_size | Minimum diff block (row chunk) size. **Default: 1** |
 | table_diff --> max_diff_block_size | Maximum diff block size. **Default: 1000000** |
 | table_diff --> compare_unit_size | Unit size for smallest comparison chunk. **Default: 10000** |
-| table_diff --> max_connections | Maximum database connections per node during diff operations. When set, caps the connection pool regardless of concurrency factor. **Default: 0** (derive from concurrency factor) |
-| mtree --> max_connections | Maximum database connections per node for `mtree build`, `mtree update`, and `mtree table-diff`, like `table_diff.max_connections` for the diff commands. One connection holds the tree's transaction and the rest run hash queries, so this also caps the busy backends per node. Must be at least `2` when set, and `3` for `mtree build`, which also runs cutting workers on the reference node out of the same pool. `0` derives the worker count from `--max-cpu-ratio` alone. **Default: 0** |
+| table_diff --> max_connections | Old name of `max_connections --> default`. ACE uses it only when `max_connections.default` is not set. **Default: 0** (not set) |
+| max_connections --> default | Number of connections that one `table-diff` task opens to each node, and a strict limit for the whole task (see [Connections per node](#connections-per-node)). `0` means not set: then the task opens 4 connections for cutting and hashing, and the comparison can open more. **Default: 0** (not set) |
+| max_connections --> nodes | Map from `<cluster>.<node>` to the number of connections for that node. It has priority over `max_connections.default`. **Default: none** |
+| mtree --> max_connections | Maximum database connections per node for `mtree build`, `mtree update`, and `mtree table-diff`. It caps the pool; the `max_connections` section does not apply to mtree commands. One connection holds the tree's transaction and the rest run hash queries, so this also caps the busy backends per node. Must be at least `2` when set, and `3` for `mtree build`, which also runs cutting workers on the reference node out of the same pool. `0` derives the worker count from `--max-cpu-ratio` alone. **Default: 0** |
 | mtree → cdc --> slot_name | Logical decoding slot name for mtree CDC. **Default: "ace_mtree_slot"** |
 | mtree → cdc --> publication_name | Publication used for mtree CDC. **Default: "ace_mtree_pub"** |
 | mtree → cdc --> cdc_processing_timeout | Wall-clock budget (s) for a CDC catch-up drain before it gives up. Progress is durable, so a timeout means "re-run or raise", not "rebuild". **Default: 300** |
@@ -55,6 +57,27 @@ The [`ace.sample.yaml` file](https://github.com/pgEdge/ace/blob/main/ace.sample.
 | cert_auth --> ace_user_key_file | Path to user/client private key. **Default: "data/pg16/pki/admin-cert/admin.key"** |
 | cert_auth --> ca_cert_file | Path to CA certificate. **Default: "data/pg16/pki/ca.crt"** |
 | (root) --> debug_mode | Enable verbose/diagnostic logging. **Default: false** |
+
+### Connections per node
+
+`table-diff` (also when `repset-diff` or `schema-diff` runs it) opens a fixed number of connections N to each node before it starts to cut and hash a table, and keeps them open until the task ends. One node, the anchor, cuts the table into blocks: there, one connection in five goes to a cutting worker (at least one), and the rest go to hash workers. On the other nodes all N connections go to hash workers. When a cutting worker ends, its connection becomes one more hash worker.
+
+N for a node comes from, in this order: `--max-connections` on the command line (or `max_connections` in the HTTP API or in a scheduled job), `max_connections.nodes.<cluster>.<node>`, `max_connections.default`, `table_diff.max_connections`, and 4.
+
+```yaml
+max_connections:
+  default: 4
+  nodes:
+    demo.n1: 8
+```
+
+Some rules to know:
+
+- The limit is per task. An API server or the scheduler can run several tasks at the same time in one process, and each task opens its own connections, so two tasks can use up to 2N connections to one node.
+- A value that you set, on the command line or in this section, is a strict limit for the whole task: the comparison of the blocks that differ also runs on these N connections, with no more comparison tasks at the same time than N. If no value is set, the task opens 4 connections for cutting and hashing, and the comparison can open more connections to a node, up to the number that `table_diff.concurrency_factor` gives (one connection per comparison task, at least 4).
+- If a server refuses a connection because it has no free connection slot (SQLSTATE 53300: the limit of the server, of the role or of the database), ACE goes on with the connections that it already has and writes a WARNING with the node, the number of connections it got and N. The comparison phase then runs no more tasks at the same time than the smallest number of connections over all nodes, and does not open new connections. If a node accepts no connection at all, the run stops with an error that names the node.
+- The service file (`pg_service.conf`) is not used for this setting: libpq reads the same file and refuses unknown keys.
+- `mtree` commands do not use this section. For them, `--max-connections` and `mtree.max_connections` keep their old meaning: an upper bound for the pool, where `0` means "compute from `--max-cpu-ratio`".
 
 
 

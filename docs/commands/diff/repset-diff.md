@@ -22,10 +22,10 @@ Runs `table-diff` on every table in a replication set and reports differences.
 | `--skip-tables` | `-T` | Comma list of tables to exclude |  |
 | `--skip-file` | `-s` | File with list of tables to exclude |  |
 | `--block-size <int>` | `-b` | Rows per block when diffing each table. Default `100000`. |
-| `--concurrency-factor <float>` | `-c` | CPU ratio for concurrency (0.0–4.0). Default `0.5`. |
+| `--concurrency-factor <float>` | `-c` | CPU ratio for the comparison of the blocks that differ (0.0–4.0); the number of hash workers comes from `--max-connections`. Default `0.5`. |
 | `--compare-unit-size <int>` | `-u` | Recursive split size for mismatched blocks. Default `10000`. |
 | `--output <json\|html>` | `-o` | Per-table diff report format. Default `json`. |
-| `--max-connections <int>` | `-M` | Maximum database connections per node. Caps the pool regardless of concurrency factor. | derived |
+| `--max-connections <int>` | `-M` | Number of connections that ACE opens to each node for one `table-diff` task. A value that you set, here or in the `max_connections` section of `ace.yaml`, is a strict limit for the whole task. `0` takes the value from `ace.yaml`; if it sets none, ACE opens 4 connections for cutting and hashing, and comparing the blocks that differ can use more (see [Connections per node](../../configuration.md#connections-per-node)). | 0 |
 | `--override-block-size` | `-B` | Allow block sizes outside `ace.yaml` guardrails. |
 | `--quiet` | `-q` | Suppress output | `false` |
 | `--debug` | `-v` | Debug logging | `false` |

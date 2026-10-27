@@ -93,9 +93,10 @@ the number and the size of blocks do not depend on it. The code is in
 `internal/consistency/slicer`; `mtree build` uses the same code.
 
 1. **Parts.** ACE splits the key space of the anchor node into K parts, the
-   units of work for the cutting workers. There is one cutting worker per
-   four hash workers (at most four), and four parts per cutting worker, so
-   K does not depend on the size of the table. The part bounds come from
+   units of work for the cutting workers. Of the N connections to the
+   anchor node, one in five goes to a cutting worker (at least one, at most
+   four), and there are four parts per cutting worker, so K does not depend
+   on the size of the table. The part bounds come from
    `pg_stats.histogram_bounds` of the first primary-key column: each chosen
    value becomes the first key of the anchor node that is not less than it.
    If the column has no histogram (the table was never analyzed, or the
@@ -136,21 +137,28 @@ the number and the size of blocks do not depend on it. The code is in
    and the last block are open (see below), and rows written during the run
    can make any block larger.
 
-   A chunk runs in a read-only `REPEATABLE READ` transaction with
-   `enable_seqscan` and `enable_sort` off; otherwise, with a selective
-   filter, the planner can choose a sequential scan and a sort for every
-   jump. The first chunk of a part cuts one block; each next chunk cuts
-   twice as many, up to about one million rows. So the first block is ready
-   at once, and the cut does not hold back the vacuum horizon of the anchor
-   node. The cut does not need one snapshot: a block is a key range, and
-   every node hashes the same ranges. How the hashes see concurrent writes
-   does not change: each block hash is its own query on each node. On a laptop one cutting
-   worker cuts 5–6 million `bigint` keys per second, and the rate grows
-   linearly with the number of workers.
+   Every cutting worker has its own connection and cuts all its parts in
+   one read-only `REPEATABLE READ` transaction, with `enable_seqscan` and
+   `enable_sort` off; otherwise, with a selective filter, the planner can
+   choose a sequential scan and a sort for every jump. The first chunk of a
+   part cuts one block; each next chunk cuts twice as many, up to about one
+   million rows, so the first block is ready at once. While a worker runs,
+   the anchor node cannot vacuum rows that became dead after its
+   transaction started; the cut never waits for the hash workers, so this
+   lasts one pass over the key index. The workers do not need one common
+   snapshot: a block is a key range, and every node hashes the same ranges.
+   How the hashes see concurrent writes does not change: each block hash is
+   its own query on each node. On a laptop one cutting worker cuts 5–6
+   million `bigint` keys per second, and the rate grows linearly with the
+   number of workers.
 
-Workers send each block to the hash queue as soon as they cut it, so
-hashing does not wait for a full pass over the key. Blocks of different
-parts can arrive in any order; the comparison step sorts them by key.
+Workers add each block to one shared list as soon as they cut it, so
+hashing does not wait for a full pass over the key. Every node has its own
+hash workers, each on its own connection, and its own position in the
+list: a slow node is behind, a fast node is ahead, and neither waits for the
+other. When a cutting worker ends, its connection becomes one more hash
+worker on the anchor node. Blocks of different parts can arrive in any
+order; the comparison step sorts them by key.
 
 The log shows how ACE built the boundaries: the part source and why, the
 anchor node, the number of parts and workers, and, at the end, the number
@@ -231,8 +239,8 @@ flowchart LR
 ### Resource Utilisation and Tuning
 
 - **block_size**: Larger blocks reduce hash tasks and recursion but increase memory/IO per hash and slow mismatch localisation; smaller blocks do the opposite (more queries, finer locality).
-- **concurrency_factor**: CPU ratio (0.0–4.0) that scales workers relative to `NumCPU` (e.g. 0.5 on a 16-CPU host spawns 8 workers). Higher = faster hashing but more load on DB backends, network, and local CPU; can contend with other workloads and connection limits. The connection pool per node is sized to match the worker count (minimum 4).
-- **max_connections**: Hard cap on the connection pool size per node. When set, overrides the concurrency-derived pool size. Useful for environments with limited `max_connections` on the database server. Workers that exceed the pool size will queue for a connection rather than fail.
+- **concurrency_factor**: CPU ratio (0.0–4.0) relative to `NumCPU` (e.g. 0.5 on a 16-CPU host gives 8) for the comparison phase only: it runs this many tasks at the same time. Higher = faster localisation of differences but more load on DB backends, network, and local CPU. It does not change the speed of hashing, which depends on `max_connections`. Without a `max_connections` value set by the user, the connection pool per node has room for all comparison tasks (minimum 4).
+- **max_connections**: The number of connections N that the task opens to each node at the start and keeps until the end. Cutting and hashing use exactly these connections: every hash worker and every cutting worker holds its own one, so no worker waits for the pool. A server with fewer free slots gives fewer connections, and the task goes on with them. If the user sets N (on the command line or in the configuration file), it is a strict limit for the whole task: the pool of a node holds exactly N connections, and the comparison phase runs at most N tasks at the same time, so it never waits for a connection. Without such a value the pool holds at least N connections and at least the number that the comparison phase needs.
 - **compare_unit_size**: Lower values push recursion deeper (more queries, smaller fetches); higher values stop earlier (fewer queries, larger fetches on mismatched ranges).
 - **max_diff_rows**: Early-exit guardrail. Lower caps keep runs short and reports small on divergent tables; raising/removing can grow memory and report size when drift is large.
 - **table_filter**: Narrows scope and cost; rows that do not match the filter do not count toward `block_size`. Must be identical across nodes to avoid false positives.
@@ -253,8 +261,8 @@ flowchart LR
 
 ### Operational Tuning Playbook
 
-- Start conservative on busy systems: smaller `concurrency_factor`, moderate `block_size`.
-- For large but mostly consistent tables: increase `block_size` and `concurrency_factor` to hash faster; keep `compare_unit_size` reasonable to localise mismatches.
+- Start conservative on busy systems: smaller `max_connections` and `concurrency_factor`, moderate `block_size`.
+- For large but mostly consistent tables: increase `block_size` and `max_connections` to hash faster; keep `compare_unit_size` reasonable to localise mismatches.
 - For drift-heavy tables: lower `block_size`/`compare_unit_size` to localise quickly; keep `max_diff_rows` low to bound runtime and report size.
 
 ### Limits and Edge Cases
