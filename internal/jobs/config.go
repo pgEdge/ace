@@ -139,9 +139,6 @@ func buildTableDiffJob(cfg *config.Config, def config.JobDef, spec scheduleSpec)
 	if base.CompareUnitSize == 0 && cfg.TableDiff.CompareUnitSize > 0 {
 		base.CompareUnitSize = cfg.TableDiff.CompareUnitSize
 	}
-	if base.MaxConnections == 0 && cfg.TableDiff.MaxConnections > 0 {
-		base.MaxConnections = cfg.TableDiff.MaxConnections
-	}
 
 	return Job{
 		Name:       jobName(def, "table-diff", base.QualifiedTableName),
@@ -214,9 +211,6 @@ func buildSchemaDiffJob(cfg *config.Config, def config.JobDef, spec scheduleSpec
 	if base.CompareUnitSize == 0 && cfg.TableDiff.CompareUnitSize > 0 {
 		base.CompareUnitSize = cfg.TableDiff.CompareUnitSize
 	}
-	if base.MaxConnections == 0 && cfg.TableDiff.MaxConnections > 0 {
-		base.MaxConnections = cfg.TableDiff.MaxConnections
-	}
 
 	return Job{
 		Name:       jobName(def, "schema-diff", base.SchemaName),
@@ -285,9 +279,6 @@ func buildRepsetDiffJob(cfg *config.Config, def config.JobDef, spec scheduleSpec
 	}
 	if base.CompareUnitSize == 0 && cfg.TableDiff.CompareUnitSize > 0 {
 		base.CompareUnitSize = cfg.TableDiff.CompareUnitSize
-	}
-	if base.MaxConnections == 0 && cfg.TableDiff.MaxConnections > 0 {
-		base.MaxConnections = cfg.TableDiff.MaxConnections
 	}
 
 	return Job{

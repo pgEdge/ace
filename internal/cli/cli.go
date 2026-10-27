@@ -89,7 +89,7 @@ func SetupCLI(version string) *cli.Command {
 		&cli.Float64Flag{
 			Name:    "concurrency-factor",
 			Aliases: []string{"c"},
-			Usage:   "CPU ratio for concurrency (0.0–4.0, e.g. 0.5 uses half of available CPUs)",
+			Usage:   "CPU ratio for the comparison of the blocks that differ (0.0–4.0, e.g. 0.5 uses half of available CPUs); hashing uses --max-connections",
 			Value:   0.5,
 		},
 		&cli.IntFlag{
@@ -113,7 +113,7 @@ func SetupCLI(version string) *cli.Command {
 		&cli.IntFlag{
 			Name:    "max-connections",
 			Aliases: []string{"M"},
-			Usage:   "Maximum number of database connections per node (default: derived from concurrency factor)",
+			Usage:   "Connections to each node for one table-diff task; a set value is a strict limit for the whole task (0 = max_connections from the config file; if that is not set, 4 for cutting and hashing, and the comparison can open more)",
 			Value:   0,
 		},
 	}

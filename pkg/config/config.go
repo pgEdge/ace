@@ -27,7 +27,8 @@ type Config struct {
 	MTree          MTreeConfig    `yaml:"mtree"`
 	Server         ServerConfig   `yaml:"server"`
 	// MaxConnections is the number of connections that one table-diff task
-	// opens to each node for cutting and hashing.
+	// opens to each node. A value set here is a strict limit for the whole
+	// task.
 	MaxConnections ConnectionLimits `yaml:"max_connections"`
 
 	ScheduleJobs   []JobDef   `yaml:"schedule_jobs"`
@@ -153,10 +154,11 @@ type MTreeConfig struct {
 	} `yaml:"cdc"`
 	Schema string `yaml:"schema"`
 	// MaxConnections caps the connection pool per node for mtree build,
-	// update and table-diff, the same way table_diff.max_connections does
-	// for the diff commands. One connection holds the tree's transaction and
-	// the rest run hash queries, so this also caps the busy backends per
-	// node. 0 = derive the worker count from max_cpu_ratio alone.
+	// update and table-diff. The max_connections section of the file does
+	// not apply to these commands. One connection holds the tree's
+	// transaction and the rest run hash queries, so this also caps the busy
+	// backends per node. 0 = derive the worker count from max_cpu_ratio
+	// alone.
 	MaxConnections int `yaml:"max_connections"`
 	Diff           struct {
 		MinBlockSize int   `yaml:"min_block_size"`

@@ -138,8 +138,19 @@ type TableDiffTask struct {
 	diffLimitTriggered atomic.Bool
 
 	// diffSem limits how many recursive diff goroutines can run at the same time.
-	// It is a buffered channel of size maxConcurrent. A goroutine "acquires" a slot
-	// by sending into the channel (blocks when full) and "releases" by receiving.
+	// It is a buffered channel with one slot per comparison task. A goroutine
+	// "acquires" a slot by sending into the channel (blocks when full) and
+	// "releases" by receiving.
+	//
+	// The size of the channel is safe only because a goroutine that holds a
+	// slot uses at most one connection to each node at a time: it hashes the
+	// two nodes of its pair at the same time, but reads rows and splits
+	// ranges one query after another, and while it holds the slot it never
+	// waits for a child that needs a slot of its own. With a strict limit the
+	// pool of a node can have as few connections as there are slots, so a
+	// goroutine that ran two queries on one node at the same time would wait
+	// for the pool, and that wait would count against the timeout of its
+	// query.
 	diffSem chan struct{}
 
 	resolvedAgainstOrigin string
@@ -664,11 +675,11 @@ func (t *TableDiffTask) Validate() error {
 	}
 
 	cfg := config.Get()
-	if t.MaxConnections == 0 {
-		t.MaxConnections = cfg.TableDiff.MaxConnections
-	}
 	if t.MaxConnections < 0 {
-		return fmt.Errorf("max_connections must be >= 1 (or 0 to derive from concurrency factor)")
+		return fmt.Errorf("max_connections must be >= 1 (or 0 to take the value from the configuration file)")
+	}
+	if err := cfg.CheckConnectionLimits(); err != nil {
+		return err
 	}
 	if t.BlockSize > cfg.TableDiff.MaxBlockSize && !t.OverrideBlockSize {
 		return fmt.Errorf("block row size should be <= %d", cfg.TableDiff.MaxBlockSize)
@@ -1074,9 +1085,10 @@ func (t *TableDiffTask) CloneForSchedule(ctx context.Context) *TableDiffTask {
 	return cloned
 }
 
-// hashWorkers returns the number of hash workers on each node, and the
-// number of comparison tasks that run at the same time.
-func (t *TableDiffTask) hashWorkers() int {
+// compareWorkers returns the number of comparison tasks that run at the
+// same time: ConcurrencyFactor times the number of CPUs of the client, at
+// least one.
+func (t *TableDiffTask) compareWorkers() int {
 	n := int(math.Round(float64(runtime.NumCPU()) * t.ConcurrencyFactor))
 	if n < 1 {
 		n = 1
@@ -1084,24 +1096,100 @@ func (t *TableDiffTask) hashWorkers() int {
 	return n
 }
 
-// maxPoolSize returns the size of the connection pool of each node. The
-// anchor node runs the hash workers and the cutting workers of the slicer at
-// the same time, so the pool has room for both. MaxConnections caps it; then
-// the cut and the hashing share the connections.
+// maxPoolSize returns the pool size that the comparison phase needs on each
+// node. Each comparison task uses at most one connection to a node at a
+// time, so the pool has room for all tasks and never makes a task wait. It
+// is at least 4.
 func (t *TableDiffTask) maxPoolSize() int {
-	hash := t.hashWorkers()
-	poolSize := hash + slicer.DefaultWorkers(hash)
-	if poolSize < 4 {
-		poolSize = 4
-	}
-	if t.MaxConnections > 0 && t.MaxConnections < poolSize {
-		poolSize = t.MaxConnections
-	}
-	return poolSize
+	return max(t.compareWorkers(), 4)
 }
 
 func (t *TableDiffTask) connOpts() auth.ConnectionOptions {
 	return auth.ConnectionOptions{PoolSize: t.maxPoolSize()}
+}
+
+// nodeLimit holds the number of connections of one node for one task.
+type nodeLimit struct {
+	// want is the number of connections that the task tries to open.
+	want int
+	// set is true when the user gave want: on the command line, in the HTTP
+	// API, in a job or in the configuration file. Then want is a strict
+	// limit for the whole task.
+	set bool
+	// opened is the number of connections that the server accepted.
+	opened int
+}
+
+// nodeLimits returns the limit of every node in nodeNames: MaxConnections if
+// it is set, else the value from the configuration file, else the built-in
+// default. It reads the configuration once, so a reload of the file while
+// the task runs does not change the limits of the task.
+func (t *TableDiffTask) nodeLimits(nodeNames []string) map[string]*nodeLimit {
+	cfg := config.Get()
+	limits := make(map[string]*nodeLimit, len(nodeNames))
+	for _, name := range nodeNames {
+		l := &nodeLimit{want: t.MaxConnections, set: true}
+		if t.MaxConnections <= 0 {
+			l.want, l.set = cfg.ConnectionsFor(t.ClusterName, name)
+		}
+		limits[name] = l
+	}
+	return limits
+}
+
+// poolOpts returns the options of the pool of the node. A limit that the
+// user sets is strict for the whole task: the pool has exactly that many
+// connections, and the comparison phase also runs on them. With the
+// built-in default the pool also has room for every comparison task. The
+// pool keeps its connections for the whole task.
+func (l *nodeLimit) poolOpts(maxPoolSize int) auth.ConnectionOptions {
+	n := l.want
+	if !l.set {
+		n = max(n, maxPoolSize)
+	}
+	return auth.ConnectionOptions{PoolSize: n, KeepOpen: true}
+}
+
+// openNodeConns opens the connections of every node, up to the limit of the
+// node, leaves them idle in the pools and writes their number to the limit.
+// A node that has no free connection slot for all of them gives fewer, and
+// the task goes on with them and writes a warning. A node that gives none
+// stops the task.
+func (t *TableDiffTask) openNodeConns(ctx context.Context, pools map[string]*pgxpool.Pool, nodeNames []string, limits map[string]*nodeLimit) error {
+	for _, name := range nodeNames {
+		l := limits[name]
+		n, refusal, err := auth.OpenConns(ctx, pools[name], l.want)
+		if err != nil {
+			return fmt.Errorf("failed to open connections to node %s: %w", name, err)
+		}
+		if n == 0 {
+			return fmt.Errorf("node %s accepts no connection from ACE: %s", name, refusal.Message)
+		}
+		if n < l.want {
+			logger.Warn("table-diff: node %s accepted %d of %d connections (%s); this node uses %d connections",
+				name, n, l.want, refusal.Message, n)
+		} else {
+			logger.Info("table-diff: %d connections to node %s", n, name)
+		}
+		l.opened = n
+	}
+	return nil
+}
+
+// compareTasks returns the number of comparison tasks that run at the same
+// time. A task uses at most one connection to a node at a time. On a node
+// with a limit that the user sets, and on a node that gave fewer connections
+// than its limit because its server has no free slot, the comparison phase
+// must not open new connections, so there the number of tasks is at most the
+// number of open connections.
+func (t *TableDiffTask) compareTasks(limits map[string]*nodeLimit) int {
+	tasks := t.compareWorkers()
+	for _, l := range limits {
+		if l.set || l.opened < l.want {
+			tasks = min(tasks, l.opened)
+		}
+	}
+	return tasks
 }
 
 func (t *TableDiffTask) ExecuteTask() (err error) {
@@ -1227,14 +1315,19 @@ func (t *TableDiffTask) ExecuteTask() (err error) {
 		ctx = context.Background()
 	}
 
-	maxConcurrent := t.hashWorkers()
-	logger.Info("Using %d CPUs, %d hash workers per node, %d connections per node", runtime.NumCPU(), maxConcurrent, t.maxPoolSize())
-	t.diffSem = make(chan struct{}, maxConcurrent)
+	maxConcurrent := t.compareWorkers()
+
+	nodeNames := make([]string, 0, len(t.ClusterNodes))
+	for _, nodeInfo := range t.ClusterNodes {
+		nodeNames = append(nodeNames, nodeInfo["Name"].(string))
+	}
+	sort.Strings(nodeNames)
+	limits := t.nodeLimits(nodeNames)
 
 	pools := make(map[string]*pgxpool.Pool)
 	for _, nodeInfo := range t.ClusterNodes {
 		name := nodeInfo["Name"].(string)
-		pool, err := auth.GetClusterNodeConnection(t.Ctx, nodeInfo, t.connOpts())
+		pool, err := auth.GetClusterNodeConnection(t.Ctx, nodeInfo, limits[name].poolOpts(t.maxPoolSize()))
 		if err != nil {
 			return fmt.Errorf("failed to connect to node %s: %w", name, err)
 		}
@@ -1242,6 +1335,15 @@ func (t *TableDiffTask) ExecuteTask() (err error) {
 		defer pool.Close()
 	}
 	t.Pools = pools
+
+	// Open the connections of the task before any other work, and keep
+	// them until the task ends.
+	if err := t.openNodeConns(ctx, pools, nodeNames, limits); err != nil {
+		return err
+	}
+	compareTasks := t.compareTasks(limits)
+	t.diffSem = make(chan struct{}, compareTasks)
+	logger.Info("Using %d CPUs, up to %d comparison tasks at the same time", runtime.NumCPU(), compareTasks)
 
 	if err := t.loadNodeOriginNames(); err != nil {
 		logger.Warn("table-diff: unable to load node origin names; using raw node_origin values: %v", err)
@@ -1322,13 +1424,14 @@ func (t *TableDiffTask) ExecuteTask() (err error) {
 	// and sends them while the cut is still running, so hashing starts at
 	// once.
 	anchorPool := pools[maxNode]
+	cutWorkers := slicer.CutWorkers(limits[maxNode].opened)
 	sliceCfg := slicer.Config{
 		Schema:    t.Schema,
 		Table:     t.Table,
 		Key:       t.Key,
 		Filter:    t.EffectiveFilter,
 		BlockSize: t.BlockSize,
-		Workers:   slicer.DefaultWorkers(maxConcurrent),
+		Workers:   cutWorkers,
 	}
 	plan, err := slicer.PlanParts(ctx, anchorPool, sliceCfg)
 	if err != nil {
@@ -1336,11 +1439,23 @@ func (t *TableDiffTask) ExecuteTask() (err error) {
 	}
 	logger.Info("table-diff: block boundaries: %s", slicer.Describe(plan, sliceCfg, maxNode))
 
-	var nodeNames []string
-	for name := range pools {
-		nodeNames = append(nodeNames, name)
+	// Every worker takes its connection now and keeps it until the end of
+	// hashing. The pools already hold these connections idle, so no worker
+	// waits for a connection and none is opened.
+	held := make(map[string][]*pgxpool.Conn, len(nodeNames))
+	for _, name := range nodeNames {
+		conns, err := auth.AcquireConns(ctx, pools[name], limits[name].opened)
+		if err != nil {
+			for _, c := range held {
+				auth.ReleaseConns(c)
+			}
+			return fmt.Errorf("failed to get the connections to node %s for hashing: %w", name, err)
+		}
+		held[name] = conns
 	}
-	sort.Strings(nodeNames)
+	// On the anchor, the first connections go to the cutting workers.
+	cutConns := held[maxNode][:cutWorkers]
+	held[maxNode] = held[maxNode][cutWorkers:]
 
 	p := mpb.New(mpb.WithOutput(os.Stderr))
 	// The number of blocks is known only when the cut ends, so the bar
@@ -1362,16 +1477,24 @@ func (t *TableDiffTask) ExecuteTask() (err error) {
 		   block goes to one list as soon as it is cut; the cut never waits
 		   for the hashing.
 		2. Every node has its own hash workers and its own position in the
-		   list, so a slow node does not hold back a fast one.
+		   list, so a slow node does not hold back a fast one. Every worker
+		   uses its own connection. On the anchor, a cutting worker that
+		   has finished becomes one more hash worker on its connection.
 		3. We don't immediately perform the comparisons, but instead store the results in a map.
 		4. Once they're ready, we use a binary search approach to narrow down the ranges that have mismatches.
 	*/
 	cutCtx, cancelCut := context.WithCancel(ctx)
 	defer cancelCut()
-	cutConns, err := auth.AcquireConns(ctx, anchorPool, sliceCfg.Workers)
-	if err != nil {
-		return fmt.Errorf("failed to get a connection to node %s for the cut: %w", maxNode, err)
+
+	list := slicer.NewBlockList()
+	hashers := newBlockHashers(ctx, t, list, bar, cancelCut)
+	for _, name := range nodeNames {
+		for _, c := range held[name] {
+			hashers.addConn(name, c)
+		}
 	}
+	logger.Info("table-diff: %d cutting workers and %d hash workers on %s", cutWorkers, len(held[maxNode]), maxNode)
+
 	blockCh := make(chan slicer.Block, 4*maxConcurrent)
 	var (
 		cutStats *slicer.Stats
@@ -1380,14 +1503,14 @@ func (t *TableDiffTask) ExecuteTask() (err error) {
 	go func() {
 		defer close(blockCh)
 		cutStats, cutErr = slicer.Cut(cutCtx, slicer.Queriers(cutConns), sliceCfg, plan, blockCh,
-			func(i int, _ error) { cutConns[i].Release() })
+			func(i int, err error) {
+				if err != nil {
+					cutConns[i].Release()
+					return
+				}
+				hashers.addConn(maxNode, cutConns[i])
+			})
 	}()
-
-	list := slicer.NewBlockList()
-	hashers := newBlockHashers(ctx, t, list, bar, cancelCut)
-	for _, name := range nodeNames {
-		hashers.addNode(name, maxConcurrent)
-	}
 
 	// The loop only moves the blocks to the list, so the cut never waits.
 	for b := range blockCh {
@@ -1556,6 +1679,23 @@ func (t *TableDiffTask) hashRange(
 	if !ok {
 		return "", fmt.Errorf("no pool for node %s", node)
 	}
+	return t.hashRangeOn(ctx, pool, node, r)
+}
+
+// rowQuerier is the part of pgxpool.Pool and pgxpool.Conn that a hash query
+// needs.
+type rowQuerier interface {
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+}
+
+// hashRangeOn runs the block hash query for the range r of node on q, a
+// connection or the pool of that node, and returns the hash as hex text.
+func (t *TableDiffTask) hashRangeOn(
+	ctx context.Context,
+	q rowQuerier,
+	node string,
+	r Range,
+) (string, error) {
 	startTime := time.Now()
 	var hash string
 
@@ -1585,7 +1725,7 @@ func (t *TableDiffTask) hashRange(
 
 	logger.Debug("[%s] Hashing range: Start=%v, End=%v. SQL: %s, Args: %v", node, r.Start, r.End, query, args)
 
-	err = pool.QueryRow(ctx, query, args...).Scan(&hash)
+	err = q.QueryRow(ctx, query, args...).Scan(&hash)
 
 	if err != nil {
 		duration := time.Since(startTime)

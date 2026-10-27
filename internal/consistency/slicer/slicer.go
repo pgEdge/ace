@@ -133,6 +133,15 @@ func DefaultWorkers(hashWorkers int) int {
 	return w
 }
 
+// CutWorkers returns how many of conns connections to the anchor node go to
+// cutting workers when the rest go to hash workers: at least one cutting
+// worker for every four hash workers, at least one in all, and never more
+// than the limit of cutting workers. With 4 connections it is one cutting
+// worker and three hash workers.
+func CutWorkers(conns int) int {
+	return min(max((conns+4)/5, 1), maxWorkers)
+}
+
 // DefaultParts returns the number of parts for the given number of cutting
 // workers. Several parts per worker keep the workers busy when parts are
 // uneven.
