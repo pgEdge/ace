@@ -17,6 +17,7 @@ import (
 	"os"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -67,7 +68,8 @@ func runSlicer(t *testing.T, pool *pgxpool.Pool, cfg Config) (*Plan, []Block, *S
 		}
 		close(done)
 	}()
-	st, err := Cut(ctx, pool, cfg, plan, out)
+	conns, release := cutConns(t, pool, cfg.Workers)
+	st, err := Cut(ctx, conns, cfg, plan, out, release)
 	close(out)
 	<-done
 	if err != nil {
@@ -75,6 +77,42 @@ func runSlicer(t *testing.T, pool *pgxpool.Pool, cfg Config) (*Plan, []Block, *S
 	}
 	SortBlocks(blocks)
 	return plan, blocks, st
+}
+
+// cutConns takes n connections from pool for Cut. release gives connection
+// i back to the pool, and fails the test if Cut gives it back twice.
+func cutConns(t *testing.T, pool *pgxpool.Pool, n int) ([]Querier, func(int, error)) {
+	t.Helper()
+	n = max(n, 1)
+	held := make([]*pgxpool.Conn, n)
+	conns := make([]Querier, n)
+	for i := range held {
+		c, err := pool.Acquire(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		held[i], conns[i] = c, c
+	}
+	var mu sync.Mutex
+	release := func(i int, _ error) {
+		mu.Lock()
+		defer mu.Unlock()
+		if held[i] == nil {
+			t.Errorf("Cut gave connection %d back twice", i)
+			return
+		}
+		held[i].Release()
+		held[i] = nil
+	}
+	t.Cleanup(func() {
+		for i, c := range held {
+			if c != nil {
+				t.Errorf("Cut did not give connection %d back", i)
+				c.Release()
+			}
+		}
+	})
+	return conns, release
 }
 
 // countRange counts the rows of [start, end) that match the filter.
@@ -365,8 +403,10 @@ func TestSlicerRepeatable(t *testing.T) {
 
 // TestCutConcurrentWrites cuts a table in many small chunks while another
 // session deletes and inserts rows in it, also the rows the chunks start
-// from. The blocks must still follow each other with no gap, and the first
-// and the last block must stay open.
+// from. Each worker cuts in its own snapshot, and the workers start at
+// different moments, so they see different rows. The blocks must still
+// follow each other with no gap, and the first and the last block must stay
+// open.
 func TestCutConcurrentWrites(t *testing.T) {
 	pool := testPool(t)
 	ctx := context.Background()
@@ -478,6 +518,62 @@ func TestCutPlanUsesIndex(t *testing.T) {
 	}
 }
 
+// TestCutOneSnapshot checks that a worker cuts all its parts in one
+// snapshot: rows inserted after the first block do not change the cut.
+func TestCutOneSnapshot(t *testing.T) {
+	pool := testPool(t)
+	ctx := context.Background()
+	exec(t, pool, `DROP TABLE IF EXISTS ace_slicer_test.s`)
+	exec(t, pool, `CREATE TABLE ace_slicer_test.s (id int PRIMARY KEY)`)
+	exec(t, pool, `INSERT INTO ace_slicer_test.s SELECT g FROM generate_series(1, 1000) g`)
+	exec(t, pool, `ANALYZE ace_slicer_test.s`)
+	t.Cleanup(func() { exec(t, pool, `DROP TABLE IF EXISTS ace_slicer_test.s`) })
+
+	cfg := Config{Schema: "ace_slicer_test", Table: "s", Key: []string{"id"}, BlockSize: 10, ChunkRows: 20, Workers: 1}
+	plan, err := PlanParts(ctx, pool, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := make(chan Block) // the worker waits for every block
+	conns, release := cutConns(t, pool, 1)
+	type result struct {
+		st  *Stats
+		err error
+	}
+	res := make(chan result, 1)
+	go func() {
+		st, err := Cut(ctx, conns, cfg, plan, out, release)
+		close(out)
+		res <- result{st, err}
+	}()
+
+	<-out
+	exec(t, pool, `INSERT INTO ace_slicer_test.s SELECT g FROM generate_series(1001, 2000) g`)
+	for range out {
+	}
+	r := <-res
+	if r.err != nil {
+		t.Fatalf("Cut: %v", r.err)
+	}
+	if r.st.Rows != 1000 {
+		t.Fatalf("the cut counted %d rows, want 1000: it saw rows inserted after it started", r.st.Rows)
+	}
+}
+
+// TestCutMoreConnsThanParts checks that Cut gives back the connections that
+// it does not need.
+func TestCutMoreConnsThanParts(t *testing.T) {
+	pool := testPool(t)
+	exec(t, pool, `DROP TABLE IF EXISTS ace_slicer_test.m`)
+	exec(t, pool, `CREATE TABLE ace_slicer_test.m (id int PRIMARY KEY)`)
+	exec(t, pool, `INSERT INTO ace_slicer_test.m SELECT g FROM generate_series(1, 500) g`)
+	t.Cleanup(func() { exec(t, pool, `DROP TABLE IF EXISTS ace_slicer_test.m`) })
+
+	cfg := Config{Schema: "ace_slicer_test", Table: "m", Key: []string{"id"}, BlockSize: 100, Parts: 1, Workers: 3}
+	_, blocks, st := runSlicer(t, pool, cfg)
+	checkBlocks(t, pool, cfg, blocks, st)
+}
+
 // TestCutCancel checks that Cut stops when nobody reads its blocks and the
 // context is cancelled.
 func TestCutCancel(t *testing.T) {
@@ -495,8 +591,9 @@ func TestCutCancel(t *testing.T) {
 	}
 	out := make(chan Block) // nobody reads it
 	errCh := make(chan error, 1)
+	conns, release := cutConns(t, pool, cfg.Workers)
 	go func() {
-		_, err := Cut(ctx, pool, cfg, plan, out)
+		_, err := Cut(ctx, conns, cfg, plan, out, release)
 		errCh <- err
 	}()
 	cancel()
