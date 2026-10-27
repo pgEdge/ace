@@ -17,7 +17,7 @@ Choose the option that fits your environment:
 
 ## Install via Go
 
-Requires Go 1.26+. No CGO or system SQLite libraries needed — the project uses a pure-Go SQLite driver.
+Requires Go 1.26.10+. No CGO or system SQLite libraries needed — the project uses a pure-Go SQLite driver.
 
 ```sh
 # Latest release
