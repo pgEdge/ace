@@ -4,6 +4,35 @@ All notable changes to ACE will be captured in this document. This project follo
 
 ## [Unreleased]
 
+### ⚠️ Breaking Change
+- **`--max-connections` (`-M`) of `table-diff`, `repset-diff` and
+  `schema-diff` has a new meaning.** It was an upper bound for the
+  connection pool of each node, and `0` meant "compute from the number of
+  CPUs of the client". Now it is the number of connections that
+  `table-diff` opens to each node at the start of a task and keeps until
+  the end, and a strict limit for the whole task, the comparison of the
+  blocks that differ included. `0` means "take the value from the
+  configuration file". Without any setting, cutting and hashing use 8
+  connections per node, so they no longer depend on the client CPUs, and
+  the comparison can open more, up to the number that
+  `--concurrency-factor` gives. The `max_connections` field of the HTTP
+  API and of scheduled jobs has the same meaning. `mtree` commands keep
+  the old meaning of the flag and of `mtree.max_connections`.
+
+### Upgrading
+- **Check `table_diff.max_connections` in `ace.yaml`.** It is now the old
+  name of `max_connections.default`, so its value has a new meaning. It
+  was an upper bound: the pool opened a connection only when a worker
+  needed one, and with a small `concurrency_factor` it opened fewer. Now
+  `table-diff` opens that many connections to every node at the start of
+  each task and keeps them to the end. With
+  `table_diff.max_connections: 16`, every task holds 16 connections to
+  every node, and an API server or the scheduler that runs two tasks at
+  the same time holds 32. Set it to the number of connections that one
+  task may use, or to `0` to let cutting and hashing use 8. The same
+  applies to `--max-connections` in scripts, and to `max_connections` in
+  HTTP requests and in scheduled jobs.
+
 ### Added
 - Diff reports have a `format_version` field. `table-repair` and
   `table-rerun` refuse a report with a version they do not know. A report
@@ -12,6 +41,25 @@ All notable changes to ACE will be captured in this document. This project follo
   report in the current form, without trailing zeros. The stale check of a
   repair plan then finds their keys on the target, and the rerun counts a
   row that the report holds under two keys once.
+- **A number of connections for each node.** The new `max_connections`
+  section of `ace.yaml` sets a default and optional values for single
+  nodes, named `<cluster>.<node>`:
+
+  ```yaml
+  max_connections:
+    default: 4
+    nodes:
+      demo.n1: 8
+  ```
+
+  `--max-connections` sets one value for all nodes and has priority over
+  the file. `table_diff.max_connections` is the old name of
+  `max_connections.default`. The limit is per task: an API server or the
+  scheduler that runs two tasks at the same time can use twice as many
+  connections to a node. A value that the user sets is a strict limit for
+  the whole task, the comparison of mismatched blocks included. Without
+  any value, cutting and hashing use 8 connections, and the comparison can
+  open more, up to the number that `--concurrency-factor` gives.
 
 ### Changed
 - **A numeric value in a diff report has no trailing zeros.** The row fetch
@@ -20,6 +68,21 @@ All notable changes to ACE will be captured in this document. This project follo
   column without a fixed scale gets the value without the trailing zeros on
   the target. A column with a fixed scale, such as `numeric(10,2)`, is not
   affected.
+- **`table-diff` opens its connections at the start and keeps them.** It
+  opens the connections for cutting and hashing to every node before any
+  other work, and the pool no longer closes them because of their age or
+  idle time, so another client cannot take their slots in the middle of a
+  run. If a server refuses a connection because it has no free slot
+  (SQLSTATE 53300), `table-diff` goes on with the connections that it
+  has, writes a warning that names the node, and the comparison phase
+  then runs no more tasks at the same time than the smallest node has
+  connections. A node that accepts no connection stops the run.
+- **A cutting worker keeps one transaction for all its parts.** It cuts on
+  its own connection, in one read-only `REPEATABLE READ` transaction, and
+  never waits for the hash workers. While the cut runs, the anchor node
+  cannot vacuum rows that became dead after it started; the cut reads the
+  key index once, so this lasts one pass over the index. This applies to
+  `mtree build` too.
 
 ### Fixed
 - **`table-rerun` reported rows it could not find in the report as
@@ -49,6 +112,21 @@ All notable changes to ACE will be captured in this document. This project follo
   types. A column of a domain over numeric whose name starts with these words
   is not wrapped in `trim_scale()` any more, so a Merkle tree of such a table
   must be built again.
+- **A slow node no longer makes `table-diff` slow on the other nodes.**
+  The hash workers of all nodes took tasks from one queue, and a worker
+  that waited for a busy node kept its slot, so the tasks of a node with
+  free connections waited too. Now every node has its own hash workers,
+  each on its own connection, and its own position in the list of blocks.
+- **A hash query no longer fails with a timeout because it waited for a
+  connection.** The 60 second limit of a hash query started before the
+  worker got a connection from the pool. Every hash worker now holds its
+  connection, so the limit counts only the query.
+- **The cut of `table-diff` no longer lasts as long as the hashing.**
+  Blocks went to the hash workers through a bounded buffer, so the cutting
+  workers waited when the hash workers were behind, and they also took
+  connections from the same pool as the hash workers. On the anchor node,
+  a cutting worker that has finished now becomes one more hash worker on
+  its connection.
 
 ## [v3.0.0]
 
