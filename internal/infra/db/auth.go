@@ -13,6 +13,7 @@ package auth
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"strconv"
@@ -31,7 +32,21 @@ type ConnectionOptions struct {
 	Role           string
 	PoolSize       int
 	DropPrivileges bool
+	// KeepOpen makes the pool keep its connections for the whole run: it
+	// does not close a connection because of its age or idle time. A closed
+	// connection frees a slot on the server, and another client can take it
+	// before the pool opens the connection again.
+	KeepOpen bool
 }
+
+// keepOpenLifetime is the connection lifetime and idle time of a KeepOpen
+// pool. pgxpool takes 0 as "expired at once", so a long time is used
+// instead of 0.
+const keepOpenLifetime = 14 * 24 * time.Hour
+
+// tooManyConnections is SQLSTATE 53300: the server, the role or the
+// database has no free connection slot.
+const tooManyConnections = "53300"
 
 func toConnectionString(node map[string]any, dbName string) string {
 	var parts []string
@@ -199,6 +214,31 @@ func AcquireConns(ctx context.Context, pool *pgxpool.Pool, n int) ([]*pgxpool.Co
 		conns = append(conns, c)
 	}
 	return conns, nil
+}
+
+// OpenConns makes pool open up to n connections, one at a time, and leaves
+// them in the pool as idle connections. It stops at the first refusal with
+// SQLSTATE 53300 and returns the number of connections that are open and
+// that refusal. Any other error is returned as err.
+//
+// Later, up to opened callers can take a connection from the pool at the
+// same time without a new connection to the server, as long as the pool
+// does not close idle connections.
+func OpenConns(ctx context.Context, pool *pgxpool.Pool, n int) (opened int, refusal *pgconn.PgError, err error) {
+	conns := make([]*pgxpool.Conn, 0, n)
+	defer func() { ReleaseConns(conns) }()
+	for len(conns) < n {
+		c, err := pool.Acquire(ctx)
+		if err != nil {
+			var pgErr *pgconn.PgError
+			if errors.As(err, &pgErr) && pgErr.Code == tooManyConnections {
+				return len(conns), pgErr, nil
+			}
+			return len(conns), nil, err
+		}
+		conns = append(conns, c)
+	}
+	return len(conns), nil, nil
 }
 
 // ReleaseConns gives every connection of conns back to its pool.
@@ -459,6 +499,11 @@ func applyConnectionOptions(cfg *pgxpool.Config, opts ConnectionOptions) {
 	}
 	if opts.PoolSize > 0 {
 		cfg.MaxConns = int32(opts.PoolSize)
+	}
+	if opts.KeepOpen {
+		cfg.MaxConnLifetime = keepOpenLifetime
+		cfg.MaxConnLifetimeJitter = 0
+		cfg.MaxConnIdleTime = keepOpenLifetime
 	}
 	role := strings.TrimSpace(opts.Role)
 

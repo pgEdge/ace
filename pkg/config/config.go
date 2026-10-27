@@ -12,6 +12,7 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"strings"
 	"sync"
@@ -25,6 +26,9 @@ type Config struct {
 	TableDiff      DiffConfig     `yaml:"table_diff"`
 	MTree          MTreeConfig    `yaml:"mtree"`
 	Server         ServerConfig   `yaml:"server"`
+	// MaxConnections is the number of connections that one table-diff task
+	// opens to each node for cutting and hashing.
+	MaxConnections ConnectionLimits `yaml:"max_connections"`
 
 	ScheduleJobs   []JobDef   `yaml:"schedule_jobs"`
 	ScheduleConfig []SchedDef `yaml:"schedule_config"`
@@ -60,7 +64,87 @@ type DiffConfig struct {
 	BatchSize         int     `yaml:"diff_batch_size"`
 	MaxBatchSize      int     `yaml:"max_diff_batch_size"`
 	CompareUnitSize   int     `yaml:"compare_unit_size"`
-	MaxConnections    int     `yaml:"max_connections"`
+	// MaxConnections is the old name of max_connections.default. It is used
+	// only when max_connections.default is not set.
+	MaxConnections int `yaml:"max_connections"`
+}
+
+// DefaultMaxConnections is the number of connections per node when neither
+// the command nor the configuration file sets one.
+const DefaultMaxConnections = 8
+
+// ConnectionLimits is the max_connections section of the configuration
+// file. A value of 0 means "not set".
+type ConnectionLimits struct {
+	// Default applies to every node that Nodes does not list.
+	Default int `yaml:"default"`
+	// Nodes maps "<cluster>.<node>" to the value for that node.
+	Nodes map[string]int `yaml:"nodes"`
+}
+
+// UnmarshalYAML also accepts a single number, "max_connections: 8", as the
+// default value.
+func (l *ConnectionLimits) UnmarshalYAML(node *yaml.Node) error {
+	if node.Kind == yaml.ScalarNode {
+		return node.Decode(&l.Default)
+	}
+	type plain ConnectionLimits
+	return node.Decode((*plain)(l))
+}
+
+// ConnectionsFor returns the number of connections per node that the file
+// sets for node of cluster: the value for "<cluster>.<node>", then
+// max_connections.default, then table_diff.max_connections, then
+// DefaultMaxConnections. set is false only when the file sets none of them
+// and the result is DefaultMaxConnections. c can be nil.
+func (c *Config) ConnectionsFor(cluster, node string) (n int, set bool) {
+	if c == nil {
+		return DefaultMaxConnections, false
+	}
+	if n := c.MaxConnections.Nodes[cluster+"."+node]; n > 0 {
+		return n, true
+	}
+	if n := c.MaxConnections.Default; n > 0 {
+		return n, true
+	}
+	if n := c.TableDiff.MaxConnections; n > 0 {
+		return n, true
+	}
+	return DefaultMaxConnections, false
+}
+
+// CheckConnectionLimits returns an error if a number of connections in the
+// file is negative or larger than MaxConnectionsPerNode. c can be nil.
+func (c *Config) CheckConnectionLimits() error {
+	if c == nil {
+		return nil
+	}
+	if err := checkConnectionCount("max_connections.default", c.MaxConnections.Default); err != nil {
+		return err
+	}
+	if err := checkConnectionCount("table_diff.max_connections", c.TableDiff.MaxConnections); err != nil {
+		return err
+	}
+	for name, n := range c.MaxConnections.Nodes {
+		if err := checkConnectionCount("max_connections.nodes."+name, n); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// MaxConnectionsPerNode is the largest number of connections per node that
+// ACE accepts. It is the largest max_connections of PostgreSQL, so a larger
+// number cannot be a real limit.
+const MaxConnectionsPerNode = 262143
+
+// checkConnectionCount returns an error if n is not between 0 and
+// MaxConnectionsPerNode. name is the name of the setting.
+func checkConnectionCount(name string, n int) error {
+	if n < 0 || n > MaxConnectionsPerNode {
+		return fmt.Errorf("%s must be between 0 and %d, got %d", name, MaxConnectionsPerNode, n)
+	}
+	return nil
 }
 
 type MTreeConfig struct {
