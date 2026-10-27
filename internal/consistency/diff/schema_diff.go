@@ -236,11 +236,12 @@ func (c *SchemaDiffCmd) Validate() error {
 	}
 
 	cfg := config.Get()
-	if c.MaxConnections == 0 && cfg != nil {
-		c.MaxConnections = cfg.TableDiff.MaxConnections
+	if c.MaxConnections < 0 || c.MaxConnections > config.MaxConnectionsPerNode {
+		return fmt.Errorf("max_connections must be between 1 and %d (or 0 to take the value from the configuration file), got %d",
+			config.MaxConnectionsPerNode, c.MaxConnections)
 	}
-	if c.MaxConnections < 0 {
-		return fmt.Errorf("max_connections must be >= 1 (or 0 to derive from concurrency factor)")
+	if err := cfg.CheckConnectionLimits(); err != nil {
+		return err
 	}
 
 	return nil

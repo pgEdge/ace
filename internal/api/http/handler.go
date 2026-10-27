@@ -218,7 +218,7 @@ func (s *APIServer) handleTableDiff(w http.ResponseWriter, r *http.Request) {
 	task.ConcurrencyFactor = s.resolveConcurrency(cfg, req.Concurrency)
 	task.CompareUnitSize = s.resolveCompareUnitSize(cfg, req.CompareUnitSize)
 	task.MaxDiffRows = s.resolveMaxDiffRows(cfg, req.MaxDiffRows)
-	task.MaxConnections = s.resolveMaxConnections(cfg, req.MaxConnections)
+	task.MaxConnections = req.MaxConnections
 	task.Output = "json"
 	task.Nodes = s.resolveNodes(req.Nodes)
 	task.TableFilter = strings.TrimSpace(req.TableFilter)
@@ -294,19 +294,6 @@ func (s *APIServer) resolveMaxDiffRows(cfg *config.Config, requested int64) int6
 	}
 	if cfg != nil && cfg.TableDiff.MaxDiffRows > 0 {
 		return cfg.TableDiff.MaxDiffRows
-	}
-	return 0
-}
-
-func (s *APIServer) resolveMaxConnections(cfg *config.Config, requested int) int {
-	if requested > 0 {
-		return requested
-	}
-	if requested < 0 {
-		return requested // rejected by Validate()
-	}
-	if cfg != nil && cfg.TableDiff.MaxConnections > 0 {
-		return cfg.TableDiff.MaxConnections
 	}
 	return 0
 }
@@ -597,7 +584,7 @@ func (s *APIServer) handleSchemaDiff(w http.ResponseWriter, r *http.Request) {
 	task.BlockSize = s.resolveBlockSize(cfg, req.BlockSize)
 	task.ConcurrencyFactor = s.resolveConcurrency(cfg, req.Concurrency)
 	task.CompareUnitSize = s.resolveCompareUnitSize(cfg, req.CompareUnitSize)
-	task.MaxConnections = s.resolveMaxConnections(cfg, req.MaxConnections)
+	task.MaxConnections = req.MaxConnections
 	task.Output = strings.TrimSpace(req.Output)
 	if task.Output == "" {
 		task.Output = "json"
@@ -680,7 +667,7 @@ func (s *APIServer) handleRepsetDiff(w http.ResponseWriter, r *http.Request) {
 	task.BlockSize = s.resolveBlockSize(cfg, req.BlockSize)
 	task.ConcurrencyFactor = s.resolveConcurrency(cfg, req.Concurrency)
 	task.CompareUnitSize = s.resolveCompareUnitSize(cfg, req.CompareUnitSize)
-	task.MaxConnections = s.resolveMaxConnections(cfg, req.MaxConnections)
+	task.MaxConnections = req.MaxConnections
 	task.Output = strings.TrimSpace(req.Output)
 	if task.Output == "" {
 		task.Output = "json"

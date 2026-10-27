@@ -94,6 +94,18 @@ func TestDefaults(t *testing.T) {
 	if got := DefaultParts(3); got != 12 {
 		t.Errorf("DefaultParts(3) = %d, want 12", got)
 	}
+
+	// conns -> cutting workers; the rest are hash workers.
+	cut := []struct{ conns, want int }{{1, 1}, {2, 1}, {4, 1}, {5, 1}, {6, 2}, {10, 2}, {11, 3}, {100, 4}}
+	for _, c := range cut {
+		got := CutWorkers(c.conns)
+		if got != c.want {
+			t.Errorf("CutWorkers(%d) = %d, want %d", c.conns, got, c.want)
+		}
+		if hash := c.conns - got; c.conns > 1 && got < maxWorkers && 4*got < hash {
+			t.Errorf("CutWorkers(%d) = %d: less than one cutting worker for every four of %d hash workers", c.conns, got, hash)
+		}
+	}
 }
 
 func TestCutQueries(t *testing.T) {
