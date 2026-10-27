@@ -354,12 +354,6 @@ type RecursiveDiffTask struct {
 	CurrentEstimatedBlockSize int
 }
 
-type HashTask struct {
-	nodeName   string
-	rangeIndex int
-	r          Range
-}
-
 type HashResult struct {
 	hash string
 	err  error
@@ -1080,8 +1074,8 @@ func (t *TableDiffTask) CloneForSchedule(ctx context.Context) *TableDiffTask {
 	return cloned
 }
 
-// hashWorkers returns the number of hash queries that table-diff runs at
-// the same time.
+// hashWorkers returns the number of hash workers on each node, and the
+// number of comparison tasks that run at the same time.
 func (t *TableDiffTask) hashWorkers() int {
 	n := int(math.Round(float64(runtime.NumCPU()) * t.ConcurrencyFactor))
 	if n < 1 {
@@ -1234,8 +1228,7 @@ func (t *TableDiffTask) ExecuteTask() (err error) {
 	}
 
 	maxConcurrent := t.hashWorkers()
-	logger.Info("Using %d CPUs, max concurrent workers = %d, %d connections per node", runtime.NumCPU(), maxConcurrent, t.maxPoolSize())
-	sem := make(chan struct{}, maxConcurrent)
+	logger.Info("Using %d CPUs, %d hash workers per node, %d connections per node", runtime.NumCPU(), maxConcurrent, t.maxPoolSize())
 	t.diffSem = make(chan struct{}, maxConcurrent)
 
 	pools := make(map[string]*pgxpool.Pool)
@@ -1365,10 +1358,11 @@ func (t *TableDiffTask) ExecuteTask() (err error) {
 
 	/*
 		We use the following approach:
-		1. The slicer cuts the table into blocks on the anchor node and sends
-		   them to blockCh as soon as it cuts them.
-		2. For each block we queue one HashTask per node. Each HashTask is
-		   independent of the others, and can be executed in parallel.
+		1. The slicer cuts the table into blocks on the anchor node. Every
+		   block goes to one list as soon as it is cut; the cut never waits
+		   for the hashing.
+		2. Every node has its own hash workers and its own position in the
+		   list, so a slow node does not hold back a fast one.
 		3. We don't immediately perform the comparisons, but instead store the results in a map.
 		4. Once they're ready, we use a binary search approach to narrow down the ranges that have mismatches.
 	*/
@@ -1384,49 +1378,13 @@ func (t *TableDiffTask) ExecuteTask() (err error) {
 		cutStats, cutErr = slicer.Cut(cutCtx, anchorPool, sliceCfg, plan, blockCh)
 	}()
 
-	resultsMap := make(map[int]RangeResults)
-	var resultsMutex sync.Mutex
-
-	hashTaskQueue := make(chan HashTask, 2*maxConcurrent)
-	var initialHashWg sync.WaitGroup
-	for i := 0; i < maxConcurrent; i++ {
-		initialHashWg.Add(1)
-		go func() {
-			defer initialHashWg.Done()
-			for task := range hashTaskQueue {
-				// Initial hashing runs before any rows are counted, so only the
-				// error circuit-breaker is relevant here; the per-pair row limit
-				// is enforced later in recursiveDiff.
-				if t.hasError() {
-					bar.Increment()
-					continue
-				}
-				sem <- struct{}{}
-				queryCtx, cancel := context.WithTimeout(t.Ctx, 60*time.Second)
-				hashValue, hErr := t.hashRange(queryCtx, task.nodeName, task.r)
-				cancel()
-				<-sem
-
-				if hErr != nil {
-					errWrap := fmt.Errorf("initial hash failed for node %s range %v-%v: %w", task.nodeName, task.r.Start, task.r.End, hErr)
-					t.recordError(errWrap)
-				}
-
-				resultsMutex.Lock()
-				if _, ok := resultsMap[task.rangeIndex]; !ok {
-					resultsMap[task.rangeIndex] = make(RangeResults)
-				}
-				resultsMap[task.rangeIndex][task.nodeName] = HashResult{hash: hashValue, err: hErr}
-				resultsMutex.Unlock()
-				bar.Increment()
-			}
-		}()
+	list := slicer.NewBlockList()
+	hashers := newBlockHashers(ctx, t, list, bar, cancelCut)
+	for _, name := range nodeNames {
+		hashers.addNode(name, maxConcurrent)
 	}
 
-	// blocks are in arrival order, and the hash results are keyed by the
-	// index of the block in it. The comparison below walks them in key
-	// order with slicer.KeyOrder.
-	var blocks []slicer.Block
+	// The loop only moves the blocks to the list, so the cut never waits.
 	for b := range blockCh {
 		if t.hasError() {
 			// A hash failed and the diff will stop with that error. Stop
@@ -1434,17 +1392,25 @@ func (t *TableDiffTask) ExecuteTask() (err error) {
 			cancelCut()
 			continue
 		}
-		rangeIdx := len(blocks)
-		blocks = append(blocks, b)
-		bar.SetTotal(int64(len(blocks)*len(nodeNames)), false)
-		r := t.rangeFromBlock(b)
-		for _, nodeName := range nodeNames {
-			hashTaskQueue <- HashTask{nodeName: nodeName, rangeIndex: rangeIdx, r: r}
+		idx := list.Add(b)
+		if idx < 0 {
+			// A hash worker has stopped the list after an error.
+			continue
 		}
+		bar.SetTotal(int64((idx+1)*len(nodeNames)), false)
 	}
-	close(hashTaskQueue)
-	initialHashWg.Wait()
+	if cutErr != nil {
+		list.Stop()
+	} else {
+		list.Close()
+	}
+	resultsMap := hashers.wait()
 	bar.SetTotal(-1, true)
+
+	// blocks are in arrival order, and the hash results are keyed by the
+	// index of the block in it. The comparison below walks them in key
+	// order with slicer.KeyOrder.
+	blocks := list.Blocks()
 
 	if err := t.getFirstError(); err != nil {
 		return err
