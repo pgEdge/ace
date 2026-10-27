@@ -23,6 +23,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/pgedge/ace/internal/consistency/slicer"
+	auth "github.com/pgedge/ace/internal/infra/db"
 	"github.com/pgedge/ace/pkg/config"
 	"github.com/pgedge/ace/pkg/types"
 	"github.com/stretchr/testify/require"
@@ -121,7 +122,10 @@ func slicingCut(t *testing.T, ctx context.Context, table string, key []string, f
 		}
 		close(done)
 	}()
-	st, err := slicer.Cut(ctx, pgCluster.Node1Pool, cfg, plan, out)
+	conns, err := auth.AcquireConns(ctx, pgCluster.Node1Pool, cfg.Workers)
+	require.NoError(t, err)
+	st, err := slicer.Cut(ctx, slicer.Queriers(conns), cfg, plan, out,
+		func(i int, _ error) { conns[i].Release() })
 	close(out)
 	<-done
 	require.NoError(t, err)
