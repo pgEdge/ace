@@ -2004,6 +2004,10 @@ func (m *MerkleTreeTask) BuildMtree() (err error) {
 		// the cut runs.
 		cutCtx, cancelCut := context.WithCancel(m.Ctx)
 		defer cancelCut()
+		cutConns, err := auth.AcquireConns(m.Ctx, refPool, cutWorkers)
+		if err != nil {
+			return fmt.Errorf("failed to get a connection to node %s for the cut: %w", refName, err)
+		}
 		cut := make(chan slicer.Block, 4*numWorkers)
 		in := make(chan slicer.Block, 4*numWorkers)
 		var (
@@ -2012,7 +2016,8 @@ func (m *MerkleTreeTask) BuildMtree() (err error) {
 		)
 		go func() {
 			defer close(cut)
-			cutStats, cutErr = slicer.Cut(cutCtx, refPool, sliceCfg, plan, cut)
+			cutStats, cutErr = slicer.Cut(cutCtx, slicer.Queriers(cutConns), sliceCfg, plan, cut,
+				func(i int, _ error) { cutConns[i].Release() })
 		}()
 		// The first block of the slicer has no lower bound and is empty on
 		// the reference node. A Merkle tree stores the first key of the

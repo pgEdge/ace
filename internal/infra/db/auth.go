@@ -186,6 +186,28 @@ func GetSizedClusterNodeConnection(node map[string]any, opts ConnectionOptions) 
 	return pool, nil
 }
 
+// AcquireConns takes n connections from pool. On an error it gives back the
+// connections that it already has.
+func AcquireConns(ctx context.Context, pool *pgxpool.Pool, n int) ([]*pgxpool.Conn, error) {
+	conns := make([]*pgxpool.Conn, 0, n)
+	for len(conns) < n {
+		c, err := pool.Acquire(ctx)
+		if err != nil {
+			ReleaseConns(conns)
+			return nil, err
+		}
+		conns = append(conns, c)
+	}
+	return conns, nil
+}
+
+// ReleaseConns gives every connection of conns back to its pool.
+func ReleaseConns(conns []*pgxpool.Conn) {
+	for _, c := range conns {
+		c.Release()
+	}
+}
+
 func GetReplModeConnection(nodeInfo map[string]any) (*pgconn.PgConn, error) {
 	connStr := toConnectionString(nodeInfo, "")
 	cfg, err := pgconn.ParseConfig(connStr)

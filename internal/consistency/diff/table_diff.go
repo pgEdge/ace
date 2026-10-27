@@ -1368,6 +1368,10 @@ func (t *TableDiffTask) ExecuteTask() (err error) {
 	*/
 	cutCtx, cancelCut := context.WithCancel(ctx)
 	defer cancelCut()
+	cutConns, err := auth.AcquireConns(ctx, anchorPool, sliceCfg.Workers)
+	if err != nil {
+		return fmt.Errorf("failed to get a connection to node %s for the cut: %w", maxNode, err)
+	}
 	blockCh := make(chan slicer.Block, 4*maxConcurrent)
 	var (
 		cutStats *slicer.Stats
@@ -1375,7 +1379,8 @@ func (t *TableDiffTask) ExecuteTask() (err error) {
 	)
 	go func() {
 		defer close(blockCh)
-		cutStats, cutErr = slicer.Cut(cutCtx, anchorPool, sliceCfg, plan, blockCh)
+		cutStats, cutErr = slicer.Cut(cutCtx, slicer.Queriers(cutConns), sliceCfg, plan, blockCh,
+			func(i int, _ error) { cutConns[i].Release() })
 	}()
 
 	list := slicer.NewBlockList()
