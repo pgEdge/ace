@@ -62,6 +62,15 @@ All notable changes to ACE will be captured in this document. This project follo
   open more, up to the number that `--concurrency-factor` gives.
 
 ### Changed
+- Every ACE connection sets `client_connection_check_interval = 5000` (ms),
+  so a backend in a long query stops it within a few seconds when ACE stops
+  without closing its connections, for example when the kernel kills it.
+  Before, the backend ran the query to the end and held its snapshot, and
+  so held back vacuum on that node.
+  Set `postgres.client_connection_check_interval` in `ace.yaml` to change
+  it, or to `-1` to leave the server's setting in place. A server that does
+  not support the setting (before PostgreSQL 14, or on Windows) accepts the
+  connection without it.
 - **A numeric value in a diff report has no trailing zeros.** The row fetch
   now reads a numeric column with `trim_scale()`, as the row hash does, so
   the report shows `7.5`, not `7.50`. Repair writes this form: a `numeric`
