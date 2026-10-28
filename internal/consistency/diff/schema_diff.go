@@ -80,9 +80,13 @@ type SchemaDiffCmd struct {
 	ConnectionPool    *pgxpool.Pool
 	ConcurrencyFactor float64
 	MaxConnections    int
-	BlockSize         int
-	CompareUnitSize   int
-	Output            string
+	// BlockTimeout and RunTimeout are passed to the table-diff of each
+	// table. nil means the value from ace.yaml.
+	BlockTimeout    *int
+	RunTimeout      *int
+	BlockSize       int
+	CompareUnitSize int
+	Output          string
 	// OutputExplicit records whether the user actually passed --output, as
 	// opposed to it carrying the flag's own default. --compare=structure
 	// needs this distinction because "json" is that default: without it,
@@ -926,6 +930,8 @@ func (task *SchemaDiffCmd) SchemaTableDiff() (err error) {
 		tdTask.QualifiedTableName = qualifiedTableName
 		tdTask.ConcurrencyFactor = task.ConcurrencyFactor
 		tdTask.MaxConnections = task.MaxConnections
+		tdTask.BlockTimeout = task.BlockTimeout
+		tdTask.RunTimeout = task.RunTimeout
 		tdTask.BlockSize = task.BlockSize
 		tdTask.CompareUnitSize = task.CompareUnitSize
 		tdTask.Output = task.Output
@@ -989,6 +995,8 @@ func (task *SchemaDiffCmd) CloneForSchedule(ctx context.Context) *SchemaDiffCmd 
 	clone.BlockSize = task.BlockSize
 	clone.ConcurrencyFactor = task.ConcurrencyFactor
 	clone.MaxConnections = task.MaxConnections
+	clone.BlockTimeout = task.BlockTimeout
+	clone.RunTimeout = task.RunTimeout
 	clone.CompareUnitSize = task.CompareUnitSize
 	clone.Output = task.Output
 	clone.OutputExplicit = task.OutputExplicit

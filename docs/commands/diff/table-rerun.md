@@ -17,6 +17,7 @@ Re-runs a previous diff to confirm fixes or check if inconsistencies persist.
 | `--diff-file` | `-f` | Path to original diff (**required**) |  |
 | `--dbname` | `-d` | Database name |  |
 | `--nodes` | `-n` | Nodes to include (comma or `all`) | `all` |
+| `--run-timeout <int>` |  | Time limit in seconds for the whole rerun. `0` means no limit. | `table_diff.run_timeout`, or `0` |
 | `--quiet` | `-q` | Suppress output | `false` |
 | `--debug` | `-v` | Debug logging | `false` |
 

@@ -150,6 +150,21 @@ of that version, and recreate the `#` operator as described in the
 `bytea_xor` entry.
 
 ### Added
+- **Time limits for `table-diff`, `repset-diff` and `schema-diff`.**
+  `--block-timeout` (`table_diff.block_timeout` in `ace.yaml`, default 60 s)
+  limits one query on one block: the hash of a block, the split of a range,
+  or the fetch of its rows. `--run-timeout` (`table_diff.run_timeout`,
+  default 0, no limit) limits the diff of one table; for `repset-diff` and
+  `schema-diff` it applies to each table on its own, and `table-rerun` has
+  it too. When a limit is reached, ACE cancels its queries on all nodes
+  and the diff fails with an error that names the limit. Each query holds
+  a snapshot only while it runs, so these limits also bound how long ACE
+  holds back vacuum on a node. The block limit was a fixed 60 s for the
+  hash queries only, and the time spent waiting for a free connection
+  counted toward it; now the wait does not count. **The fetch of rows and
+  the split of a range had no limit before and now have the 60 s default.**
+  If a diff of very wide rows fails with a block timeout after the
+  upgrade, raise `table_diff.block_timeout` or set it to `0`.
 - `--max-connections` / `-M` on `mtree build`, `mtree update`, and
   `mtree table-diff`, with `mtree.max_connections` in `ace.yaml` and
   `max_connections` on the matching HTTP API endpoints. It caps the

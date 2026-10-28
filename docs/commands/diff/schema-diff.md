@@ -30,6 +30,8 @@ table instead of its data or its mere presence.
 | `--compare-unit-size <int>` | `-u` | Recursive split size for mismatched blocks. Default `10000`. |
 | `--output <json\|html>` | `-o` | Per-table diff report format. Default `json`. With `--compare=structure`, only `json` is accepted, and it only takes effect when given by hand (see below). |
 | `--override-block-size` | `-B` | Allow block sizes outside `ace.yaml` guardrails. |
+| `--block-timeout <int>` |  | Time limit in seconds for one query on one block of a table. `0` means no limit. | `table_diff.block_timeout`, or `60` |
+| `--run-timeout <int>` |  | Time limit in seconds for the diff of each table, counted for each table on its own. `0` means no limit. | `table_diff.run_timeout`, or `0` |
 | `--ddl-only` | `-L` | Compare object sets only (no per-table diff) | `false` |
 | `--quiet` | `-q` | Suppress output | `false` |
 | `--debug` | `-v` | Debug logging | `false` |

@@ -65,6 +65,11 @@ type DiffConfig struct {
 	MaxBatchSize      int     `yaml:"max_diff_batch_size"`
 	CompareUnitSize   int     `yaml:"compare_unit_size"`
 	MaxConnections    int     `yaml:"max_connections"`
+	// BlockTimeout limits one query on one block, in seconds. Unset means
+	// 60; 0 means no limit.
+	BlockTimeout *int `yaml:"block_timeout"`
+	// RunTimeout limits one table-diff run, in seconds. 0 means no limit.
+	RunTimeout int `yaml:"run_timeout"`
 }
 
 type MTreeConfig struct {
