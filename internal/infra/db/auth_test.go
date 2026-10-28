@@ -187,6 +187,70 @@ func TestRuntimeParamsHonourConfiguredParallelWorkers(t *testing.T) {
 	}
 }
 
+func TestClientCheckInterval(t *testing.T) {
+	cases := []struct {
+		name   string
+		cfg    *config.Config
+		wantMS int
+		wantOK bool
+	}{
+		{"no config", nil, 5000, true},
+		{"unset", &config.Config{}, 5000, true},
+		{"configured", &config.Config{Postgres: config.PostgresConfig{ClientConnectionCheckInterval: intPtr(1000)}}, 1000, true},
+		{"zero", &config.Config{Postgres: config.PostgresConfig{ClientConnectionCheckInterval: intPtr(0)}}, 0, true},
+		{"negative leaves the server setting", &config.Config{Postgres: config.PostgresConfig{ClientConnectionCheckInterval: intPtr(-1)}}, -1, false},
+	}
+	for _, tc := range cases {
+		ms, ok := clientCheckInterval(tc.cfg)
+		if ms != tc.wantMS || ok != tc.wantOK {
+			t.Errorf("%s: got (%d, %v), want (%d, %v)", tc.name, ms, ok, tc.wantMS, tc.wantOK)
+		}
+	}
+}
+
+// The setting must not be in the startup packet: an old server, or a
+// server on a platform without the check, would refuse the connection.
+func TestCheckIntervalNotInStartupPacket(t *testing.T) {
+	params := map[string]string{}
+	applyRuntimeParams(params, config.PostgresConfig{ClientConnectionCheckInterval: intPtr(1000)})
+	if _, ok := params["client_connection_check_interval"]; ok {
+		t.Fatalf("client_connection_check_interval is in the startup parameters")
+	}
+}
+
+func TestConfigsGetAfterConnectHook(t *testing.T) {
+	poolCfg, err := pgxpool.ParseConfig("host=localhost dbname=x user=x sslmode=disable")
+	if err != nil {
+		t.Fatal(err)
+	}
+	applyPostgresPoolConfig(poolCfg)
+	if poolCfg.ConnConfig.Config.AfterConnect == nil {
+		t.Error("pool config has no AfterConnect hook")
+	}
+
+	replCfg, err := pgconn.ParseConfig("host=localhost dbname=x user=x sslmode=disable")
+	if err != nil {
+		t.Fatal(err)
+	}
+	applyPostgresPgconnConfig(replCfg)
+	if replCfg.AfterConnect == nil {
+		t.Error("replication config has no AfterConnect hook")
+	}
+}
+
+func TestSetClientCheckIntervalKeepsPreviousHook(t *testing.T) {
+	cfg, err := pgconn.ParseConfig("host=localhost dbname=x user=x sslmode=disable")
+	if err != nil {
+		t.Fatal(err)
+	}
+	prevErr := errors.New("previous hook")
+	cfg.AfterConnect = func(context.Context, *pgconn.PgConn) error { return prevErr }
+	setClientCheckInterval(cfg, 5000)
+	if err := cfg.AfterConnect(context.Background(), nil); !errors.Is(err, prevErr) {
+		t.Fatalf("got %v, want the error of the previous hook", err)
+	}
+}
+
 // A negative value means "leave the server's own setting alone".
 func TestRuntimeParamsNegativeLeavesServerDefault(t *testing.T) {
 	params := map[string]string{}

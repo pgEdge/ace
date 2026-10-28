@@ -13,6 +13,7 @@ package auth
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"strconv"
@@ -352,6 +353,9 @@ func applyPostgresPoolConfig(poolCfg *pgxpool.Config) {
 	poolCfg.ConnConfig.Config.RuntimeParams = runtimeParams
 	validateOutputSettings(&poolCfg.ConnConfig.Config)
 	cfg := config.Get()
+	if ms, ok := clientCheckInterval(cfg); ok {
+		setClientCheckInterval(&poolCfg.ConnConfig.Config, ms)
+	}
 	if cfg == nil {
 		return
 	}
@@ -372,12 +376,62 @@ func applyPostgresPgconnConfig(pgCfg *pgconn.Config) {
 	pgCfg.RuntimeParams = runtimeParams
 	validateOutputSettings(pgCfg)
 	cfg := config.Get()
+	if ms, ok := clientCheckInterval(cfg); ok {
+		setClientCheckInterval(pgCfg, ms)
+	}
 	if cfg == nil {
 		return
 	}
 	applyRuntimeParams(runtimeParams, cfg.Postgres)
 	if cfg.Postgres.ConnectionTimeout > 0 {
 		pgCfg.ConnectTimeout = time.Duration(cfg.Postgres.ConnectionTimeout) * time.Second
+	}
+}
+
+// defaultClientConnectionCheckInterval is the value of
+// client_connection_check_interval, in milliseconds, that ACE sets when
+// ace.yaml does not set it.
+const defaultClientConnectionCheckInterval = 5000
+
+// clientCheckInterval returns the value of client_connection_check_interval
+// in milliseconds that ACE sets, and false if ACE leaves the server setting
+// alone.
+func clientCheckInterval(cfg *config.Config) (int, bool) {
+	ms := defaultClientConnectionCheckInterval
+	if cfg != nil && cfg.Postgres.ClientConnectionCheckInterval != nil {
+		ms = *cfg.Postgres.ClientConnectionCheckInterval
+	}
+	return ms, ms >= 0
+}
+
+// setClientCheckInterval wraps the AfterConnect hook of cfg so that a new
+// connection sets client_connection_check_interval to ms. If ACE stops
+// without closing its connections, for example when the kernel kills it, a
+// backend in the middle of a long query finds the lost client only with
+// this check. Without it, the backend runs the query to the end and holds
+// its snapshot all that time.
+//
+// The value is not sent in the startup packet. A server before PostgreSQL
+// 14 does not know the setting, and a server on a platform without the
+// check accepts only 0; in both cases the server would refuse the
+// connection. If the server refuses the SET, the connection works without
+// the check. A hook that is already set is called first.
+func setClientCheckInterval(cfg *pgconn.Config, ms int) {
+	prev := cfg.AfterConnect
+	sql := fmt.Sprintf("SET client_connection_check_interval = %d", ms)
+	cfg.AfterConnect = func(ctx context.Context, conn *pgconn.PgConn) error {
+		if prev != nil {
+			if err := prev(ctx, conn); err != nil {
+				return err
+			}
+		}
+		_, err := conn.Exec(ctx, sql).ReadAll() // nosemgrep
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) {
+			logger.Debug("the server refused client_connection_check_interval: %v", err)
+			return nil
+		}
+		return err
 	}
 }
 

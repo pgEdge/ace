@@ -23,6 +23,11 @@ postgres:
   # Postgres from adding parallel workers to each of them. Set to -1 to leave
   # the server's own setting in place.
   max_parallel_workers_per_gather: 0
+  # Set on every ACE connection (ms). If ACE stops without closing its
+  # connections, a backend in a long query finds the lost client within
+  # this time and stops the query. Set to -1 to leave the server's own
+  # setting in place.
+  client_connection_check_interval: 5000
 
 table_diff:
   concurrency_factor: 0.5

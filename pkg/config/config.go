@@ -47,6 +47,10 @@ type PostgresConfig struct {
 	// workers, so unset (or 0) stops Postgres from adding parallel workers
 	// on top of that. A negative value leaves the server's setting alone.
 	MaxParallelWorkersPerGather *int `yaml:"max_parallel_workers_per_gather"`
+	// ClientConnectionCheckInterval is set as client_connection_check_interval
+	// (ms) on every ACE connection. Unset means 5000. A negative value leaves
+	// the server's setting alone.
+	ClientConnectionCheckInterval *int `yaml:"client_connection_check_interval"`
 }
 
 type DiffConfig struct {
