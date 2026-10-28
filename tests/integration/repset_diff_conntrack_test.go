@@ -20,6 +20,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/pgedge/ace/internal/consistency/diff"
+	"github.com/pgedge/ace/pkg/config"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -102,11 +103,45 @@ func monitorConnections(
 	return snapshots, stop
 }
 
-// TestRepsetDiff_MaxConnectionsCap verifies that setting MaxConnections limits
-// the number of database connections per node, even when the concurrency factor
-// would allow more. On a 4-vCPU GitHub Actions runner with concurrency factor
-// 4.0, this creates 16 workers but caps the pool at 2 connections per node.
-// Workers queue for connections rather than opening new ones.
+// aceConnCount returns the number of ACE connections to the node of pool.
+func aceConnCount(t *testing.T, ctx context.Context, pool *pgxpool.Pool) int {
+	t.Helper()
+	var n int
+	require.NoError(t, pool.QueryRow(ctx, `
+		SELECT count(*) FROM pg_stat_activity
+		WHERE application_name = 'ACE' AND pid <> pg_backend_pid()`).Scan(&n))
+	return n
+}
+
+// waitForACEConns waits until every node of pools has no more ACE
+// connections than want gives for it, and fails the test after 10 seconds.
+func waitForACEConns(t *testing.T, ctx context.Context, pools map[string]*pgxpool.Pool, want map[string]int) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		extra := make(map[string]int)
+		for name, pool := range pools {
+			if n := aceConnCount(t, ctx, pool); n > want[name] {
+				extra[name] = n - want[name]
+			}
+		}
+		if len(extra) == 0 {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("ACE connections still open above the expected number: %v", extra)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// TestRepsetDiff_MaxConnectionsCap verifies that MaxConnections limits the
+// number of database connections per node for the whole task, even when the
+// concurrency factor would allow more. On a 4-vCPU GitHub Actions runner with
+// concurrency factor 4.0, the comparison phase could run 16 tasks, but with
+// MaxConnections = 2 it runs at most 2 at the same time, on the 2
+// connections that cutting and hashing used. Every other table differs
+// between the nodes, so the comparison phase runs.
 func TestRepsetDiff_MaxConnectionsCap(t *testing.T) {
 	const (
 		numTables         = 5
@@ -214,8 +249,8 @@ func TestRepsetDiff_MaxConnectionsCap(t *testing.T) {
 	}
 
 	// With MaxConnections=2, peak should never exceed 2 per node, regardless
-	// of concurrency factor (16 workers on 4 CPUs). The pool queues excess
-	// workers. Allow no margin — the cap must hold strictly.
+	// of concurrency factor (16 comparison tasks on 4 CPUs), in every phase
+	// of the task. Allow no margin.
 	for node, peak := range peakPerNode {
 		assert.LessOrEqual(t, peak, maxConnections,
 			"node %s peak ACE connections (%d) exceeds max_connections (%d) — "+
@@ -236,5 +271,140 @@ func TestRepsetDiff_MaxConnectionsCap(t *testing.T) {
 			name, aceCount, baseline[name], leaked)
 		assert.LessOrEqual(t, leaked, 1,
 			"node %s should not leak connections (leaked %d)", name, leaked)
+	}
+}
+
+// TestTableDiff_ConnectionsPerNode checks that table-diff opens exactly the
+// number of connections that the max_connections section of the
+// configuration file gives for each node, and no more, while it cuts and
+// hashes a table. The tables are equal, so there is no comparison phase.
+func TestTableDiff_ConnectionsPerNode(t *testing.T) {
+	const (
+		tableName = "conn_per_node"
+		rows      = 200000
+		n1Conns   = 2
+		n2Conns   = 3
+	)
+	ctx := context.Background()
+	qualifiedName := fmt.Sprintf("%s.%s", testSchema, tableName)
+	pools := map[string]*pgxpool.Pool{serviceN1: pgCluster.Node1Pool, serviceN2: pgCluster.Node2Pool}
+
+	for name, pool := range pools {
+		_, err := pool.Exec(ctx, fmt.Sprintf(`CREATE TABLE IF NOT EXISTS %s (id int PRIMARY KEY, val text)`, qualifiedName))
+		require.NoError(t, err, "create table on %s", name)
+		_, err = pool.Exec(ctx, fmt.Sprintf(
+			`INSERT INTO %s SELECT g, 'row_' || g FROM generate_series(1, %d) g ON CONFLICT DO NOTHING`, qualifiedName, rows))
+		require.NoError(t, err, "insert rows on %s", name)
+	}
+	t.Cleanup(func() {
+		for _, pool := range pools {
+			pool.Exec(ctx, fmt.Sprintf(`DROP TABLE IF EXISTS %s CASCADE`, qualifiedName))
+		}
+	})
+
+	old := config.Get()
+	cfg := *old
+	cfg.MaxConnections = config.ConnectionLimits{
+		Default: n2Conns,
+		Nodes:   map[string]int{pgCluster.ClusterName + "." + serviceN1: n1Conns},
+	}
+	config.Set(&cfg)
+	t.Cleanup(func() { config.Set(old) })
+
+	baseline := make(map[string]int)
+	for name, pool := range pools {
+		baseline[name] = aceConnCount(t, ctx, pool)
+	}
+
+	task := newTestTableDiffTask(t, qualifiedName, []string{serviceN1, serviceN2})
+	task.ConcurrencyFactor = 4
+	task.QuietMode = true
+	task.SkipDBUpdate = true
+	require.NoError(t, task.RunChecks(false))
+	// The checks use their own short connections; count only the
+	// connections of the diff.
+	waitForACEConns(t, ctx, pools, baseline)
+
+	snapshots, stop := monitorConnections(ctx, pools, 10*time.Millisecond)
+	err := task.ExecuteTask()
+	stop()
+	require.NoError(t, err)
+
+	peak := make(map[string]int)
+	for _, s := range *snapshots {
+		peak[s.Node] = max(peak[s.Node], s.ACEConns-baseline[s.Node])
+	}
+	assert.Equal(t, n1Conns, peak[serviceN1], "peak ACE connections on %s", serviceN1)
+	assert.Equal(t, n2Conns, peak[serviceN2], "peak ACE connections on %s", serviceN2)
+	for name := range pools {
+		t.Logf("node %s: peak ACE connections above baseline = %d", name, peak[name])
+	}
+}
+
+// TestTableDiff_OneConnectionPerNode runs table-diff with one connection to
+// each node. On the anchor the only connection first cuts the table and then
+// hashes it, and the comparison phase also runs on that one connection. The
+// tables differ, so every phase of the task runs.
+func TestTableDiff_OneConnectionPerNode(t *testing.T) {
+	const (
+		tableName = "conn_one_per_node"
+		rows      = 20000
+		diverged  = 30
+	)
+	ctx := context.Background()
+	qualifiedName := fmt.Sprintf("%s.%s", testSchema, tableName)
+	pools := map[string]*pgxpool.Pool{serviceN1: pgCluster.Node1Pool, serviceN2: pgCluster.Node2Pool}
+
+	for name, pool := range pools {
+		_, err := pool.Exec(ctx, fmt.Sprintf(`CREATE TABLE IF NOT EXISTS %s (id int PRIMARY KEY, val text)`, qualifiedName))
+		require.NoError(t, err, "create table on %s", name)
+		_, err = pool.Exec(ctx, fmt.Sprintf(
+			`INSERT INTO %s SELECT g, 'row_' || g FROM generate_series(1, %d) g ON CONFLICT DO NOTHING`, qualifiedName, rows))
+		require.NoError(t, err, "insert rows on %s", name)
+	}
+	t.Cleanup(func() {
+		for _, pool := range pools {
+			pool.Exec(ctx, fmt.Sprintf(`DROP TABLE IF EXISTS %s CASCADE`, qualifiedName))
+		}
+	})
+	// The table is in no replication set, so the change stays on n1. The
+	// changed rows are spread over the table, so several blocks differ.
+	_, err := pgCluster.Node1Pool.Exec(ctx, fmt.Sprintf(
+		`UPDATE %s SET val = 'diverged_n1' WHERE id %% %d = 0`, qualifiedName, rows/diverged))
+	require.NoError(t, err, "diverge the table on %s", serviceN1)
+
+	task := newTestTableDiffTask(t, qualifiedName, []string{serviceN1, serviceN2})
+	task.ConcurrencyFactor = 4
+	task.MaxConnections = 1
+	task.BlockSize = 1000
+	task.OverrideBlockSize = true
+	task.QuietMode = true
+	task.SkipDBUpdate = true
+	baseline := make(map[string]int)
+	for name, pool := range pools {
+		baseline[name] = aceConnCount(t, ctx, pool)
+	}
+	require.NoError(t, task.RunChecks(false))
+	// The checks use their own short connections, and a backend leaves
+	// pg_stat_activity a little after the client closes it. Wait until they
+	// are gone, so the count below sees only the connections of the diff.
+	waitForACEConns(t, ctx, pools, baseline)
+
+	snapshots, stop := monitorConnections(ctx, pools, 10*time.Millisecond)
+	err = task.ExecuteTask()
+	stop()
+	require.NoError(t, err)
+
+	pairKey := serviceN1 + "/" + serviceN2
+	assert.Equal(t, diverged, task.DiffResult.Summary.DiffRowsCount[pairKey],
+		"table-diff with one connection per node must find every changed row")
+
+	peak := make(map[string]int)
+	for _, s := range *snapshots {
+		peak[s.Node] = max(peak[s.Node], s.ACEConns-baseline[s.Node])
+	}
+	for name := range pools {
+		t.Logf("node %s: peak ACE connections above baseline = %d", name, peak[name])
+		assert.Equal(t, 1, peak[name], "peak ACE connections on %s", name)
 	}
 }

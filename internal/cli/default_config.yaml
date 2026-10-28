@@ -34,7 +34,22 @@ table_diff:
   diff_batch_size: 1
   max_diff_batch_size: 1000
   compare_unit_size: 10000
-  max_connections: 0            # max DB connections per node (0 = derive from concurrency factor)
+  # Old name of max_connections.default below; used only when that is not
+  # set. 0 = not set.
+  max_connections: 0
+
+# Number of connections that one table-diff task opens to each node, and
+# keeps until it ends. --max-connections on the command line has priority.
+# A node can have its own value under "nodes", named <cluster>.<node>. A
+# value set here or on the command line is a strict limit for the whole
+# task. 0 = not set: the task opens 4 connections for cutting and hashing,
+# and the comparison of blocks that differ can open more, up to the number
+# that concurrency_factor gives. The limit is per task. mtree commands do
+# not use this section.
+max_connections:
+  default: 0
+  # nodes:
+  #   demo.n1: 8
 
 mtree:
   cdc:
@@ -51,8 +66,9 @@ mtree:
     adaptive_drain_fraction: 0.01
     adaptive_drain_min_changes: 1000
   schema: "pgedge_ace"
-  # Max DB connections per node for mtree build, update and table-diff, like
-  # table_diff.max_connections. One connection holds the tree's transaction
+  # Max DB connections per node for mtree build, update and table-diff. It
+  # caps the pool; the max_connections section above does not apply to
+  # mtree commands. One connection holds the tree's transaction
   # and the rest run hash queries, so this also caps the busy backends per
   # node. Must be at least 2 when set, and 3 for mtree build, which also
   # runs cutting workers. 0 = derive from --max-cpu-ratio.

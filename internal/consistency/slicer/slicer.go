@@ -32,10 +32,15 @@
 // compared on every node.
 //
 // Workers send blocks to a channel as soon as they cut them, so hashing
-// starts before the whole key space is cut. One cutting query reads a
-// bounded number of rows, so the cut does not hold back the vacuum horizon
-// of the anchor node. The cut does not need one snapshot: a block is a key
-// range, and every node hashes the same ranges whatever rows they hold.
+// starts before the whole key space is cut.
+//
+// Each worker has its own connection and cuts all its parts in one
+// read-only REPEATABLE READ transaction. While the transaction is open, the
+// anchor node cannot vacuum rows that became dead after it started. The cut
+// reads the key index once, so this lasts only one pass over the index, if
+// the reader of the blocks never makes the workers wait. The workers do not
+// need one common snapshot: a block is a key range, and every node hashes
+// the same ranges whatever rows they hold.
 package slicer
 
 import (
@@ -62,7 +67,8 @@ const (
 	SourceSingle = "single"
 
 	// DefaultChunkRows is the target number of rows that one cutting query
-	// reads. It limits how long the query holds back the vacuum horizon.
+	// reads. A worker sends the blocks of a query when the query ends, so
+	// this limit decides how long the readers wait for the next blocks.
 	DefaultChunkRows = 1_000_000
 
 	// The sample reads about samplePagesPerPart pages per part, and never
@@ -78,10 +84,19 @@ const (
 	maxWorkers = 4
 )
 
-// Querier is the part of pgxpool.Pool that the slicer uses.
+// Querier is the part of pgxpool.Pool and pgxpool.Conn that the slicer uses.
 type Querier interface {
 	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
 	BeginTx(ctx context.Context, txOptions pgx.TxOptions) (pgx.Tx, error)
+}
+
+// Queriers converts a slice of connections to the type that Cut takes.
+func Queriers[T Querier](conns []T) []Querier {
+	qs := make([]Querier, len(conns))
+	for i, c := range conns {
+		qs[i] = c
+	}
+	return qs
 }
 
 // Config describes the table and the limits of one slicing run.
@@ -96,7 +111,8 @@ type Config struct {
 	BlockSize int
 	// Parts is the target number of parts. 0 means DefaultParts(Workers).
 	Parts int
-	// Workers is the number of parts cut at the same time on the anchor.
+	// Workers is the number of cutting workers that the caller plans to
+	// give to Cut. It sets the default number of parts.
 	Workers int
 	// ChunkRows overrides DefaultChunkRows (tests use small values).
 	ChunkRows int
@@ -115,6 +131,15 @@ func DefaultWorkers(hashWorkers int) int {
 		w = maxWorkers
 	}
 	return w
+}
+
+// CutWorkers returns how many of conns connections to the anchor node go to
+// cutting workers when the rest go to hash workers: at least one cutting
+// worker for every four hash workers, at least one in all, and never more
+// than the limit of cutting workers. With 4 connections it is one cutting
+// worker and three hash workers.
+func CutWorkers(conns int) int {
+	return min(max((conns+4)/5, 1), maxWorkers)
 }
 
 // DefaultParts returns the number of parts for the given number of cutting
@@ -623,7 +648,6 @@ func newCutQueries(cfg *Config) *cutQueries {
 
 type cutter struct {
 	cfg       *Config
-	q         Querier
 	sql       *cutQueries
 	out       chan<- Block
 	start     time.Time
@@ -657,23 +681,19 @@ func (c *cutter) send(ctx context.Context, b Block) error {
 // sort, and then every jump of a chunk reads the whole table.
 const chunkPlanGuard = "SET LOCAL enable_seqscan = off; SET LOCAL enable_sort = off"
 
-// inChunkTx runs fn in a read-only REPEATABLE READ transaction with the
-// plan guard, so all queries of one chunk see the same snapshot.
-func (c *cutter) inChunkTx(ctx context.Context, fn func(tx pgx.Tx) error) error {
-	tx, err := c.q.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
+// beginCut starts the transaction of one cutting worker on q: read-only,
+// REPEATABLE READ, with the plan guard. All queries of the worker see the
+// same snapshot.
+func beginCut(ctx context.Context, q Querier) (pgx.Tx, error) {
+	tx, err := q.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
 	if err != nil {
-		return err
+		return nil, err
 	}
-	// After Commit, Rollback does nothing.
-	defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }()
-
 	if _, err := tx.Exec(ctx, chunkPlanGuard); err != nil {
-		return err
+		_ = tx.Rollback(context.WithoutCancel(ctx))
+		return nil, err
 	}
-	if err := fn(tx); err != nil {
-		return err
-	}
-	return tx.Commit(ctx)
+	return tx, nil
 }
 
 func keyArgs(lo, hi []any, extra ...any) []any {
@@ -685,59 +705,53 @@ func keyArgs(lo, hi []any, extra ...any) []any {
 
 // firstKey returns the first key of part p, which has no lower bound, or
 // nil if the part has no rows.
-func (c *cutter) firstKey(ctx context.Context, p Part) ([]any, error) {
-	var key []any
-	err := c.inChunkTx(ctx, func(tx pgx.Tx) error {
-		rows, err := tx.Query(ctx, c.sql.first[hiIdx(p.Hi != nil)], p.Hi...)
-		if err != nil {
-			return err
-		}
-		keys, err := scanKeys(rows, len(c.cfg.Key), 0)
-		if err != nil {
-			return err
-		}
-		if len(keys) > 0 {
-			key = keys[0]
-		}
-		return nil
-	})
-	return key, err
+func (c *cutter) firstKey(ctx context.Context, tx pgx.Tx, p Part) ([]any, error) {
+	rows, err := tx.Query(ctx, c.sql.first[hiIdx(p.Hi != nil)], p.Hi...)
+	if err != nil {
+		return nil, err
+	}
+	keys, err := scanKeys(rows, len(c.cfg.Key), 0)
+	if err != nil || len(keys) == 0 {
+		return nil, err
+	}
+	return keys[0], nil
 }
 
 // readChunk returns up to n block starts after the block that starts at
 // cur, and, when there are fewer than n, the number of rows from the last
 // block start to the end of the part.
-func (c *cutter) readChunk(ctx context.Context, p Part, cur []any, n int64) (starts [][]any, tail int64, err error) {
+func (c *cutter) readChunk(ctx context.Context, tx pgx.Tx, p Part, cur []any, n int64) (starts [][]any, tail int64, err error) {
 	m := int64(c.cfg.BlockSize)
 	hi := hiIdx(p.Hi != nil)
-	err = c.inChunkTx(ctx, func(tx pgx.Tx) error {
-		rows, err := tx.Query(ctx, c.sql.chunk[hi], keyArgs(cur, p.Hi, m, n)...)
-		if err != nil {
-			return err
-		}
-		got, err := scanKeys(rows, len(c.cfg.Key), 1)
-		if err != nil {
-			return err
-		}
-		// Row 0 is the first key not less than cur: cur itself, or the
-		// next key if cur was deleted. It starts the current block, which
-		// is already open.
-		if len(got) > 0 {
-			starts = got[1:]
-		}
-		if int64(len(starts)) == n {
-			return nil
-		}
-		last := cur
-		if len(starts) > 0 {
-			last = starts[len(starts)-1]
-		}
-		return tx.QueryRow(ctx, c.sql.tail[hi], keyArgs(last, p.Hi, m+1)...).Scan(&tail)
-	})
-	return starts, tail, err
+	rows, err := tx.Query(ctx, c.sql.chunk[hi], keyArgs(cur, p.Hi, m, n)...)
+	if err != nil {
+		return nil, 0, err
+	}
+	got, err := scanKeys(rows, len(c.cfg.Key), 1)
+	if err != nil {
+		return nil, 0, err
+	}
+	// Row 0 is the first key not less than cur: cur itself, or the next key
+	// if cur does not exist in the snapshot. It starts the current block,
+	// which is already open.
+	if len(got) > 0 {
+		starts = got[1:]
+	}
+	if int64(len(starts)) == n {
+		return starts, 0, nil
+	}
+	last := cur
+	if len(starts) > 0 {
+		last = starts[len(starts)-1]
+	}
+	if err := tx.QueryRow(ctx, c.sql.tail[hi], keyArgs(last, p.Hi, m+1)...).Scan(&tail); err != nil {
+		return nil, 0, err
+	}
+	return starts, tail, nil
 }
 
-// cutPart cuts one part and sends its blocks in key order.
+// cutPart cuts one part in the transaction tx and sends its blocks in key
+// order.
 //
 // Invariants:
 //
@@ -747,15 +761,14 @@ func (c *cutter) readChunk(ctx context.Context, p Part, cur []any, n int64) (sta
 //     structure and holds even if rows change during the cut, so every key
 //     of [Lo, Hi) on every node is in exactly one block.
 //   - Size. Every block holds at most BlockSize rows on the anchor node in
-//     the snapshot of the chunk that cut it. A block never spans two
-//     chunks: a chunk ends on a block start. Rows written later can make a
+//     the snapshot of the worker that cut it. Rows written later can make a
 //     block larger; the limit is not a promise about other nodes or other
 //     moments.
 //
 // The size invariant needs the block starts in key order: each one is found
 // with ORDER BY on the key, starting from the one before it.
-func (c *cutter) cutPart(ctx context.Context, idx int, p Part) error {
-	pc := &partCut{c: c, idx: idx, p: p, cur: p.Lo}
+func (c *cutter) cutPart(ctx context.Context, tx pgx.Tx, idx int, p Part) error {
+	pc := &partCut{c: c, tx: tx, idx: idx, p: p, cur: p.Lo}
 	if p.Lo == nil {
 		if done, err := pc.openStart(ctx); err != nil || done {
 			return err
@@ -776,6 +789,7 @@ func (c *cutter) cutPart(ctx context.Context, idx int, p Part) error {
 // sequence number of the next block.
 type partCut struct {
 	c   *cutter
+	tx  pgx.Tx
 	idx int
 	p   Part
 	cur []any
@@ -794,7 +808,7 @@ func (pc *partCut) send(ctx context.Context, end []any, rows int64) error {
 // nodes have below every key of the anchor. done is true if the part has no
 // rows; then (nil, Hi) is its only block.
 func (pc *partCut) openStart(ctx context.Context) (done bool, err error) {
-	first, err := pc.c.firstKey(ctx, pc.p)
+	first, err := pc.c.firstKey(ctx, pc.tx, pc.p)
 	if err != nil {
 		return false, fmt.Errorf("slicer: cut part %d: %w", pc.idx, err)
 	}
@@ -807,7 +821,7 @@ func (pc *partCut) openStart(ctx context.Context) (done bool, err error) {
 // cutChunk cuts up to n blocks from the current block start. done is true
 // when the part ends in this chunk; then its last block is sent too.
 func (pc *partCut) cutChunk(ctx context.Context, n int64) (done bool, err error) {
-	starts, tail, err := pc.c.readChunk(ctx, pc.p, pc.cur, n)
+	starts, tail, err := pc.c.readChunk(ctx, pc.tx, pc.p, pc.cur, n)
 	if err != nil {
 		return false, fmt.Errorf("slicer: cut part %d: %w", pc.idx, err)
 	}
@@ -820,6 +834,27 @@ func (pc *partCut) cutChunk(ctx context.Context, n int64) (done bool, err error)
 		return false, nil
 	}
 	return true, pc.send(ctx, pc.p.Hi, tail)
+}
+
+// work is one cutting worker: it takes parts from jobs and cuts them on q,
+// all in one transaction.
+func (c *cutter) work(ctx context.Context, q Querier, plan *Plan, jobs <-chan int) error {
+	tx, err := beginCut(ctx, q)
+	if err != nil {
+		return fmt.Errorf("slicer: start the cut transaction: %w", err)
+	}
+	// After Commit, Rollback does nothing.
+	defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }()
+
+	for i := range jobs {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if err := c.cutPart(ctx, tx, i, plan.Parts[i]); err != nil {
+			return err
+		}
+	}
+	return tx.Commit(ctx)
 }
 
 // Describe returns a one-line description of a plan for the log.
@@ -836,11 +871,31 @@ func Describe(plan *Plan, cfg Config, anchor string) string {
 // out. It does not close out. Blocks of one part arrive in key order; blocks
 // of different parts can interleave. Cut returns when all parts are cut or
 // on the first error.
-func Cut(ctx context.Context, q Querier, cfg Config, plan *Plan, out chan<- Block) (*Stats, error) {
+//
+// Every connection in conns runs one cutting worker, and all connections
+// must lead to the anchor node. A worker cuts all its parts in one
+// read-only REPEATABLE READ transaction, so the reader of out must take the
+// blocks at once: a worker that waits keeps its snapshot open.
+//
+// When a worker has no more parts, it ends its transaction and calls done
+// with the index of its connection and its error, nil on success. From then
+// the caller can use that connection again. Cut calls done once for every
+// connection, also for a connection that it does not need because the plan
+// has fewer parts, and before Cut returns. done can be nil.
+func Cut(ctx context.Context, conns []Querier, cfg Config, plan *Plan, out chan<- Block, done func(i int, err error)) (*Stats, error) {
+	if done == nil {
+		done = func(int, error) {}
+	}
 	if err := cfg.validate(); err != nil {
+		for i := range conns {
+			done(i, err)
+		}
 		return nil, err
 	}
-	c := &cutter{cfg: &cfg, q: q, sql: newCutQueries(&cfg), out: out, start: time.Now()}
+	if len(conns) == 0 {
+		return nil, errors.New("slicer: no connection to cut on")
+	}
+	c := &cutter{cfg: &cfg, sql: newCutQueries(&cfg), out: out, start: time.Now()}
 
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -851,31 +906,27 @@ func Cut(ctx context.Context, q Querier, cfg Config, plan *Plan, out chan<- Bloc
 	}
 	close(jobs)
 
-	workers := cfg.Workers
-	if workers > len(plan.Parts) {
-		workers = len(plan.Parts)
-	}
 	var (
 		wg       sync.WaitGroup
 		errOnce  sync.Once
 		firstErr error
 	)
-	for w := 0; w < workers; w++ {
+	for w, q := range conns {
+		if w >= len(plan.Parts) {
+			done(w, nil)
+			continue
+		}
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			for i := range jobs {
-				if ctx.Err() != nil {
-					return
-				}
-				if err := c.cutPart(ctx, i, plan.Parts[i]); err != nil {
-					errOnce.Do(func() {
-						firstErr = err
-						cancel()
-					})
-					return
-				}
+			err := c.work(ctx, q, plan, jobs)
+			if err != nil {
+				errOnce.Do(func() {
+					firstErr = err
+					cancel()
+				})
 			}
+			done(w, err)
 		}()
 	}
 	wg.Wait()

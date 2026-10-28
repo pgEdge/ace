@@ -17,7 +17,7 @@ This command compares the data in the specified table across nodes in a cluster 
 |---|---|---|
 | `--dbname <name>` | `-d` | Database name. Defaults to the first DB in the cluster config. |
 | `--block-size <int>` | `-b` | Rows processed per comparison block. Default `100000`. Honours `ace.yaml` limits unless `--override-block-size` is set. |
-| `--concurrency-factor <float>` | `-c` | CPU ratio for concurrency (0.0–4.0, e.g. 0.5 uses half of available CPUs). Default `0.5`. |
+| `--concurrency-factor <float>` | `-c` | CPU ratio for the comparison of the blocks that differ (0.0–4.0, e.g. 0.5 uses half of available CPUs); the number of hash workers comes from `--max-connections`. Default `0.5`. |
 | `--compare-unit-size <int>` | `-u` | Recursive split size for mismatched blocks. Default `10000`. |
 | `--output <json\|html>` | `-o` | Report format. Default `json`. When `html`, both JSON and HTML files share the same timestamped prefix. |
 | `--max-html-rows <int>` |  | Maximum number of rows for each node pair in the HTML report. Default `0`, which means `table_diff.max_html_rows` from `ace.yaml`, or `10000` when that is not set either. There is no setting for "no limit"; set a large number instead. The JSON report always contains every row. |
@@ -25,7 +25,7 @@ This command compares the data in the specified table across nodes in a cluster 
 | `--table-filter <WHERE>` | `-F` | Optional SQL `WHERE` clause applied on every node before hashing. |
 | `--against-origin <node>` |  | Limit the diff to rows whose `node_origin` matches this Spock node id or name (useful for failed-node recovery). |
 | `--until <timestamp>` |  | Optional commit timestamp fence (RFC3339) applied with `--against-origin` and `--table-filter`; excludes newer rows. |
-| `--max-connections <int>` | `-M` | Maximum database connections per node. When set, caps the connection pool regardless of concurrency factor. Default: derived from `--concurrency-factor`. |
+| `--max-connections <int>` | `-M` | Number of connections that ACE opens to each node for one `table-diff` task. A value that you set, here or in the `max_connections` section of `ace.yaml`, is a strict limit for the whole task. `0` takes the value from `ace.yaml`; if it sets none, ACE opens 4 connections for cutting and hashing, and comparing the blocks that differ can use more (see [Connections per node](../../configuration.md#connections-per-node)). Default: `0`. |
 | `--override-block-size` | `-B` | Skip block-size safety checks defined in `ace.yaml`. |
 | `--quiet` | `-q` | Suppress progress output. Results still write to the diff file. |
 | `--debug` | `-v` | Enable verbose logging. |
@@ -46,7 +46,10 @@ Compare a table across all nodes and write a JSON report (add `--output html` to
 2025/07/22 12:03:51 INFO Cluster acctg exists
 2025/07/22 12:03:51 INFO Connections successful to nodes in cluster
 2025/07/22 12:03:51 INFO Table public.customers_large is comparable across nodes
-2025/07/22 12:03:51 INFO Using 16 CPUs, max concurrent workers = 16
+2025/07/22 12:03:51 INFO table-diff: 4 connections to node n1
+2025/07/22 12:03:51 INFO table-diff: 4 connections to node n2
+2025/07/22 12:03:51 INFO table-diff: 4 connections to node n3
+2025/07/22 12:03:51 INFO Using 16 CPUs, up to 16 comparison tasks at the same time
 Hashing initial ranges: 171 / 177 [=======================================================================>---] 1s | 0s
 Analysing mismatches: 2 / 2 [=================================================================================] 0s | done
 2025/07/22 12:03:53 INFO Table diff comparison completed for public.customers_large
@@ -62,7 +65,10 @@ Analysing mismatches: 2 / 2 [===================================================
 2025/07/22 12:05:59 INFO Cluster acctg exists
 2025/07/22 12:05:59 INFO Connections successful to nodes in cluster
 2025/07/22 12:05:59 INFO Table public.customers_large is comparable across nodes
-2025/07/22 12:05:59 INFO Using 16 CPUs, max concurrent workers = 16
+2025/07/22 12:05:59 INFO table-diff: 4 connections to node n1
+2025/07/22 12:05:59 INFO table-diff: 4 connections to node n2
+2025/07/22 12:05:59 INFO table-diff: 4 connections to node n3
+2025/07/22 12:05:59 INFO Using 16 CPUs, up to 16 comparison tasks at the same time
 Hashing initial ranges: 168 / 177 [======================================================================>----] 1s | 0s
 2025/07/22 12:06:01 INFO Table diff comparison completed for public.customers_large
 2025/07/22 12:06:01 INFO ✔ TABLES MATCH
@@ -72,7 +78,7 @@ Hashing initial ranges: 168 / 177 [=============================================
 
 ACE optimises comparisons with multiprocessing and block hashing:
 
-- It splits work into blocks (`--block-size`) and uses multiple workers per node (`--concurrency-factor`) to compute hashes. If hashes mismatch for a block, rows are materialised and, if necessary, recursively split using `--compare-unit-size`.
+- It splits work into blocks (`--block-size`) and computes their hashes with several workers per node, one per connection (`--max-connections`). If hashes mismatch for a block, rows are materialised and, if necessary, recursively split using `--compare-unit-size`; `--concurrency-factor` sets how many such comparisons run at the same time.
 - Runtime factors include host resources (CPU/memory), allowed parallelism, table size and row width (e.g., large JSON/bytea/embedding columns can slow hashing), distribution of differences (widely scattered diffs trigger more block fetches), and network latency to database nodes.
 
 ### Relations ACE does not compare
@@ -113,8 +119,8 @@ ace table-diff my-cluster public._events \
 
 ### Tuning tips
 
-1. Tune `--block-size` and `--concurrency-factor` for your hardware and data
-   profile.
+1. Tune `--block-size`, `--max-connections` and `--concurrency-factor` for
+   your hardware and data profile.
 2. Use `--table-filter`/`-F` to narrow scope on very large tables.
     - Filters are applied inline (no temporary views) and recorded in the diff
       summary as both the raw filter and the effective filter (which also

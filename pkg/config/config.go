@@ -12,6 +12,7 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"strings"
 	"sync"
@@ -25,6 +26,10 @@ type Config struct {
 	TableDiff      DiffConfig     `yaml:"table_diff"`
 	MTree          MTreeConfig    `yaml:"mtree"`
 	Server         ServerConfig   `yaml:"server"`
+	// MaxConnections is the number of connections that one table-diff task
+	// opens to each node. A value set here is a strict limit for the whole
+	// task.
+	MaxConnections ConnectionLimits `yaml:"max_connections"`
 
 	ScheduleJobs   []JobDef   `yaml:"schedule_jobs"`
 	ScheduleConfig []SchedDef `yaml:"schedule_config"`
@@ -60,7 +65,73 @@ type DiffConfig struct {
 	BatchSize         int     `yaml:"diff_batch_size"`
 	MaxBatchSize      int     `yaml:"max_diff_batch_size"`
 	CompareUnitSize   int     `yaml:"compare_unit_size"`
-	MaxConnections    int     `yaml:"max_connections"`
+	// MaxConnections is the old name of max_connections.default. It is used
+	// only when max_connections.default is not set.
+	MaxConnections int `yaml:"max_connections"`
+}
+
+// DefaultMaxConnections is the number of connections per node when neither
+// the command nor the configuration file sets one.
+const DefaultMaxConnections = 4
+
+// ConnectionLimits is the max_connections section of the configuration
+// file. A value of 0 means "not set".
+type ConnectionLimits struct {
+	// Default applies to every node that Nodes does not list.
+	Default int `yaml:"default"`
+	// Nodes maps "<cluster>.<node>" to the value for that node.
+	Nodes map[string]int `yaml:"nodes"`
+}
+
+// UnmarshalYAML also accepts a single number, "max_connections: 8", as the
+// default value.
+func (l *ConnectionLimits) UnmarshalYAML(node *yaml.Node) error {
+	if node.Kind == yaml.ScalarNode {
+		return node.Decode(&l.Default)
+	}
+	type plain ConnectionLimits
+	return node.Decode((*plain)(l))
+}
+
+// ConnectionsFor returns the number of connections per node that the file
+// sets for node of cluster: the value for "<cluster>.<node>", then
+// max_connections.default, then table_diff.max_connections, then
+// DefaultMaxConnections. set is false only when the file sets none of them
+// and the result is DefaultMaxConnections. c can be nil.
+func (c *Config) ConnectionsFor(cluster, node string) (n int, set bool) {
+	if c == nil {
+		return DefaultMaxConnections, false
+	}
+	if n := c.MaxConnections.Nodes[cluster+"."+node]; n > 0 {
+		return n, true
+	}
+	if n := c.MaxConnections.Default; n > 0 {
+		return n, true
+	}
+	if n := c.TableDiff.MaxConnections; n > 0 {
+		return n, true
+	}
+	return DefaultMaxConnections, false
+}
+
+// CheckConnectionLimits returns an error if a number of connections in the
+// file is negative. c can be nil.
+func (c *Config) CheckConnectionLimits() error {
+	if c == nil {
+		return nil
+	}
+	if c.MaxConnections.Default < 0 {
+		return fmt.Errorf("max_connections.default must be >= 0, got %d", c.MaxConnections.Default)
+	}
+	if c.TableDiff.MaxConnections < 0 {
+		return fmt.Errorf("table_diff.max_connections must be >= 0, got %d", c.TableDiff.MaxConnections)
+	}
+	for name, n := range c.MaxConnections.Nodes {
+		if n < 0 {
+			return fmt.Errorf("max_connections.nodes.%s must be >= 0, got %d", name, n)
+		}
+	}
+	return nil
 }
 
 type MTreeConfig struct {
@@ -83,10 +154,11 @@ type MTreeConfig struct {
 	} `yaml:"cdc"`
 	Schema string `yaml:"schema"`
 	// MaxConnections caps the connection pool per node for mtree build,
-	// update and table-diff, the same way table_diff.max_connections does
-	// for the diff commands. One connection holds the tree's transaction and
-	// the rest run hash queries, so this also caps the busy backends per
-	// node. 0 = derive the worker count from max_cpu_ratio alone.
+	// update and table-diff. The max_connections section of the file does
+	// not apply to these commands. One connection holds the tree's
+	// transaction and the rest run hash queries, so this also caps the busy
+	// backends per node. 0 = derive the worker count from max_cpu_ratio
+	// alone.
 	MaxConnections int `yaml:"max_connections"`
 	Diff           struct {
 		MinBlockSize int   `yaml:"min_block_size"`

@@ -28,7 +28,7 @@ ACE (Active Consistency Engine) helps keep nodes in a pgEdge Distributed Postgre
 
 **Control Resource Use When Possible.** 
 
-  - Adjust `--block-size`, `--concurrency-factor`, and `--compare-unit-size` to match each host’s capacity. For Merkle operations, consider lowering or raising `--max-cpu-ratio` as needed, or set `--max-connections` for an absolute cap when ACE runs on a host with far more cores than the database servers.
+  - Adjust `--block-size`, `--max-connections`, `--concurrency-factor`, and `--compare-unit-size` to match each host’s capacity. For the diff commands, `--max-connections` sets how many connections ACE opens to each node, and a value that you set is a strict limit for the whole task. For Merkle operations, consider lowering or raising `--max-cpu-ratio` as needed, or set `--max-connections` for an absolute cap when ACE runs on a host with far more cores than the database servers.
 
 **Keep your Statistics Fresh.** 
 
