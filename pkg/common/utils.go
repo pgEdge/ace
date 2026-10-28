@@ -31,6 +31,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgtype"
+	"github.com/jackc/pgx/v5"
 	pgxv5type "github.com/jackc/pgx/v5/pgtype"
 	"github.com/pgedge/ace/pkg/config"
 	"github.com/pgedge/ace/pkg/logger"
@@ -994,65 +995,6 @@ func SafeCut(s string, n int) string {
 	return s[:n]
 }
 
-// SelectColExpr returns the SELECT-list expression for one column of a diff
-// row fetch: the quoted name for known scalar types the driver scans
-// losslessly, or a ::TEXT cast (aliased back to the column name) for arrays,
-// json, bytea and any type the driver would surface as an opaque Go struct
-// (geometric, network, range, enum, xml, ...). Postgres parses its own text
-// form on repair, so text values round-trip for every type without per-type
-// conversion code. Both diff engines must build their row-fetch SELECTs with
-// it so reports stay engine-independent and repairable.
-func SelectColExpr(quotedCol, colType string) string {
-	if NeedsTextCast(colType) {
-		return fmt.Sprintf("%s::TEXT AS %s", quotedCol, quotedCol)
-	}
-	return quotedCol
-}
-
-// NeedsTextCast reports whether a diff row fetch must cast the column to
-// ::TEXT for its value to round-trip through a diff report (see
-// SelectColExpr). Row-fetch sites that cannot use SelectColExpr verbatim
-// (e.g. table-qualified selects) must still consult this policy.
-func NeedsTextCast(colType string) bool {
-	return strings.HasSuffix(colType, "[]") ||
-		strings.Contains(strings.ToLower(colType), "json") ||
-		strings.Contains(strings.ToLower(colType), "bytea") ||
-		!IsKnownScalarType(colType)
-}
-
-func IsKnownScalarType(colType string) bool {
-	// colType is pg_catalog.format_type output. Strip the typmod so
-	// "numeric(10,2)" and "timestamp(3) with time zone" match their base
-	// names, then require an exact match: prefix matching mistook types that
-	// merely start like a scalar ("daterange" for "date") for the scalar
-	// itself, so they were never cast to ::TEXT and reached diff reports as
-	// unrepairable Go-formatted structs.
-	base := colType
-	if i := strings.IndexByte(base, '('); i >= 0 {
-		if j := strings.IndexByte(base[i:], ')'); j >= 0 {
-			base = strings.TrimSpace(base[:i] + base[i+j+1:])
-		}
-	}
-
-	switch base {
-	case "character varying", "character", "text",
-		"integer", "bigint", "smallint",
-		"numeric", "decimal", "real", "double precision",
-		"boolean",
-		"bytea",
-		"json", "jsonb",
-		"uuid",
-		"date",
-		"timestamp without time zone", "timestamp with time zone",
-		// "time with time zone" (timetz) is deliberately absent: it is not
-		// registered in the pgx v5 default type map, so it cannot be scanned
-		// into *interface{} and must be cast to ::TEXT by the diff layer.
-		"time without time zone":
-		return true
-	}
-	return false
-}
-
 // RowKeyFromStrings joins already-rendered primary-key parts into the
 // in-memory key that matches a row across nodes.
 //
@@ -1191,6 +1133,8 @@ type ModifiedRow struct {
 	Node2Data types.OrderedMap
 }
 
+// CompareRowSets compares two sets of rows by primary key. The order of the
+// rows in rows1 and rows2 does not matter: they are matched by key.
 func CompareRowSets(rows1, rows2 []types.OrderedMap, pkeyCols []string, dataCols []string) (DiffResult, error) {
 	map1, err := rowsToMap(rows1, pkeyCols)
 	if err != nil {
@@ -1250,6 +1194,44 @@ func timeOrInfinity(t time.Time, inf pgtype.InfinityModifier) any {
 	default:
 		return t
 	}
+}
+
+// ScanRow reads the current row of rows: one entry per result column, named
+// after it, with each value in the form that ACE stores in diff reports.
+// Every place that reads table rows for a diff report, for a comparison or
+// for a key match must read them in this way, so that the values have one Go
+// form wherever they meet.
+func ScanRow(rows pgx.Rows) (types.OrderedMap, error) {
+	values, err := rows.Values()
+	if err != nil {
+		return nil, err
+	}
+	fields := rows.FieldDescriptions()
+	if len(values) != len(fields) {
+		return nil, fmt.Errorf("row has %d values for %d columns", len(values), len(fields))
+	}
+	row := make(types.OrderedMap, len(fields))
+	for i, f := range fields {
+		row[i] = types.KVPair{Key: f.Name, Value: NormalizeScannedValue(values[i])}
+	}
+	return row, nil
+}
+
+// ScanRows reads all rows in the same form and closes them.
+func ScanRows(rows pgx.Rows) ([]types.OrderedMap, error) {
+	defer rows.Close()
+	var result []types.OrderedMap
+	for rows.Next() {
+		row, err := ScanRow(rows)
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, row)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return result, nil
 }
 
 // NormalizeScannedValue converts a value scanned from a database row into the
@@ -1384,6 +1366,46 @@ func NormalizeNumericString(s string) string {
 	// If all fractional digits were zeros, remove the decimal point too
 	trimmed = strings.TrimRight(trimmed, ".")
 	return trimmed
+}
+
+// UpgradeDiffOutput brings a diff report of format version 0 to the current
+// version, in memory. A report of another version is not changed.
+//
+// Version 0 differs from version 1 in one way: a scalar numeric value can
+// have trailing zeros ("7.50"), while the same value read from the database
+// now has none ("7.5"). A row key built from such a report does not match
+// the key of the same row read now, and one row can be in the report under
+// two keys.
+//
+// numericCols is the set of the numeric columns of the table. A column that
+// is not in it is not changed. A version 0 report with a nil set is an
+// error: the report would be marked as upgraded while nothing was converted.
+func UpgradeDiffOutput(d *types.DiffOutput, numericCols map[string]bool) error {
+	if d.FormatVersion != 0 {
+		return nil
+	}
+	if numericCols == nil {
+		return fmt.Errorf("cannot read a diff report of format version 0 without the column types of the table")
+	}
+	for _, pair := range d.NodeDiffs {
+		for _, rows := range pair.Rows {
+			for _, row := range rows {
+				for i, kv := range row {
+					if !numericCols[kv.Key] {
+						continue
+					}
+					switch v := kv.Value.(type) {
+					case string:
+						row[i].Value = NormalizeNumericString(v)
+					case json.Number:
+						row[i].Value = json.Number(NormalizeNumericString(string(v)))
+					}
+				}
+			}
+		}
+	}
+	d.FormatVersion = types.DiffFormatVersion
+	return nil
 }
 
 // stringifyValue converts a value to its string representation for comparison,
@@ -1529,6 +1551,8 @@ func WriteDiffReport(diffResult types.DiffOutput, schema, table, format string, 
 			nodePairDiff.Rows[nodeName] = rows
 		}
 	}
+
+	diffResult.FormatVersion = types.DiffFormatVersion
 
 	outputPrefix := fmt.Sprintf("%s_%s_diffs-%s",
 		strings.ReplaceAll(schema, ".", "_"),

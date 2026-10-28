@@ -513,14 +513,135 @@ func InsertBlockRangesBatchComposite(ctx context.Context, db DBQuerier, mtreeTab
 }
 
 // isNumericType reports whether a column of this type (format_type output)
-// goes through trim_scale(). Arrays do not: trim_scale(numeric[]) does not
-// exist.
+// is wrapped in trim_scale(). The type must be numeric or decimal itself, with
+// or without a typmod: a type whose name only starts with these words, such
+// as an enum, has no trim_scale(). Arrays are not wrapped either:
+// trim_scale(numeric[]) does not exist.
 func isNumericType(colType string) bool {
 	lower := strings.ToLower(strings.TrimSpace(colType))
 	if strings.HasSuffix(lower, "[]") {
 		return false
 	}
-	return strings.HasPrefix(lower, "numeric") || strings.HasPrefix(lower, "decimal")
+	if i := strings.IndexByte(lower, '('); i >= 0 {
+		lower = strings.TrimSpace(lower[:i])
+	}
+	return lower == "numeric" || lower == "decimal"
+}
+
+// NumericColumns returns the set of the columns that are wrapped in
+// trim_scale(), by the column types of a table (format_type output). It
+// returns nil when there are no column types.
+func NumericColumns(colTypes map[string]string) map[string]bool {
+	if len(colTypes) == 0 {
+		return nil
+	}
+	cols := make(map[string]bool)
+	for col, colType := range colTypes {
+		if isNumericType(colType) {
+			cols[col] = true
+		}
+	}
+	return cols
+}
+
+// ColExpr returns the SQL expression that stands for one column wherever ACE
+// reads its value: in the row hash and in the row fetch. The hash and the
+// fetch must take a column in the same form. Otherwise two rows could hash
+// the same and still be reported as different when their block is fetched
+// for another reason, or the reverse.
+//
+// A scalar numeric or decimal column is wrapped in trim_scale(), so 1.50 and
+// 1.5 are the same value. An array is not, because trim_scale(numeric[])
+// does not exist.
+//
+// col is the column name, not quoted. tableAlias may be empty; the column is
+// then not qualified. colType is pg_catalog.format_type output; an empty type
+// gives the plain column.
+func ColExpr(tableAlias, col, colType string) string {
+	ref := pgx.Identifier{col}.Sanitize()
+	if tableAlias != "" {
+		ref = tableAlias + "." + ref
+	}
+	if isNumericType(colType) {
+		ref = fmt.Sprintf("trim_scale(%s)", ref)
+	}
+	return ref
+}
+
+// FetchColExpr returns the expression for one column in a diff row fetch,
+// without a name. It starts from the expression of the row hash, so a
+// fetched value is the value that was hashed. Then it casts to ::TEXT the
+// columns the driver cannot scan without loss: arrays, json, bytea and any
+// type the driver would give as an opaque Go struct (geometric, network,
+// range, enum, xml, ...). Postgres parses its own text form on repair, so
+// text values round-trip for every type without per-type conversion code.
+//
+// An empty or unknown type is cast to ::TEXT here, while the row hash takes
+// the plain column for it. Both forms print the same text inside ROW(), so
+// the fetched value is still the hashed value.
+//
+// col is the column name, not quoted. tableAlias may be empty.
+func FetchColExpr(tableAlias, col, colType string) string {
+	expr := ColExpr(tableAlias, col, colType)
+	if NeedsTextCast(colType) {
+		expr += "::TEXT"
+	}
+	return expr
+}
+
+// SelectColExpr returns the SELECT-list entry for one column of a diff row
+// fetch: the fetch expression, named after the column when it is more than
+// the plain column. Rows are read by the names of the result columns, so the
+// name must not change. Every row fetch of the diff engines must use it, so
+// that diff reports do not depend on the engine and stay repairable.
+func SelectColExpr(tableAlias, col, colType string) string {
+	expr := FetchColExpr(tableAlias, col, colType)
+	if expr == ColExpr(tableAlias, col, "") {
+		return expr
+	}
+	return expr + " AS " + pgx.Identifier{col}.Sanitize()
+}
+
+// NeedsTextCast reports whether a diff row fetch must cast the column to
+// ::TEXT for its value to round-trip through a diff report.
+func NeedsTextCast(colType string) bool {
+	return strings.HasSuffix(colType, "[]") ||
+		strings.Contains(strings.ToLower(colType), "json") ||
+		strings.Contains(strings.ToLower(colType), "bytea") ||
+		!IsKnownScalarType(colType)
+}
+
+func IsKnownScalarType(colType string) bool {
+	// colType is pg_catalog.format_type output. Strip the typmod so
+	// "numeric(10,2)" and "timestamp(3) with time zone" match their base
+	// names, then require an exact match: prefix matching mistook types that
+	// merely start like a scalar ("daterange" for "date") for the scalar
+	// itself, so they were never cast to ::TEXT and reached diff reports as
+	// unrepairable Go-formatted structs.
+	base := colType
+	if i := strings.IndexByte(base, '('); i >= 0 {
+		if j := strings.IndexByte(base[i:], ')'); j >= 0 {
+			base = strings.TrimSpace(base[:i] + base[i+j+1:])
+		}
+	}
+
+	switch base {
+	case "character varying", "character", "text",
+		"integer", "bigint", "smallint",
+		"numeric", "decimal", "real", "double precision",
+		"boolean",
+		"bytea",
+		"json", "jsonb",
+		"uuid",
+		"date",
+		"timestamp without time zone", "timestamp with time zone",
+		// "time with time zone" (timetz) is deliberately absent: it is not
+		// registered in the pgx v5 default type map, so it cannot be scanned
+		// into *interface{} and must be cast to ::TEXT by the diff layer.
+		"time without time zone":
+		return true
+	}
+	return false
 }
 
 // RowHashExpr returns a SQL expression for the sha256 hash of one row, as a
@@ -529,11 +650,11 @@ func isNumericType(colType string) bool {
 // a leaf could differ while every row hash matches, and the diff would not
 // fetch the rows of that block.
 //
-// The row is encoded as ROW(col1, col2, ...)::text. This text is unambiguous:
-// a NULL prints as nothing, an empty string as "", and a value with a comma,
-// a quote, a parenthesis, a backslash or a space is quoted. Numeric and
-// decimal columns go through trim_scale(), so 1.50 and 1.5 give the same
-// hash.
+// The row is encoded as ROW(col1, col2, ...)::text, each column in the form
+// that the row fetch also uses. This text is unambiguous: a NULL prints as
+// nothing, an empty string as "", and a value with a comma, a quote, a
+// parenthesis, a backslash or a space is quoted. Numeric and decimal columns
+// are wrapped in trim_scale(), so 1.50 and 1.5 give the same hash.
 //
 // The text is converted to UTF8 before it is hashed, so nodes with different
 // database encodings give the same hash for the same row. sha256 works on
@@ -548,14 +669,7 @@ func RowHashExpr(tableAlias string, allCols []string, colTypes map[string]string
 	}
 	exprs := make([]string, len(allCols))
 	for i, col := range allCols {
-		ref := pgx.Identifier{col}.Sanitize()
-		if tableAlias != "" {
-			ref = tableAlias + "." + ref
-		}
-		if colTypes != nil && isNumericType(colTypes[col]) {
-			ref = fmt.Sprintf("trim_scale(%s)", ref)
-		}
-		exprs[i] = ref
+		exprs[i] = ColExpr(tableAlias, col, colTypes[col])
 	}
 	// ROW() is not a function call, so the limit of 100 arguments does not
 	// apply to it.

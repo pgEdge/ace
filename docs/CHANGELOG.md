@@ -2,6 +2,54 @@
 
 All notable changes to ACE will be captured in this document. This project follows semantic versioning; the latest changes appear first.
 
+## [Unreleased]
+
+### Added
+- Diff reports have a `format_version` field. `table-repair` and
+  `table-rerun` refuse a report with a version they do not know. A report
+  from an earlier ACE has no such field and is read as version 0.
+- `table-repair` and `table-rerun` read the numeric values of a version 0
+  report in the current form, without trailing zeros. The stale check of a
+  repair plan then finds their keys on the target, and the rerun counts a
+  row that the report holds under two keys once.
+
+### Changed
+- **A numeric value in a diff report has no trailing zeros.** The row fetch
+  now reads a numeric column with `trim_scale()`, as the row hash does, so
+  the report shows `7.5`, not `7.50`. Repair writes this form: a `numeric`
+  column without a fixed scale gets the value without the trailing zeros on
+  the target. A column with a fixed scale, such as `numeric(10,2)`, is not
+  affected.
+
+### Fixed
+- **`table-rerun` reported rows it could not find in the report as
+  differences with no row to show.** It matched the rows it read to the
+  report by a printed key, so a key that prints in another form, such as a
+  numeric key `1.50` in a report from an earlier ACE, did not match, and a
+  row deleted on both nodes was counted too. The rerun now matches rows to
+  the report by key position, and a row deleted on both nodes is not a
+  difference: the nodes agree on it.
+- **`table-rerun` dropped rows with a uuid, numeric or time key.** It read
+  the rows of the nodes in another form than the report, so the keys did
+  not match. It then reported such a row as a difference with no row to
+  show.
+- **The stale check of a repair plan was skipped for numeric and uuid
+  keys.** With `allow_stale_repairs: false`, repair overwrote such a row
+  even when it had changed after the diff. The check now reads the keys in
+  the form of the report.
+- **A numeric primary key stored with another scale on two nodes was
+  reported as two rows.** The diff reported the row `1.50` on one node and
+  the row `1.5` on the other as a row missing on each node, so a repair plan
+  applied the rules for missing rows to them, for example a `delete` rule.
+  Now they are one row.
+- **`table-diff` and the mtree commands failed on a column of an enum whose
+  name starts with `numeric` or `decimal`.** ACE took such a type for a
+  numeric type and wrapped the column in `trim_scale()`, which does not
+  exist for it. Now only `numeric` and `decimal` themselves are numeric
+  types. A column of a domain over numeric whose name starts with these words
+  is not wrapped in `trim_scale()` any more, so a Merkle tree of such a table
+  must be built again.
+
 ## [v3.0.0]
 
 > **⚠️ This release has breaking changes. Read Breaking Change and

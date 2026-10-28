@@ -22,7 +22,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/jackc/pgtype"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/pgedge/ace/db/queries"
@@ -55,6 +54,22 @@ func (t *TableDiffTask) ExecuteRerunTask() error {
 
 	if err := t.RunChecks(true); err != nil {
 		return fmt.Errorf("pre-run checks failed for rerun: %w", err)
+	}
+
+	// A report of format version 0 can hold one row under two keys, such as
+	// "1.50" from one node and "1.5" from the other. Both keys find the same
+	// row, so the report is brought to the current form first. The column
+	// types are the same on every node.
+	if t.DiffResult.FormatVersion == 0 {
+		logger.Info("Diff file %s has no format version; reading it as version 0", t.DiffFilePath)
+	}
+	var colTypes map[string]string
+	for _, nodeColTypes := range t.ColTypes {
+		colTypes = nodeColTypes
+		break
+	}
+	if err := utils.UpgradeDiffOutput(&t.DiffResult, queries.NumericColumns(colTypes)); err != nil {
+		return fmt.Errorf("diff file %s: %w", t.DiffFilePath, err)
 	}
 
 	pools := make(map[string]*pgxpool.Pool)
@@ -94,12 +109,15 @@ func (t *TableDiffTask) ExecuteRerunTask() error {
 	}
 	logger.Info("Found %d unique rows with differences in the original report to re-check.", len(allPkeys))
 
-	var pkeyValues [][]any
-	for _, pkMap := range allPkeys {
-		var pkVals []any
+	// pkeyStrs[i] is the report key of the key values pkeyValues[i].
+	pkeyStrs := make([]string, 0, len(allPkeys))
+	pkeyValues := make([][]any, 0, len(allPkeys))
+	for pkStr, pkMap := range allPkeys {
+		pkVals := make([]any, 0, len(t.Key))
 		for _, pkCol := range t.Key {
 			pkVals = append(pkVals, pkMap[pkCol])
 		}
+		pkeyStrs = append(pkeyStrs, pkStr)
 		pkeyValues = append(pkeyValues, pkVals)
 	}
 
@@ -113,7 +131,7 @@ func (t *TableDiffTask) ExecuteRerunTask() error {
 		go func(n string) {
 			defer wg.Done()
 			pool := t.Pools[n]
-			rows, fErr := fetchRowsByPkeys(t.Ctx, pool, t, pkeyValues)
+			rows, fErr := fetchRowsByPkeys(t.Ctx, pool, t, pkeyStrs, pkeyValues)
 			if fErr != nil {
 				errs <- fmt.Errorf("failed to fetch rows for node %s: %w", n, fErr)
 				return
@@ -177,6 +195,9 @@ func CheckDiffFileFormat(filePath string, task *TableDiffTask) error {
 	if err := json.Unmarshal(data, &diffOutput); err != nil {
 		return fmt.Errorf("failed to unmarshal diff file %s: %w", filePath, err)
 	}
+	if err := diffOutput.CheckFormatVersion(); err != nil {
+		return fmt.Errorf("diff file %s: %w", filePath, err)
+	}
 
 	summary := diffOutput.Summary
 	if summary.Schema == "" || summary.Table == "" || len(summary.Nodes) == 0 || len(summary.PrimaryKey) == 0 {
@@ -224,13 +245,33 @@ func (t *TableDiffTask) collectPkeysFromDiff() (map[string]map[string]any, error
 	return allPkeys, nil
 }
 
+// rerunKeyPosCol is the column of the temporary key table that holds the
+// position of a key in the list of keys from the report.
+const rerunKeyPosCol = "ace_report_key_pos"
+
 // fetchRowsByPkeys efficiently fetches a list of rows from a node by their primary keys.
 // It uses a temporary table and a JOIN for high performance with large numbers of keys.
+//
+// pkeyStrs[i] is the report key of the row with the key values pkeyVals[i].
+// The result maps a report key to the row read for it. A row is matched to
+// its report key by its position in the key table, not by a key printed
+// from the values read: a value read from the database can print in another
+// form than the same value in the report (a timestamp, for example). With a
+// printed key such a row would look missing on every node.
 // TODO: Can this be separated out into a common function that can be used by other tasks?
-func fetchRowsByPkeys(ctx context.Context, pool *pgxpool.Pool, t *TableDiffTask, pkeyVals [][]any) (map[string]types.OrderedMap, error) {
+func fetchRowsByPkeys(ctx context.Context, pool *pgxpool.Pool, t *TableDiffTask, pkeyStrs []string, pkeyVals [][]any) (map[string]types.OrderedMap, error) {
 	if len(pkeyVals) == 0 {
 		return make(map[string]types.OrderedMap), nil
 	}
+	if len(pkeyStrs) != len(pkeyVals) {
+		return nil, fmt.Errorf("%d report keys for %d key value sets", len(pkeyStrs), len(pkeyVals))
+	}
+	for _, pkCol := range t.Key {
+		if pkCol == rerunKeyPosCol {
+			return nil, fmt.Errorf("primary key column %s has the name of the key position column of the rerun", pkCol)
+		}
+	}
+	posIdent := pgx.Identifier{rerunKeyPosCol}.Sanitize()
 
 	pkColTypes, err := queries.GetPkeyColumnTypes(ctx, pool, t.Schema, t.Table, t.Key)
 	if err != nil {
@@ -254,6 +295,7 @@ func fetchRowsByPkeys(ctx context.Context, pool *pgxpool.Pool, t *TableDiffTask,
 		}
 		pkColDefs = append(pkColDefs, fmt.Sprintf("%s %s", pgx.Identifier{pkCol}.Sanitize(), colType))
 	}
+	pkColDefs = append(pkColDefs, posIdent+" integer")
 
 	createTempTableSQL := fmt.Sprintf("CREATE TEMPORARY TABLE %s (%s) ON COMMIT PRESERVE ROWS", sanitisedTempTable, strings.Join(pkColDefs, ", "))
 	logger.Debug("Creating temporary table for pkeys: %s", createTempTableSQL)
@@ -263,7 +305,12 @@ func fetchRowsByPkeys(ctx context.Context, pool *pgxpool.Pool, t *TableDiffTask,
 	}
 
 	logger.Debug("Copying %d pkey sets into temporary table %s", len(pkeyVals), tempTableName)
-	_, err = tx.CopyFrom(ctx, pgx.Identifier{tempTableName}, t.Key, pgx.CopyFromRows(pkeyVals))
+	copyCols := append(append(make([]string, 0, len(t.Key)+1), t.Key...), rerunKeyPosCol)
+	copyRows := make([][]any, len(pkeyVals))
+	for i, vals := range pkeyVals {
+		copyRows[i] = append(append(make([]any, 0, len(vals)+1), vals...), int32(i))
+	}
+	_, err = tx.CopyFrom(ctx, pgx.Identifier{tempTableName}, copyCols, pgx.CopyFromRows(copyRows))
 	if err != nil {
 		return nil, fmt.Errorf("failed to copy primary keys to temporary table: %w", err)
 	}
@@ -281,17 +328,14 @@ func fetchRowsByPkeys(ctx context.Context, pool *pgxpool.Pool, t *TableDiffTask,
 		return nil, fmt.Errorf("could not determine column types: %w", err)
 	}
 
-	selectCols := make([]string, 0, len(t.Cols)+2)
+	// The position of the key comes first; it is not a part of the row.
+	selectCols := make([]string, 0, len(t.Cols)+3)
+	selectCols = append(selectCols, "temp."+posIdent)
 	selectCols = append(selectCols, "pg_xact_commit_timestamp(t.xmin) as commit_ts", "to_json(pg_xact_commit_timestamp_origin(t.xmin))->>'roident' as node_origin")
 	for _, col := range t.Cols {
-		quotedCol := pgx.Identifier{col}.Sanitize()
-		// Same cast policy as the diff engines' row fetches: complex types
-		// must travel as Postgres text so the rerun report stays repairable.
-		if utils.NeedsTextCast(colTypes[col]) {
-			selectCols = append(selectCols, fmt.Sprintf("t.%s::TEXT AS %s", quotedCol, quotedCol))
-		} else {
-			selectCols = append(selectCols, "t."+quotedCol)
-		}
+		// The columns are fetched in the form of a diff report, so that the rerun
+		// report compares and repairs the same way.
+		selectCols = append(selectCols, queries.SelectColExpr("t", col, colTypes[col]))
 	}
 
 	fetchSQL := fmt.Sprintf("SELECT %s FROM %s t JOIN %s temp ON %s",
@@ -304,18 +348,19 @@ func fetchRowsByPkeys(ctx context.Context, pool *pgxpool.Pool, t *TableDiffTask,
 	}
 	defer pgRows.Close()
 
+	// The values are read in the form of a diff report.
 	results := make(map[string]types.OrderedMap)
 	for pgRows.Next() {
-		rowData, err := scanRow(pgRows)
+		rowData, err := utils.ScanRow(pgRows)
 		if err != nil {
 			return nil, fmt.Errorf("failed to scan re-run row: %w", err)
 		}
 
-		pkStr, err := utils.StringifyOrderedMapKey(rowData, t.Key)
-		if err != nil {
-			return nil, fmt.Errorf("failed to stringify fetched row key: %w", err)
+		pos, ok := rowData[0].Value.(int32)
+		if !ok || pos < 0 || int(pos) >= len(pkeyStrs) {
+			return nil, fmt.Errorf("re-run row has an invalid key position %v", rowData[0].Value)
 		}
-		results[pkStr] = rowData
+		results[pkeyStrs[pos]] = rowData[1:]
 	}
 
 	if err := pgRows.Err(); err != nil {
@@ -331,8 +376,9 @@ func fetchRowsByPkeys(ctx context.Context, pool *pgxpool.Pool, t *TableDiffTask,
 
 func (t *TableDiffTask) reCompareDiffs(fetchedRowsByNode map[string]map[string]types.OrderedMap) (*types.DiffOutput, error) {
 	newDiffResult := &types.DiffOutput{
-		NodeDiffs: make(map[string]types.DiffByNodePair),
-		Summary:   t.DiffResult.Summary,
+		FormatVersion: types.DiffFormatVersion,
+		NodeDiffs:     make(map[string]types.DiffByNodePair),
+		Summary:       t.DiffResult.Summary,
 	}
 	newDiffResult.Summary.DiffRowsCount = make(map[string]int)
 	newDiffResult.Summary.TotalRowsChecked = 0
@@ -370,6 +416,12 @@ func (t *TableDiffTask) reCompareDiffs(fetchedRowsByNode map[string]map[string]t
 		for pkStr := range allPkeysForPair {
 			newRow1, nowOnNode1 := fetchedRowsByNode[node1][pkStr]
 			newRow2, nowOnNode2 := fetchedRowsByNode[node2][pkStr]
+
+			// The row is gone from both nodes: the nodes agree now. Counting
+			// it would report a difference with no row to show or repair.
+			if !nowOnNode1 && !nowOnNode2 {
+				continue
+			}
 
 			isDifferent := false
 			if !nowOnNode1 || !nowOnNode2 {
@@ -419,82 +471,4 @@ func areRowsDifferent(row1, row2 types.OrderedMap, dataCols []string) (bool, err
 		}
 	}
 	return false, nil
-}
-
-func scanRow(pgRows pgx.Rows) (types.OrderedMap, error) {
-	colsDesc := pgRows.FieldDescriptions()
-	rowValues := make([]any, len(colsDesc))
-	rowValPtrs := make([]any, len(colsDesc))
-	for i := range rowValues {
-		rowValPtrs[i] = &rowValues[i]
-	}
-
-	if err := pgRows.Scan(rowValPtrs...); err != nil {
-		return nil, fmt.Errorf("failed to scan row: %w", err)
-	}
-
-	rowData := make(types.OrderedMap, len(colsDesc))
-	for i, colD := range colsDesc {
-		val := rowValues[i]
-		var processedVal any
-		switch v := val.(type) {
-		case pgtype.Numeric:
-			if v.Status == pgtype.Present {
-				text, err := v.EncodeText(nil, nil)
-				if err == nil {
-					processedVal = utils.NormalizeNumericString(string(text))
-				} else {
-					processedVal = v
-				}
-			} else {
-				processedVal = nil
-			}
-		case pgtype.Timestamp:
-			if v.Status == pgtype.Present {
-				processedVal = v.Time
-			} else {
-				processedVal = nil
-			}
-		case pgtype.Timestamptz:
-			if v.Status == pgtype.Present {
-				processedVal = v.Time
-			} else {
-				processedVal = nil
-			}
-		case pgtype.Date:
-			if v.Status == pgtype.Present {
-				processedVal = v.Time
-			} else {
-				processedVal = nil
-			}
-		case pgtype.Bytea:
-			if v.Status == pgtype.Present {
-				processedVal = v.Bytes
-			} else {
-				processedVal = nil
-			}
-		case string:
-			processedVal = v
-		case pgtype.JSON, pgtype.JSONB:
-			if v == nil || v.(interface{ GetStatus() pgtype.Status }).GetStatus() != pgtype.Present {
-				processedVal = nil
-			} else {
-				var dataHolder any
-				if assignable, ok := v.(interface{ AssignTo(dst any) error }); ok {
-					err := assignable.AssignTo(&dataHolder)
-					if err != nil {
-						processedVal = nil
-					} else {
-						processedVal = dataHolder
-					}
-				} else {
-					processedVal = nil
-				}
-			}
-		default:
-			processedVal = val
-		}
-		rowData[i] = types.KVPair{Key: string(colD.Name), Value: processedVal}
-	}
-	return rowData, nil
 }

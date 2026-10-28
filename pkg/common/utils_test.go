@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"sync"
 	"testing"
 	"time"
@@ -121,42 +122,6 @@ func TestConvertToPgxType_Money(t *testing.T) {
 	val, err := ConvertToPgxType("$532.96", "money")
 	require.NoError(t, err)
 	require.Equal(t, "$532.96", val)
-}
-
-// Complex and unknown types are fetched as ::TEXT so their Postgres text form
-// round-trips through the diff report; known scalars stay native.
-func TestSelectColExpr(t *testing.T) {
-	tests := []struct {
-		colType string
-		want    string
-	}{
-		{"integer", `"c"`},
-		{"timestamp without time zone", `"c"`},
-		{"timestamp(3) with time zone", `"c"`},
-		{"numeric(10,2)", `"c"`},
-		{"date", `"c"`},
-		{"uuid", `"c"`},
-		{"integer[]", `"c"::TEXT AS "c"`},
-		{"jsonb", `"c"::TEXT AS "c"`},
-		{"bytea", `"c"::TEXT AS "c"`},
-		{"point", `"c"::TEXT AS "c"`},
-		{"int4range", `"c"::TEXT AS "c"`},
-		// "daterange" must not be mistaken for "date" (nor "datemultirange",
-		// nor a UDT that happens to share a scalar's name as a prefix).
-		{"daterange", `"c"::TEXT AS "c"`},
-		{"datemultirange", `"c"::TEXT AS "c"`},
-		{"date_status_enum", `"c"::TEXT AS "c"`},
-		{"mood_enum", `"c"::TEXT AS "c"`},
-		{"xml", `"c"::TEXT AS "c"`},
-		{"bit(8)", `"c"::TEXT AS "c"`},
-		{"inet", `"c"::TEXT AS "c"`},
-		{"time with time zone", `"c"::TEXT AS "c"`},
-	}
-	for _, tt := range tests {
-		t.Run(tt.colType, func(t *testing.T) {
-			require.Equal(t, tt.want, SelectColExpr(`"c"`, tt.colType))
-		})
-	}
 }
 
 // Concurrent normalisation is race-free (a pgtype.Map must not be shared
@@ -655,4 +620,102 @@ func TestSortPKKeysIsDeterministicOnTiedDisplays(t *testing.T) {
 	keys = []string{"id-10", "id-2"}
 	sortPKKeys(keys, map[string]string{"id-2": "2", "id-10": "10"})
 	require.Equal(t, []string{"id-2", "id-10"}, keys, "2 must still sort before 10")
+}
+
+// The rows are matched by key, so the order of the input rows must not change
+// the result.
+func TestCompareRowSetsIgnoresRowOrder(t *testing.T) {
+	r := func(id int, v string) types.OrderedMap {
+		return types.OrderedMap{{Key: "id", Value: id}, {Key: "v", Value: v}}
+	}
+	n1 := []types.OrderedMap{r(1, "a"), r(2, "b"), r(3, "c"), r(4, "d")}
+	n2 := []types.OrderedMap{r(2, "b"), r(3, "x"), r(5, "e")}
+	reversed := func(rows []types.OrderedMap) []types.OrderedMap {
+		out := make([]types.OrderedMap, len(rows))
+		for i, row := range rows {
+			out[len(rows)-1-i] = row
+		}
+		return out
+	}
+	summary := func(res DiffResult) [3][]string {
+		var s [3][]string
+		for _, row := range res.Node1OnlyRows {
+			s[0] = append(s[0], fmt.Sprint(row))
+		}
+		for _, row := range res.Node2OnlyRows {
+			s[1] = append(s[1], fmt.Sprint(row))
+		}
+		for _, m := range res.ModifiedRows {
+			s[2] = append(s[2], m.PKey)
+		}
+		for i := range s {
+			sort.Strings(s[i])
+		}
+		return s
+	}
+
+	want, err := CompareRowSets(n1, n2, []string{"id"}, []string{"id", "v"})
+	require.NoError(t, err)
+	got, err := CompareRowSets(reversed(n1), reversed(n2), []string{"id"}, []string{"id", "v"})
+	require.NoError(t, err)
+	require.Equal(t, summary(want), summary(got))
+	require.Len(t, want.Node1OnlyRows, 2)
+	require.Len(t, want.Node2OnlyRows, 1)
+	require.Len(t, want.ModifiedRows, 1)
+}
+
+// A version 0 report keeps the trailing zeros of a numeric value. After the
+// upgrade its numeric values have the form of version 1, so a row key built
+// from the report matches the key of the same row read from a database now.
+func TestUpgradeDiffOutput(t *testing.T) {
+	// note is text and prices is numeric[]: they are not in the set.
+	numericCols := map[string]bool{"id": true, "price": true}
+	row := func(id, price any) types.OrderedMap {
+		return types.OrderedMap{
+			{Key: "id", Value: id},
+			{Key: "price", Value: price},
+			{Key: "note", Value: "7.50"},
+			{Key: "prices", Value: "{1.50,2}"},
+			{Key: "_spock_metadata_", Value: map[string]any{"commit_ts": "x"}},
+		}
+	}
+	report := func(version int) types.DiffOutput {
+		return types.DiffOutput{
+			FormatVersion: version,
+			NodeDiffs: map[string]types.DiffByNodePair{
+				"n1/n2": {Rows: map[string][]types.OrderedMap{
+					"n1": {row("1.50", json.Number("7.50"))},
+					"n2": {row(json.Number("2.000"), nil)},
+				}},
+			},
+		}
+	}
+
+	t.Run("version 0", func(t *testing.T) {
+		d := report(0)
+		require.NoError(t, UpgradeDiffOutput(&d, numericCols))
+		require.Equal(t, types.DiffFormatVersion, d.FormatVersion)
+
+		n1 := d.NodeDiffs["n1/n2"].Rows["n1"][0]
+		require.Equal(t, row("1.5", json.Number("7.5")), n1)
+		require.Equal(t, row(json.Number("2"), nil), d.NodeDiffs["n1/n2"].Rows["n2"][0])
+
+		key, err := StringifyOrderedMapKey(n1, []string{"id"})
+		require.NoError(t, err)
+		require.Equal(t, RowKeyFromStrings([]string{"1.5"}), key)
+	})
+
+	t.Run("current version is not changed", func(t *testing.T) {
+		d := report(types.DiffFormatVersion)
+		require.NoError(t, UpgradeDiffOutput(&d, numericCols))
+		require.Equal(t, report(types.DiffFormatVersion), d)
+	})
+
+	// Without the types nothing can be converted, so the report must not be
+	// marked as upgraded.
+	t.Run("version 0 without column types", func(t *testing.T) {
+		d := report(0)
+		require.Error(t, UpgradeDiffOutput(&d, nil))
+		require.Equal(t, report(0), d)
+	})
 }

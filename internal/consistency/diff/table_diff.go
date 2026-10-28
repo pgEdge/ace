@@ -518,8 +518,7 @@ func (t *TableDiffTask) fetchRows(nodeName string, r Range) ([]types.OrderedMap,
 	selectCols = append(selectCols, "pg_xact_commit_timestamp(xmin) as commit_ts", "to_json(pg_xact_commit_timestamp_origin(xmin))->>'roident' as node_origin")
 
 	for _, colName := range t.Cols {
-		quotedColName := pgx.Identifier{colName}.Sanitize()
-		selectCols = append(selectCols, utils.SelectColExpr(quotedColName, colTypes[colName]))
+		selectCols = append(selectCols, queries.SelectColExpr("", colName, colTypes[colName]))
 	}
 
 	selectColsStr := strings.Join(selectCols, ", ")
@@ -527,11 +526,6 @@ func (t *TableDiffTask) fetchRows(nodeName string, r Range) ([]types.OrderedMap,
 	quotedKeyCols := make([]string, len(t.Key))
 	for i, k := range t.Key {
 		quotedKeyCols[i] = pgx.Identifier{k}.Sanitize()
-	}
-
-	orderByClause := ""
-	if len(t.Key) > 0 {
-		orderByClause = "ORDER BY " + strings.Join(quotedKeyCols, ", ")
 	}
 
 	var querySQL string
@@ -601,7 +595,12 @@ func (t *TableDiffTask) fetchRows(nodeName string, r Range) ([]types.OrderedMap,
 		whereClause = "WHERE " + strings.Join(conditions, " AND ")
 	}
 
-	querySQL = fmt.Sprintf("SELECT %s FROM %s %s %s", selectColsStr, quotedSchemaTable, whereClause, orderByClause)
+	// No ORDER BY: the rows of the two nodes are matched by key, so their order
+	// is not used. An ORDER BY on the key would also refer to the select-list
+	// entry of the same name, which can be an expression (trim_scale, ::TEXT).
+	// Then the database cannot take the order from the primary key index and
+	// must sort the whole block.
+	querySQL = fmt.Sprintf("SELECT %s FROM %s %s", selectColsStr, quotedSchemaTable, whereClause)
 
 	logger.Debug("[%s] Fetching rows for range: Start=%v, End=%v. SQL: %s, Args: %v", nodeName, r.Start, r.End, querySQL, args)
 
@@ -609,30 +608,9 @@ func (t *TableDiffTask) fetchRows(nodeName string, r Range) ([]types.OrderedMap,
 	if err != nil {
 		return nil, fmt.Errorf("failed to query rows for range on node %s (SQL: %s, Args: %v): %w", nodeName, querySQL, args, err)
 	}
-	defer pgRows.Close()
-
-	var results []types.OrderedMap
-	colsDesc := pgRows.FieldDescriptions()
-
-	for pgRows.Next() {
-		rowValues := make([]any, len(colsDesc))
-		rowValPtrs := make([]any, len(colsDesc))
-		for i := range rowValues {
-			rowValPtrs[i] = &rowValues[i]
-		}
-
-		if err := pgRows.Scan(rowValPtrs...); err != nil {
-			return nil, fmt.Errorf("failed to scan row on node %s: %w", nodeName, err)
-		}
-
-		rowData := make(types.OrderedMap, len(colsDesc))
-		for i, colD := range colsDesc {
-			rowData[i] = types.KVPair{Key: string(colD.Name), Value: utils.NormalizeScannedValue(rowValues[i])}
-		}
-		results = append(results, rowData)
-	}
-	if err := pgRows.Err(); err != nil {
-		return nil, fmt.Errorf("row iteration error on node %s: %w", nodeName, err)
+	results, err := utils.ScanRows(pgRows)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read rows on node %s: %w", nodeName, err)
 	}
 	return results, nil
 }
@@ -1291,7 +1269,8 @@ func (t *TableDiffTask) ExecuteTask() (err error) {
 	}
 
 	t.DiffResult = types.DiffOutput{
-		NodeDiffs: make(map[string]types.DiffByNodePair),
+		FormatVersion: types.DiffFormatVersion,
+		NodeDiffs:     make(map[string]types.DiffByNodePair),
 		Summary: types.DiffSummary{
 			Schema:            t.Schema,
 			Table:             t.BaseTable,

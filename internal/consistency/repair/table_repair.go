@@ -361,6 +361,9 @@ func (t *TableRepairTask) ValidateAndPrepare() error {
 	if err := json.Unmarshal(diffData, &t.RawDiffs); err != nil {
 		return fmt.Errorf("failed to unmarshal diff file %s: %w", t.DiffFilePath, err)
 	}
+	if err := t.RawDiffs.CheckFormatVersion(); err != nil {
+		return fmt.Errorf("diff file %s: %w", t.DiffFilePath, err)
+	}
 
 	diffSchema := strings.TrimSpace(t.RawDiffs.Summary.Schema)
 	diffTable := strings.TrimSpace(t.RawDiffs.Summary.Table)
@@ -558,6 +561,15 @@ func (t *TableRepairTask) ValidateAndPrepare() error {
 	}
 	if t.SourceOfTruth != "" && t.Pools[t.SourceOfTruth] == nil {
 		return fmt.Errorf("failed to establish a connection to the source_of_truth node: %s", t.SourceOfTruth)
+	}
+
+	// The stale check matches the keys of the report with keys read from the
+	// target now, so the report must have the current value form.
+	if t.RawDiffs.FormatVersion == 0 {
+		logger.Info("Diff file %s has no format version; reading it as version 0", t.DiffFilePath)
+	}
+	if err := utils.UpgradeDiffOutput(&t.RawDiffs, queries.NumericColumns(refColTypes)); err != nil {
+		return fmt.Errorf("diff file %s: %w", t.DiffFilePath, err)
 	}
 
 	logger.Debug("Table repair task validated and prepared successfully.")
@@ -1653,7 +1665,17 @@ func (t *TableRepairTask) runUnidirectionalRepair(startTime time.Time) error {
 		if !skipDeletes {
 			nodeDeletes := fullDeletes[nodeName]
 			if len(nodeDeletes) > 0 {
-				deletedCount, err := executeDeletes(t.Ctx, tx, t, nodeName, nodeDeletes, nil)
+				// The stale check of a repair plan reads the key columns by
+				// their type, so the deletes need the column types too.
+				targetNodeColTypes, _, err := t.getColTypesForNode(nodeName)
+				if err != nil {
+					tx.Rollback(t.Ctx)
+					errStr := fmt.Sprintf("column types for target node '%s' not found for deletes: %v", nodeName, err)
+					logger.Error("%s", errStr)
+					repairErrors = append(repairErrors, errStr)
+					continue
+				}
+				deletedCount, err := executeDeletes(t.Ctx, tx, t, nodeName, nodeDeletes, targetNodeColTypes)
 				if err != nil {
 					tx.Rollback(t.Ctx)
 					logger.Error("executing deletes on node %s: %v", nodeName, err)
