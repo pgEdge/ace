@@ -447,6 +447,13 @@ func (task *SchemaDiffCmd) schemaObjectDiff() error {
 		})
 	}
 
+	// A stop of the command, for example by a signal, makes the queries
+	// fail, and the loop above skips such nodes. Do not compare only a part
+	// of the nodes then.
+	if cause := stopCause(task.Ctx); cause != nil {
+		return fmt.Errorf("schema diff stopped before all nodes were read: %w", cause)
+	}
+
 	if len(allNodeObjects) < 2 {
 		fmt.Println("{\"status\": \"Not enough nodes to compare (at least 2 required).\"}")
 		return nil
@@ -754,6 +761,9 @@ func (task *SchemaDiffCmd) schemaStructureDiff() error {
 	return &utils.ExitCodeError{Code: worst, Err: errors.New(summary)}
 }
 
+// SchemaTableDiff runs a table-diff for each table of the schema and prints
+// a summary. It does not start the next table after the context of the task
+// is done, and then returns the cause of the stop.
 func (task *SchemaDiffCmd) SchemaTableDiff() (err error) {
 	// The caller may already have run the checks - internal/cli does, to
 	// validate before committing to a run - so they are not repeated here.
@@ -894,6 +904,12 @@ func (task *SchemaDiffCmd) SchemaTableDiff() (err error) {
 	}
 
 	for _, tableName := range task.tableList {
+		// When the context of the command is done, for example after a
+		// signal, stop the whole command, not only the current table.
+		if stopCause(task.Ctx) != nil {
+			break
+		}
+
 		var skipped bool
 		for _, skip := range task.skipTablesList {
 			if skip == tableName {
@@ -963,7 +979,11 @@ func (task *SchemaDiffCmd) SchemaTableDiff() (err error) {
 	summary.FailedTables = failedTables
 	summary.SkippedTables = append(skippedTables, summary.SkippedTables...)
 	summary.MissingTables = task.missingTables
-	return summary.PrintAndFinalize("Schema diff", "schema "+task.SchemaName)
+	summaryErr := summary.PrintAndFinalize("Schema diff", "schema "+task.SchemaName)
+	if cause := stopCause(task.Ctx); cause != nil {
+		return fmt.Errorf("schema diff stopped before all tables were compared: %w", cause)
+	}
+	return summaryErr
 }
 
 func (task *SchemaDiffCmd) CloneForSchedule(ctx context.Context) *SchemaDiffCmd {

@@ -147,6 +147,10 @@ type TableDiffTask struct {
 	resolvedAgainstOrigin string
 	untilTime             *time.Time
 
+	// stopRun stops the context of the current run with a cause. It is set
+	// only while the run is in progress.
+	stopRun context.CancelCauseFunc
+
 	Ctx context.Context
 }
 
@@ -163,16 +167,25 @@ func (t *TableDiffTask) GetClusterNodes() []map[string]any {
 }
 func (t *TableDiffTask) SetClusterNodes(cn []map[string]any) { t.ClusterNodes = cn }
 
+// recordError keeps the first error of the run and stops the run with it,
+// so that the workers on all nodes stop.
 func (t *TableDiffTask) recordError(err error) {
 	if err == nil {
 		return
 	}
 	t.firstErrorMu.Lock()
-	if t.firstError == nil {
-		t.firstError = err
+	defer t.firstErrorMu.Unlock()
+	if t.firstError != nil {
+		return
 	}
-	t.firstErrorMu.Unlock()
+	t.firstError = err
 	t.errorRecorded.Store(true)
+	// The first error stops the whole run, so the queries of the other
+	// workers stop on every node at once. The stop happens under the lock,
+	// so a later error cannot stop the run first and become its cause.
+	if t.stopRun != nil {
+		t.stopRun(err)
+	}
 }
 
 func (t *TableDiffTask) getFirstError() error {
@@ -1136,8 +1149,22 @@ func (t *TableDiffTask) compareTasks(limits map[string]*nodeLimit) int {
 	return tasks
 }
 
+// ExecuteTask runs one table-diff and writes the report. The run has its
+// own context: the first error or the end of t.Ctx stops all its workers,
+// and the error then names the cause of the stop. The task status is
+// recorded in the task store.
 func (t *TableDiffTask) ExecuteTask() (err error) {
 	startTime := time.Now()
+
+	parentCtx := t.Ctx
+	runCtx, stopRun := newRunContext(parentCtx)
+	t.Ctx = runCtx
+	t.stopRun = stopRun
+	defer func() {
+		stopRun(nil)
+		t.stopRun = nil
+		t.Ctx = parentCtx
+	}()
 
 	if t.Mode == "rerun" {
 		t.Task.TaskType = taskstore.TaskTypeTableRerun
@@ -1243,6 +1270,19 @@ func (t *TableDiffTask) ExecuteTask() (err error) {
 			if storePtr != nil && t.TaskStore == storePtr {
 				t.TaskStore = nil
 			}
+		}
+	}()
+
+	// When the run stops early, the errors of the workers only say that a
+	// query was cancelled. Report the reason of the stop instead: the first
+	// error, a time limit or a signal.
+	defer func() {
+		if err == nil {
+			return
+		}
+		if cause := stopCause(runCtx); cause != nil && cause != err {
+			logger.Debug("table-diff: stopped with error: %v", err)
+			err = cause
 		}
 	}()
 
@@ -1496,7 +1536,6 @@ func (t *TableDiffTask) ExecuteTask() (err error) {
 
 	logger.Info("Initial hash calculations complete. Proceeding with comparisons for mismatches...")
 
-	var diffWg sync.WaitGroup
 	var mismatchedTasks []RecursiveDiffTask
 
 	for _, rangeIdx := range slicer.KeyOrder(blocks) {
@@ -1546,43 +1585,16 @@ func (t *TableDiffTask) ExecuteTask() (err error) {
 				decor.OnComplete(decor.AverageETA(decor.ET_STYLE_GO), "done"),
 			),
 		)
-
-		for _, task := range mismatchedTasks {
-			if t.shouldStopPair(pairKeyFor(task.Node1Name, task.Node2Name)) {
-				diffBar.Increment()
-				continue
-			}
-			diffWg.Add(1)
-			go func(task RecursiveDiffTask) {
-				// Wait for a semaphore slot; blocks while all comparison
-				// tasks are busy, preventing OOM from unbounded fan-out.
-				// select lets context cancellation unblock the wait so
-				// diffWg.Wait() cannot hang.
-				select {
-				case t.diffSem <- struct{}{}:
-					// Got a slot — release it when this goroutine finishes.
-					defer func() { <-t.diffSem }()
-				case <-ctx.Done():
-					// Context cancelled while waiting for a slot; decrement so
-					// diffWg.Wait() can return.
-					diffWg.Done()
-					diffBar.Increment()
-					return
-				}
-				defer diffBar.Increment()
-				t.recursiveDiff(ctx, task, &diffWg)
-			}(task)
-		}
+		t.runRecursiveDiffs(ctx, mismatchedTasks, diffBar)
 	}
 
-	diffWg.Wait()
 	p.Wait()
 
 	if t.diffLimitTriggered.Load() {
 		t.DiffResult.Summary.DiffRowLimitReached = true
 	}
 
-	if err := t.getFirstError(); err != nil {
+	if err := t.runError(ctx); err != nil {
 		return err
 	}
 
@@ -1606,6 +1618,53 @@ func (t *TableDiffTask) ExecuteTask() (err error) {
 	}
 
 	return nil
+}
+
+// runRecursiveDiffs narrows each mismatched range in its own goroutine and
+// waits until all of them end. Only as many goroutines as the diff
+// semaphore allows do diff work at the same time. When the run stops, a
+// goroutine that still waits for a slot ends without any work and without
+// an error.
+func (t *TableDiffTask) runRecursiveDiffs(ctx context.Context, tasks []RecursiveDiffTask, bar *mpb.Bar) {
+	var wg sync.WaitGroup
+	for _, task := range tasks {
+		if t.shouldStopPair(pairKeyFor(task.Node1Name, task.Node2Name)) {
+			bar.Increment()
+			continue
+		}
+		wg.Add(1)
+		go func(task RecursiveDiffTask) {
+			// Wait for a semaphore slot; blocks while all comparison tasks
+			// are busy, preventing OOM from unbounded fan-out. select lets
+			// context cancellation unblock the wait so wg.Wait() cannot
+			// hang.
+			select {
+			case t.diffSem <- struct{}{}:
+				// Got a slot — release it when this goroutine finishes.
+				defer func() { <-t.diffSem }()
+			case <-ctx.Done():
+				// Context cancelled while waiting for a slot; decrement so
+				// wg.Wait() can return.
+				wg.Done()
+				bar.Increment()
+				return
+			}
+			defer bar.Increment()
+			t.recursiveDiff(ctx, task, &wg)
+		}(task)
+	}
+	wg.Wait()
+}
+
+// runError returns the first error of the run. If there is none but the run
+// was stopped, for example by a signal, it returns the cause of the stop. A
+// stop can end the diff workers without an error, and then some ranges are
+// not compared, so the result is not complete.
+func (t *TableDiffTask) runError(ctx context.Context) error {
+	if err := t.getFirstError(); err != nil {
+		return err
+	}
+	return stopCause(ctx)
 }
 
 // hashRange runs the block hash query (queries.BlockHashSQL) for the range r

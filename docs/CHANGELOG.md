@@ -98,6 +98,15 @@ All notable changes to ACE will be captured in this document. This project follo
   selective filter it could read many more rows than the hash.
 
 ### Fixed
+- **Ctrl-C or SIGTERM during `table-diff`, `table-rerun`, `repset-diff` or
+  `schema-diff` killed ACE at once.** ACE did not close its connections and
+  left the task in the `RUNNING` state. Now the first signal stops the
+  queries on all nodes, closes the connections and records the task as
+  `FAILED` with "interrupted by signal". A second signal stops ACE at once.
+- **After an error on one node, `table-diff` kept the other queries
+  running.** Now the first error stops the queries on all nodes, and the
+  run reports that error instead of the "query cancelled" errors of the
+  other workers.
 - **`table-rerun` reported rows it could not find in the report as
   differences with no row to show.** It matched the rows it read to the
   report by a printed key, so a key that prints in another form, such as a
