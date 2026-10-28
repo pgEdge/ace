@@ -135,6 +135,10 @@ type TableDiffTask struct {
 	resolvedAgainstOrigin string
 	untilTime             *time.Time
 
+	// stopRun stops the context of the current run with a cause. It is set
+	// only while the run is in progress.
+	stopRun context.CancelCauseFunc
+
 	Ctx context.Context
 }
 
@@ -161,6 +165,11 @@ func (t *TableDiffTask) recordError(err error) {
 	}
 	t.firstErrorMu.Unlock()
 	t.errorRecorded.Store(true)
+	// The first error stops the whole run, so the queries of the other
+	// workers stop on every node at once.
+	if t.stopRun != nil {
+		t.stopRun(err)
+	}
 }
 
 func (t *TableDiffTask) getFirstError() error {
@@ -1061,6 +1070,16 @@ func (t *TableDiffTask) connOpts() auth.ConnectionOptions {
 func (t *TableDiffTask) ExecuteTask() (err error) {
 	startTime := time.Now()
 
+	parentCtx := t.Ctx
+	runCtx, stopRun := newRunContext(parentCtx)
+	t.Ctx = runCtx
+	t.stopRun = stopRun
+	defer func() {
+		stopRun(nil)
+		t.stopRun = nil
+		t.Ctx = parentCtx
+	}()
+
 	if t.Mode == "rerun" {
 		t.Task.TaskType = taskstore.TaskTypeTableRerun
 	} else if t.Task.TaskType == "" {
@@ -1165,6 +1184,19 @@ func (t *TableDiffTask) ExecuteTask() (err error) {
 			if storePtr != nil && t.TaskStore == storePtr {
 				t.TaskStore = nil
 			}
+		}
+	}()
+
+	// When the run stops early, the errors of the workers only say that a
+	// query was cancelled. Report the reason of the stop instead: the first
+	// error, a time limit or a signal.
+	defer func() {
+		if err == nil {
+			return
+		}
+		if cause := stopCause(runCtx); cause != nil && cause != err {
+			logger.Debug("table-diff: stopped with error: %v", err)
+			err = cause
 		}
 	}()
 

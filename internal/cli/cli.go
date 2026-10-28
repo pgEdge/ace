@@ -957,7 +957,7 @@ func resolveClusterArg(cmd, missingUsage, argsUsage string, required int, args [
 	return "", nil, fmt.Errorf("unexpected arguments for %s (usage: %s)", cmd, argsUsage)
 }
 
-func TableDiffCLI(cmd *cli.Command) error {
+func TableDiffCLI(cmd *cli.Command) (err error) {
 	args := cmd.Args().Slice()
 	clusterName, positional, err := resolveClusterArg("table-diff", "<table>", "[cluster] <table>", 1, args)
 	if err != nil {
@@ -991,7 +991,10 @@ func TableDiffCLI(cmd *cli.Command) error {
 	task.Until = cmd.String("until")
 	task.QuietMode = cmd.Bool("quiet")
 	task.OverrideBlockSize = cmd.Bool("override-block-size")
-	task.Ctx = context.Background()
+	ctx, stop := signalContext(context.Background())
+	defer stop()
+	defer func() { err = withStopCause(ctx, err) }()
+	task.Ctx = ctx
 
 	if err := task.Validate(); err != nil {
 		return fmt.Errorf("validation failed: %w", err)
@@ -1031,10 +1034,7 @@ func TableDiffCLI(cmd *cli.Command) error {
 		},
 	}
 
-	runCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
-
-	return scheduler.RunSingleJob(runCtx, job)
+	return scheduler.RunSingleJob(ctx, job)
 }
 
 func MtreeInitCLI(cmd *cli.Command) error {
@@ -1264,7 +1264,7 @@ func MtreeDiffCLI(cmd *cli.Command) error {
 	return nil
 }
 
-func TableRerunCLI(cmd *cli.Command) error {
+func TableRerunCLI(cmd *cli.Command) (err error) {
 	args := cmd.Args().Slice()
 	clusterName, _, err := resolveClusterArg("table-rerun", "", "[cluster]", 0, args)
 	if err != nil {
@@ -1278,7 +1278,10 @@ func TableRerunCLI(cmd *cli.Command) error {
 	task.DBName = cmd.String("dbname")
 	task.Nodes = cmd.String("nodes")
 	task.QuietMode = cmd.Bool("quiet")
-	task.Ctx = context.Background()
+	ctx, stop := signalContext(context.Background())
+	defer stop()
+	defer func() { err = withStopCause(ctx, err) }()
+	task.Ctx = ctx
 
 	if err := task.ExecuteTask(); err != nil {
 		return fmt.Errorf("error during table-rerun: %w", err)
@@ -1352,7 +1355,7 @@ func SpockDiffCLI(cmd *cli.Command) error {
 	return nil
 }
 
-func SchemaDiffCLI(cmd *cli.Command) error {
+func SchemaDiffCLI(cmd *cli.Command) (err error) {
 	args := cmd.Args().Slice()
 	clusterName, positional, err := resolveClusterArg("schema-diff", "<schema>", "[cluster] <schema>", 1, args)
 	if err != nil {
@@ -1376,7 +1379,10 @@ func SchemaDiffCLI(cmd *cli.Command) error {
 	task.Quiet = cmd.Bool("quiet")
 	task.DDLOnly = cmd.Bool("ddl-only")
 	task.Compare = cmd.String("compare")
-	task.Ctx = context.Background()
+	ctx, stop := signalContext(context.Background())
+	defer stop()
+	defer func() { err = withStopCause(ctx, err) }()
+	task.Ctx = ctx
 
 	if scheduleEnabled && task.DDLOnly {
 		return fmt.Errorf("scheduling is only supported when --ddl-only is false")
@@ -1431,13 +1437,10 @@ func SchemaDiffCLI(cmd *cli.Command) error {
 		},
 	}
 
-	runCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
-
-	return scheduler.RunSingleJob(runCtx, job)
+	return scheduler.RunSingleJob(ctx, job)
 }
 
-func RepsetDiffCLI(cmd *cli.Command) error {
+func RepsetDiffCLI(cmd *cli.Command) (err error) {
 	args := cmd.Args().Slice()
 	clusterName, positional, err := resolveClusterArg("repset-diff", "<repset>", "[cluster] <repset>", 1, args)
 	if err != nil {
@@ -1460,7 +1463,10 @@ func RepsetDiffCLI(cmd *cli.Command) error {
 	task.SkipTables = cmd.String("skip-tables")
 	task.SkipFile = cmd.String("skip-file")
 	task.Quiet = cmd.Bool("quiet")
-	task.Ctx = context.Background()
+	ctx, stop := signalContext(context.Background())
+	defer stop()
+	defer func() { err = withStopCause(ctx, err) }()
+	task.Ctx = ctx
 
 	task.BlockSize = int(blockSizeInt)
 	task.ConcurrencyFactor = cmd.Float64("concurrency-factor")
@@ -1507,10 +1513,7 @@ func RepsetDiffCLI(cmd *cli.Command) error {
 		},
 	}
 
-	runCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
-
-	return scheduler.RunSingleJob(runCtx, job)
+	return scheduler.RunSingleJob(ctx, job)
 }
 
 func StartSchedulerCLI(_ context.Context, cmd *cli.Command) error {

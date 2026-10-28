@@ -396,6 +396,12 @@ func RepsetDiff(task *RepsetDiffCmd) (err error) {
 	}()
 
 	for _, tableName := range task.tableList {
+		// When the context of the command is done, for example after a
+		// signal, stop the whole command, not only the current table.
+		if stopCause(task.Ctx) != nil {
+			break
+		}
+
 		var skipped bool
 		for _, skip := range task.skipTablesList {
 			if strings.TrimSpace(skip) == tableName {
@@ -467,7 +473,11 @@ func RepsetDiff(task *RepsetDiffCmd) (err error) {
 	summary.FailedTables = failedTables
 	summary.SkippedTables = append(skippedTables, summary.SkippedTables...)
 	summary.MissingTables = task.missingTables
-	return summary.PrintAndFinalize("Repset diff", "repset "+task.RepsetName)
+	summaryErr := summary.PrintAndFinalize("Repset diff", "repset "+task.RepsetName)
+	if cause := stopCause(task.Ctx); cause != nil {
+		return fmt.Errorf("repset diff stopped before all tables were compared: %w", cause)
+	}
+	return summaryErr
 }
 
 func (task *RepsetDiffCmd) CloneForSchedule(ctx context.Context) *RepsetDiffCmd {

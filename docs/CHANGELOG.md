@@ -255,6 +255,15 @@ of that version, and recreate the `#` operator as described in the
   reads `/etc/ace/ace.yaml`.
 
 ### Fixed
+- **Ctrl-C or SIGTERM during `table-diff`, `table-rerun`, `repset-diff` or
+  `schema-diff` killed ACE at once.** ACE did not close its connections and
+  left the task in the `RUNNING` state. Now the first signal stops the
+  queries on all nodes, closes the connections and records the task as
+  `FAILED` with "interrupted by signal". A second signal stops ACE at once.
+- **After an error on one node, `table-diff` kept the other queries
+  running.** Now the first error stops the queries on all nodes, and the
+  run reports that error instead of the "query cancelled" errors of the
+  other workers.
 - **`mtree table-diff` failed on a table with a `uuid` primary key** as soon
   as the nodes had a different row, with `invalid input syntax for type
   uuid`. It sent the Go rendering of the key back to the server instead of
