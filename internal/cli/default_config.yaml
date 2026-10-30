@@ -23,6 +23,11 @@ postgres:
   # Postgres from adding parallel workers to each of them. Set to -1 to leave
   # the server's own setting in place.
   max_parallel_workers_per_gather: 0
+  # Set on every ACE connection (ms). If ACE stops without closing its
+  # connections, a backend in a long query finds the lost client within
+  # this time and stops the query. Set to -1 to leave the server's own
+  # setting in place.
+  client_connection_check_interval: 5000
 
 table_diff:
   concurrency_factor: 0.5
@@ -35,6 +40,12 @@ table_diff:
   max_diff_batch_size: 1000
   compare_unit_size: 10000
   max_connections: 0            # max DB connections per node (0 = derive from concurrency factor)
+  # Time limits in seconds; 0 means no limit. block_timeout limits one
+  # query on one block (a hash, a split of a range, a fetch of its rows).
+  # run_timeout limits the diff of one table. A query that hits a limit
+  # is cancelled on the server too.
+  block_timeout: 60
+  run_timeout: 0
 
 mtree:
   cdc:

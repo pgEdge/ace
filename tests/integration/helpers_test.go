@@ -84,19 +84,6 @@ func revertTableToSimpleKey(ctx context.Context, pool *pgxpool.Pool, schemaName,
 	return nil
 }
 
-func materializedViewExists(t *testing.T, ctx context.Context, pool *pgxpool.Pool, schemaName, viewName string) bool {
-	t.Helper()
-	var exists bool
-	err := pool.QueryRow(ctx, `
-		SELECT EXISTS (
-			SELECT 1 
-			FROM pg_matviews 
-			WHERE schemaname = $1 AND matviewname = $2
-		)`, schemaName, viewName).Scan(&exists)
-	require.NoError(t, err)
-	return exists
-}
-
 func loadDataFromCSV(
 	ctx context.Context,
 	pool *pgxpool.Pool,

@@ -34,6 +34,8 @@ Compares a table between nodes and generates a diff report.
 | `--nodes`              | `-n`  | Nodes to include in the diff (comma-separated, or "all")            | all     |
 | `--table-filter`       | `-F`  | `WHERE` clause expression to use while diffing tables               |         |
 | `--max-connections`    | `-M`  | Maximum database connections per node                               | derived |
+| `--block-timeout`      |       | Seconds for one query on one block (0 = no limit)                   | 60      |
+| `--run-timeout`        |       | Seconds for the diff of one table (0 = no limit)                    | 0       |
 | `--override-block-size`| `-B`  | Allow block sizes outside `ace.yaml` guardrails                     | false   |
 | `--quiet`              | `-q`  | Suppress progress output                                            | false   |
 | `--debug`              | `-v`  | Enable debug logging                                                | false   |
@@ -149,6 +151,8 @@ Compares schemas across nodes in a pgEdge cluster. By default, `schema-diff` per
 | `--nodes`              | `-n`  | Nodes to include in the diff (comma-separated, or "all")                | all     |
 | `--table-filter`       | `-F`  | `WHERE` clause expression to use while diffing tables                   |         |
 | `--max-connections`    | `-m`  | Maximum database connections per node                                   | derived |
+| `--block-timeout`      |       | Seconds for one query on one block (0 = no limit)                       | 60      |
+| `--run-timeout`        |       | Seconds for the diff of each table (0 = no limit)                       | 0       |
 | `--override-block-size`| `-B`  | Allow block sizes outside `ace.yaml` guardrails                         | false   |
 | `--quiet`              | `-q`  | Suppress progress output                                                | false   |
 | `--debug`              | `-v`  | Enable debug logging                                                    | false   |

@@ -26,6 +26,8 @@ Runs `table-diff` on every table in a replication set and reports differences.
 | `--compare-unit-size <int>` | `-u` | Recursive split size for mismatched blocks. Default `10000`. |
 | `--output <json\|html>` | `-o` | Per-table diff report format. Default `json`. |
 | `--max-connections <int>` | `-M` | Maximum database connections per node. Caps the pool regardless of concurrency factor. | derived |
+| `--block-timeout <int>` |  | Time limit in seconds for one query on one block of a table. `0` means no limit. | `table_diff.block_timeout`, or `60` |
+| `--run-timeout <int>` |  | Time limit in seconds for the diff of each table, counted for each table on its own. `0` means no limit. | `table_diff.run_timeout`, or `0` |
 | `--override-block-size` | `-B` | Allow block sizes outside `ace.yaml` guardrails. |
 | `--quiet` | `-q` | Suppress output | `false` |
 | `--debug` | `-v` | Debug logging | `false` |

@@ -47,6 +47,10 @@ type PostgresConfig struct {
 	// workers, so unset (or 0) stops Postgres from adding parallel workers
 	// on top of that. A negative value leaves the server's setting alone.
 	MaxParallelWorkersPerGather *int `yaml:"max_parallel_workers_per_gather"`
+	// ClientConnectionCheckInterval is set as client_connection_check_interval
+	// (ms) on every ACE connection. Unset means 5000. A negative value leaves
+	// the server's setting alone.
+	ClientConnectionCheckInterval *int `yaml:"client_connection_check_interval"`
 }
 
 type DiffConfig struct {
@@ -61,6 +65,11 @@ type DiffConfig struct {
 	MaxBatchSize      int     `yaml:"max_diff_batch_size"`
 	CompareUnitSize   int     `yaml:"compare_unit_size"`
 	MaxConnections    int     `yaml:"max_connections"`
+	// BlockTimeout limits one query on one block, in seconds. Unset means
+	// 60; 0 means no limit.
+	BlockTimeout *int `yaml:"block_timeout"`
+	// RunTimeout limits one table-diff run, in seconds. 0 means no limit.
+	RunTimeout int `yaml:"run_timeout"`
 }
 
 type MTreeConfig struct {

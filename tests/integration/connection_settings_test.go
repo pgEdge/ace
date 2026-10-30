@@ -14,7 +14,9 @@ package integration
 import (
 	"context"
 	"testing"
+	"time"
 
+	"github.com/jackc/pgx/v5/pgproto3"
 	auth "github.com/pgedge/ace/internal/infra/db"
 	"github.com/stretchr/testify/require"
 )
@@ -95,4 +97,55 @@ func TestACEConnPinsOutputSettings(t *testing.T) {
 		require.Equal(t, want, string(results[0].Rows[0][0]),
 			"SHOW %s on the replication connection", name)
 	}
+}
+
+// TestBackendStopsAfterLostClient checks that a backend of an ACE
+// connection stops a long query when the client is gone without a word,
+// as when the kernel kills ACE. The test sends a query and closes the
+// socket, with no cancel request and no Terminate message. Without
+// client_connection_check_interval, the backend would run the query to the
+// end.
+func TestBackendStopsAfterLostClient(t *testing.T) {
+	ctx := context.Background()
+	node := pgCluster.ClusterNodes[0]
+
+	pool, err := auth.GetClusterNodeConnection(ctx, node, auth.ConnectionOptions{})
+	require.NoError(t, err)
+	defer pool.Close()
+
+	var interval string
+	require.NoError(t, pool.QueryRow(ctx, "SHOW client_connection_check_interval").Scan(&interval))
+	require.Equal(t, "5s", interval)
+
+	conn, err := pool.Acquire(ctx)
+	require.NoError(t, err)
+	pgxConn := conn.Hijack()
+	pid := pgxConn.PgConn().PID()
+	hijacked, err := pgxConn.PgConn().Hijack()
+	require.NoError(t, err)
+
+	hijacked.Frontend.Send(&pgproto3.Query{String: "SELECT pg_sleep(60)"})
+	require.NoError(t, hijacked.Frontend.Flush())
+
+	const activeQuery = `SELECT count(*) FROM pg_stat_activity
+WHERE pid = $1 AND state = 'active' AND query LIKE '%pg_sleep(60)%'`
+	waitFor := func(want int, limit time.Duration) time.Duration {
+		start := time.Now()
+		for {
+			var n int
+			require.NoError(t, pool.QueryRow(ctx, activeQuery, pid).Scan(&n))
+			if n == want {
+				return time.Since(start)
+			}
+			if time.Since(start) > limit {
+				t.Fatalf("backend %d: active queries = %d, want %d after %s", pid, n, want, limit)
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
+	}
+	waitFor(1, 5*time.Second)
+
+	require.NoError(t, hijacked.Conn.Close())
+	took := waitFor(0, 20*time.Second)
+	t.Logf("backend %d stopped the query %s after the client was gone", pid, took)
 }

@@ -52,6 +52,10 @@ type RepsetDiffCmd struct {
 	ConnectionPool    *pgxpool.Pool
 	ConcurrencyFactor float64
 	MaxConnections    int
+	// BlockTimeout and RunTimeout are passed to the table-diff of each
+	// table. nil means the value from ace.yaml.
+	BlockTimeout      *int
+	RunTimeout        *int
 	BlockSize         int
 	CompareUnitSize   int
 	Output            string
@@ -396,6 +400,12 @@ func RepsetDiff(task *RepsetDiffCmd) (err error) {
 	}()
 
 	for _, tableName := range task.tableList {
+		// When the context of the command is done, for example after a
+		// signal, stop the whole command, not only the current table.
+		if stopCause(task.Ctx) != nil {
+			break
+		}
+
 		var skipped bool
 		for _, skip := range task.skipTablesList {
 			if strings.TrimSpace(skip) == tableName {
@@ -422,6 +432,8 @@ func RepsetDiff(task *RepsetDiffCmd) (err error) {
 		tdTask.QualifiedTableName = tableName
 		tdTask.ConcurrencyFactor = task.ConcurrencyFactor
 		tdTask.MaxConnections = task.MaxConnections
+		tdTask.BlockTimeout = task.BlockTimeout
+		tdTask.RunTimeout = task.RunTimeout
 		tdTask.BlockSize = task.BlockSize
 		tdTask.CompareUnitSize = task.CompareUnitSize
 		tdTask.Output = task.Output
@@ -467,7 +479,11 @@ func RepsetDiff(task *RepsetDiffCmd) (err error) {
 	summary.FailedTables = failedTables
 	summary.SkippedTables = append(skippedTables, summary.SkippedTables...)
 	summary.MissingTables = task.missingTables
-	return summary.PrintAndFinalize("Repset diff", "repset "+task.RepsetName)
+	summaryErr := summary.PrintAndFinalize("Repset diff", "repset "+task.RepsetName)
+	if cause := stopCause(task.Ctx); cause != nil {
+		return fmt.Errorf("repset diff stopped before all tables were compared: %w", cause)
+	}
+	return summaryErr
 }
 
 func (task *RepsetDiffCmd) CloneForSchedule(ctx context.Context) *RepsetDiffCmd {
@@ -482,6 +498,8 @@ func (task *RepsetDiffCmd) CloneForSchedule(ctx context.Context) *RepsetDiffCmd 
 	clone.BlockSize = task.BlockSize
 	clone.ConcurrencyFactor = task.ConcurrencyFactor
 	clone.MaxConnections = task.MaxConnections
+	clone.BlockTimeout = task.BlockTimeout
+	clone.RunTimeout = task.RunTimeout
 	clone.CompareUnitSize = task.CompareUnitSize
 	clone.Output = task.Output
 	clone.TableFilter = task.TableFilter

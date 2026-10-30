@@ -150,6 +150,21 @@ of that version, and recreate the `#` operator as described in the
 `bytea_xor` entry.
 
 ### Added
+- **Time limits for `table-diff`, `repset-diff` and `schema-diff`.**
+  `--block-timeout` (`table_diff.block_timeout` in `ace.yaml`, default 60 s)
+  limits one query on one block: the hash of a block, the split of a range,
+  or the fetch of its rows. `--run-timeout` (`table_diff.run_timeout`,
+  default 0, no limit) limits the diff of one table; for `repset-diff` and
+  `schema-diff` it applies to each table on its own, and `table-rerun` has
+  it too. When a limit is reached, ACE cancels its queries on all nodes
+  and the diff fails with an error that names the limit. Each query holds
+  a snapshot only while it runs, so these limits also bound how long ACE
+  holds back vacuum on a node. The block limit was a fixed 60 s for the
+  hash queries only, and the time spent waiting for a free connection
+  counted toward it; now the wait does not count. **The fetch of rows and
+  the split of a range had no limit before and now have the 60 s default.**
+  If a diff of very wide rows fails with a block timeout after the
+  upgrade, raise `table_diff.block_timeout` or set it to `0`.
 - `--max-connections` / `-M` on `mtree build`, `mtree update`, and
   `mtree table-diff`, with `mtree.max_connections` in `ace.yaml` and
   `max_connections` on the matching HTTP API endpoints. It caps the
@@ -207,6 +222,15 @@ of that version, and recreate the `#` operator as described in the
   table that has foreign partitions is future work.
 
 ### Changed
+- Every ACE connection sets `client_connection_check_interval = 5000` (ms),
+  so a backend in a long query stops it within a few seconds when ACE stops
+  without closing its connections, for example when the kernel kills it.
+  Before, the backend ran the query to the end and held its snapshot, and
+  so held back vacuum on that node.
+  Set `postgres.client_connection_check_interval` in `ace.yaml` to change
+  it, or to `-1` to leave the server's setting in place. A server that does
+  not support the setting (before PostgreSQL 14, or on Windows) accepts the
+  connection without it.
 - **ACE reads table metadata from the system catalogs, so a read-only role
   can run it.** The `information_schema` views show only objects the user
   has privileges on, and `table_constraints` ignores `SELECT`, so a role
@@ -246,6 +270,15 @@ of that version, and recreate the `#` operator as described in the
   reads `/etc/ace/ace.yaml`.
 
 ### Fixed
+- **Ctrl-C or SIGTERM during `table-diff`, `table-rerun`, `repset-diff` or
+  `schema-diff` killed ACE at once.** ACE did not close its connections and
+  left the task in the `RUNNING` state. Now the first signal stops the
+  queries on all nodes, closes the connections and records the task as
+  `FAILED` with "interrupted by signal". A second signal stops ACE at once.
+- **After an error on one node, `table-diff` kept the other queries
+  running.** Now the first error stops the queries on all nodes, and the
+  run reports that error instead of the "query cancelled" errors of the
+  other workers.
 - **`mtree table-diff` failed on a table with a `uuid` primary key** as soon
   as the nodes had a different row, with `invalid input syntax for type
   uuid`. It sent the Go rendering of the key back to the server instead of

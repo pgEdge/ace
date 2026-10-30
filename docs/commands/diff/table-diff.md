@@ -26,6 +26,8 @@ This command compares the data in the specified table across nodes in a cluster 
 | `--against-origin <node>` |  | Limit the diff to rows whose `node_origin` matches this Spock node id or name (useful for failed-node recovery). |
 | `--until <timestamp>` |  | Optional commit timestamp fence (RFC3339) applied with `--against-origin` and `--table-filter`; excludes newer rows. |
 | `--max-connections <int>` | `-M` | Maximum database connections per node. When set, caps the connection pool regardless of concurrency factor. Default: derived from `--concurrency-factor`. |
+| `--block-timeout <int>` |  | Time limit in seconds for one query on one block: the hash of a block, the split of a range, or the fetch of its rows. When a query hits the limit, ACE cancels it on the server and the diff fails with an error that names the node and the range. `0` means no limit. Default: `table_diff.block_timeout` from `ace.yaml`, or `60`. |
+| `--run-timeout <int>` |  | Time limit in seconds for the whole diff. When it is reached, ACE cancels all its queries on all nodes and the diff fails. `0` means no limit. Default: `table_diff.run_timeout` from `ace.yaml`, or `0`. |
 | `--override-block-size` | `-B` | Skip block-size safety checks defined in `ace.yaml`. |
 | `--quiet` | `-q` | Suppress progress output. Results still write to the diff file. |
 | `--debug` | `-v` | Enable verbose logging. |
