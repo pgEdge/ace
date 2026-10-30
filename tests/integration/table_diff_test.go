@@ -1235,7 +1235,13 @@ func testTableDiff_TableFiltering(t *testing.T, env *testEnv) {
 		t.Errorf("Expected modified row index 3 not found in filtered diffs")
 	}
 
-	require.Empty(t, tdTask.FilteredViewName, "filtered view should no longer be created")
+	// The filter goes into the queries; table-diff creates no objects for it.
+	for _, pool := range []*pgxpool.Pool{env.N1Pool, env.N2Pool} {
+		var n int
+		require.NoError(t, pool.QueryRow(ctx,
+			`SELECT count(*) FROM pg_class WHERE relname LIKE 'ace\_%\_filtered'`).Scan(&n))
+		require.Zero(t, n, "table-diff with a filter must not create a relation")
+	}
 	require.Equal(t, tdTask.TableFilter, tdTask.DiffResult.Summary.TableFilter, "diff summary should record the table filter used")
 
 	log.Println("TestTableDiff_TableFiltering completed.")

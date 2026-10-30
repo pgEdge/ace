@@ -13,8 +13,6 @@ package diff
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -66,12 +64,6 @@ type Range struct {
 	End   any
 }
 
-func buildFilteredViewName(taskID, table string) string {
-	sum := sha256.Sum256([]byte(taskID))
-	hash := hex.EncodeToString(sum[:8]) // use first 16 hex chars
-	return fmt.Sprintf("ace_%s_%s_filtered", hash, table)
-}
-
 type TableDiffTask struct {
 	types.Task
 	types.DerivedFields
@@ -79,9 +71,7 @@ type TableDiffTask struct {
 	DBName             string
 	Nodes              string
 
-	BaseTable           string
-	FilteredViewName    string
-	FilteredViewCreated bool
+	BaseTable string
 
 	BlockSize         int
 	ConcurrencyFactor float64
@@ -796,12 +786,6 @@ func (t *TableDiffTask) Validate() error {
 }
 
 func (t *TableDiffTask) RunChecks(skipValidation bool) (err error) {
-	defer func() {
-		if err != nil && t.FilteredViewCreated {
-			t.cleanupFilteredView()
-		}
-	}()
-
 	if !skipValidation {
 		if err = t.Validate(); err != nil {
 			return err
@@ -1016,42 +1000,6 @@ func (t *TableDiffTask) diagnoseSchemaMismatch(
 	return errors.New(b.String())
 }
 
-func (t *TableDiffTask) cleanupFilteredView() {
-	if t.TableFilter == "" || t.FilteredViewName == "" || !t.FilteredViewCreated {
-		return
-	}
-
-	schemaIdent := pgx.Identifier{t.Schema}.Sanitize()
-	viewIdent := pgx.Identifier{t.FilteredViewName}.Sanitize()
-	dropSQL := fmt.Sprintf("DROP MATERIALIZED VIEW IF EXISTS %s.%s", schemaIdent, viewIdent)
-
-	for _, nodeInfo := range t.ClusterNodes {
-		name, _ := nodeInfo["Name"].(string)
-		if len(t.NodeList) > 0 && !utils.Contains(t.NodeList, name) {
-			continue
-		}
-
-		pool, err := auth.GetClusterNodeConnection(t.Ctx, nodeInfo, t.connOpts())
-		if err != nil {
-			logger.Warn("table-diff: failed to get connection for filtered view cleanup on node %s: %v", name, err)
-			continue
-		}
-
-		if _, err := pool.Exec(t.Ctx, dropSQL); err != nil { // nosemgrep
-			logger.Warn("table-diff: failed to drop filtered view %s.%s on node %s: %v", t.Schema, t.FilteredViewName, name, err)
-		} else {
-			logger.Info("table-diff: dropped filtered view %s.%s on node %s", t.Schema, t.FilteredViewName, name)
-		}
-
-		pool.Close()
-	}
-
-	t.FilteredViewCreated = false
-	if t.BaseTable != "" {
-		t.Table = t.BaseTable
-	}
-}
-
 func (t *TableDiffTask) CloneForSchedule(ctx context.Context) *TableDiffTask {
 	cloned := NewTableDiffTask()
 	cloned.ClusterName = t.ClusterName
@@ -1173,8 +1121,6 @@ func (t *TableDiffTask) ExecuteTask() (err error) {
 			}
 		}
 	}
-
-	defer t.cleanupFilteredView()
 
 	defer func() {
 		finishedAt := time.Now()
