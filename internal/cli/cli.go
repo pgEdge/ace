@@ -101,8 +101,8 @@ func SetupCLI(version string) *cli.Command {
 		&cli.IntFlag{
 			Name:    "compare-unit-size",
 			Aliases: []string{"u"},
-			Usage:   "Max size of the smallest block to use when diffs are present",
-			Value:   10000,
+			Usage:   "Deprecated: no longer used and ignored",
+			Value:   0,
 		},
 		&cli.StringFlag{
 			Name:    "output",

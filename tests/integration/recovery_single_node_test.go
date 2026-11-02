@@ -343,7 +343,6 @@ func TestCatastrophicSingleNodeFailure(t *testing.T) {
 	diffTask.Nodes = strings.Join([]string{serviceN2, serviceN3}, ",")
 	diffTask.Output = "json"
 	diffTask.BlockSize = 1000
-	diffTask.CompareUnitSize = 100
 	diffTask.ConcurrencyFactor = 1
 	diffTask.MaxDiffRows = math.MaxInt64
 	// --against-origin takes the Spock node name ("n1"), not the service name.
@@ -438,7 +437,6 @@ func TestCatastrophicSingleNodeFailure(t *testing.T) {
 	validateTask.Nodes = strings.Join([]string{serviceN2, serviceN3}, ",")
 	validateTask.Output = "json"
 	validateTask.BlockSize = 1000
-	validateTask.CompareUnitSize = 100
 	validateTask.ConcurrencyFactor = 1
 	validateTask.MaxDiffRows = math.MaxInt64
 	validateTask.DiffResult = types.DiffOutput{
