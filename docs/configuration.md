@@ -53,6 +53,7 @@ The [`ace.sample.yaml` file](https://github.com/pgEdge/ace/blob/main/ace.sample.
 | mtree → diff --> min_block_size | Minimum Merkle diff block size. **Default: 1000** |
 | mtree → diff --> block_size | Target Merkle diff block size. **Default: 100000** |
 | mtree → diff --> max_block_size | Maximum Merkle diff block size. **Default: 1000000** |
+| mtree → diff --> key_map_max_memory_mb | Memory limit, in MB, for the keys of one work item when `mtree table-diff` looks for the differing rows. A work item that needs more stops the run with an error. `0` (or a negative value) means no limit. **Default: 512** |
 | server --> listen_address | Address the ACE server listens on. **Default: "0.0.0.0"** |
 | server --> listen_port | Port the ACE server listens on. **Default: 5000** |
 | (root) --> schedule_jobs | Array of job definitions consumed by the scheduler (see [Scheduling ACE Runs](scheduling.md)). **Default: []** |

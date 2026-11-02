@@ -248,7 +248,7 @@ flowchart LR
 - Edge cases:
   - **Unbalanced trees:** If one node split/merged more, traversal still walks each subtree; missing peers are flagged as mismatches.
   - **Early pruning:** Large identical subtrees are skipped after a single hash compare.
-  - **Diff materialisation:** Only at mismatching leaves; ACE then fetches block rows and aligns by PK.
+  - **Diff materialisation:** Only at mismatching leaves. Each node sends the key and an 8-byte row hash of every row in these leaves; the keys of the first node go into a map, and the other node is checked against it. Only the rows that differ are then read in full, by primary key. This is the same row search as in `table-diff` (see [Finding the Differing Rows](table_diff.md#finding-the-differing-rows)); its memory is limited by `mtree.diff.key_map_max_memory_mb` (default 512).
 
 ```mermaid
 flowchart TB
@@ -402,19 +402,17 @@ rebuild correctly outside the database:
 | `uuid`, `bytea` | Supported; compared as bytes, like `uuid_cmp` and `byteacmp` |
 | `timestamp`, `timestamptz`, `date` | Supported |
 | `text`, `varchar`, `char` | Supported **only under the `C` or `POSIX` collation**; see below |
-| `numeric`, `time`, and any type the driver decodes into a struct | **Not supported.** The tree builds and a clean run still reports a match, but the moment a block mismatches, the row identity cannot be built and the comparison stops with an error |
+| `numeric`, `time`, and any type the driver decodes into a struct | Accepted, but the order of the block bounds is not guaranteed; see below |
 | `enum`, `citext`, domains over any of the above, and types the driver has no codec for | Accepted, but the order is not guaranteed; see below |
 
-The two halves of that table fail differently, and the difference matters.
+The rows of a mismatched block are matched by the text of their key, which the
+server prints, so the row identity works for every key type. What can go wrong
+is only the order of the block bounds, which ACE sorts in Go.
 
-A type the driver decodes into a struct -- `numeric`, `time` -- has no row
-identity ACE can build, so as soon as a block mismatches and the rows have to be
-matched up, the comparison stops with an error. The pair is recorded in
-`incomplete_pairs`, `TABLES MATCH` is not printed, and the command exits
-non-zero. Nothing is silently dropped, but note what is *not* covered: a run
-that finds no mismatching block at all still reports a match, and the bounds
-that led to that conclusion were ordered by their Go rendering. A clean verdict
-over such a key is worth no more than the ordering behind it.
+A type the driver decodes into a struct -- `numeric`, `time` -- has no Go order
+that ACE knows. ACE then sorts its bounds by their Go rendering and logs a
+warning naming the type once per task. A clean verdict over such a key is worth
+no more than the ordering behind it.
 
 A string-like type whose collation Go cannot reproduce -- `text` outside `C`,
 `enum`, `citext` -- is the worse case, because identity works fine and only the
