@@ -3,11 +3,11 @@ package integration
 // "mtree table-diff" failed on any table with a uuid primary key, as soon as
 // the two nodes really disagreed on a row.
 //
-// readRowHashes built its map key by printing the scanned pkey, and the keys of
-// the mismatched rows were then used as parameters of the row-fetch query. pgx
-// decodes a uuid as [16]byte, so the parameter was the text "[17 17 ...]" and
-// the server rejected it with SQLSTATE 22P02. The worker error was logged and
-// then dropped, so the run still finished with "TABLES MATCH".
+// The row search built its map key by printing the scanned pkey, and the keys
+// of the mismatched rows were then used as parameters of the row-fetch query.
+// pgx decodes a uuid as [16]byte, so the parameter was the text "[17 17 ...]"
+// and the server rejected it with SQLSTATE 22P02. The worker error was logged
+// and then dropped, so the run still finished with "TABLES MATCH".
 //
 // So the diff must find the differing row AND must not claim a match.
 //

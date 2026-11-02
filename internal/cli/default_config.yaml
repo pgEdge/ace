@@ -102,6 +102,9 @@ mtree:
     max_diff_rows: 1000000
     # Max rows per node pair in the HTML report (--output html).
     max_html_rows: 10000
+    # Memory limit, in MB, for the keys of one work item while mtree
+    # table-diff looks for the differing rows. 0 = no limit.
+    key_map_max_memory_mb: 512
 
 # Example scheduler configuration:
 # schedule_jobs:

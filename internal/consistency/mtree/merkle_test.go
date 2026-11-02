@@ -1,85 +1,17 @@
 package mtree
 
 import (
-	"bytes"
 	"context"
-	"crypto/sha256"
 	"fmt"
 	"math"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgconn"
-	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/pgedge/ace/db/queries"
+	"github.com/pgedge/ace/internal/consistency/keydiff"
 	"github.com/pgedge/ace/pkg/types"
 )
-
-// fakeRows is the smallest pgx.Rows that readRowHashes needs. Scan copies
-// values into *any destinations, which is how an untyped scan buffer receives
-// the driver's own Go values: a uuid arrives as [16]byte, not as text. It
-// also fills *pgtype.DriverBytes destinations, which is how the row hash is
-// scanned. Like the real driver, it hands out the same buffer for every row,
-// so a reader that keeps the slice instead of copying it sees the last row.
-type fakeRows struct {
-	rows [][]any
-	pos  int
-	buf  []byte
-}
-
-func (r *fakeRows) Close()                                       {}
-func (r *fakeRows) Err() error                                   { return nil }
-func (r *fakeRows) CommandTag() pgconn.CommandTag                { return pgconn.CommandTag{} }
-func (r *fakeRows) FieldDescriptions() []pgconn.FieldDescription { return nil }
-func (r *fakeRows) Next() bool                                   { r.pos++; return r.pos <= len(r.rows) }
-func (r *fakeRows) RawValues() [][]byte                          { return nil }
-func (r *fakeRows) Conn() *pgx.Conn                              { return nil }
-
-// current returns the row that Next stopped on. A real pgx.Rows returns an
-// error when it is read past the last row instead of panicking. Do the same
-// here, so that a later test of the error path fails with a message rather
-// than an index panic.
-func (r *fakeRows) current() ([]any, error) {
-	if r.pos < 1 || r.pos > len(r.rows) {
-		return nil, fmt.Errorf("read at position %d, outside the %d rows", r.pos, len(r.rows))
-	}
-	return r.rows[r.pos-1], nil
-}
-
-func (r *fakeRows) Values() ([]any, error) { return r.current() }
-
-func (r *fakeRows) Scan(dest ...any) error {
-	row, err := r.current()
-	if err != nil {
-		return err
-	}
-	if len(dest) != len(row) {
-		return fmt.Errorf("scanning into %d destinations, row has %d values", len(dest), len(row))
-	}
-	for i := range dest {
-		switch p := dest[i].(type) {
-		case *any:
-			*p = row[i]
-		case *pgtype.DriverBytes:
-			v, ok := row[i].([]byte)
-			if !ok {
-				return fmt.Errorf("value %d is %T, cannot scan into *pgtype.DriverBytes", i, row[i])
-			}
-			r.buf = append(r.buf[:0], v...)
-			*p = r.buf
-		default:
-			return fmt.Errorf("dest[%d] is %T, want *any or *pgtype.DriverBytes", i, dest[i])
-		}
-	}
-	return nil
-}
-
-// rowHash returns a 32-byte row hash with every byte set to b.
-func rowHash(b byte) []byte {
-	return bytes.Repeat([]byte{b}, sha256.Size)
-}
 
 func uuidBytes(b byte) [16]byte {
 	var out [16]byte
@@ -122,7 +54,7 @@ func TestMtreeDiffEnforcesMaxDiffRows(t *testing.T) {
 		Node2: map[string]any{"Name": "n2"},
 	}
 
-	if err := m.appendDiffs("n1/n2", work, node1OnlyRows(20), nil); err != nil {
+	if err := m.appendDiffs("n1/n2", work, keydiff.Result{Only1: node1OnlyRows(20)}); err != nil {
 		t.Fatalf("appendDiffs returned error: %v", err)
 	}
 
@@ -145,7 +77,7 @@ func TestMtreeDiffExactCapMarksTruncated(t *testing.T) {
 		Node2: map[string]any{"Name": "n2"},
 	}
 
-	if err := m.appendDiffs("n1/n2", work, node1OnlyRows(cap), nil); err != nil {
+	if err := m.appendDiffs("n1/n2", work, keydiff.Result{Only1: node1OnlyRows(cap)}); err != nil {
 		t.Fatalf("appendDiffs returned error: %v", err)
 	}
 
@@ -165,7 +97,7 @@ func TestMtreeDiffNoLimitCollectsAll(t *testing.T) {
 		Node2: map[string]any{"Name": "n2"},
 	}
 
-	if err := m.appendDiffs("n1/n2", work, node1OnlyRows(20), nil); err != nil {
+	if err := m.appendDiffs("n1/n2", work, keydiff.Result{Only1: node1OnlyRows(20)}); err != nil {
 		t.Fatalf("appendDiffs returned error: %v", err)
 	}
 
@@ -185,87 +117,6 @@ func TestMtreeDiffRejectsNegativeMaxDiffRows(t *testing.T) {
 	err := m.DiffMtree()
 	if err == nil || !strings.Contains(err.Error(), "max_diff_rows must be >= 0") {
 		t.Fatalf("expected max_diff_rows validation error, got %v", err)
-	}
-}
-
-// The pkey values that reach the row-fetch query must be the ones pgx decoded,
-// not the map key. For a uuid the key prints as "[17 17 ...]", which the server
-// rejects as invalid uuid input.
-func TestReadRowHashesKeepsScannedPkey(t *testing.T) {
-	id := uuidBytes(0x11)
-	rows := &fakeRows{rows: [][]any{{id, rowHash(0xab)}}}
-
-	got, err := readRowHashes(rows, 1)
-	if err != nil {
-		t.Fatalf("readRowHashes returned error: %v", err)
-	}
-	if len(got) != 1 {
-		t.Fatalf("read %d entries, want 1", len(got))
-	}
-	for _, e := range got {
-		if !bytes.Equal(e.hash[:], rowHash(0xab)) {
-			t.Errorf("hash = %x, want %x", e.hash, rowHash(0xab))
-		}
-		if len(e.pkey) != 1 {
-			t.Fatalf("pkey has %d values, want 1", len(e.pkey))
-		}
-		if e.pkey[0] != id {
-			t.Errorf("pkey[0] = %#v (%T), want the scanned [16]byte", e.pkey[0], e.pkey[0])
-		}
-	}
-}
-
-// Composite keys must not collide. Without quotes, ("a|b","c") and
-// ("a","b|c") join into the same string, and one of the two rows drops out of
-// the comparison.
-func TestReadRowHashesKeysDoNotCollide(t *testing.T) {
-	rows := &fakeRows{rows: [][]any{
-		{"a|b", "c", rowHash(1)},
-		{"a", "b|c", rowHash(2)},
-	}}
-
-	got, err := readRowHashes(rows, 2)
-	if err != nil {
-		t.Fatalf("readRowHashes returned error: %v", err)
-	}
-	if len(got) != 2 {
-		t.Fatalf("read %d entries, want 2 distinct keys", len(got))
-	}
-}
-
-// pkey points into the scan buffer, so that buffer has to stay inside the
-// loop. Moving it out would leave every entry pointing at the last row. The
-// hash arrives in a driver buffer that is reused for every row, so each entry
-// must hold its own copy of it.
-func TestReadRowHashesRowsDoNotAlias(t *testing.T) {
-	rows := &fakeRows{rows: [][]any{
-		{uuidBytes(0x01), rowHash(1)},
-		{uuidBytes(0x02), rowHash(2)},
-	}}
-
-	got, err := readRowHashes(rows, 1)
-	if err != nil {
-		t.Fatalf("readRowHashes returned error: %v", err)
-	}
-	seen := make(map[[16]byte][sha256.Size]byte, len(got))
-	for _, e := range got {
-		seen[e.pkey[0].([16]byte)] = e.hash
-	}
-	if len(seen) != 2 {
-		t.Errorf("entries share %d distinct pkeys, want 2", len(seen))
-	}
-	h1, h2 := seen[uuidBytes(0x01)], seen[uuidBytes(0x02)]
-	if !bytes.Equal(h1[:], rowHash(1)) || !bytes.Equal(h2[:], rowHash(2)) {
-		t.Errorf("hashes = %x, %x; want each row to keep its own hash", h1, h2)
-	}
-}
-
-// A row hash that is not 32 bytes means the query and the reader disagree
-// on the hash. Comparing such hashes would give a wrong answer, so stop.
-func TestReadRowHashesRejectsWrongHashSize(t *testing.T) {
-	rows := &fakeRows{rows: [][]any{{uuidBytes(0x01), []byte{1, 2, 3}}}}
-	if _, err := readRowHashes(rows, 1); err == nil {
-		t.Errorf("readRowHashes accepted a 3-byte row hash")
 	}
 }
 
@@ -337,156 +188,6 @@ func TestComparePkeyValuesNaNSortsLast(t *testing.T) {
 	}
 	if got, ok := comparePkeyValues(nan, nan); !ok || got != 0 {
 		t.Errorf("comparePkeyValues(NaN, NaN) = %d, %v; want 0, true", got, ok)
-	}
-}
-
-func TestBuildRowHashQuery(t *testing.T) {
-	tests := []struct {
-		name           string
-		schema         string
-		table          string
-		key            []string
-		cols           []string
-		whereClause    string
-		colTypes       map[string]string
-		wantContains   []string
-		wantNotContain []string
-	}{
-		{
-			name:        "nil colTypes - no trim_scale",
-			schema:      "public",
-			table:       "orders",
-			key:         []string{"id"},
-			cols:        []string{"id", "name", "amount"},
-			whereClause: "TRUE",
-			colTypes:    nil,
-			wantContains: []string{
-				`SELECT "id", sha256(convert_to(ROW("id", "name", "amount")::text, 'UTF8')) AS row_hash`,
-				`FROM "public"."orders"`,
-				`WHERE TRUE`,
-			},
-			wantNotContain: []string{
-				`trim_scale`,
-			},
-		},
-		{
-			name:        "numeric column gets trim_scale",
-			schema:      "public",
-			table:       "orders",
-			key:         []string{"id"},
-			cols:        []string{"id", "name", "price"},
-			whereClause: "TRUE",
-			colTypes:    map[string]string{"id": "integer", "name": "text", "price": "numeric(10,2)"},
-			wantContains: []string{
-				`ROW("id", "name", trim_scale("price"))::text`,
-			},
-		},
-		{
-			name:        "decimal column gets trim_scale",
-			schema:      "public",
-			table:       "ledger",
-			key:         []string{"txn_id"},
-			cols:        []string{"txn_id", "debit", "credit"},
-			whereClause: `"txn_id" >= $1`,
-			colTypes:    map[string]string{"txn_id": "bigint", "debit": "decimal(18,4)", "credit": "DECIMAL"},
-			wantContains: []string{
-				`ROW("txn_id", trim_scale("debit"), trim_scale("credit"))::text`,
-				`WHERE "txn_id" >= $1`,
-			},
-		},
-		{
-			name:        "composite primary key",
-			schema:      "sales",
-			table:       "line_items",
-			key:         []string{"order_id", "line_num"},
-			cols:        []string{"order_id", "line_num", "qty", "unit_price"},
-			whereClause: "TRUE",
-			colTypes:    map[string]string{"order_id": "integer", "line_num": "integer", "qty": "integer", "unit_price": "numeric"},
-			wantContains: []string{
-				`SELECT "order_id", "line_num", sha256(convert_to(`,
-				`ROW("order_id", "line_num", "qty", trim_scale("unit_price"))::text`,
-			},
-		},
-		{
-			name:        "no numeric columns - no trim_scale even with colTypes",
-			schema:      "public",
-			table:       "users",
-			key:         []string{"user_id"},
-			cols:        []string{"user_id", "email", "created_at"},
-			whereClause: "TRUE",
-			colTypes:    map[string]string{"user_id": "integer", "email": "text", "created_at": "timestamp"},
-			wantContains: []string{
-				`ROW("user_id", "email", "created_at")::text`,
-			},
-			wantNotContain: []string{
-				`trim_scale`,
-			},
-		},
-	}
-
-	// The row hash of the diff and the row hash inside the leaf hash must be
-	// the same expression, or a leaf can differ while every row matches.
-	t.Run("same row hash as the leaf hash", func(t *testing.T) {
-		cols := []string{"id", "price"}
-		colTypes := map[string]string{"price": "numeric"}
-		query, err := buildRowHashQuery("public", "orders", []string{"id"}, cols, "TRUE", colTypes)
-		if err != nil {
-			t.Fatalf("buildRowHashQuery() error = %v", err)
-		}
-		want, err := queries.RowHashExpr("", cols, colTypes)
-		if err != nil {
-			t.Fatalf("RowHashExpr() error = %v", err)
-		}
-		if !strings.Contains(query, want) {
-			t.Errorf("row hash query %q does not use %q", query, want)
-		}
-		// readRowHashes scans the hash as bytes.
-		if strings.Contains(query, "::text AS row_hash") {
-			t.Errorf("row hash must stay a bytea: %q", query)
-		}
-	})
-
-	t.Run("no columns is an error", func(t *testing.T) {
-		if _, err := buildRowHashQuery("public", "orders", []string{"id"}, nil, "TRUE", nil); err == nil {
-			t.Errorf("buildRowHashQuery() with no columns: want an error")
-		}
-	})
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			query, err := buildRowHashQuery(tt.schema, tt.table, tt.key, tt.cols, tt.whereClause, tt.colTypes)
-			if err != nil {
-				t.Fatalf("buildRowHashQuery() error = %v", err)
-			}
-
-			// The hashes are matched by key, so the database must not sort them.
-			if strings.Contains(query, "ORDER BY") {
-				t.Errorf("row hash query sorts the rows: %s", query)
-			}
-
-			for _, substr := range tt.wantContains {
-				if !strings.Contains(query, substr) {
-					t.Errorf("query missing expected substring %q\nquery: %s", substr, query)
-				}
-			}
-			for _, substr := range tt.wantNotContain {
-				if strings.Contains(query, substr) {
-					t.Errorf("query should NOT contain %q\nquery: %s", substr, query)
-				}
-			}
-		})
-	}
-}
-
-// The fetched rows of the two nodes are matched by key, so the fetch must not
-// make the database sort them.
-func TestBuildFetchRowsSQLHasNoOrderBy(t *testing.T) {
-	simple, _ := buildFetchRowsSQLSimple("public", "orders", "id", `trim_scale("id") AS "id"`, []any{1, 2})
-	composite, _ := buildFetchRowsSQLComposite("public", "orders", []string{"a", "b"}, `"a", "b"`, [][]any{{1, 2}})
-	for _, q := range []string{simple, composite} {
-		if strings.Contains(q, "ORDER BY") {
-			t.Errorf("row fetch sorts the rows: %s", q)
-		}
 	}
 }
 

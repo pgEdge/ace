@@ -294,7 +294,7 @@ flowchart LR
 
 ### Finding the Differing Rows
 
-When the hashes of a block differ on two nodes, ACE finds the rows that differ in one pass over the block on each node. The code is in `internal/consistency/keydiff`.
+When the hashes of a block differ on two nodes, ACE finds the rows that differ in one pass over the block on each node. The code is in `internal/consistency/keydiff`; `mtree table-diff` uses the same code.
 
 1. **Key query.** On both nodes ACE runs the same query over the block (the same key range and filter as the block hash). For every row it returns the text of each primary-key column and the first 8 bytes of the row hash, the same row hash that the block hash is built from. Row hashes are only compared for the same key, so 8 bytes are enough: a changed row is missed with a probability of 2^-64. A `numeric` key column goes through `trim_scale()`, so `1.50` and `1.5` are the same key. The query has no `ORDER BY`.
 2. **Build.** The block hash query also counts the rows of the block. The node with fewer rows is the build side: ACE puts its keys and row hashes into a map. If the build side has no rows, this step is skipped.
