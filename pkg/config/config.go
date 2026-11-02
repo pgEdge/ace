@@ -193,6 +193,10 @@ type MTreeConfig struct {
 		MaxBlockSize int   `yaml:"max_block_size"`
 		MaxDiffRows  int64 `yaml:"max_diff_rows"`
 		MaxHTMLRows  int64 `yaml:"max_html_rows"`
+		// KeyMapMaxMemoryMB limits the memory for the keys of one
+		// mismatched block, in megabytes. Not set means the default; 0
+		// means no limit.
+		KeyMapMaxMemoryMB *int `yaml:"key_map_max_memory_mb"`
 	} `yaml:"diff"`
 }
 

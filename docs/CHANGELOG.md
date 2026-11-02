@@ -89,6 +89,8 @@ All notable changes to ACE will be captured in this document. This project follo
   schema-diff look for the differing rows. A block that needs more stops
   the run with an error that names the table, the block, the nodes and the
   setting. `0` means no limit.
+- `mtree.diff.key_map_max_memory_mb` (default 512): the same limit for
+  `mtree table-diff`.
 
 ### Changed
 - Every ACE connection sets `client_connection_check_interval = 5000` (ms),
@@ -130,6 +132,10 @@ All notable changes to ACE will be captured in this document. This project follo
   lookup per key. The key values are compared as text, so no key type
   needs special code on the client. In an inheritance tree, rows with the
   same key in the parent and in a child are now each compared.
+- `mtree table-diff` uses the same row search. It no longer reads the
+  keys and row hashes of both nodes into memory, and it no longer stops
+  with an error when a mismatched block has a `numeric` or `time` primary
+  key.
 
 ### Fixed
 - **Ctrl-C or SIGTERM during `table-diff`, `table-rerun`, `repset-diff` or
