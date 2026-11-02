@@ -29,7 +29,7 @@ Compares a table between nodes and generates a diff report.
 | `--dbname`             | `-d`  | Name of the database                                                |         |
 | `--block-size`         | `-b`  | Number of rows per block                                            | 100000  |
 | `--concurrency-factor` | `-c`  | CPU ratio for comparing differing blocks (0.0–4.0)                  | 0.5     |
-| `--compare-unit-size`  | `-u`  | Max size of the smallest block to use when diffs are present        | 10000   |
+| `--compare-unit-size`  | `-u`  | Deprecated: no longer used; ACE writes a warning                    |         |
 | `--output`             | `-o`  | Output format (`json` or `html`)                                    | json    |
 | `--nodes`              | `-n`  | Nodes to include in the diff (comma-separated, or "all")            | all     |
 | `--table-filter`       | `-F`  | `WHERE` clause expression to use while diffing tables               |         |
@@ -148,7 +148,7 @@ Compares schemas across nodes in a pgEdge cluster. By default, `schema-diff` per
 | `--dbname`             | `-d`  | Name of the database                                                    |         |
 | `--block-size`         | `-b`  | Number of rows per block                                                | 100000  |
 | `--concurrency-factor` | `-c`  | CPU ratio for comparing differing blocks (0.0–4.0)                      | 0.5     |
-| `--compare-unit-size`  | `-u`  | Max size of the smallest block to use when diffs are present            | 10000   |
+| `--compare-unit-size`  | `-u`  | Deprecated: no longer used; ACE writes a warning                        |         |
 | `--output`             | `-o`  | Output format (`json` or `html`)                                        | json    |
 | `--nodes`              | `-n`  | Nodes to include in the diff (comma-separated, or "all")                | all     |
 | `--table-filter`       | `-F`  | `WHERE` clause expression to use while diffing tables                   |         |
@@ -171,7 +171,7 @@ Compares schemas across nodes in a pgEdge cluster. By default, `schema-diff` per
 
 Omit `--ddl-only` if you want to combine the command with `--schedule --every=<duration>` for recurring comparisons.
 
-When `--ddl-only` is omitted, each table uses `table-diff` with the same block size, concurrency factor, compare-unit size, output format, and override behaviour supplied here.
+When `--ddl-only` is omitted, each table uses `table-diff` with the same block size, concurrency factor, output format, and override behaviour supplied here.
 
 ### `repset-diff`
 
@@ -196,7 +196,7 @@ Performs a `table-diff` on every table in a replication set and reports differen
 | `--skip-file`           | `-s`  | File containing a list of tables to exclude                                 |         |
 | `--block-size`          | `-b`  | Rows per block when diffing tables                                          | 100000  |
 | `--concurrency-factor`  | `-c`  | CPU ratio for comparing differing blocks (0.0–4.0)                           | 0.5     |
-| `--compare-unit-size`   | `-u`  | Recursive split size for mismatched blocks                                  | 10000   |
+| `--compare-unit-size`   | `-u`  | Deprecated: no longer used; ACE writes a warning                            |         |
 | `--output`              | `-o`  | Per-table diff output format (`json` or `html`)                             | json    |
 | `--max-connections`     | `-M`  | Connections per node, a strict limit for the task when set (0 = `max_connections` in `ace.yaml`, else 8 for cutting and hashing) | 0 |
 | `--block-timeout`       |       | Seconds for one query on one block (0 = no limit; default from `table_diff.block_timeout`) | 60      |
@@ -216,7 +216,7 @@ Performs a `table-diff` on every table in a replication set and reports differen
 
 Add `--schedule --every=<duration>` to keep the sweep running until you stop the process.
 
-Each table in the replication set is diffed with the same block size, concurrency factor, compare-unit size, output format, and override behaviour provided on the command line.
+Each table in the replication set is diffed with the same block size, concurrency factor, output format, and override behaviour provided on the command line.
 
 ### `spock-diff`
 

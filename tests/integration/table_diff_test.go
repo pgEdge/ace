@@ -1330,7 +1330,6 @@ func TestTableDiffMaxDiffRowsPerPair(t *testing.T) {
 		[]string{env.ServiceN1, env.ServiceN2, env.ServiceN3})
 	tdTask.ClusterName = clusterName
 	tdTask.BlockSize = 10
-	tdTask.CompareUnitSize = 1
 	tdTask.MaxDiffRows = 14 // > per-pair (10), < total across pairs (20)
 
 	require.NoError(t, tdTask.RunChecks(false))
@@ -1354,6 +1353,9 @@ func TestTableDiffMaxDiffRowsPerPair(t *testing.T) {
 		"n2/n3 are identical and must report no differences")
 }
 
+// testTableDiff_MaxDiffRowsLimit changes four rows on n2 and runs table-diff
+// with max_diff_rows 2. The run must stop at the limit, mark it in the
+// summary and record at least that number of rows.
 func testTableDiff_MaxDiffRowsLimit(t *testing.T, env *testEnv) {
 	ctx := context.Background()
 	tableName := "customers"
@@ -1393,7 +1395,6 @@ func testTableDiff_MaxDiffRowsLimit(t *testing.T, env *testEnv) {
 	nodesToCompare := []string{env.ServiceN1, env.ServiceN2}
 	tdTask := env.newTableDiffTask(t, qualifiedTableName, nodesToCompare)
 	tdTask.BlockSize = 10
-	tdTask.CompareUnitSize = 1
 	tdTask.MaxDiffRows = 2
 
 	err = tdTask.RunChecks(false)

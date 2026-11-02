@@ -23,7 +23,7 @@ Runs `table-diff` on every table in a replication set and reports differences.
 | `--skip-file` | `-s` | File with list of tables to exclude |  |
 | `--block-size <int>` | `-b` | Rows per block when diffing each table. Default `100000`. |
 | `--concurrency-factor <float>` | `-c` | CPU ratio for the comparison of the blocks that differ (0.0–4.0); the number of hash workers comes from `--max-connections`. Default `0.5`. |
-| `--compare-unit-size <int>` | `-u` | Recursive split size for mismatched blocks. Default `10000`. |
+| `--compare-unit-size <int>` | `-u` | Deprecated: no longer used. ACE accepts it and writes a warning. |
 | `--output <json\|html>` | `-o` | Per-table diff report format. Default `json`. |
 | `--max-connections <int>` | `-M` | Number of connections that ACE opens to each node for one `table-diff` task. A value that you set, here or in the `max_connections` section of `ace.yaml`, is a strict limit for the whole task. `0` takes the value from `ace.yaml`; if it sets none, ACE opens 8 connections for cutting and hashing, and comparing the blocks that differ can use more (see [Connections per node](../../configuration.md#connections-per-node)). | 0 |
 | `--block-timeout <int>` |  | Time limit in seconds for one query on one block of a table. `0` means no limit. | `table_diff.block_timeout`, or `60` |
@@ -41,7 +41,7 @@ Runs `table-diff` on every table in a replication set and reports differences.
 ./ace repset-diff --dbname=mydatabase my-cluster my_repset
 ```
 
-Each table in the replication set is diffed with the same block size, concurrency factor, compare-unit size, output format, and override behaviour you provide here.
+Each table in the replication set is diffed with the same block size, concurrency factor, output format, and override behaviour you provide here.
 
 ### Scheduling runs
 

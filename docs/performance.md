@@ -14,7 +14,7 @@ ACE parallelizes work across multiple processes, hashing blocks of rows and only
 
 If you notice a pronounced change in a node's performance:
 
-* Review your ACE commands; experiment with the [table-diff tuning flags](#command-options-that-impact-performance) such as `--block-size`, `--max-connections`, `--concurrency-factor`, and `--compare-unit-size`.
+* Review your ACE commands; experiment with the [table-diff tuning flags](#command-options-that-impact-performance) such as `--block-size`, `--max-connections`, and `--concurrency-factor`.
 * Confirm that your table has been `ANALYZE`d recently.
 * Use `--table-filter`/`-F` and `--nodes` to target hot ranges.
 * If you're using ACE on huge tables, use Merkle trees.
@@ -30,9 +30,6 @@ When invoking [ACE commands](commands/index.md), review the available command op
 
 - **`--concurrency-factor`**
     CPU ratio that controls how many comparisons of the blocks that differ ACE runs at the same time, relative to available CPUs (0.0–4.0). For example, `0.5` on a 16-CPU machine runs 8 comparisons. Higher values find the differing rows faster on machines with spare CPU, but can create contention on smaller or busier hosts. It does not change the speed of hashing; for that, see `--max-connections`. Default is `0.5`.
-
-- **`--compare-unit-size`**
-    Sets the minimum block size used when ACE recursively drills into mismatched blocks. Smaller values provide more granular comparisons at the cost of additional round-trips. Default is `10000`.
 
 - **`--max-connections`**
     The number of connections that ACE opens to each node to cut and hash a table. The default is 8, or the value from the `max_connections` section of `ace.yaml`, which can also give a different value for each node. More connections hash faster but keep more backends busy on the server. If a server has fewer free connection slots, ACE works with the connections it gets and writes a warning. A value that you set is a strict limit for the whole task. Without one, comparing the blocks that differ can use more connections, up to the number that `--concurrency-factor` gives. See [Connections per node](configuration.md#connections-per-node).

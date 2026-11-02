@@ -33,6 +33,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/pgedge/ace/db/queries"
+	"github.com/pgedge/ace/internal/consistency/keydiff"
 	"github.com/pgedge/ace/internal/consistency/schema"
 	"github.com/pgedge/ace/internal/consistency/slicer"
 	auth "github.com/pgedge/ace/internal/infra/db"
@@ -114,8 +115,14 @@ type TableDiffTask struct {
 
 	NodeOriginNames map[string]map[string]string
 
+	// CompareUnitSize is no longer used. It is kept so that old settings,
+	// jobs and API requests still work, and a run warns about it.
 	CompareUnitSize int
 	MaxDiffRows     int64
+	// KeyMapMaxMemory is the limit, in bytes, of the memory for the keys of
+	// one mismatched block. 0 means table_diff.key_map_max_memory_mb from the
+	// settings file; a negative value means no limit.
+	KeyMapMaxMemory int64
 	// MaxHTMLRows limits how many entries the HTML report shows for each
 	// node pair. 0 means table_diff.max_html_rows from the config, and if
 	// that is not set either, utils.DefaultMaxHTMLRows.
@@ -134,20 +141,23 @@ type TableDiffTask struct {
 	pairDiffRows       sync.Map
 	diffLimitTriggered atomic.Bool
 
-	// diffSem limits how many recursive diff goroutines can run at the same time.
-	// It is a buffered channel with one slot per comparison task. A goroutine
-	// "acquires" a slot by sending into the channel (blocks when full) and
-	// "releases" by receiving.
+	// diffSem limits how many mismatched blocks are compared at the same
+	// time. It is a buffered channel with one slot per comparison task. A
+	// goroutine "acquires" a slot by sending into the channel (blocks when
+	// full) and "releases" by receiving.
 	//
 	// The size of the channel is safe only because a goroutine that holds a
-	// slot uses at most one connection to each node at a time: it hashes the
-	// two nodes of its pair at the same time, but reads rows and splits
-	// ranges one query after another, and while it holds the slot it never
-	// waits for a child that needs a slot of its own. With a strict limit the
-	// pool of a node can have as few connections as there are slots, so a
-	// goroutine that ran two queries on one node at the same time would wait
-	// for the pool and hold its slot all that time.
+	// slot uses at most one connection to each node at a time: the
+	// comparison of a block runs its queries one after another. With a
+	// strict limit the pool of a node can have as few connections as there
+	// are slots, so a goroutine that ran two queries on one node at the same
+	// time would wait for the pool and hold its slot all that time.
 	diffSem chan struct{}
+
+	// keyWidths and scanChildren are set before the mismatched blocks are
+	// compared and only read after that.
+	keyWidths    map[string]int64
+	scanChildren bool
 
 	resolvedAgainstOrigin string
 	untilTime             *time.Time
@@ -376,15 +386,9 @@ func (t *TableDiffTask) withSpockMetadata(row map[string]any, nodeName string) m
 	return utils.AddSpockMetadata(row)
 }
 
-type RecursiveDiffTask struct {
-	Node1Name                 string
-	Node2Name                 string
-	CurrentRange              Range
-	CurrentEstimatedBlockSize int
-}
-
 type HashResult struct {
 	hash string
+	rows int64
 	err  error
 }
 
@@ -452,6 +456,9 @@ func (t *TableDiffTask) ensureFilterHasRows(pool *pgxpool.Pool, nodeName string)
 
 type RangeResults map[string]HashResult
 
+// getBlockHashSQL returns the block hash query for a range with or without a
+// lower bound and an upper bound. Each of the four queries is built once and
+// kept for the run.
 func (t *TableDiffTask) getBlockHashSQL(hasLower, hasUpper bool) (string, error) {
 	key := hashBoundsKey{hasLower: hasLower, hasUpper: hasUpper}
 
@@ -466,13 +473,7 @@ func (t *TableDiffTask) getBlockHashSQL(hasLower, hasUpper bool) (string, error)
 		return sql, nil
 	}
 
-	// Use any node's column types for hashing (schemas are validated to match)
-	var mergedColTypes map[string]string
-	for _, ct := range t.ColTypes {
-		mergedColTypes = ct
-		break
-	}
-	query, err := queries.BlockHashSQL(t.Schema, t.Table, t.Key, "TD_BLOCK_HASH" /* mode */, hasLower, hasUpper, t.EffectiveFilter, t.Cols, mergedColTypes)
+	query, err := queries.BlockHashSQL(t.Schema, t.Table, t.Key, "TD_BLOCK_HASH" /* mode */, hasLower, hasUpper, t.EffectiveFilter, t.Cols, t.hashColTypes())
 	if err != nil {
 		return "", err
 	}
@@ -498,18 +499,8 @@ func NewTableDiffTask() *TableDiffTask {
 	}
 }
 
-// fetchRows reads the rows of range r on node nodeName, in no fixed order.
-// The query is one operation on a block, so the block timeout limits it.
-func (t *TableDiffTask) fetchRows(nodeName string, r Range) ([]types.OrderedMap, error) {
-	if len(t.Key) == 0 {
-		return nil, fmt.Errorf("primary key not defined for table %s.%s", t.Schema, t.Table)
-	}
-
-	quotedSchema := pgx.Identifier{t.Schema}.Sanitize()
-	quotedTable := pgx.Identifier{t.Table}.Sanitize()
-	quotedSchemaTable := fmt.Sprintf("%s.%s", quotedSchema, quotedTable)
-
-	var colTypes map[string]string
+// nodeColTypes returns the column types of the table on nodeName.
+func (t *TableDiffTask) nodeColTypes(nodeName string) (map[string]string, error) {
 	var colTypesKey string
 	for _, nodeInfo := range t.ClusterNodes {
 		if name, ok := nodeInfo["Name"].(string); ok && name == nodeName {
@@ -525,148 +516,29 @@ func (t *TableDiffTask) fetchRows(nodeName string, r Range) ([]types.OrderedMap,
 				portStr = "5432"
 			}
 			colTypesKey = fmt.Sprintf("%s:%s", publicIP, portStr)
-			colTypes = t.ColTypes[colTypesKey]
+			if colTypes := t.ColTypes[colTypesKey]; colTypes != nil {
+				return colTypes, nil
+			}
 			break
 		}
 	}
-
-	if colTypes == nil {
-		return nil, fmt.Errorf("could not find column types for node %s using key %s", nodeName, colTypesKey)
-	}
-
-	selectCols := make([]string, 0, len(t.Cols)+2)
-	selectCols = append(selectCols, "pg_xact_commit_timestamp(xmin) as commit_ts", "to_json(pg_xact_commit_timestamp_origin(xmin))->>'roident' as node_origin")
-
-	for _, colName := range t.Cols {
-		selectCols = append(selectCols, queries.SelectColExpr("", colName, colTypes[colName]))
-	}
-
-	selectColsStr := strings.Join(selectCols, ", ")
-
-	quotedKeyCols := make([]string, len(t.Key))
-	for i, k := range t.Key {
-		quotedKeyCols[i] = pgx.Identifier{k}.Sanitize()
-	}
-
-	var querySQL string
-	args := []any{}
-
-	var conditions []string
-	paramIndex := 1
-
-	if strings.TrimSpace(t.EffectiveFilter) != "" {
-		conditions = append(conditions, fmt.Sprintf("(%s)", t.EffectiveFilter))
-	}
-
-	if r.Start != nil {
-		startVal := r.Start
-		if len(t.Key) == 1 {
-			// Simple primary key
-			conditions = append(conditions, fmt.Sprintf("%s >= $%d", quotedKeyCols[0], paramIndex))
-			args = append(args, startVal)
-			paramIndex++
-		} else {
-			// Composite primary key
-			startVals, ok := startVal.([]any)
-			if !ok || len(startVals) != len(t.Key) {
-				return nil, fmt.Errorf("r.Start is not a valid composite key for table %s.%s (expected %d values, got %T with value %v)", t.Schema, t.Table, len(t.Key), startVal, startVal)
-			}
-
-			pkTupleStr := fmt.Sprintf("ROW(%s)", strings.Join(quotedKeyCols, ", "))
-
-			placeholders := make([]string, len(t.Key))
-			for i := 0; i < len(t.Key); i++ {
-				placeholders[i] = fmt.Sprintf("$%d", paramIndex+i)
-			}
-			placeholderTupleStr := fmt.Sprintf("ROW(%s)", strings.Join(placeholders, ", "))
-
-			conditions = append(conditions, fmt.Sprintf("%s >= %s", pkTupleStr, placeholderTupleStr))
-			args = append(args, startVals...)
-			paramIndex += len(t.Key)
-		}
-	}
-
-	if r.End != nil {
-		endVal := r.End
-		if len(t.Key) == 1 {
-			conditions = append(conditions, fmt.Sprintf("%s < $%d", quotedKeyCols[0], paramIndex))
-			args = append(args, endVal)
-		} else {
-			endVals, ok := endVal.([]any)
-			if !ok || len(endVals) != len(t.Key) {
-				return nil, fmt.Errorf("r.End is not a valid composite key for table %s.%s (expected %d values, got %T with value %v)", t.Schema, t.Table, len(t.Key), endVal, endVal)
-			}
-
-			pkTupleStr := fmt.Sprintf("ROW(%s)", strings.Join(quotedKeyCols, ", "))
-
-			placeholders := make([]string, len(t.Key))
-			for i := 0; i < len(t.Key); i++ {
-				placeholders[i] = fmt.Sprintf("$%d", paramIndex+i)
-			}
-			placeholderTupleStr := fmt.Sprintf("ROW(%s)", strings.Join(placeholders, ", "))
-
-			conditions = append(conditions, fmt.Sprintf("%s < %s", pkTupleStr, placeholderTupleStr))
-			args = append(args, endVals...)
-		}
-	}
-
-	whereClause := ""
-	if len(conditions) > 0 {
-		whereClause = "WHERE " + strings.Join(conditions, " AND ")
-	}
-
-	// No ORDER BY: the rows of the two nodes are matched by key, so their order
-	// is not used. An ORDER BY on the key would also refer to the select-list
-	// entry of the same name, which can be an expression (trim_scale, ::TEXT).
-	// Then the database cannot take the order from the primary key index and
-	// must sort the whole block.
-	querySQL = fmt.Sprintf("SELECT %s FROM %s %s", selectColsStr, quotedSchemaTable, whereClause)
-
-	logger.Debug("[%s] Fetching rows for range: Start=%v, End=%v. SQL: %s, Args: %v", nodeName, r.Start, r.End, querySQL, args)
-
-	var results []types.OrderedMap
-	err := t.withBlockConn(t.Ctx, nodeName, func(ctx context.Context, conn *pgxpool.Conn) error {
-		pgRows, err := conn.Query(ctx, querySQL, args...) // nosemgrep
-		if err != nil {
-			return fmt.Errorf("failed to query rows for range on node %s (SQL: %s, Args: %v): %w", nodeName, querySQL, args, err)
-		}
-		results, err = utils.ScanRows(pgRows)
-		if err != nil {
-			return fmt.Errorf("failed to read rows on node %s: %w", nodeName, err)
-		}
-		return nil
-	})
-	if err != nil {
-		return nil, err
-	}
-	return results, nil
+	return nil, fmt.Errorf("could not find column types for node %s using key %s", nodeName, colTypesKey)
 }
 
-func (t *TableDiffTask) compareBlocks(
-	node1, node2 string,
-	r Range,
-) (utils.DiffResult, error) {
-	n1Rows, err := t.fetchRows(node1, r)
-	if err != nil {
-		return utils.DiffResult{}, fmt.Errorf("failed to fetch rows for node %s in range %v-%v: %w", node1, r.Start, r.End, err)
+// hashColTypes returns the column types that the row hash uses. The schemas
+// of the nodes were checked to match, so the types of any node are right,
+// but the choice must be the same for every hash of the run: it is the node
+// whose key comes first.
+func (t *TableDiffTask) hashColTypes() map[string]string {
+	keys := make([]string, 0, len(t.ColTypes))
+	for k := range t.ColTypes {
+		keys = append(keys, k)
 	}
-	n2Rows, err := t.fetchRows(node2, r)
-	if err != nil {
-		return utils.DiffResult{}, fmt.Errorf("failed to fetch rows for node %s in range %v-%v: %w", node2, r.Start, r.End, err)
+	if len(keys) == 0 {
+		return nil
 	}
-
-	diffResult, err := utils.CompareRowSets(n1Rows, n2Rows, t.Key, t.Cols)
-	if err != nil {
-		return utils.DiffResult{}, fmt.Errorf("failed to compare row sets for %s vs %s: %w", node1, node2, err)
-	}
-
-	if len(diffResult.Node1OnlyRows) > 0 || len(diffResult.Node2OnlyRows) > 0 || len(diffResult.ModifiedRows) > 0 {
-		logger.Debug("[%s vs %s] Comparison for range Start=%v, End=%v: N1Only=%d, N2Only=%d, Modified=%d",
-			node1, node2, r.Start, r.End,
-			len(diffResult.Node1OnlyRows), len(diffResult.Node2OnlyRows), len(diffResult.ModifiedRows))
-	}
-
-	return diffResult, nil
+	sort.Strings(keys)
+	return t.ColTypes[keys[0]]
 }
 
 // Validate checks the arguments of the task, fills the values that the
@@ -1333,7 +1205,9 @@ func (t *TableDiffTask) ExecuteTask() (err error) {
 		return t.ExecuteRerunTask()
 	}
 
-	logger.Debug("Using CompareUnitSize: %d", t.CompareUnitSize)
+	if cfg := config.Get(); t.CompareUnitSize > 0 || (cfg != nil && cfg.TableDiff.CompareUnitSize > 0) {
+		warnCompareUnitSize()
+	}
 
 	ctx := t.Ctx
 	if ctx == nil {
@@ -1552,7 +1426,8 @@ func (t *TableDiffTask) ExecuteTask() (err error) {
 		   uses its own connection. On the anchor, a cutting worker that
 		   has finished becomes one more hash worker on its connection.
 		3. We don't immediately perform the comparisons, but instead store the results in a map.
-		4. Once they're ready, we use a binary search approach to narrow down the ranges that have mismatches.
+		4. Once they're ready, each block whose hashes differ on two nodes is
+		   compared row by row through a map of keys and row hashes.
 	*/
 	cutCtx, cancelCut := context.WithCancel(ctx)
 	defer cancelCut()
@@ -1650,7 +1525,7 @@ func (t *TableDiffTask) ExecuteTask() (err error) {
 
 	logger.Info("Initial hash calculations complete. Proceeding with comparisons for mismatches...")
 
-	var mismatchedTasks []RecursiveDiffTask
+	var mismatchedTasks []mismatchTask
 
 	for _, rangeIdx := range slicer.KeyOrder(blocks) {
 		currentRange := t.rangeFromBlock(blocks[rangeIdx])
@@ -1669,13 +1544,14 @@ func (t *TableDiffTask) ExecuteTask() (err error) {
 				}
 
 				if r1.hash != r2.hash {
-					logger.Debug("%s Mismatch in initial range %d (%v-%v) for %s vs %s. Hashes: %s... / %s... narrowing down diffs...",
+					logger.Debug("%s Mismatch in initial range %d (%v-%v) for %s vs %s. Hashes: %s... / %s...",
 						utils.CrossMark, rangeIdx, currentRange.Start, currentRange.End, node1, node2, utils.SafeCut(r1.hash, 8), utils.SafeCut(r2.hash, 8))
-					mismatchedTasks = append(mismatchedTasks, RecursiveDiffTask{
-						Node1Name:                 node1,
-						Node2Name:                 node2,
-						CurrentRange:              currentRange,
-						CurrentEstimatedBlockSize: t.BlockSize,
+					mismatchedTasks = append(mismatchedTasks, mismatchTask{
+						node1: node1,
+						node2: node2,
+						r:     currentRange,
+						rows1: r1.rows,
+						rows2: r2.rows,
 					})
 
 				} else {
@@ -1686,7 +1562,8 @@ func (t *TableDiffTask) ExecuteTask() (err error) {
 	}
 
 	if len(mismatchedTasks) > 0 {
-		logger.Debug("Found %d initial mismatched ranges. Narrowing down differences.", len(mismatchedTasks))
+		logger.Debug("Found %d initial mismatched ranges. Comparing their rows.", len(mismatchedTasks))
+		t.prepareKeyCompare(ctx, nodeNames)
 
 		diffBar := p.AddBar(int64(len(mismatchedTasks)),
 			mpb.PrependDecorators(
@@ -1699,7 +1576,7 @@ func (t *TableDiffTask) ExecuteTask() (err error) {
 				decor.OnComplete(decor.AverageETA(decor.ET_STYLE_GO), "done"),
 			),
 		)
-		t.runRecursiveDiffs(ctx, mismatchedTasks, diffBar)
+		t.runCompares(ctx, mismatchedTasks, diffBar)
 	}
 
 	p.Wait()
@@ -1734,37 +1611,42 @@ func (t *TableDiffTask) ExecuteTask() (err error) {
 	return nil
 }
 
-// runRecursiveDiffs narrows each mismatched range in its own goroutine and
-// waits until all of them end. Only as many goroutines as the diff
-// semaphore allows do diff work at the same time. When the run stops, a
-// goroutine that still waits for a slot ends without any work and without
-// an error.
-func (t *TableDiffTask) runRecursiveDiffs(ctx context.Context, tasks []RecursiveDiffTask, bar *mpb.Bar) {
+// runCompares compares each mismatched block in its own goroutine and waits
+// until all of them end. Only as many goroutines as the diff semaphore
+// allows exist at the same time. When the run stops, the blocks that wait
+// for a slot are not compared and no error is recorded for them.
+func (t *TableDiffTask) runCompares(ctx context.Context, tasks []mismatchTask, bar *mpb.Bar) {
 	var wg sync.WaitGroup
-	for _, task := range tasks {
-		if t.shouldStopPair(pairKeyFor(task.Node1Name, task.Node2Name)) {
+	for i, task := range tasks {
+		if t.shouldStopPair(pairKeyFor(task.node1, task.node2)) {
 			bar.Increment()
 			continue
 		}
-		wg.Add(1)
-		go func(task RecursiveDiffTask) {
-			// Wait for a semaphore slot; blocks while all comparison tasks
-			// are busy, preventing OOM from unbounded fan-out. select lets
-			// context cancellation unblock the wait so wg.Wait() cannot
-			// hang.
+		// Take a slot before the goroutine starts, so that at most as many
+		// goroutines as there are slots exist at a time, however many
+		// blocks mismatch. If the run is cancelled, the blocks left are
+		// counted as done so that the progress bar can end. The first check
+		// is needed because select takes a free slot or the end of the run
+		// at random when both are ready.
+		stopped := ctx.Err() != nil
+		if !stopped {
 			select {
 			case t.diffSem <- struct{}{}:
-				// Got a slot — release it when this goroutine finishes.
-				defer func() { <-t.diffSem }()
 			case <-ctx.Done():
-				// Context cancelled while waiting for a slot; decrement so
-				// wg.Wait() can return.
-				wg.Done()
-				bar.Increment()
-				return
+				stopped = true
 			}
+		}
+		if stopped {
+			bar.IncrBy(len(tasks) - i)
+			wg.Wait()
+			return
+		}
+		wg.Add(1)
+		go func(task mismatchTask) {
+			defer wg.Done()
 			defer bar.Increment()
-			t.recursiveDiff(ctx, task, &wg)
+			defer func() { <-t.diffSem }()
+			t.compareMismatch(ctx, task)
 		}(task)
 	}
 	wg.Wait()
@@ -1781,34 +1663,15 @@ func (t *TableDiffTask) runError(ctx context.Context) error {
 	return stopCause(ctx)
 }
 
-// hashRange runs the block hash query (queries.BlockHashSQL) for the range r
-// on a connection from the pool of node and returns the hash as hex text. A
-// bound of r that is nil, or all NULL for a composite key, leaves the range
-// open on that side. The query is one operation on a block, so the block
-// timeout limits it.
-func (t *TableDiffTask) hashRange(
-	ctx context.Context,
-	node string,
-	r Range,
-) (string, error) {
-	var hash string
-	err := t.withBlockConn(ctx, node, func(ctx context.Context, conn *pgxpool.Conn) error {
-		var err error
-		hash, _, err = t.hashRangeOn(ctx, conn, node, r)
-		return err
-	})
-	return hash, err
-}
-
-// rowQuerier is the part of pgxpool.Pool and pgxpool.Conn that a hash query
-// needs.
+// rowQuerier is the part of pgxpool.Conn that a hash query needs.
 type rowQuerier interface {
 	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
 }
 
-// hashRangeOn runs the block hash query for the range r of node on q, a
-// connection or the pool of that node, and returns the hash as hex text and
-// the number of rows in the range.
+// hashRangeOn runs the block hash query (queries.BlockHashSQL) for the range
+// r of node on q, a connection to that node. It returns the hash as hex text
+// and the number of rows in the range. A bound of r that is nil, or all NULL
+// for a composite key, leaves the range open on that side.
 func (t *TableDiffTask) hashRangeOn(
 	ctx context.Context,
 	q rowQuerier,
@@ -1821,13 +1684,7 @@ func (t *TableDiffTask) hashRangeOn(
 		rows int64
 	)
 
-	numPKCols := len(t.Key)
-
-	startVals, hasLower, err := extractRangeBoundValues(r.Start, numPKCols)
-	if err != nil {
-		return "", 0, err
-	}
-	endVals, hasUpper, err := extractRangeBoundValues(r.End, numPKCols)
+	args, hasLower, hasUpper, err := rangeArgs(r, len(t.Key))
 	if err != nil {
 		return "", 0, err
 	}
@@ -1835,14 +1692,6 @@ func (t *TableDiffTask) hashRangeOn(
 	query, err := t.getBlockHashSQL(hasLower, hasUpper)
 	if err != nil {
 		return "", 0, fmt.Errorf("failed to build block-hash SQL: %w", err)
-	}
-
-	args := make([]any, 0, len(startVals)+len(endVals))
-	if hasLower {
-		args = append(args, startVals...)
-	}
-	if hasUpper {
-		args = append(args, endVals...)
 	}
 
 	logger.Debug("[%s] Hashing range: Start=%v, End=%v. SQL: %s, Args: %v", node, r.Start, r.End, query, args)
@@ -1862,6 +1711,28 @@ func (t *TableDiffTask) hashRangeOn(
 		logger.Debug("[%s] Range Start=%v, End=%v took %v", node, r.Start, r.End, duration)
 	}
 	return hash, rows, nil
+}
+
+// rangeArgs returns the query arguments for the bounds of r: the values of
+// the lower bound, then the values of the upper bound. hasLower and hasUpper
+// say which bounds r has.
+func rangeArgs(r Range, numPKCols int) (args []any, hasLower, hasUpper bool, err error) {
+	startVals, hasLower, err := extractRangeBoundValues(r.Start, numPKCols)
+	if err != nil {
+		return nil, false, false, err
+	}
+	endVals, hasUpper, err := extractRangeBoundValues(r.End, numPKCols)
+	if err != nil {
+		return nil, false, false, err
+	}
+	args = make([]any, 0, len(startVals)+len(endVals))
+	if hasLower {
+		args = append(args, startVals...)
+	}
+	if hasUpper {
+		args = append(args, endVals...)
+	}
+	return args, hasLower, hasUpper, nil
 }
 
 func extractRangeBoundValues(bound any, numPKCols int) ([]any, bool, error) {
@@ -1910,411 +1781,249 @@ func (t *TableDiffTask) rangeFromBlock(b slicer.Block) Range {
 	return Range{Start: conv(b.Start), End: conv(b.End)}
 }
 
-// generateSubRanges splits parentRange on node at the median key of the rows
-// that match the table filter into numSplits ranges (only 2 is supported).
-// It returns parentRange alone when the range cannot be split. A stop of the
-// run or a block timeout is an error.
-func (t *TableDiffTask) generateSubRanges(
-	node string,
-	parentRange Range,
-	numSplits int,
-) ([]Range, error) {
-	if numSplits <= 0 {
-		return nil, fmt.Errorf("numSplits must be positive")
-	}
-	if len(t.Key) == 0 {
-		return nil, fmt.Errorf("primary key not defined")
-	}
+var compareUnitSizeWarning sync.Once
 
-	quotedKeyCols := make([]string, len(t.Key))
-	for i, k := range t.Key {
-		quotedKeyCols[i] = pgx.Identifier{k}.Sanitize()
-	}
-	pkColsStr := strings.Join(quotedKeyCols, ", ")
-	pkTupleStr := fmt.Sprintf("ROW(%s)", pkColsStr)
-	schemaTable := fmt.Sprintf("%s.%s", pgx.Identifier{t.Schema}.Sanitize(), pgx.Identifier{t.Table}.Sanitize())
-
-	var conditions []string
-	args := []any{}
-	paramIdx := 1
-
-	// Count and split only the rows that the diff compares. Then these
-	// queries read the same rows as the hash of the range, and the split
-	// halves the rows that matter.
-	if strings.TrimSpace(t.EffectiveFilter) != "" {
-		conditions = append(conditions, fmt.Sprintf("(%s)", t.EffectiveFilter))
-	}
-
-	if parentRange.Start != nil {
-		startVal := parentRange.Start
-		if len(t.Key) == 1 {
-			conditions = append(conditions, fmt.Sprintf("%s >= $%d", quotedKeyCols[0], paramIdx))
-			args = append(args, startVal)
-			paramIdx++
-		} else {
-			startVals, ok := startVal.([]any)
-			if !ok {
-				return nil, fmt.Errorf("generateSubRanges: parentRange.Start is not a valid composite key")
-			}
-			placeholders := make([]string, len(t.Key))
-			for i := 0; i < len(t.Key); i++ {
-				placeholders[i] = fmt.Sprintf("$%d", paramIdx+i)
-			}
-			placeholderTupleStr := fmt.Sprintf("ROW(%s)", strings.Join(placeholders, ", "))
-			conditions = append(conditions, fmt.Sprintf("%s >= %s", pkTupleStr, placeholderTupleStr))
-			args = append(args, startVals...)
-			paramIdx += len(t.Key)
-		}
-	}
-
-	if parentRange.End != nil {
-		endVal := parentRange.End
-		if len(t.Key) == 1 {
-			// Uses inclusive (<=) to match fetchRows; slight overlap from
-			// splitting a mismatched range is acceptable.
-			conditions = append(conditions, fmt.Sprintf("%s <= $%d", quotedKeyCols[0], paramIdx))
-			args = append(args, endVal)
-			paramIdx++
-		} else {
-			endVals, ok := endVal.([]any)
-			if !ok {
-				return nil, fmt.Errorf("generateSubRanges: parentRange.End is not a valid composite key")
-			}
-			placeholders := make([]string, len(t.Key))
-			for i := 0; i < len(t.Key); i++ {
-				placeholders[i] = fmt.Sprintf("$%d", paramIdx+i)
-			}
-			placeholderTupleStr := fmt.Sprintf("ROW(%s)", strings.Join(placeholders, ", "))
-			conditions = append(conditions, fmt.Sprintf("%s <= %s", pkTupleStr, placeholderTupleStr))
-			args = append(args, endVals...)
-			paramIdx += len(t.Key)
-		}
-	}
-
-	whereClause := ""
-	if len(conditions) > 0 {
-		whereClause = "WHERE " + strings.Join(conditions, " AND ")
-	}
-
-	countQuery := fmt.Sprintf("SELECT COUNT(1) FROM %s %s", schemaTable, whereClause)
-	var count int64
-	err := t.queryBlockRow(t.Ctx, node, countQuery, args, &count)
-	if err != nil {
-		logger.Debug("[%s] Failed to count rows in parent range %v-%v for splitting: %v. SQL: %s, Args: %v", node, parentRange.Start, parentRange.End, err, countQuery, args)
-		return nil, fmt.Errorf("failed to count for split: %w", err)
-	}
-
-	if count < 2 || (numSplits > 1 && count < int64(numSplits)) {
-		logger.Debug("[%s] Cannot split range %v-%v further, row count %d, requested splits %d", node, parentRange.Start, parentRange.End, count, numSplits)
-		return []Range{parentRange}, nil
-	}
-
-	if numSplits == 2 {
-		sqlOffset := (count / 2) - 1
-		if sqlOffset < 0 {
-			sqlOffset = 0
-		}
-
-		orderByPK := strings.Join(quotedKeyCols, ", ")
-
-		medianQueryArgs := make([]any, len(args))
-		copy(medianQueryArgs, args)
-		medianQueryArgs = append(medianQueryArgs, sqlOffset)
-
-		medianQuery := fmt.Sprintf("SELECT %s FROM %s %s ORDER BY %s LIMIT 1 OFFSET $%d",
-			pkColsStr, schemaTable, whereClause, orderByPK, paramIdx)
-
-		var medianPKVal any
-		numPKCols := len(t.Key)
-
-		if numPKCols == 1 {
-			err = t.queryBlockRow(t.Ctx, node, medianQuery, medianQueryArgs, &medianPKVal)
-		} else {
-			scanDest := make([]any, numPKCols)
-			scanDestPtrs := make([]any, numPKCols)
-			for i := range scanDest {
-				scanDestPtrs[i] = &scanDest[i]
-			}
-			err = t.queryBlockRow(t.Ctx, node, medianQuery, medianQueryArgs, scanDestPtrs...)
-			if err == nil {
-				medianPKVal = append([]any{}, scanDest...)
-			}
-		}
-
-		if err != nil {
-			// A stop or a timeout is an error. Without this check, the range
-			// would be compared row by row as if it could not be split.
-			if isBlockTimeout(err) || t.Ctx.Err() != nil {
-				return nil, fmt.Errorf("failed to find the median key for split: %w", err)
-			}
-			logger.Debug("[%s] Failed to find median PK for range %v-%v: %v. SQL: %s, Args: %v", node, parentRange.Start, parentRange.End, err, medianQuery, medianQueryArgs)
-			return []Range{parentRange}, nil
-		}
-
-		range1End := medianPKVal
-		range2Start := medianPKVal
-
-		if reflect.DeepEqual(parentRange.Start, medianPKVal) && reflect.DeepEqual(medianPKVal, parentRange.End) {
-			logger.Debug("[%s] Median PK %v is same as range bounds %v-%v. Cannot split.", node, medianPKVal, parentRange.Start, parentRange.End)
-			return []Range{parentRange}, nil
-		}
-
-		subRanges := []Range{
-			{Start: parentRange.Start, End: range1End},
-		}
-		if !reflect.DeepEqual(medianPKVal, parentRange.End) {
-			subRanges = append(subRanges, Range{Start: range2Start, End: parentRange.End})
-		} else if len(subRanges) == 1 && reflect.DeepEqual(subRanges[0], parentRange) {
-			logger.Debug("[%s] Split resulted in first sub-range same as parent. No effective split for %v-%v.", node, parentRange.Start, parentRange.End)
-			return []Range{parentRange}, nil
-		}
-
-		logger.Debug("[%s] Split range %v-%v into %d sub-ranges using median %v (count: %d). SubRanges: %v", node, parentRange.Start, parentRange.End, len(subRanges), medianPKVal, count, subRanges)
-		return subRanges, nil
-	}
-
-	logger.Info("[%s] generateSubRangesViaNtile not fully implemented for numSplits=%d, returning parent range.", node, numSplits)
-	return []Range{parentRange}, nil
+// warnCompareUnitSize says, once per process, that compare_unit_size is
+// ignored.
+func warnCompareUnitSize() {
+	compareUnitSizeWarning.Do(func() {
+		logger.Warn("compare_unit_size (--compare-unit-size) is no longer used and is ignored; " +
+			"remove it from the command, the job or the settings file")
+	})
 }
 
-// recursiveDiff narrows a range whose hashes differ on two nodes. It splits
-// the range and hashes the parts until a part is small enough, and then
-// compares the rows of that part.
-func (t *TableDiffTask) recursiveDiff(
-	ctx context.Context,
-	task RecursiveDiffTask,
-	wg *sync.WaitGroup,
-) {
-	defer wg.Done()
+// mismatchTask is one block whose hashes differ on two nodes.
+type mismatchTask struct {
+	node1, node2 string
+	r            Range
+	rows1, rows2 int64
+}
 
-	node1Name := task.Node1Name
-	node2Name := task.Node2Name
-	pairKey := pairKeyFor(node1Name, node2Name)
+// DefaultKeyMapMaxMemoryMB is the default limit, in megabytes, of the memory
+// for the keys of one mismatched block.
+const DefaultKeyMapMaxMemoryMB = 512
 
-	if t.shouldStopPair(pairKey) {
-		return
+const keyMapMaxMemorySetting = "table_diff.key_map_max_memory_mb"
+
+// keyMapMaxMemory returns the limit, in bytes, of the memory for the keys of
+// one mismatched block. 0 means no limit, as does a setting of 0 or less.
+func (t *TableDiffTask) keyMapMaxMemory() int64 {
+	if t.KeyMapMaxMemory < 0 {
+		return 0
 	}
-
-	currentRange := task.CurrentRange
-	currentEstimatedBlockSize := task.CurrentEstimatedBlockSize
-
-	finalCompareUnitSize := max(t.CompareUnitSize, 1)
-
-	isSmallEnough := currentEstimatedBlockSize <= finalCompareUnitSize
-	if !isSmallEnough && currentRange.Start != nil && currentRange.End != nil && reflect.DeepEqual(currentRange.Start, currentRange.End) {
-		isSmallEnough = true
+	if t.KeyMapMaxMemory > 0 {
+		return t.KeyMapMaxMemory
 	}
+	mb := DefaultKeyMapMaxMemoryMB
+	if cfg := config.Get(); cfg != nil && cfg.TableDiff.KeyMapMaxMemoryMB != nil {
+		mb = *cfg.TableDiff.KeyMapMaxMemoryMB
+	}
+	if mb <= 0 {
+		return 0
+	}
+	return int64(mb) << 20
+}
 
-	if isSmallEnough {
-		logger.Debug("[%s vs %s] Range %v-%v (est. size %d) is <= compare_unit_size %d. Fetching rows.",
-			node1Name, node2Name, currentRange.Start, currentRange.End, currentEstimatedBlockSize, finalCompareUnitSize)
-
-		diffInfo, err := t.compareBlocks(node1Name, node2Name, currentRange)
+// prepareKeyCompare reads, once and before the mismatched blocks are
+// compared, what every comparison needs from the catalog: the average key
+// width on each node (only with a memory limit) and whether the table has
+// inheritance children on any node. The row read of all nodes uses one
+// plan, and the plan for a table without children reads a child once for
+// every key, so children on one node are enough to choose the plan for
+// children. A failure here is not an error: the width is then unknown, and
+// the children are assumed to exist, which is safe.
+func (t *TableDiffTask) prepareKeyCompare(ctx context.Context, nodeNames []string) {
+	t.keyWidths = make(map[string]int64, len(nodeNames))
+	if t.keyMapMaxMemory() > 0 {
+		for _, node := range nodeNames {
+			w, err := keydiff.KeyWidth(ctx, t.Pools[node], t.Schema, t.Table, t.Key)
+			if err != nil {
+				logger.Debug("[%s] no key statistics for %s: %v", node, t.QualifiedTableName, err)
+				w = 0
+			}
+			t.keyWidths[node] = w
+		}
+	}
+	t.scanChildren = anyNode(nodeNames, func(node string) bool {
+		has, err := keydiff.HasInheritanceChildren(ctx, t.Pools[node], t.Schema, t.Table)
 		if err != nil {
-			errWrap := fmt.Errorf("fetch and compare rows for %s/%s in range %v-%v: %w", node1Name, node2Name, currentRange.Start, currentRange.End, err)
-			t.recordError(errWrap)
-			logger.Info("ERROR during fetchAndCompareRows for %s/%s, range %v-%v: %v", node1Name, node2Name, currentRange.Start, currentRange.End, errWrap)
-			return
+			logger.Debug("[%s] cannot check the inheritance children of %s: %v", node, t.QualifiedTableName, err)
+			return true
 		}
+		return has
+	})
+}
 
-		var currentDiffRowsForPair int
-		limitReached := false
-		if len(diffInfo.Node1OnlyRows) > 0 || len(diffInfo.Node2OnlyRows) > 0 || len(diffInfo.ModifiedRows) > 0 {
-			t.diffMutex.Lock()
-
-			if _, ok := t.DiffResult.NodeDiffs[pairKey]; !ok {
-				t.DiffResult.NodeDiffs[pairKey] = types.DiffByNodePair{
-					Rows: make(map[string][]types.OrderedMap),
-				}
-			}
-
-			if _, ok := t.DiffResult.NodeDiffs[pairKey].Rows[node1Name]; !ok {
-				t.DiffResult.NodeDiffs[pairKey].Rows[node1Name] = []types.OrderedMap{}
-			}
-			if _, ok := t.DiffResult.NodeDiffs[pairKey].Rows[node2Name]; !ok {
-				t.DiffResult.NodeDiffs[pairKey].Rows[node2Name] = []types.OrderedMap{}
-			}
-
-			for _, row := range diffInfo.Node1OnlyRows {
-				if t.shouldStopPair(pairKey) {
-					limitReached = true
-					break
-				}
-				rowAsMap := utils.OrderedMapToMap(row)
-				rowWithMeta := t.withSpockMetadata(rowAsMap, node1Name)
-				rowAsOrderedMap := utils.MapToOrderedMap(rowWithMeta, t.Cols)
-				t.DiffResult.NodeDiffs[pairKey].Rows[node1Name] = append(t.DiffResult.NodeDiffs[pairKey].Rows[node1Name], rowAsOrderedMap)
-				currentDiffRowsForPair++
-				if t.incrementPairDiffRowsLocked(pairKey, 1) {
-					limitReached = true
-					break
-				}
-			}
-
-			if !limitReached {
-				for _, row := range diffInfo.Node2OnlyRows {
-					if t.shouldStopPair(pairKey) {
-						limitReached = true
-						break
-					}
-					rowAsMap := utils.OrderedMapToMap(row)
-					rowWithMeta := t.withSpockMetadata(rowAsMap, node2Name)
-					rowAsOrderedMap := utils.MapToOrderedMap(rowWithMeta, t.Cols)
-					t.DiffResult.NodeDiffs[pairKey].Rows[node2Name] = append(t.DiffResult.NodeDiffs[pairKey].Rows[node2Name], rowAsOrderedMap)
-					currentDiffRowsForPair++
-					if t.incrementPairDiffRowsLocked(pairKey, 1) {
-						limitReached = true
-						break
-					}
-				}
-			}
-
-			if !limitReached {
-				for _, modRow := range diffInfo.ModifiedRows {
-					if t.shouldStopPair(pairKey) {
-						limitReached = true
-						break
-					}
-					node1DataAsMap := utils.OrderedMapToMap(modRow.Node1Data)
-					node1DataWithMeta := t.withSpockMetadata(node1DataAsMap, node1Name)
-					node1DataAsOrderedMap := utils.MapToOrderedMap(node1DataWithMeta, t.Cols)
-					t.DiffResult.NodeDiffs[pairKey].Rows[node1Name] = append(t.DiffResult.NodeDiffs[pairKey].Rows[node1Name], node1DataAsOrderedMap)
-
-					node2DataAsMap := utils.OrderedMapToMap(modRow.Node2Data)
-					node2DataWithMeta := t.withSpockMetadata(node2DataAsMap, node2Name)
-					node2DataAsOrderedMap := utils.MapToOrderedMap(node2DataWithMeta, t.Cols)
-					t.DiffResult.NodeDiffs[pairKey].Rows[node2Name] = append(t.DiffResult.NodeDiffs[pairKey].Rows[node2Name], node2DataAsOrderedMap)
-					currentDiffRowsForPair++
-					if t.incrementPairDiffRowsLocked(pairKey, 1) {
-						limitReached = true
-						break
-					}
-				}
-			}
-
-			if t.DiffResult.Summary.DiffRowsCount == nil {
-				t.DiffResult.Summary.DiffRowsCount = make(map[string]int)
-			}
-			t.DiffResult.Summary.DiffRowsCount[pairKey] += currentDiffRowsForPair
-			t.diffMutex.Unlock()
-
-			if limitReached || t.shouldStopPair(pairKey) {
-				return
-			}
-		}
-		return
+// anyNode reports whether f is true for at least one of nodes. It stops at
+// the first such node. With no nodes it returns true, the safe answer for a
+// check that cannot be made.
+func anyNode(nodes []string, f func(node string) bool) bool {
+	if len(nodes) == 0 {
+		return true
 	}
+	for _, node := range nodes {
+		if f(node) {
+			return true
+		}
+	}
+	return false
+}
 
+// compareMismatch finds the rows that differ on two nodes in one block whose
+// hashes do not match, and adds them to the diff result.
+func (t *TableDiffTask) compareMismatch(ctx context.Context, task mismatchTask) {
+	pairKey := pairKeyFor(task.node1, task.node2)
 	if t.shouldStopPair(pairKey) {
 		return
 	}
 
-	subRanges, err := t.generateSubRanges(node1Name, currentRange, 2)
+	maxKeys := 0
+	if t.MaxDiffRows > 0 {
+		left := t.MaxDiffRows - t.pairCounter(pairKey).Load()
+		if left <= 0 {
+			return
+		}
+		if left < math.MaxInt32 {
+			maxKeys = int(left)
+		}
+	}
+
+	fail := func(err error) {
+		var me *keydiff.MemoryLimitError
+		if errors.As(err, &me) {
+			err = fmt.Errorf("%w; raise %s or use smaller blocks", err, keyMapMaxMemorySetting)
+		}
+		t.recordError(fmt.Errorf("compare rows of %s in range %v-%v on %s and %s: %w",
+			t.QualifiedTableName, task.r.Start, task.r.End, task.node1, task.node2, err))
+	}
+
+	args, hasLower, hasUpper, err := rangeArgs(task.r, len(t.Key))
 	if err != nil {
-		errWrap := fmt.Errorf("generate sub-ranges for %s/%s in range %v-%v: %w", node1Name, node2Name, currentRange.Start, currentRange.End, err)
-		t.recordError(errWrap)
-		logger.Info("ERROR generating sub-ranges for %s/%s, range %v-%v: %v. Stopping recursion for this path.",
-			node1Name, node2Name, currentRange.Start, currentRange.End, errWrap)
+		fail(err)
 		return
 	}
 
-	if len(subRanges) == 0 {
-		logger.Debug("[%s vs %s] Range %v-%v could not be split further (generateSubRangesViaNtile returned empty). Treating as unit.",
-			node1Name, node2Name, currentRange.Start, currentRange.End)
-		// Fallback: treat the range as the smallest unit and compare it.
-		task.CurrentEstimatedBlockSize = finalCompareUnitSize
-		newWg := &sync.WaitGroup{}
-		newWg.Add(1)
-		t.recursiveDiff(ctx, task, newWg)
-		newWg.Wait()
+	side := func(node string, rows int64) (keydiff.Side, error) {
+		colTypes, err := t.nodeColTypes(node)
+		if err != nil {
+			return keydiff.Side{}, err
+		}
+		pool, ok := t.Pools[node]
+		if !ok {
+			return keydiff.Side{}, fmt.Errorf("no pool for node %s", node)
+		}
+		// Every query of the comparison is one operation on the block, so
+		// the block timeout limits each of them.
+		conn := &blockQuerier{t: t, pool: pool}
+		return keydiff.Side{Name: node, Conn: conn, ColTypes: colTypes, Rows: rows, RowsKnown: true}, nil
+	}
+	s1, err := side(task.node1, task.rows1)
+	if err != nil {
+		fail(err)
+		return
+	}
+	s2, err := side(task.node2, task.rows2)
+	if err != nil {
+		fail(err)
+		return
+	}
+	s1.KeyWidth = t.keyWidths[task.node1]
+	s2.KeyWidth = t.keyWidths[task.node2]
+
+	tbl := keydiff.Table{Schema: t.Schema, Name: t.Table, Key: t.Key, Cols: t.Cols, HashTypes: t.hashColTypes(),
+		ScanChildren: t.scanChildren}
+	block := keydiff.Block{
+		Where:      queries.BlockWhereClause(t.Key, hasLower, hasUpper, t.EffectiveFilter),
+		Args:       args,
+		ReadFilter: t.EffectiveFilter,
+	}
+	res, err := keydiff.Compare(ctx, tbl, block, s1, s2, keydiff.Options{
+		MaxKeys:   maxKeys,
+		MaxMemory: t.keyMapMaxMemory(),
+	})
+	if err != nil {
+		fail(err)
+		return
+	}
+	logger.Debug("[%s vs %s] range %v-%v: %d differing keys (map on %s), %d only on %s, %d only on %s, %d changed",
+		task.node1, task.node2, task.r.Start, task.r.End, res.DiffKeys, res.BuildNode,
+		len(res.Only1), task.node1, len(res.Only2), task.node2, len(res.Changed))
+	t.addDiffRows(pairKey, task.node1, task.node2, res)
+}
+
+// addDiffRows adds the differing rows of one block to the diff result and
+// counts them against max_diff_rows.
+func (t *TableDiffTask) addDiffRows(pairKey, node1Name, node2Name string, res keydiff.Result) {
+	if res.Count() == 0 && !res.Truncated {
 		return
 	}
 
-	// If generateSubRanges returns the original range, it means it couldn't split.
-	if len(subRanges) == 1 && reflect.DeepEqual(subRanges[0], currentRange) {
-		logger.Debug("[%s vs %s] generateSubRangesViaNtile returned same range %v-%v. Fetching rows.",
-			node1Name, node2Name, currentRange.Start, currentRange.End)
-		task.CurrentEstimatedBlockSize = finalCompareUnitSize
-		newWg := &sync.WaitGroup{}
-		newWg.Add(1)
-		t.recursiveDiff(ctx, task, newWg)
-		newWg.Wait()
+	t.diffMutex.Lock()
+	defer t.diffMutex.Unlock()
+
+	if res.Truncated {
+		t.DiffResult.Summary.DiffRowLimitReached = true
+		if t.diffLimitTriggered.CompareAndSwap(false, true) {
+			logger.Warn("table-diff: %s reached max_diff_rows limit (%d); enumeration for this pair stops (other pairs continue)", pairKey, t.MaxDiffRows)
+		}
+	}
+	if res.Count() == 0 {
 		return
 	}
 
-	for _, sr := range subRanges {
-		if t.shouldStopPair(pairKey) {
-			return
-		}
-
-		newEstimatedBlockSize := currentEstimatedBlockSize / len(subRanges)
-		if newEstimatedBlockSize <= 0 {
-			newEstimatedBlockSize = 1
-		}
-
-		hash1Chan := make(chan HashResult, 1)
-		hash2Chan := make(chan HashResult, 1)
-
-		go func() {
-			h, e := t.hashRange(ctx, node1Name, sr)
-			hash1Chan <- HashResult{hash: h, err: e}
-		}()
-		go func() {
-			h, e := t.hashRange(ctx, node2Name, sr)
-			hash2Chan <- HashResult{hash: h, err: e}
-		}()
-
-		res1 := <-hash1Chan
-		res2 := <-hash2Chan
-
-		if res1.err != nil {
-			errWrap := fmt.Errorf("hashing sub-range %v-%v for %s: %w", sr.Start, sr.End, node1Name, res1.err)
-			t.recordError(errWrap)
-			logger.Info("ERROR hashing sub-range %v-%v for %s: %v", sr.Start, sr.End, node1Name, errWrap)
-			return
-		}
-		if res2.err != nil {
-			errWrap := fmt.Errorf("hashing sub-range %v-%v for %s: %w", sr.Start, sr.End, node2Name, res2.err)
-			t.recordError(errWrap)
-			logger.Info("ERROR hashing sub-range %v-%v for %s: %v", sr.Start, sr.End, node2Name, errWrap)
-			return
-		}
-
-		if res1.hash != res2.hash {
-			logger.Debug("%s Mismatch in sub-range %v-%v for %s (%s...) vs %s (%s...). Recursing.",
-				utils.CrossMark, sr.Start, sr.End, node1Name, utils.SafeCut(res1.hash, 8), node2Name, utils.SafeCut(res2.hash, 8))
-
-			if t.shouldStopPair(pairKey) {
-				return
-			}
-
-			wg.Add(1)
-			go func(sr Range, newEstimatedBlockSize int) {
-				// Wait for a semaphore slot; blocks while all comparison
-				// tasks are busy, preventing OOM from unbounded fan-out.
-				// select lets context cancellation unblock the wait so
-				// wg.Wait() cannot hang.
-				select {
-				case t.diffSem <- struct{}{}:
-					// Got a slot — release it when this goroutine finishes.
-					defer func() { <-t.diffSem }()
-				case <-ctx.Done():
-					// Context cancelled while waiting for a slot; decrement so
-					// wg.Wait() can return.
-					wg.Done()
-					return
-				}
-				t.recursiveDiff(ctx, RecursiveDiffTask{
-					Node1Name:                 node1Name,
-					Node2Name:                 node2Name,
-					CurrentRange:              sr,
-					CurrentEstimatedBlockSize: newEstimatedBlockSize,
-				}, wg)
-			}(sr, newEstimatedBlockSize)
-		} else {
-			logger.Debug("%s Match in sub-range %v-%v for %s vs %s.", utils.CheckMark, sr.Start, sr.End, node1Name, node2Name)
+	if _, ok := t.DiffResult.NodeDiffs[pairKey]; !ok {
+		t.DiffResult.NodeDiffs[pairKey] = types.DiffByNodePair{
+			Rows: make(map[string][]types.OrderedMap),
 		}
 	}
+	rows := t.DiffResult.NodeDiffs[pairKey].Rows
+	if _, ok := rows[node1Name]; !ok {
+		rows[node1Name] = []types.OrderedMap{}
+	}
+	if _, ok := rows[node2Name]; !ok {
+		rows[node2Name] = []types.OrderedMap{}
+	}
+
+	add := func(node string, row types.OrderedMap) {
+		withMeta := t.withSpockMetadata(utils.OrderedMapToMap(row), node)
+		rows[node] = append(rows[node], utils.MapToOrderedMap(withMeta, t.Cols))
+	}
+
+	var added int
+	full := false
+	count := func() {
+		added++
+		if t.incrementPairDiffRowsLocked(pairKey, 1) {
+			full = true
+		}
+	}
+	for _, row := range res.Only1 {
+		if full {
+			break
+		}
+		add(node1Name, row)
+		count()
+	}
+	for _, row := range res.Only2 {
+		if full {
+			break
+		}
+		add(node2Name, row)
+		count()
+	}
+	for _, c := range res.Changed {
+		if full {
+			break
+		}
+		add(node1Name, c.Row1)
+		add(node2Name, c.Row2)
+		count()
+	}
+
+	if t.DiffResult.Summary.DiffRowsCount == nil {
+		t.DiffResult.Summary.DiffRowsCount = make(map[string]int)
+	}
+	t.DiffResult.Summary.DiffRowsCount[pairKey] += added
 }
 
 func (t *TableDiffTask) AddPrimaryKeyToDiffSummary() {

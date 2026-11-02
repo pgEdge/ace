@@ -91,7 +91,7 @@ Request body:
 | `nodes` | array[string] | no | Defaults to `"all"`. |
 | `block_size` | int | no | Defaults to `table_diff.diff_block_size` or `100000`. |
 | `concurrency_factor` | float | no | CPU ratio (0.0–4.0). Defaults to `table_diff.concurrency_factor` or `0.5`. |
-| `compare_unit_size` | int | no | Defaults to `table_diff.compare_unit_size` or `10000`. |
+| `compare_unit_size` | int | no | Deprecated: no longer used. ACE accepts it and writes a warning. |
 | `max_diff_rows` | int64 | no | Defaults to `table_diff.max_diff_rows` or `0` (no limit). |
 | `max_connections` | int | no | Connections per node for each `table-diff` task; a value that is set is a strict limit for the whole task. `0` or missing takes, in this order, `max_connections.nodes.<cluster>.<node>` or `max_connections.default` from `ace.yaml`, then `table_diff.max_connections`; if none is set, the task opens 8 for cutting and hashing, and the comparison can open more. |
 | `slicer` | string | no | How to cut a table into blocks: `auto`, `cutter` or `sample`. Defaults to `table_diff.slicer` or `auto`. |
@@ -193,7 +193,7 @@ Request body:
 | `ddl_only` | bool | no | Compare schema objects only. |
 | `block_size` | int | no | Defaults to `table_diff.diff_block_size` or `100000`. |
 | `concurrency_factor` | float | no | CPU ratio (0.0–4.0). Defaults to `table_diff.concurrency_factor` or `0.5`. |
-| `compare_unit_size` | int | no | Defaults to `table_diff.compare_unit_size` or `10000`. |
+| `compare_unit_size` | int | no | Deprecated: no longer used. ACE accepts it and writes a warning. |
 | `max_connections` | int | no | Connections per node for each `table-diff` task; a value that is set is a strict limit for the whole task. `0` or missing takes, in this order, `max_connections.nodes.<cluster>.<node>` or `max_connections.default` from `ace.yaml`, then `table_diff.max_connections`; if none is set, the task opens 8 for cutting and hashing, and the comparison can open more. |
 | `slicer` | string | no | How to cut a table into blocks: `auto`, `cutter` or `sample`. Defaults to `table_diff.slicer` or `auto`. |
 | `output` | string | no | `json` (default) or `html`. |
@@ -216,7 +216,7 @@ Request body:
 | `skip_file` | string | no | File path (server-side). |
 | `block_size` | int | no | Defaults to `table_diff.diff_block_size` or `100000`. |
 | `concurrency_factor` | float | no | CPU ratio (0.0–4.0). Defaults to `table_diff.concurrency_factor` or `0.5`. |
-| `compare_unit_size` | int | no | Defaults to `table_diff.compare_unit_size` or `10000`. |
+| `compare_unit_size` | int | no | Deprecated: no longer used. ACE accepts it and writes a warning. |
 | `max_connections` | int | no | Connections per node for each `table-diff` task; a value that is set is a strict limit for the whole task. `0` or missing takes, in this order, `max_connections.nodes.<cluster>.<node>` or `max_connections.default` from `ace.yaml`, then `table_diff.max_connections`; if none is set, the task opens 8 for cutting and hashing, and the comparison can open more. |
 | `slicer` | string | no | How to cut a table into blocks: `auto`, `cutter` or `sample`. Defaults to `table_diff.slicer` or `auto`. |
 | `output` | string | no | `json` (default) or `html`. |

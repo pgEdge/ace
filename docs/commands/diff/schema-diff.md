@@ -27,7 +27,7 @@ table instead of its data or its mere presence.
 | `--skip-file` | `-s` | File with list of tables to exclude. Applies to `--compare=structure` too. |  |
 | `--block-size <int>` | `-b` | Rows per block when diffing tables. Default `100000`. |
 | `--concurrency-factor <float>` | `-c` | CPU ratio for the comparison of the blocks that differ (0.0–4.0); the number of hash workers comes from `--max-connections`. Default `0.5`. |
-| `--compare-unit-size <int>` | `-u` | Recursive split size for mismatched blocks. Default `10000`. |
+| `--compare-unit-size <int>` | `-u` | Deprecated: no longer used. ACE accepts it and writes a warning. |
 | `--output <json\|html>` | `-o` | Per-table diff report format. Default `json`. With `--compare=structure`, only `json` is accepted, and it only takes effect when given by hand (see below). |
 | `--slicer <auto\|cutter\|sample>` |  | How to cut each table into blocks; see `table-diff`. | `table_diff.slicer`, or `auto` |
 | `--override-block-size` | `-B` | Allow block sizes outside `ace.yaml` guardrails. |
@@ -45,7 +45,7 @@ table instead of its data or its mere presence.
 ./ace schema-diff --dbname=mydatabase my-cluster public
 ```
 
-When `--ddl-only` is **not** set, every qualifying table invokes `table-diff` using the same block size, concurrency factor, compare-unit size, output format, and override settings supplied here, so you get consistent behaviour between standalone and schema-driven comparisons.
+When `--ddl-only` is **not** set, every qualifying table invokes `table-diff` using the same block size, concurrency factor, output format, and override settings supplied here, so you get consistent behaviour between standalone and schema-driven comparisons.
 
 ### Scheduling runs
 

@@ -92,6 +92,9 @@ func (h *blockHashers) addConn(node string, conn *pgxpool.Conn) {
 	go h.work(node, conn, cur)
 }
 
+// work hashes the blocks that cur gives, one after another, on conn, until
+// the list ends or a hash fails. The first error stops the list and the
+// queries of all other workers. conn goes back to its pool at the end.
 func (h *blockHashers) work(node string, conn *pgxpool.Conn, cur *slicer.Cursor) {
 	defer h.wg.Done()
 	defer conn.Release()
@@ -129,7 +132,7 @@ func (h *blockHashers) work(node string, conn *pgxpool.Conn, cur *slicer.Cursor)
 		if h.results[idx] == nil {
 			h.results[idx] = make(RangeResults)
 		}
-		h.results[idx][node] = HashResult{hash: hash}
+		h.results[idx][node] = HashResult{hash: hash, rows: rows}
 		h.rowsByNode[node] += rows
 		h.mu.Unlock()
 		h.bar.Increment()
