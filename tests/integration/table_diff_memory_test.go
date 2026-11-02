@@ -113,7 +113,6 @@ func TestTableDiffMemoryUsage(t *testing.T) {
 	tdTask.Nodes = strings.Join(nodesToCompare, ",")
 	tdTask.Output = "json"
 	tdTask.BlockSize = 10000
-	tdTask.CompareUnitSize = 500
 	tdTask.ConcurrencyFactor = 1
 	tdTask.MaxDiffRows = math.MaxInt64
 

@@ -20,7 +20,7 @@ The design of table diff is driven by the following requirements and constraints
 
 ## Algorithm (Block-Hash Diff)
 
-The table is partitioned into primary-key ranges (blocks). Identical block boundaries are applied on every node. Each range/node pair is hashed by parallel workers; only blocks whose hashes disagree are split further and, eventually, materialised for row-level diffing.
+The table is partitioned into primary-key ranges (blocks). Identical block boundaries are applied on every node. Each range/node pair is hashed by parallel workers; only for the blocks whose hashes disagree does ACE look for the differing rows, through a map of keys and row hashes (see [Finding the Differing Rows](#finding-the-differing-rows)).
 
 ```mermaid
 flowchart LR
@@ -65,21 +65,12 @@ flowchart LR
 
   %% Block-level decisions
   C1 -->|match| S1["Skip block<br>(no fetch)"]:::skip
-  C2 -->|mismatch| Split2["Split Block 2<br>into subranges"]:::split
+  C2 -->|mismatch| Keys2["Read key + row hash<br>of Block 2 on both nodes"]:::split
   C3 -->|match| S3["Skip block<br>(no fetch)"]:::skip
 
-  %% Recursive path for mismatched block
-  Split2 --> SA["Sub-block 2a"]:::blk
-  Split2 --> SB["Sub-block 2b"]:::blk
-
-  SA -.-> WSA["Worker hashes<br>2a"]:::worker
-  SB -.-> WSB["Worker hashes<br>2b"]:::worker
-
-  WSA --> RC2{"Sub-block hashes<br>match?"}:::cmp
-  WSB --> RC2
-
-  RC2 -->|match| RS2["Skip sub-block"]:::skip
-  RC2 -->|mismatch| Fetch2["Fetch ordered rows<br>for sub-block(s)"]:::fetch
+  %% Key map path for mismatched block
+  Keys2 --> Map2["Smaller side into a map,<br>other side checked as a stream"]:::cmp
+  Map2 --> Fetch2["Read full rows<br>of differing keys only"]:::fetch
 
   Fetch2 --> Diff2["Row diff: add/del/mod<br>respect max_diff_rows"]:::diff
   Diff2 --> Report["Report & summary<br>(JSON/HTML, taskstore)"]:::report
@@ -181,8 +172,7 @@ hashed.
   means “no bound,” so rows of another node outside the anchor’s key range
   fall into the first or the last block and surface as hash mismatches.
   On such a node these two blocks can hold more than `block_size` rows:
-  the extra rows are differences, and recursion splits the block until the
-  discrepant rows are isolated.
+  the extra rows are differences, and the key map finds them.
 
 ```mermaid
 flowchart LR
@@ -199,16 +189,32 @@ flowchart LR
   classDef default fill:#eef,stroke:#6b7a99,color:#1f2a44;
 ```
 
+### Finding the Differing Rows
+
+When the hashes of a block differ on two nodes, ACE finds the rows that differ in one pass over the block on each node. The code is in `internal/consistency/keydiff`.
+
+1. **Key query.** On both nodes ACE runs the same query over the block (the same key range and filter as the block hash). For every row it returns the text of each primary-key column and the first 8 bytes of the row hash, the same row hash that the block hash is built from. Row hashes are only compared for the same key, so 8 bytes are enough: a changed row is missed with a probability of 2^-64. A `numeric` key column goes through `trim_scale()`, so `1.50` and `1.5` are the same key. The query has no `ORDER BY`.
+2. **Build.** The block hash query also counts the rows of the block. The node with fewer rows is the build side: ACE puts its keys and row hashes into a map. If the build side has no rows, this step is skipped.
+3. **Probe.** ACE reads the key query of the other node as a stream. A row whose key is not in the map, or whose row hash is different, is a difference. A row with the same key and the same hash is removed from the map, so the map gets smaller during the probe. The keys left in the map at the end exist only on the build side.
+4. **Row read.** ACE reads the full rows of the differing keys from both nodes, 2000 keys per query. The key texts go to the server as `text[]` parameters and are cast back to the column type. Each key is looked up in a `LATERAL` subquery with `OFFSET 0`, so the plan is a nested loop with one lookup in the primary-key index per key, never a scan of the whole table. The exception is a table with inheritance children: the index of the parent does not cover them, so for such a table ACE leaves the choice to the planner, which can read each child once for all keys of the batch instead of once per key. The final result uses only the row hashes from the server: a key with rows on both nodes and different hashes is a changed row, a key with a row on one node only is a missing row, and a key whose rows are equal again (they changed during the run) is not reported.
+
+The client compares bytes for equality only. It never orders key values and never converts them to Go types. Two keys that the server holds as equal but prints in a different way (`-0` and `0` in a `float` column, `citext` values that differ only in case, values under a nondeterministic collation) are two different rows for ACE: such a row is reported as missing on each node. Logical replication copies values as they are, so these cases are not expected between replicas.
+
+In an inheritance tree the parent and a child can hold rows with the same key. The map and the row read treat the rows of a key as a multiset, so each such row is compared.
+
+**Memory.** The keys of one block are limited by `table_diff.key_map_max_memory_mb`, 512 MB by default; 0 means no limit. Before the build, ACE estimates the memory from the row count and the average key width in `pg_stats`; during the build and the probe it counts the bytes of the keys it holds. When a block needs more, the run stops with an error that names the table, the block, the nodes, the row counts and the setting. Several blocks are compared at the same time, so the total memory can be the number of workers times the limit. With the default block sizes and keys of a normal size the limit is not reached.
+
+**Connections and time limit.** The queries of one comparison run one after another, so a comparison uses at most one connection at a time. Each of them is one operation on the block: `block_timeout` limits it, and the wait for a free connection does not count.
+
+**Early stop.** When a node pair reaches `max_diff_rows`, the probe stops. The keys left in the map are then not reported, because the rows that the probe did not read can still match them. ACE reads the rest of the probe query and drops it, instead of a cancel: a cancel closes the connection, and with a strict connection limit the pool may not be able to open a new one. So the server still computes the row hash of every row left in the block.
+
 ### Comparison Notes: Simple vs Composite Primary Keys
 
 - **Ordering and hashing**
   - Simple PK: ranges use scalar bounds; hashing binds one value for lower/upper when present.
   - Composite PK: ranges are tuples (`ROW(col1, col2, ...)`); hashing binds each component, and comparisons rely on the tuple sort order.
-- **Range splitting**
-  - Simple PK: median discovery and splits are straightforward using a single OFFSET/LIMIT on the ordered PK.
-  - Composite PK: splits still pivot on PK order but must scan and bind every key component; more columns mean more bind parameters and slightly heavier queries.
-- **Row materialisation**
-  - `fetchRows` always orders by the PK columns (single or composite) so `CompareRowSets` can align rows deterministically.
+- **Row search**
+  - Simple and composite PKs work the same way: the key ID of a row is built from the text of every key column, and the row read binds one `text[]` parameter per key column.
   - Arrays/UDTs get cast to `TEXT` to avoid OID/scan issues regardless of PK shape.
 - **What users should watch for**
   - Ensure the declared PK is the true business key; otherwise, composite drift can hide behind non-unique or misordered keys.
@@ -238,10 +244,11 @@ flowchart LR
 
 ### Resource Utilisation and Tuning
 
-- **block_size**: Larger blocks reduce hash tasks and recursion but increase memory/IO per hash and slow mismatch localisation; smaller blocks do the opposite (more queries, finer locality).
+- **block_size**: Larger blocks reduce hash tasks but increase memory/IO per hash and the size of the key map of a mismatched block; smaller blocks do the opposite (more queries, finer locality).
 - **concurrency_factor**: CPU ratio (0.0–4.0) relative to `NumCPU` (e.g. 0.5 on a 16-CPU host gives 8) for the comparison phase only: it runs this many tasks at the same time. Higher = faster localisation of differences but more load on DB backends, network, and local CPU. It does not change the speed of hashing, which depends on `max_connections`. Without a `max_connections` value set by the user, the connection pool per node has room for all comparison tasks (minimum 4).
 - **max_connections**: The number of connections N that the task opens to each node at the start and keeps until the end. Cutting and hashing use exactly these connections: every hash worker and every cutting worker holds its own one, so no worker waits for the pool. A server with fewer free slots gives fewer connections, and the task goes on with them. If the user sets N (on the command line or in the configuration file), it is a strict limit for the whole task: the pool of a node holds exactly N connections, and the comparison phase runs at most N tasks at the same time, so it never waits for a connection. Without such a value the pool holds at least N connections and at least the number that the comparison phase needs.
-- **compare_unit_size**: Lower values push recursion deeper (more queries, smaller fetches); higher values stop earlier (fewer queries, larger fetches on mismatched ranges).
+- **key_map_max_memory_mb**: Memory limit for the keys of one mismatched block. Raise it only for very large blocks or very long keys.
+- **compare_unit_size**: No longer used. ACE accepts it and writes a warning.
 - **max_diff_rows**: Early-exit guardrail. Lower caps keep runs short and reports small on divergent tables; raising/removing can grow memory and report size when drift is large.
 - **table_filter**: Narrows scope and cost; rows that do not match the filter do not count toward `block_size`. Must be identical across nodes to avoid false positives.
 - **override_block_size**: Skips safety rails from `ace.yaml`. Oversized blocks can spike memory and slow hashes, especially on wide rows.
@@ -249,9 +256,10 @@ flowchart LR
 
 ### Failure Modes and Safeguards
 
-- **Diff limit hit**: `max_diff_rows` stops recursion early and marks the report; more differences may exist.
+- **Diff limit hit**: `max_diff_rows` stops the row search early and marks the report; more differences may exist.
+- **Key map too large**: a mismatched block that needs more memory than `key_map_max_memory_mb` stops the run with an error.
 - **Permission or schema/PK mismatch**: Validation fails before work starts; nothing is executed against the DB.
-- **Timeouts/slow ranges**: `block_timeout` limits each query on a block (a hash, a split of a range, a fetch of its rows), and `run_timeout` limits the whole run. The first error, a time limit or a signal stops the workers on all nodes, and the run reports that cause.
+- **Timeouts/slow ranges**: `block_timeout` limits each query on a block (a hash, or a key query or a row read of a block that differs), and `run_timeout` limits the whole run. The first error, a time limit or a signal stops the workers on all nodes, and the run reports that cause.
 - **Stale stats**: Some parts are larger, so the cutting work is less even. Block size does not depend on statistics.
 
 ### Consistency Caveats
@@ -262,8 +270,8 @@ flowchart LR
 ### Operational Tuning Playbook
 
 - Start conservative on busy systems: smaller `max_connections` and `concurrency_factor`, moderate `block_size`.
-- For large but mostly consistent tables: increase `block_size` and `max_connections` to hash faster; keep `compare_unit_size` reasonable to localise mismatches.
-- For drift-heavy tables: lower `block_size`/`compare_unit_size` to localise quickly; keep `max_diff_rows` low to bound runtime and report size.
+- For large but mostly consistent tables: increase `block_size` and `max_connections` to hash faster.
+- For drift-heavy tables: lower `block_size` to keep the key map of each block small; keep `max_diff_rows` low to bound runtime and report size.
 
 ### Limits and Edge Cases
 
@@ -274,7 +282,7 @@ flowchart LR
 
 ### Observability
 
-- Logs show range hashing progress, mismatches, recursion, and diff limits.
+- Logs show range hashing progress, mismatches, the result of the row search of each mismatched block (at debug level), and diff limits.
 - Progress bars (mpb) reflect hash and mismatch-analysis stages.
 - Task status and summary are persisted to SQLite (`ace_tasks.db` by default, or the `ACE_TASKS_DB` path) via `taskstore` in table `ace_tasks` with columns: `task_id`, `task_type`, `task_status`, `cluster_name`, `task_context` (JSON), `schema`, `table_name`, `repset_name`, `diff_file_path`, `started_at`, `finished_at`, `time_taken`. Example rows:
 

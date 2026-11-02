@@ -141,7 +141,6 @@ func TestNativePGNonHeapRelations(t *testing.T) {
 		task.Quiet = true
 		task.SkipDBUpdate = true
 		task.BlockSize = 10000
-		task.CompareUnitSize = 100
 		task.ConcurrencyFactor = 1
 		require.NoError(t, task.RunChecks(false))
 		require.NoError(t, task.SchemaTableDiff())
