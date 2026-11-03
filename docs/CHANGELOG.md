@@ -83,6 +83,10 @@ All notable changes to ACE will be captured in this document. This project follo
   cannot vacuum rows that became dead after it started; the cut reads the
   key index once, so this lasts one pass over the index. This applies to
   `mtree build` too.
+- `table-diff` splits a mismatched range at the median of the rows that
+  match `--table-filter`, as the hash and the fetch of rows read only these
+  rows. Before, the split counted all rows of the range, so with a
+  selective filter it could read many more rows than the hash.
 
 ### Fixed
 - **`table-rerun` reported rows it could not find in the report as

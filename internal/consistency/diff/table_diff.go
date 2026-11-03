@@ -1729,6 +1729,9 @@ func (t *TableDiffTask) rangeFromBlock(b slicer.Block) Range {
 	return Range{Start: conv(b.Start), End: conv(b.End)}
 }
 
+// generateSubRanges splits parentRange on node at the median key of the rows
+// that match the table filter into numSplits ranges (only 2 is supported).
+// It returns parentRange alone when the range cannot be split.
 func (t *TableDiffTask) generateSubRanges(
 	node string,
 	parentRange Range,
@@ -1756,6 +1759,13 @@ func (t *TableDiffTask) generateSubRanges(
 	var conditions []string
 	args := []any{}
 	paramIdx := 1
+
+	// Count and split only the rows that the diff compares. Then these
+	// queries read the same rows as the hash of the range, and the split
+	// halves the rows that matter.
+	if strings.TrimSpace(t.EffectiveFilter) != "" {
+		conditions = append(conditions, fmt.Sprintf("(%s)", t.EffectiveFilter))
+	}
 
 	if parentRange.Start != nil {
 		startVal := parentRange.Start
