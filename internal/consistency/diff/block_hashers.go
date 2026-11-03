@@ -15,23 +15,18 @@ import (
 	"context"
 	"fmt"
 	"sync"
-	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/pgedge/ace/internal/consistency/slicer"
 	"github.com/vbauerster/mpb/v8"
 )
 
-// initialHashTimeout limits one hash query of the first pass over the
-// blocks. A worker already holds its connection when the query starts, so
-// the limit counts only the query.
-const initialHashTimeout = 60 * time.Second
-
 // blockHashers hash the blocks of a list on every node of a table-diff.
-// Every worker has its own connection and keeps it until the list ends. The
-// workers of a node share one cursor over the list, so every node reads the
-// list at its own pace. The first error stops the list and cancels the
-// queries that still run, so all workers end at once.
+// Every worker has its own connection and keeps it until the list ends, so
+// the block timeout of a hash query counts only the query. The workers of a
+// node share one cursor over the list, so every node reads the list at its
+// own pace. The first error stops the list and cancels the queries that
+// still run, so all workers end at once.
 type blockHashers struct {
 	t      *TableDiffTask
 	ctx    context.Context
@@ -87,9 +82,12 @@ func (h *blockHashers) work(node string, conn *pgxpool.Conn, cur *slicer.Cursor)
 			return
 		}
 		r := h.t.rangeFromBlock(b)
-		qctx, cancel := context.WithTimeout(h.ctx, initialHashTimeout)
-		hash, err := h.t.hashRangeOn(qctx, conn, node, r)
-		cancel()
+		var hash string
+		err := h.t.withBlockLimit(h.ctx, func(ctx context.Context) error {
+			var err error
+			hash, err = h.t.hashRangeOn(ctx, conn, node, r)
+			return err
+		})
 		if err != nil {
 			// Only the first error is kept, so the errors of the queries
 			// that the cancel below ends do not hide it.

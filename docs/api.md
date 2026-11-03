@@ -34,6 +34,8 @@ Compares a table between nodes and generates a diff report.
 | `--nodes`              | `-n`  | Nodes to include in the diff (comma-separated, or "all")            | all     |
 | `--table-filter`       | `-F`  | `WHERE` clause expression to use while diffing tables               |         |
 | `--max-connections`    | `-M`  | Connections per node, a strict limit for the task when set (0 = `max_connections` in `ace.yaml`, else 8 for cutting and hashing) | 0 |
+| `--block-timeout`      |       | Seconds for one query on one block (0 = no limit; default from `table_diff.block_timeout`) | 60      |
+| `--run-timeout`        |       | Seconds for the diff of one table (0 = no limit; default from `table_diff.run_timeout`) | 0       |
 | `--override-block-size`| `-B`  | Allow block sizes outside `ace.yaml` guardrails                     | false   |
 | `--quiet`              | `-q`  | Suppress progress output                                            | false   |
 | `--debug`              | `-v`  | Enable debug logging                                                | false   |
@@ -112,6 +114,7 @@ Re-runs a diff from a file to check for persistent differences.
 | `--diff-file`         | `-f`  | Path to the diff file to re-run (**required**)                     |         |
 | `--dbname`            | `-d`  | Name of the database                                               |         |
 | `--nodes`             | `-n`  | Nodes to include in the diff (comma-separated, or "all")           | all     |
+| `--run-timeout`       |       | Seconds for the whole rerun (0 = no limit; default from `table_diff.run_timeout`) | 0       |
 | `--quiet`             | `-q`  | Suppress output                                                    | false   |
 | `--debug`             | `-v`  | Enable debug logging                                               | false   |
 
@@ -149,6 +152,8 @@ Compares schemas across nodes in a pgEdge cluster. By default, `schema-diff` per
 | `--nodes`              | `-n`  | Nodes to include in the diff (comma-separated, or "all")                | all     |
 | `--table-filter`       | `-F`  | `WHERE` clause expression to use while diffing tables                   |         |
 | `--max-connections`    | `-M`  | Connections per node, a strict limit for the task when set (0 = `max_connections` in `ace.yaml`, else 8 for cutting and hashing) | 0 |
+| `--block-timeout`      |       | Seconds for one query on one block (0 = no limit; default from `table_diff.block_timeout`) | 60      |
+| `--run-timeout`        |       | Seconds for the diff of each table (0 = no limit; default from `table_diff.run_timeout`) | 0       |
 | `--override-block-size`| `-B`  | Allow block sizes outside `ace.yaml` guardrails                         | false   |
 | `--quiet`              | `-q`  | Suppress progress output                                                | false   |
 | `--debug`              | `-v`  | Enable debug logging                                                    | false   |
@@ -192,6 +197,8 @@ Performs a `table-diff` on every table in a replication set and reports differen
 | `--compare-unit-size`   | `-u`  | Recursive split size for mismatched blocks                                  | 10000   |
 | `--output`              | `-o`  | Per-table diff output format (`json` or `html`)                             | json    |
 | `--max-connections`     | `-M`  | Connections per node, a strict limit for the task when set (0 = `max_connections` in `ace.yaml`, else 8 for cutting and hashing) | 0 |
+| `--block-timeout`       |       | Seconds for one query on one block (0 = no limit; default from `table_diff.block_timeout`) | 60      |
+| `--run-timeout`         |       | Seconds for the diff of each table (0 = no limit; default from `table_diff.run_timeout`) | 0       |
 | `--override-block-size` | `-B`  | Allow block sizes outside `ace.yaml` guardrails                             | false   |
 | `--quiet`               | `-q`  | Suppress output                                                             | false   |
 | `--debug`               | `-v`  | Enable debug logging                                                        | false   |

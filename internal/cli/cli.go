@@ -43,6 +43,7 @@ var defaultConfigYAML string
 //go:embed default_pg_service.conf
 var defaultPgServiceConf string
 
+// SetupCLI builds the ace command with all its subcommands and flags.
 func SetupCLI(version string) *cli.Command {
 	// Use -V for version, so -v stays reserved for the debug/verbose flag on
 	// subcommands, matching go tooling conventions.
@@ -77,6 +78,11 @@ func SetupCLI(version string) *cli.Command {
 			Usage:   "Enable debug logging",
 			Value:   false,
 		},
+	}
+
+	runTimeoutFlag := &cli.IntFlag{
+		Name:  "run-timeout",
+		Usage: "Seconds for the diff of one table, 0 = no limit (default: table_diff.run_timeout, or 0)",
 	}
 
 	diffFlags := []cli.Flag{
@@ -116,6 +122,11 @@ func SetupCLI(version string) *cli.Command {
 			Usage:   "Connections to each node for one table-diff task; a set value is a strict limit for the whole task (0 = max_connections from the config file; if that is not set, 8 for cutting and hashing, and the comparison can open more)",
 			Value:   0,
 		},
+		&cli.IntFlag{
+			Name:  "block-timeout",
+			Usage: "Seconds for one query on one block, 0 = no limit (default: table_diff.block_timeout, or 60)",
+		},
+		runTimeoutFlag,
 	}
 
 	rerunOnlyFlags := []cli.Flag{
@@ -186,6 +197,7 @@ func SetupCLI(version string) *cli.Command {
 	)
 
 	tableRerunFlags := append(commonFlags, rerunOnlyFlags...)
+	tableRerunFlags = append(tableRerunFlags, runTimeoutFlag)
 
 	tableRepairFlags := []cli.Flag{
 		&cli.StringFlag{
@@ -957,6 +969,19 @@ func resolveClusterArg(cmd, missingUsage, argsUsage string, required int, args [
 	return "", nil, fmt.Errorf("unexpected arguments for %s (usage: %s)", cmd, argsUsage)
 }
 
+// timeoutFlag returns the value of a timeout flag in seconds, or nil if the
+// flag is not given, so that the value from ace.yaml is used.
+func timeoutFlag(cmd *cli.Command, name string) (*int, error) {
+	if !cmd.IsSet(name) {
+		return nil, nil
+	}
+	v := cmd.Int(name)
+	if v < 0 {
+		return nil, fmt.Errorf("--%s must be >= 0, got %d", name, v)
+	}
+	return &v, nil
+}
+
 // TableDiffCLI runs the table-diff command once, or on a schedule with
 // --schedule. In a single run, SIGINT or SIGTERM stops it, and the error
 // then names the signal. With --schedule, a signal ends the schedule: a run
@@ -982,6 +1007,12 @@ func TableDiffCLI(cmd *cli.Command) (err error) {
 	task.BlockSize = int(blockSizeInt)
 	task.ConcurrencyFactor = cmd.Float64("concurrency-factor")
 	task.MaxConnections = cmd.Int("max-connections")
+	if task.BlockTimeout, err = timeoutFlag(cmd, "block-timeout"); err != nil {
+		return err
+	}
+	if task.RunTimeout, err = timeoutFlag(cmd, "run-timeout"); err != nil {
+		return err
+	}
 	task.CompareUnitSize = cmd.Int("compare-unit-size")
 	task.Output = strings.ToLower(cmd.String("output"))
 	task.MaxHTMLRows = cmd.Int64("max-html-rows")
@@ -1285,6 +1316,9 @@ func TableRerunCLI(cmd *cli.Command) (err error) {
 	task.DBName = cmd.String("dbname")
 	task.Nodes = cmd.String("nodes")
 	task.QuietMode = cmd.Bool("quiet")
+	if task.RunTimeout, err = timeoutFlag(cmd, "run-timeout"); err != nil {
+		return err
+	}
 	ctx, stop := signalContext(context.Background())
 	defer stop()
 	defer func() { err = withStopCause(ctx, err) }()
@@ -1406,6 +1440,12 @@ func SchemaDiffCLI(cmd *cli.Command) (err error) {
 	task.BlockSize = int(blockSizeInt)
 	task.ConcurrencyFactor = cmd.Float64("concurrency-factor")
 	task.MaxConnections = cmd.Int("max-connections")
+	if task.BlockTimeout, err = timeoutFlag(cmd, "block-timeout"); err != nil {
+		return err
+	}
+	if task.RunTimeout, err = timeoutFlag(cmd, "run-timeout"); err != nil {
+		return err
+	}
 	task.CompareUnitSize = cmd.Int("compare-unit-size")
 	task.Output = cmd.String("output")
 	task.OutputExplicit = cmd.IsSet("output")
@@ -1488,6 +1528,12 @@ func RepsetDiffCLI(cmd *cli.Command) (err error) {
 	task.BlockSize = int(blockSizeInt)
 	task.ConcurrencyFactor = cmd.Float64("concurrency-factor")
 	task.MaxConnections = cmd.Int("max-connections")
+	if task.BlockTimeout, err = timeoutFlag(cmd, "block-timeout"); err != nil {
+		return err
+	}
+	if task.RunTimeout, err = timeoutFlag(cmd, "run-timeout"); err != nil {
+		return err
+	}
 	task.CompareUnitSize = cmd.Int("compare-unit-size")
 	task.Output = cmd.String("output")
 	task.OverrideBlockSize = cmd.Bool("override-block-size")

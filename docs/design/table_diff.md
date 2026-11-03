@@ -251,7 +251,7 @@ flowchart LR
 
 - **Diff limit hit**: `max_diff_rows` stops recursion early and marks the report; more differences may exist.
 - **Permission or schema/PK mismatch**: Validation fails before work starts; nothing is executed against the DB.
-- **Timeouts/slow ranges**: Hashing is wrapped in timeouts; the first error is recorded and surfaced after workers finish.
+- **Timeouts/slow ranges**: `block_timeout` limits each query on a block (a hash, a split of a range, a fetch of its rows), and `run_timeout` limits the whole run. The first error, a time limit or a signal stops the workers on all nodes, and the run reports that cause.
 - **Stale stats**: Some parts are larger, so the cutting work is less even. Block size does not depend on statistics.
 
 ### Consistency Caveats
