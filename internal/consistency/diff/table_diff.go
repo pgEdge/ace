@@ -140,12 +140,20 @@ type TableDiffTask struct {
 	// waits for a child that needs a slot of its own. With a strict limit the
 	// pool of a node can have as few connections as there are slots, so a
 	// goroutine that ran two queries on one node at the same time would wait
-	// for the pool, and that wait would count against the timeout of its
-	// query.
+	// for the pool and hold its slot all that time.
 	diffSem chan struct{}
 
 	resolvedAgainstOrigin string
 	untilTime             *time.Time
+
+	// BlockTimeout and RunTimeout limit, in seconds, one query on one block
+	// and the whole run. nil means the value from ace.yaml; 0 means no
+	// limit.
+	BlockTimeout *int
+	RunTimeout   *int
+
+	// blockTimeout is the block timeout of the current run.
+	blockTimeout time.Duration
 
 	// stopRun stops the context of the current run with a cause. It is set
 	// only while the run is in progress.
@@ -484,12 +492,9 @@ func NewTableDiffTask() *TableDiffTask {
 	}
 }
 
+// fetchRows reads the rows of range r on node nodeName, in no fixed order.
+// The query is one operation on a block, so the block timeout limits it.
 func (t *TableDiffTask) fetchRows(nodeName string, r Range) ([]types.OrderedMap, error) {
-	pool, ok := t.Pools[nodeName]
-	if !ok {
-		return nil, fmt.Errorf("no pool for node %s", nodeName)
-	}
-
 	if len(t.Key) == 0 {
 		return nil, fmt.Errorf("primary key not defined for table %s.%s", t.Schema, t.Table)
 	}
@@ -613,13 +618,20 @@ func (t *TableDiffTask) fetchRows(nodeName string, r Range) ([]types.OrderedMap,
 
 	logger.Debug("[%s] Fetching rows for range: Start=%v, End=%v. SQL: %s, Args: %v", nodeName, r.Start, r.End, querySQL, args)
 
-	pgRows, err := pool.Query(t.Ctx, querySQL, args...) // nosemgrep
+	var results []types.OrderedMap
+	err := t.withBlockConn(t.Ctx, nodeName, func(ctx context.Context, conn *pgxpool.Conn) error {
+		pgRows, err := conn.Query(ctx, querySQL, args...) // nosemgrep
+		if err != nil {
+			return fmt.Errorf("failed to query rows for range on node %s (SQL: %s, Args: %v): %w", nodeName, querySQL, args, err)
+		}
+		results, err = utils.ScanRows(pgRows)
+		if err != nil {
+			return fmt.Errorf("failed to read rows on node %s: %w", nodeName, err)
+		}
+		return nil
+	})
 	if err != nil {
-		return nil, fmt.Errorf("failed to query rows for range on node %s (SQL: %s, Args: %v): %w", nodeName, querySQL, args, err)
-	}
-	results, err := utils.ScanRows(pgRows)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read rows on node %s: %w", nodeName, err)
+		return nil, err
 	}
 	return results, nil
 }
@@ -651,6 +663,8 @@ func (t *TableDiffTask) compareBlocks(
 	return diffResult, nil
 }
 
+// Validate checks the arguments of the task, fills the values that the
+// task does not set from ace.yaml, and loads the cluster information.
 func (t *TableDiffTask) Validate() error {
 	if t.ClusterName == "" || t.QualifiedTableName == "" {
 		return fmt.Errorf("cluster_name and table_name are required arguments")
@@ -662,6 +676,9 @@ func (t *TableDiffTask) Validate() error {
 			config.MaxConnectionsPerNode, t.MaxConnections)
 	}
 	if err := cfg.CheckConnectionLimits(); err != nil {
+		return err
+	}
+	if _, _, err := t.timeLimits(); err != nil {
 		return err
 	}
 	if t.BlockSize > cfg.TableDiff.MaxBlockSize && !t.OverrideBlockSize {
@@ -1007,6 +1024,8 @@ func (t *TableDiffTask) CloneForSchedule(ctx context.Context) *TableDiffTask {
 	cloned.BlockSize = t.BlockSize
 	cloned.ConcurrencyFactor = t.ConcurrencyFactor
 	cloned.MaxConnections = t.MaxConnections
+	cloned.BlockTimeout = t.BlockTimeout
+	cloned.RunTimeout = t.RunTimeout
 	cloned.Output = t.Output
 	cloned.TableFilter = t.TableFilter
 	cloned.QuietMode = t.QuietMode
@@ -1150,14 +1169,19 @@ func (t *TableDiffTask) compareTasks(limits map[string]*nodeLimit) int {
 }
 
 // ExecuteTask runs one table-diff and writes the report. The run has its
-// own context: the first error or the end of t.Ctx stops all its workers,
-// and the error then names the cause of the stop. The task status is
-// recorded in the task store.
+// own context: the first error, the run timeout or the end of t.Ctx stops
+// all its workers, and the error then names the cause of the stop. The task
+// status is recorded in the task store.
 func (t *TableDiffTask) ExecuteTask() (err error) {
 	startTime := time.Now()
 
+	// A wrong limit fails the run below, after the task status is
+	// recorded.
+	blockTimeout, runTimeout, limitsErr := t.timeLimits()
+	t.blockTimeout = blockTimeout
+
 	parentCtx := t.Ctx
-	runCtx, stopRun := newRunContext(parentCtx)
+	runCtx, stopRun := newRunContext(parentCtx, runTimeout)
 	t.Ctx = runCtx
 	t.stopRun = stopRun
 	defer func() {
@@ -1285,6 +1309,11 @@ func (t *TableDiffTask) ExecuteTask() (err error) {
 			err = cause
 		}
 	}()
+
+	if limitsErr != nil {
+		return limitsErr
+	}
+	logger.Debug("table-diff: block timeout %s, run timeout %s (0s means no limit)", blockTimeout, runTimeout)
 
 	if t.Mode == "rerun" {
 		return t.ExecuteRerunTask()
@@ -1657,9 +1686,9 @@ func (t *TableDiffTask) runRecursiveDiffs(ctx context.Context, tasks []Recursive
 }
 
 // runError returns the first error of the run. If there is none but the run
-// was stopped, for example by a signal, it returns the cause of the stop. A
-// stop can end the diff workers without an error, and then some ranges are
-// not compared, so the result is not complete.
+// was stopped, for example by the run timeout or a signal, it returns the
+// cause of the stop. A stop can end the diff workers without an error, and
+// then some ranges are not compared, so the result is not complete.
 func (t *TableDiffTask) runError(ctx context.Context) error {
 	if err := t.getFirstError(); err != nil {
 		return err
@@ -1668,18 +1697,22 @@ func (t *TableDiffTask) runError(ctx context.Context) error {
 }
 
 // hashRange runs the block hash query (queries.BlockHashSQL) for the range r
-// on node and returns the hash as hex text. A bound of r that is nil, or all
-// NULL for a composite key, leaves the range open on that side.
+// on a connection from the pool of node and returns the hash as hex text. A
+// bound of r that is nil, or all NULL for a composite key, leaves the range
+// open on that side. The query is one operation on a block, so the block
+// timeout limits it.
 func (t *TableDiffTask) hashRange(
 	ctx context.Context,
 	node string,
 	r Range,
 ) (string, error) {
-	pool, ok := t.Pools[node]
-	if !ok {
-		return "", fmt.Errorf("no pool for node %s", node)
-	}
-	return t.hashRangeOn(ctx, pool, node, r)
+	var hash string
+	err := t.withBlockConn(ctx, node, func(ctx context.Context, conn *pgxpool.Conn) error {
+		var err error
+		hash, err = t.hashRangeOn(ctx, conn, node, r)
+		return err
+	})
+	return hash, err
 }
 
 // rowQuerier is the part of pgxpool.Pool and pgxpool.Conn that a hash query
@@ -1790,7 +1823,8 @@ func (t *TableDiffTask) rangeFromBlock(b slicer.Block) Range {
 
 // generateSubRanges splits parentRange on node at the median key of the rows
 // that match the table filter into numSplits ranges (only 2 is supported).
-// It returns parentRange alone when the range cannot be split.
+// It returns parentRange alone when the range cannot be split. A stop of the
+// run or a block timeout is an error.
 func (t *TableDiffTask) generateSubRanges(
 	node string,
 	parentRange Range,
@@ -1801,10 +1835,6 @@ func (t *TableDiffTask) generateSubRanges(
 	}
 	if len(t.Key) == 0 {
 		return nil, fmt.Errorf("primary key not defined")
-	}
-	pool, ok := t.Pools[node]
-	if !ok {
-		return nil, fmt.Errorf("no pool for node %s", node)
 	}
 
 	quotedKeyCols := make([]string, len(t.Key))
@@ -1879,7 +1909,7 @@ func (t *TableDiffTask) generateSubRanges(
 
 	countQuery := fmt.Sprintf("SELECT COUNT(1) FROM %s %s", schemaTable, whereClause)
 	var count int64
-	err := pool.QueryRow(t.Ctx, countQuery, args...).Scan(&count) // nosemgrep
+	err := t.queryBlockRow(t.Ctx, node, countQuery, args, &count)
 	if err != nil {
 		logger.Debug("[%s] Failed to count rows in parent range %v-%v for splitting: %v. SQL: %s, Args: %v", node, parentRange.Start, parentRange.End, err, countQuery, args)
 		return nil, fmt.Errorf("failed to count for split: %w", err)
@@ -1909,20 +1939,25 @@ func (t *TableDiffTask) generateSubRanges(
 		numPKCols := len(t.Key)
 
 		if numPKCols == 1 {
-			err = pool.QueryRow(t.Ctx, medianQuery, medianQueryArgs...).Scan(&medianPKVal) // nosemgrep
+			err = t.queryBlockRow(t.Ctx, node, medianQuery, medianQueryArgs, &medianPKVal)
 		} else {
 			scanDest := make([]any, numPKCols)
 			scanDestPtrs := make([]any, numPKCols)
 			for i := range scanDest {
 				scanDestPtrs[i] = &scanDest[i]
 			}
-			err = pool.QueryRow(t.Ctx, medianQuery, medianQueryArgs...).Scan(scanDestPtrs...) // nosemgrep
+			err = t.queryBlockRow(t.Ctx, node, medianQuery, medianQueryArgs, scanDestPtrs...)
 			if err == nil {
 				medianPKVal = append([]any{}, scanDest...)
 			}
 		}
 
 		if err != nil {
+			// A stop or a timeout is an error. Without this check, the range
+			// would be compared row by row as if it could not be split.
+			if isBlockTimeout(err) || t.Ctx.Err() != nil {
+				return nil, fmt.Errorf("failed to find the median key for split: %w", err)
+			}
 			logger.Debug("[%s] Failed to find median PK for range %v-%v: %v. SQL: %s, Args: %v", node, parentRange.Start, parentRange.End, err, medianQuery, medianQueryArgs)
 			return []Range{parentRange}, nil
 		}
@@ -1953,6 +1988,9 @@ func (t *TableDiffTask) generateSubRanges(
 	return []Range{parentRange}, nil
 }
 
+// recursiveDiff narrows a range whose hashes differ on two nodes. It splits
+// the range and hashes the parts until a part is small enough, and then
+// compares the rows of that part.
 func (t *TableDiffTask) recursiveDiff(
 	ctx context.Context,
 	task RecursiveDiffTask,
@@ -2125,23 +2163,20 @@ func (t *TableDiffTask) recursiveDiff(
 			newEstimatedBlockSize = 1
 		}
 
-		hashCtx, cancelHash := context.WithTimeout(ctx, 60*time.Second)
-
 		hash1Chan := make(chan HashResult, 1)
 		hash2Chan := make(chan HashResult, 1)
 
 		go func() {
-			h, e := t.hashRange(hashCtx, node1Name, sr)
+			h, e := t.hashRange(ctx, node1Name, sr)
 			hash1Chan <- HashResult{hash: h, err: e}
 		}()
 		go func() {
-			h, e := t.hashRange(hashCtx, node2Name, sr)
+			h, e := t.hashRange(ctx, node2Name, sr)
 			hash2Chan <- HashResult{hash: h, err: e}
 		}()
 
 		res1 := <-hash1Chan
 		res2 := <-hash2Chan
-		cancelHash()
 
 		if res1.err != nil {
 			errWrap := fmt.Errorf("hashing sub-range %v-%v for %s: %w", sr.Start, sr.End, node1Name, res1.err)

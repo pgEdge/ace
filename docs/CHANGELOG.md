@@ -34,6 +34,25 @@ All notable changes to ACE will be captured in this document. This project follo
   HTTP requests and in scheduled jobs.
 
 ### Added
+- **Time limits for `table-diff`, `repset-diff` and `schema-diff`.**
+  `--block-timeout` (`table_diff.block_timeout` in `ace.yaml`, default 60 s)
+  limits one query on one block: the hash of a block, the split of a range,
+  or the fetch of its rows. `--run-timeout` (`table_diff.run_timeout`,
+  default 0, no limit) limits the diff of one table; for `repset-diff` and
+  `schema-diff` it applies to each table on its own, and `table-rerun` has
+  it too. When a limit is reached, ACE cancels its queries on all nodes
+  and the diff fails with an error that names the limit. A hash, split or
+  fetch query holds a snapshot only while it runs, so the block limit also
+  bounds how long such a query holds back vacuum on a node. The block limit
+  does not apply to the cut of the table into blocks: a cutting worker
+  holds one snapshot for all its parts, and only `run_timeout` limits it,
+  which by default means no limit. The block limit was a fixed 60 s for the
+  hash queries only. In the comparison of the blocks that differ, the time
+  spent waiting for a free connection counted toward it; now the wait does
+  not count. **The fetch of rows and
+  the split of a range had no limit before and now have the 60 s default.**
+  If a diff of very wide rows fails with a block timeout after the
+  upgrade, raise `table_diff.block_timeout` or set it to `0`.
 - Diff reports have a `format_version` field. `table-repair` and
   `table-rerun` refuse a report with a version they do not know. A report
   from an earlier ACE has no such field and is read as version 0.

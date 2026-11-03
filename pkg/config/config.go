@@ -72,6 +72,11 @@ type DiffConfig struct {
 	// MaxConnections is the old name of max_connections.default. It is used
 	// only when max_connections.default is not set.
 	MaxConnections int `yaml:"max_connections"`
+	// BlockTimeout limits one query on one block, in seconds. Unset means
+	// 60; 0 means no limit.
+	BlockTimeout *int `yaml:"block_timeout"`
+	// RunTimeout limits one table-diff run, in seconds. 0 means no limit.
+	RunTimeout int `yaml:"run_timeout"`
 }
 
 // DefaultMaxConnections is the number of connections per node when neither
