@@ -18,6 +18,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -216,29 +217,93 @@ func AcquireConns(ctx context.Context, pool *pgxpool.Pool, n int) ([]*pgxpool.Co
 	return conns, nil
 }
 
-// OpenConns makes pool open up to n connections, one at a time, and leaves
-// them in the pool as idle connections. It stops at the first refusal with
-// SQLSTATE 53300 and returns the number of connections that are open and
-// that refusal. Any other error is returned as err.
+// openConnsAtOnce is the largest number of connections that OpenConns
+// opens to one pool at the same time.
+const openConnsAtOnce = 16
+
+// OpenConns makes pool open up to n connections and leaves them in the pool
+// as idle connections. It opens the first connection alone, so a server that
+// does not accept ACE at all, for example because of a wrong password, gets
+// one attempt and not n. Then it opens the other connections, up to
+// openConnsAtOnce at the same time, so the start costs much less than n
+// connection times. After the first refusal or error it starts no new
+// attempts.
+//
+// It returns the number of connections that are open. A refusal with
+// SQLSTATE 53300 is not an error: the server has no free slot for more
+// connections, and OpenConns returns that refusal. Any other error is
+// returned as err.
 //
 // Later, up to opened callers can take a connection from the pool at the
 // same time without a new connection to the server, as long as the pool
 // does not close idle connections.
 func OpenConns(ctx context.Context, pool *pgxpool.Pool, n int) (opened int, refusal *pgconn.PgError, err error) {
-	conns := make([]*pgxpool.Conn, 0, n)
-	defer func() { ReleaseConns(conns) }()
-	for len(conns) < n {
-		c, err := pool.Acquire(ctx)
-		if err != nil {
-			var pgErr *pgconn.PgError
-			if errors.As(err, &pgErr) && pgErr.Code == tooManyConnections {
-				return len(conns), pgErr, nil
-			}
-			return len(conns), nil, err
-		}
-		conns = append(conns, c)
+	if n <= 0 {
+		return 0, nil, nil
 	}
-	return len(conns), nil, nil
+	first, err := pool.Acquire(ctx)
+	if err != nil {
+		if r := connRefusal(err); r != nil {
+			return 0, r, nil
+		}
+		return 0, nil, err
+	}
+	conns := []*pgxpool.Conn{first}
+	defer func() { ReleaseConns(conns) }()
+
+	var (
+		mu   sync.Mutex
+		wg   sync.WaitGroup
+		left = n - 1
+	)
+	// next reserves one attempt. It returns false when all attempts are
+	// made, or when an attempt has failed.
+	next := func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		if left == 0 || refusal != nil || err != nil {
+			return false
+		}
+		left--
+		return true
+	}
+	for range min(n-1, openConnsAtOnce) {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for next() {
+				c, cerr := pool.Acquire(ctx)
+				mu.Lock()
+				switch r := connRefusal(cerr); {
+				case cerr == nil:
+					conns = append(conns, c)
+				case r != nil:
+					if refusal == nil {
+						refusal = r
+					}
+				case err == nil:
+					err = cerr
+				}
+				mu.Unlock()
+			}
+		}()
+	}
+	wg.Wait()
+
+	if err != nil {
+		return len(conns), nil, err
+	}
+	return len(conns), refusal, nil
+}
+
+// connRefusal returns err as a server error if the server refused the
+// connection with SQLSTATE 53300, else nil.
+func connRefusal(err error) *pgconn.PgError {
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) && pgErr.Code == tooManyConnections {
+		return pgErr
+	}
+	return nil
 }
 
 // ReleaseConns gives every connection of conns back to its pool.

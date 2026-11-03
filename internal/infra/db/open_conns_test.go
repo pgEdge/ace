@@ -92,4 +92,92 @@ func TestOpenConnsRoleLimit(t *testing.T) {
 	if after := pool.Stat().NewConnsCount(); after != before {
 		t.Fatalf("the pool tried %d new connections for two callers, want none", after-before)
 	}
+
+	// Many more connections than the role may have: after the first refusal
+	// OpenConns starts no new attempts, so it makes far fewer than n.
+	cfg.MaxConns = 64
+	many, err := pgxpool.NewWithConfig(ctx, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer many.Close()
+	pool.Reset()
+	for deadline := time.Now().Add(10 * time.Second); ; {
+		var n int
+		if err := admin.QueryRow(ctx, "SELECT count(*) FROM pg_stat_activity WHERE usename = $1", role).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		if n == 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("%d backends of %s are still open", n, role)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	opened, refusal, err = OpenConns(ctx, many, 64)
+	if err != nil {
+		t.Fatalf("OpenConns of 64: %v", err)
+	}
+	if opened != 2 || refusal == nil {
+		t.Fatalf("OpenConns of 64 = %d, %v; want 2 and a refusal", opened, refusal)
+	}
+	// Every attempt that started before the first refusal came back either
+	// succeeded or was one of at most openConnsAtOnce that ran at that time.
+	if tries, most := many.Stat().NewConnsCount(), int64(opened+openConnsAtOnce); tries > most {
+		t.Fatalf("OpenConns of 64 tried %d connections, want at most %d", tries, most)
+	}
+	many.Reset()
+
+	// A role with no free slot at all: the first connection is refused, and
+	// OpenConns makes no other attempt.
+	if _, err := admin.Exec(ctx, "ALTER ROLE "+role+" CONNECTION LIMIT 0"); err != nil {
+		t.Fatal(err)
+	}
+	empty, err := pgxpool.NewWithConfig(ctx, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer empty.Close()
+	opened, refusal, err = OpenConns(ctx, empty, 4)
+	if err != nil {
+		t.Fatalf("OpenConns with no free slot: %v", err)
+	}
+	if opened != 0 || refusal == nil {
+		t.Fatalf("OpenConns with no free slot = %d, %v; want 0 and a refusal", opened, refusal)
+	}
+	if tries := empty.Stat().NewConnsCount(); tries != 1 {
+		t.Fatalf("OpenConns with no free slot tried %d connections, want 1", tries)
+	}
+}
+
+// TestOpenConnsAll needs a PostgreSQL server. Set ACE_TEST_DSN to a
+// connection string.
+func TestOpenConnsAll(t *testing.T) {
+	dsn := os.Getenv("ACE_TEST_DSN")
+	if dsn == "" {
+		t.Skip("ACE_TEST_DSN is not set")
+	}
+	ctx := context.Background()
+	cfg, err := pgxpool.ParseConfig(dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	applyConnectionOptions(cfg, ConnectionOptions{PoolSize: 8, KeepOpen: true})
+	pool, err := pgxpool.NewWithConfig(ctx, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+
+	opened, refusal, err := OpenConns(ctx, pool, 8)
+	if err != nil || refusal != nil || opened != 8 {
+		t.Fatalf("OpenConns = %d, %v, %v; want 8 and no refusal", opened, refusal, err)
+	}
+	if st := pool.Stat(); st.IdleConns() != 8 || st.AcquiredConns() != 0 {
+		t.Fatalf("pool after OpenConns: %d idle, %d acquired; want 8 idle", st.IdleConns(), st.AcquiredConns())
+	}
+	if opened, _, err := OpenConns(ctx, pool, 0); opened != 0 || err != nil {
+		t.Fatalf("OpenConns(0) = %d, %v; want 0 and no error", opened, err)
+	}
 }

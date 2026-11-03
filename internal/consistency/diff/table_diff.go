@@ -32,6 +32,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/pgedge/ace/db/queries"
 	"github.com/pgedge/ace/internal/consistency/schema"
@@ -1131,26 +1132,42 @@ func (l *nodeLimit) poolOpts(maxPoolSize int) auth.ConnectionOptions {
 
 // openNodeConns opens the connections of every node, up to the limit of the
 // node, leaves them idle in the pools and writes their number to the limit.
-// A node that has no free connection slot for all of them gives fewer, and
-// the task goes on with them and writes a warning. A node that gives none
-// stops the task.
+// It opens the connections of all nodes at the same time. A node that has no
+// free connection slot for all of them gives fewer, and the task goes on
+// with them and writes a warning. A node that gives none stops the task.
 func (t *TableDiffTask) openNodeConns(ctx context.Context, pools map[string]*pgxpool.Pool, nodeNames []string, limits map[string]*nodeLimit) error {
-	for _, name := range nodeNames {
-		l := limits[name]
-		n, refusal, err := auth.OpenConns(ctx, pools[name], l.want)
-		if err != nil {
-			return fmt.Errorf("failed to open connections to node %s: %w", name, err)
+	type opened struct {
+		n       int
+		refusal *pgconn.PgError
+		err     error
+	}
+	res := make([]opened, len(nodeNames))
+	var wg sync.WaitGroup
+	for i, name := range nodeNames {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			r := &res[i]
+			r.n, r.refusal, r.err = auth.OpenConns(ctx, pools[name], limits[name].want)
+		}()
+	}
+	wg.Wait()
+
+	for i, name := range nodeNames {
+		l, r := limits[name], res[i]
+		if r.err != nil {
+			return fmt.Errorf("failed to open connections to node %s: %w", name, r.err)
 		}
-		if n == 0 {
-			return fmt.Errorf("node %s accepts no connection from ACE: %s", name, refusal.Message)
+		if r.n == 0 {
+			return fmt.Errorf("node %s accepts no connection from ACE: %s", name, r.refusal.Message)
 		}
-		if n < l.want {
+		if r.n < l.want {
 			logger.Warn("table-diff: node %s accepted %d of %d connections (%s); this node uses %d connections",
-				name, n, l.want, refusal.Message, n)
+				name, r.n, l.want, r.refusal.Message, r.n)
 		} else {
-			logger.Info("table-diff: %d connections to node %s", n, name)
+			logger.Info("table-diff: %d connections to node %s", r.n, name)
 		}
-		l.opened = n
+		l.opened = r.n
 	}
 	return nil
 }
