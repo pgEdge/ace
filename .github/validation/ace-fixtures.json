@@ -1,0 +1,147 @@
+{
+  "cells": {
+    "pepcell.v1.deb.bookworm.amd64.packaging": [
+      {
+        "file": "pgedge-ace_3.0.0-1.bookworm_amd64.deb",
+        "name": "pgedge-ace",
+        "sha256": "1a22f4fb4f6fd3f7866fbd803f0203c3e056df0d6eb910d90794ed92182b15dd",
+        "size": 8306102,
+        "url": "https://apt.pgedge.com/release/bookworm/pool/main/p/pgedge-ace/pgedge-ace_3.0.0-1.bookworm_amd64.deb",
+        "version": "3.0.0-1.bookworm"
+      }
+    ],
+    "pepcell.v1.deb.bookworm.arm64.packaging": [
+      {
+        "file": "pgedge-ace_3.0.0-1.bookworm_arm64.deb",
+        "name": "pgedge-ace",
+        "sha256": "0ae043c23b71d9f400ad01dbb5b8d2f3fb48ce1d23d1a087b1add0b992bcb5df",
+        "size": 7511846,
+        "url": "https://apt.pgedge.com/release/bookworm/pool/main/p/pgedge-ace/pgedge-ace_3.0.0-1.bookworm_arm64.deb",
+        "version": "3.0.0-1.bookworm"
+      }
+    ],
+    "pepcell.v1.deb.jammy.amd64.packaging": [
+      {
+        "file": "pgedge-ace_3.0.0-1.jammy_amd64.deb",
+        "name": "pgedge-ace",
+        "sha256": "b5c3433e7222ec7c26ba2e51508d7ee2a496e73950c0afe946d39011288eb2ba",
+        "size": 8306140,
+        "url": "https://apt.pgedge.com/release/jammy/pool/main/p/pgedge-ace/pgedge-ace_3.0.0-1.jammy_amd64.deb",
+        "version": "3.0.0-1.jammy"
+      }
+    ],
+    "pepcell.v1.deb.jammy.arm64.packaging": [
+      {
+        "file": "pgedge-ace_3.0.0-1.jammy_arm64.deb",
+        "name": "pgedge-ace",
+        "sha256": "df2bbfce067df5b895aea136e8b8a89d404c20687bc0525c51fe3bc580cc4c2d",
+        "size": 7511888,
+        "url": "https://apt.pgedge.com/release/jammy/pool/main/p/pgedge-ace/pgedge-ace_3.0.0-1.jammy_arm64.deb",
+        "version": "3.0.0-1.jammy"
+      }
+    ],
+    "pepcell.v1.deb.noble.amd64.packaging": [
+      {
+        "file": "pgedge-ace_3.0.0-1.noble_amd64.deb",
+        "name": "pgedge-ace",
+        "sha256": "db2aaa31fe2d67a3316e0e4df0b697d153caccf0754903846a45cc82fb7e803b",
+        "size": 8305920,
+        "url": "https://apt.pgedge.com/release/noble/pool/main/p/pgedge-ace/pgedge-ace_3.0.0-1.noble_amd64.deb",
+        "version": "3.0.0-1.noble"
+      }
+    ],
+    "pepcell.v1.deb.noble.arm64.packaging": [
+      {
+        "file": "pgedge-ace_3.0.0-1.noble_arm64.deb",
+        "name": "pgedge-ace",
+        "sha256": "6739dbeb9cda998ad2871c7d1fcaebf3a43bbe80defb1e5306774c63d6438366",
+        "size": 7511596,
+        "url": "https://apt.pgedge.com/release/noble/pool/main/p/pgedge-ace/pgedge-ace_3.0.0-1.noble_arm64.deb",
+        "version": "3.0.0-1.noble"
+      }
+    ],
+    "pepcell.v1.deb.resolute.amd64.packaging": [
+      {
+        "file": "pgedge-ace_3.0.0-1.resolute_amd64.deb",
+        "name": "pgedge-ace",
+        "sha256": "25d3a20a3c1c8974ec1f34b58f80edb0185f2e65bad4783ad307348b6e83b50a",
+        "size": 8305904,
+        "url": "https://apt.pgedge.com/release/resolute/pool/main/p/pgedge-ace/pgedge-ace_3.0.0-1.resolute_amd64.deb",
+        "version": "3.0.0-1.resolute"
+      }
+    ],
+    "pepcell.v1.deb.resolute.arm64.packaging": [
+      {
+        "file": "pgedge-ace_3.0.0-1.resolute_arm64.deb",
+        "name": "pgedge-ace",
+        "sha256": "7cd00d81e770b038850f9bbe8bba6268d2c70cb21b34010e21f7380e07120355",
+        "size": 7511588,
+        "url": "https://apt.pgedge.com/release/resolute/pool/main/p/pgedge-ace/pgedge-ace_3.0.0-1.resolute_arm64.deb",
+        "version": "3.0.0-1.resolute"
+      }
+    ],
+    "pepcell.v1.deb.trixie.amd64.packaging": [
+      {
+        "file": "pgedge-ace_3.0.0-1.trixie_amd64.deb",
+        "name": "pgedge-ace",
+        "sha256": "8155110468e6bbb71a33f57670d51123083c4ec75fd2993ccdf06ab984eba1d2",
+        "size": 8305902,
+        "url": "https://apt.pgedge.com/release/trixie/pool/main/p/pgedge-ace/pgedge-ace_3.0.0-1.trixie_amd64.deb",
+        "version": "3.0.0-1.trixie"
+      }
+    ],
+    "pepcell.v1.deb.trixie.arm64.packaging": [
+      {
+        "file": "pgedge-ace_3.0.0-1.trixie_arm64.deb",
+        "name": "pgedge-ace",
+        "sha256": "d3357efc7e3af642627a5ce74b5566484aec2895b176f4e4ccec3ab4f569884f",
+        "size": 7511572,
+        "url": "https://apt.pgedge.com/release/trixie/pool/main/p/pgedge-ace/pgedge-ace_3.0.0-1.trixie_arm64.deb",
+        "version": "3.0.0-1.trixie"
+      }
+    ],
+    "pepcell.v1.rpm.el-10.amd64.packaging": [
+      {
+        "file": "pgedge-ace-3.0.0-1.el10.x86_64.rpm",
+        "name": "pgedge-ace",
+        "sha256": "09d75a552c13a0aafce9f2d4cedfae4770c4f4b2e7d0273f63c675e403d6570c",
+        "size": 6887008,
+        "url": "https://dnf.pgedge.com/release/10/RPMS/x86_64/pgedge-ace-3.0.0-1.el10.x86_64.rpm",
+        "version": "3.0.0-1.el10"
+      }
+    ],
+    "pepcell.v1.rpm.el-10.arm64.packaging": [
+      {
+        "file": "pgedge-ace-3.0.0-1.el10.aarch64.rpm",
+        "name": "pgedge-ace",
+        "sha256": "b6abf144dba864b81af6ba6816806a67d1bd4537a51935a92d449d0f417dfa21",
+        "size": 6159505,
+        "url": "https://dnf.pgedge.com/release/10/RPMS/aarch64/pgedge-ace-3.0.0-1.el10.aarch64.rpm",
+        "version": "3.0.0-1.el10"
+      }
+    ],
+    "pepcell.v1.rpm.el-9.amd64.packaging": [
+      {
+        "file": "pgedge-ace-3.0.0-1.el9.x86_64.rpm",
+        "name": "pgedge-ace",
+        "sha256": "d69e920cf9ce95ca85acb0f496943e31df461af9a3822cdc1448aa69c135c4fc",
+        "size": 6886396,
+        "url": "https://dnf.pgedge.com/release/9/RPMS/x86_64/pgedge-ace-3.0.0-1.el9.x86_64.rpm",
+        "version": "3.0.0-1.el9"
+      }
+    ],
+    "pepcell.v1.rpm.el-9.arm64.packaging": [
+      {
+        "file": "pgedge-ace-3.0.0-1.el9.aarch64.rpm",
+        "name": "pgedge-ace",
+        "sha256": "f60e464d9984753d8a413f40ccdd3020d3269b7752fb6f62e65105a45cf95240",
+        "size": 6159269,
+        "url": "https://dnf.pgedge.com/release/9/RPMS/aarch64/pgedge-ace-3.0.0-1.el9.aarch64.rpm",
+        "version": "3.0.0-1.el9"
+      }
+    ]
+  },
+  "channel": "release",
+  "note": "Validation fixture table, read-only: the already-published pgedge-ace 3.0.0-1 release packages, one per detector cell, with the sha256 and size from the repository metadata (the independent source). The package jobs download these files and check them against it; verify_chain.py expects these sha256 values at every stage.",
+  "source_table_sha256": "1aee0a06cc39ddd35d9a6bf3d70a908b273da6e1eb6f4e2e0994a84ed80b6286"
+}
