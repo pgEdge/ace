@@ -1,0 +1,65 @@
+name: PEP ACE pilots, published 3.0.0 (temporary)
+# Temporary validation branch in pgEdge/ace; never merged. The branch holds only this file
+# (no ACE source and no other workflow), so a push to it runs nothing else: no release, package
+# build, tag, GitHub release, Docker image, Slack message or repository change.
+#
+# Two direct pep-integration.yml legs at the PEP candidate commit (feature/pep-ace-support
+# 17584fd) install the already-published pgedge-ace 3.0.0-1 from the release channel and run the
+# full ACE test (one RPM, one DEB). These test existing published packages; they are NOT evidence
+# of ACE's build-to-publication integration. Observe mode keeps failing outcomes green, so the
+# results are read from each leg's uploaded evidence, not from job colours.
+on:
+  push:
+    branches: [validate/pep-17584fd-ace-pilots]
+permissions: {}
+
+jobs:
+  ace-rpm:
+    name: "ace-rpm: rocky9-arm64 PG17 pgedge-ace 3.0.0-1.el9 (release)"
+    permissions: {contents: read}
+    uses: pgEdge/pgedge-pep-test/.github/workflows/pep-integration.yml@17584fd4efab8ed82ae89cf58bc3cb0bee880278
+    with:
+      component: ace
+      package_name: pgedge-ace
+      channel: release
+      expected_version: "3.0.0"
+      expected_buildnum: "1"
+      effective_tag: v3.0.0
+      expected_rpm: "3.0.0-1.el9"
+      container_alias: rocky9-arm64
+      pg_major: "17"
+      family: rpm
+      arch: arm64
+      scenario: certification
+      mode: observe
+      execution_mode: full
+      invocation_id: v17584fd-ace-rpm
+      pep_implementation_ref: 17584fd4efab8ed82ae89cf58bc3cb0bee880278
+    secrets:
+      PGEDGE_REPO_CLIENT_CRT: ${{ secrets.PGEDGE_REPO_CLIENT_CRT }}
+      PGEDGE_REPO_CLIENT_KEY: ${{ secrets.PGEDGE_REPO_CLIENT_KEY }}
+
+  ace-deb:
+    name: "ace-deb: debian12-arm64 PG17 pgedge-ace 3.0.0-1.bookworm (release)"
+    permissions: {contents: read}
+    uses: pgEdge/pgedge-pep-test/.github/workflows/pep-integration.yml@17584fd4efab8ed82ae89cf58bc3cb0bee880278
+    with:
+      component: ace
+      package_name: pgedge-ace
+      channel: release
+      expected_version: "3.0.0"
+      expected_buildnum: "1"
+      effective_tag: v3.0.0
+      expected_deb: "3.0.0-1.bookworm"
+      container_alias: debian12-arm64
+      pg_major: "17"
+      family: deb
+      arch: arm64
+      scenario: certification
+      mode: observe
+      execution_mode: full
+      invocation_id: v17584fd-ace-deb
+      pep_implementation_ref: 17584fd4efab8ed82ae89cf58bc3cb0bee880278
+    secrets:
+      PGEDGE_REPO_CLIENT_CRT: ${{ secrets.PGEDGE_REPO_CLIENT_CRT }}
+      PGEDGE_REPO_CLIENT_KEY: ${{ secrets.PGEDGE_REPO_CLIENT_KEY }}
