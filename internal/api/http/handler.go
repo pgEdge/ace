@@ -27,6 +27,7 @@ type tableDiffRequest struct {
 	CompareUnitSize   int      `json:"compare_unit_size"`
 	MaxDiffRows       int64    `json:"max_diff_rows"`
 	MaxConnections    int      `json:"max_connections"`
+	Slicer            string   `json:"slicer"`
 	TableFilter       string   `json:"table_filter"`
 	OverrideBlockSize bool     `json:"override_block_size"`
 	Quiet             bool     `json:"quiet"`
@@ -78,6 +79,7 @@ type schemaDiffRequest struct {
 	Concurrency       float64  `json:"concurrency_factor"`
 	CompareUnitSize   int      `json:"compare_unit_size"`
 	MaxConnections    int      `json:"max_connections"`
+	Slicer            string   `json:"slicer"`
 	Output            string   `json:"output"`
 	OverrideBlockSize bool     `json:"override_block_size"`
 	Quiet             bool     `json:"quiet"`
@@ -94,6 +96,7 @@ type repsetDiffRequest struct {
 	Concurrency       float64  `json:"concurrency_factor"`
 	CompareUnitSize   int      `json:"compare_unit_size"`
 	MaxConnections    int      `json:"max_connections"`
+	Slicer            string   `json:"slicer"`
 	Output            string   `json:"output"`
 	OverrideBlockSize bool     `json:"override_block_size"`
 	Quiet             bool     `json:"quiet"`
@@ -219,6 +222,7 @@ func (s *APIServer) handleTableDiff(w http.ResponseWriter, r *http.Request) {
 	task.CompareUnitSize = s.resolveCompareUnitSize(cfg, req.CompareUnitSize)
 	task.MaxDiffRows = s.resolveMaxDiffRows(cfg, req.MaxDiffRows)
 	task.MaxConnections = req.MaxConnections
+	task.Slicer = strings.TrimSpace(req.Slicer)
 	task.Output = "json"
 	task.Nodes = s.resolveNodes(req.Nodes)
 	task.TableFilter = strings.TrimSpace(req.TableFilter)
@@ -585,6 +589,7 @@ func (s *APIServer) handleSchemaDiff(w http.ResponseWriter, r *http.Request) {
 	task.ConcurrencyFactor = s.resolveConcurrency(cfg, req.Concurrency)
 	task.CompareUnitSize = s.resolveCompareUnitSize(cfg, req.CompareUnitSize)
 	task.MaxConnections = req.MaxConnections
+	task.Slicer = strings.TrimSpace(req.Slicer)
 	task.Output = strings.TrimSpace(req.Output)
 	if task.Output == "" {
 		task.Output = "json"
@@ -668,6 +673,7 @@ func (s *APIServer) handleRepsetDiff(w http.ResponseWriter, r *http.Request) {
 	task.ConcurrencyFactor = s.resolveConcurrency(cfg, req.Concurrency)
 	task.CompareUnitSize = s.resolveCompareUnitSize(cfg, req.CompareUnitSize)
 	task.MaxConnections = req.MaxConnections
+	task.Slicer = strings.TrimSpace(req.Slicer)
 	task.Output = strings.TrimSpace(req.Output)
 	if task.Output == "" {
 		task.Output = "json"

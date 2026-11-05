@@ -115,6 +115,7 @@ func buildTableDiffJob(cfg *config.Config, def config.JobDef, spec scheduleSpec)
 		base.MaxHTMLRows = int64(v)
 	}
 	base.MaxConnections = intArg(def.Args, "max_connections", 0)
+	base.Slicer = stringArg(def.Args, "slicer")
 	if out := stringArg(def.Args, "output"); out != "" {
 		base.Output = out
 	}
@@ -188,6 +189,7 @@ func buildSchemaDiffJob(cfg *config.Config, def config.JobDef, spec scheduleSpec
 		base.CompareUnitSize = v
 	}
 	base.MaxConnections = intArg(def.Args, "max_connections", 0)
+	base.Slicer = stringArg(def.Args, "slicer")
 	if out := stringArg(def.Args, "output"); out != "" {
 		base.Output = out
 	}
@@ -260,6 +262,7 @@ func buildRepsetDiffJob(cfg *config.Config, def config.JobDef, spec scheduleSpec
 		base.Output = out
 	}
 	base.MaxConnections = intArg(def.Args, "max_connections", 0)
+	base.Slicer = stringArg(def.Args, "slicer")
 	base.TableFilter = stringArg(def.Args, "table_filter")
 	base.OverrideBlockSize = boolArg(def.Args, "override_block_size", base.OverrideBlockSize)
 	base.SkipDBUpdate = boolArg(def.Args, "skip_db_update", base.SkipDBUpdate)

@@ -127,6 +127,10 @@ func SetupCLI(version string) *cli.Command {
 			Usage: "Seconds for one query on one block, 0 = no limit (default: table_diff.block_timeout, or 60)",
 		},
 		runTimeoutFlag,
+		&cli.StringFlag{
+			Name:  "slicer",
+			Usage: "How to cut a table into blocks: auto, cutter or sample (default: table_diff.slicer from ace.yaml, or auto)",
+		},
 	}
 
 	rerunOnlyFlags := []cli.Flag{
@@ -1013,6 +1017,7 @@ func TableDiffCLI(cmd *cli.Command) (err error) {
 	if task.RunTimeout, err = timeoutFlag(cmd, "run-timeout"); err != nil {
 		return err
 	}
+	task.Slicer = cmd.String("slicer")
 	task.CompareUnitSize = cmd.Int("compare-unit-size")
 	task.Output = strings.ToLower(cmd.String("output"))
 	task.MaxHTMLRows = cmd.Int64("max-html-rows")
@@ -1446,6 +1451,7 @@ func SchemaDiffCLI(cmd *cli.Command) (err error) {
 	if task.RunTimeout, err = timeoutFlag(cmd, "run-timeout"); err != nil {
 		return err
 	}
+	task.Slicer = cmd.String("slicer")
 	task.CompareUnitSize = cmd.Int("compare-unit-size")
 	task.Output = cmd.String("output")
 	task.OutputExplicit = cmd.IsSet("output")
@@ -1534,6 +1540,7 @@ func RepsetDiffCLI(cmd *cli.Command) (err error) {
 	if task.RunTimeout, err = timeoutFlag(cmd, "run-timeout"); err != nil {
 		return err
 	}
+	task.Slicer = cmd.String("slicer")
 	task.CompareUnitSize = cmd.Int("compare-unit-size")
 	task.Output = cmd.String("output")
 	task.OverrideBlockSize = cmd.Bool("override-block-size")

@@ -89,6 +89,12 @@ type TableDiffTask struct {
 	Mode              string
 	OverrideBlockSize bool
 
+	// Slicer is the way to cut the table into blocks: auto, cutter or
+	// sample. Empty means table_diff.slicer from the config, or auto.
+	Slicer string
+	// slicerChoice is the way the current run cuts the table.
+	slicerChoice *slicer.Choice
+
 	DiffFilePath string
 
 	InvokeMethod string
@@ -681,6 +687,11 @@ func (t *TableDiffTask) Validate() error {
 	if _, _, err := t.timeLimits(); err != nil {
 		return err
 	}
+	method, err := configuredSlicer(t.Slicer, cfg)
+	if err != nil {
+		return err
+	}
+	t.Slicer = method
 	if t.BlockSize > cfg.TableDiff.MaxBlockSize && !t.OverrideBlockSize {
 		return fmt.Errorf("block row size should be <= %d", cfg.TableDiff.MaxBlockSize)
 	}
@@ -1026,6 +1037,7 @@ func (t *TableDiffTask) CloneForSchedule(ctx context.Context) *TableDiffTask {
 	cloned.MaxConnections = t.MaxConnections
 	cloned.BlockTimeout = t.BlockTimeout
 	cloned.RunTimeout = t.RunTimeout
+	cloned.Slicer = t.Slicer
 	cloned.Output = t.Output
 	cloned.TableFilter = t.TableFilter
 	cloned.QuietMode = t.QuietMode
@@ -1179,6 +1191,7 @@ func (t *TableDiffTask) ExecuteTask() (err error) {
 	// recorded.
 	blockTimeout, runTimeout, limitsErr := t.timeLimits()
 	t.blockTimeout = blockTimeout
+	t.slicerChoice = nil
 
 	parentCtx := t.Ctx
 	runCtx, stopRun := newRunContext(parentCtx, runTimeout)
@@ -1308,6 +1321,7 @@ func (t *TableDiffTask) ExecuteTask() (err error) {
 			logger.Debug("table-diff: stopped with error: %v", err)
 			err = cause
 		}
+		err = t.withSlicerAdvice(err)
 	}()
 
 	if limitsErr != nil {
@@ -1430,9 +1444,10 @@ func (t *TableDiffTask) ExecuteTask() (err error) {
 	}
 
 	// Block boundaries come from the anchor node (the highest row estimate).
-	// The slicer cuts its key space into blocks of at most BlockSize rows
+	// The cutter cuts its key space into blocks of at most BlockSize rows
 	// and sends them while the cut is still running, so hashing starts at
-	// once.
+	// once. The sample reads a share of the heap pages and gives blocks of
+	// about BlockSize rows; its cost does not depend on the visibility map.
 	anchorPool := pools[maxNode]
 	cutWorkers := slicer.CutWorkers(limits[maxNode].opened)
 	sliceCfg := slicer.Config{
@@ -1443,11 +1458,50 @@ func (t *TableDiffTask) ExecuteTask() (err error) {
 		BlockSize: t.BlockSize,
 		Workers:   cutWorkers,
 	}
-	plan, err := slicer.PlanParts(ctx, anchorPool, sliceCfg)
+	choice, err := slicer.Choose(ctx, anchorPool, sliceCfg, t.Slicer)
 	if err != nil {
-		return fmt.Errorf("failed to plan block boundaries on %s: %w", maxNode, err)
+		return fmt.Errorf("failed to choose how to cut %s on %s: %w", t.QualifiedTableName, maxNode, err)
 	}
-	logger.Info("table-diff: block boundaries: %s", slicer.Describe(plan, sliceCfg, maxNode))
+	t.slicerChoice = choice
+
+	// The sample is read before hashing starts, so the cutter can still
+	// replace it when the sample query fails or gives too few keys. The
+	// query can read much of the table, so the block timeout limits it.
+	var sample *slicer.Sample
+	if choice.Method == slicer.MethodSample {
+		err := t.withBlockConn(ctx, maxNode, func(ctx context.Context, conn *pgxpool.Conn) error {
+			var err error
+			sample, err = slicer.ReadSample(ctx, conn, sliceCfg)
+			return err
+		})
+		if err != nil {
+			if stopCause(ctx) != nil || !choice.SampleFailed(sliceCfg) {
+				return &sampleReadError{err: fmt.Errorf("failed to read the sample of block boundaries on %s: %w", maxNode, err)}
+			}
+			logger.Debug("table-diff: the sample query on %s failed, the cutter is used: %v", maxNode, err)
+			sample = nil
+		}
+	}
+	if sample != nil && choice.CheckSample(sliceCfg, sample) {
+		sample = nil
+	}
+	t.DiffResult.Summary.Slicer = slicerSummary(choice)
+	logger.Info("table-diff: %s", choice.Describe(maxNode))
+	if choice.SlowAnchor {
+		logger.Warn("table-diff: many pages of the table on node %s are not all-visible, so the cut will make this node slower than the other nodes", maxNode)
+	}
+	if choice.Advice != "" {
+		logger.Warn("table-diff: %s", choice.Advice)
+	}
+
+	var plan *slicer.Plan
+	if choice.Method == slicer.MethodCutter {
+		plan, err = slicer.PlanParts(ctx, anchorPool, sliceCfg)
+		if err != nil {
+			return fmt.Errorf("failed to plan block boundaries on %s: %w", maxNode, err)
+		}
+		logger.Info("table-diff: block boundaries: %s", slicer.Describe(plan, sliceCfg, maxNode))
+	}
 
 	// Every worker takes its connection now and keeps it until the end of
 	// hashing. The pools already hold these connections idle, so no worker
@@ -1503,7 +1557,17 @@ func (t *TableDiffTask) ExecuteTask() (err error) {
 			hashers.addConn(name, c)
 		}
 	}
-	logger.Info("table-diff: %d cutting workers and %d hash workers on %s", cutWorkers, len(held[maxNode]), maxNode)
+	// The sample is already read, so the cutting connections hash from the
+	// start.
+	anchorHashers := len(held[maxNode])
+	if sample != nil {
+		for _, c := range cutConns {
+			hashers.addConn(maxNode, c)
+		}
+		anchorHashers += len(cutConns)
+		cutConns = nil
+	}
+	logger.Info("table-diff: %d cutting workers and %d hash workers on %s", len(cutConns), anchorHashers, maxNode)
 
 	blockCh := make(chan slicer.Block, 4*cutWorkers)
 	var (
@@ -1512,6 +1576,10 @@ func (t *TableDiffTask) ExecuteTask() (err error) {
 	)
 	go func() {
 		defer close(blockCh)
+		if sample != nil {
+			cutStats, cutErr = sample.Send(cutCtx, blockCh)
+			return
+		}
 		cutStats, cutErr = slicer.Cut(cutCtx, slicer.Queriers(cutConns), sliceCfg, plan, blockCh,
 			func(i int, err error) {
 				if err != nil {
@@ -1535,8 +1603,12 @@ func (t *TableDiffTask) ExecuteTask() (err error) {
 			// A hash worker has stopped the list after an error.
 			continue
 		}
+		if idx == 0 {
+			hashers.firstBlock()
+		}
 		bar.SetTotal(int64((idx+1)*len(nodeNames)), false)
 	}
+	hashers.cutEnded()
 	if cutErr != nil {
 		list.Stop()
 	} else {
@@ -1558,6 +1630,11 @@ func (t *TableDiffTask) ExecuteTask() (err error) {
 	}
 
 	logger.Info("table-diff: cut %s on %s", cutStats, maxNode)
+	if choice.Method == slicer.MethodCutter {
+		if share, ok := hashers.idleShare(); ok {
+			logger.Warn("table-diff: %s", choice.SlowCutAdvice(share))
+		}
+	}
 	// The hash queries of the anchor node counted its rows that match the
 	// filter. This is exact, unlike the planner estimate that chose the
 	// anchor.

@@ -317,6 +317,24 @@ of that version, and recreate the `#` operator as described in the
 `bytea_xor` entry.
 
 ### Added
+- **`table-diff` can take block bounds from a sample, and chooses the way
+  to cut by itself.** `--slicer` (`table_diff.slicer` in `ace.yaml`,
+  `slicer` in the HTTP API) is `cutter`, `sample` or `auto`, the default;
+  `repset-diff` and `schema-diff` have it too. The cutter walks the
+  primary-key index and is slow when many pages of the table are not
+  all-visible, because then it reads the heap for every row. The sample
+  reads 10 keys per block with `TABLESAMPLE SYSTEM` (1% of the pages for a
+  block size of 1000), and its cost does not depend on the visibility map.
+  `auto` takes the sample only for a key that does not follow the physical
+  row order (`pg_stats.correlation` below 0.1 for every key column) on a
+  table where more than 5% of the pages are not all-visible, and never
+  with a row filter (`--table-filter`, `--against-origin`, `--until`) or
+  on a partitioned table or a table with child tables. `auto` also takes
+  the cutter if the sample query fails or gives too few keys. The sample
+  query is limited by the block timeout. The result of a diff does
+  not depend on the way to cut. The log and the `slicer` field of the
+  summary show the choice and why. If a run cut by a sample hits the block
+  time limit, the error advises to run again with `--slicer=cutter`.
 - `--max-connections` / `-M` on `mtree build`, `mtree update`, and
   `mtree table-diff`, with `mtree.max_connections` in `ace.yaml` and
   `max_connections` on the matching HTTP API endpoints. It caps the

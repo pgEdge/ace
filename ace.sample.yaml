@@ -48,6 +48,12 @@ table_diff:
   # is cancelled on the server too.
   block_timeout: 60
   run_timeout: 0
+  # How to cut a table into blocks on the anchor node: cutter (exact blocks
+  # from the primary-key index; slow on a table with few all-visible pages),
+  # sample (block bounds from a TABLESAMPLE SYSTEM sample; even blocks only
+  # when the key does not follow the heap order), or auto (ACE chooses from
+  # pg_stats and the visibility map).
+  slicer: auto
 
 # Number of connections that one table-diff task opens to each node, and
 # keeps until it ends. --max-connections on the command line has priority.

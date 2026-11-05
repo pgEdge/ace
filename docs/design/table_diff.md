@@ -160,6 +160,91 @@ other. When a cutting worker ends, its connection becomes one more hash
 worker on the anchor node. Blocks of different parts can arrive in any
 order; the comparison step sorts them by key.
 
+#### Blocks from a sample
+
+The cutter has one weak point: the visibility map. On a heap page that is
+not all-visible, the Index Only Scan reads the heap for every index entry.
+With a key that does not follow the heap order (a UUID or a hash), this is
+one random page read per row, and it costs about as much as the hash of
+the row. So on a large table in active use, the cut can take longer than
+the hashing, and the anchor node becomes slower than the other nodes.
+
+`table_diff.slicer` (`--slicer`) chooses how to cut:
+
+- `cutter`: the index walk above.
+- `sample`: one query on the anchor node reads a `TABLESAMPLE SYSTEM (p)
+  REPEATABLE (seed)` sample of the key, sorts it on the server and returns
+  every 10th key:
+
+  ```sql
+  SELECT rn, n, <key> FROM (
+      SELECT <key>, row_number() OVER (ORDER BY <key>) AS rn,
+             count(*) OVER () AS n
+      FROM t TABLESAMPLE SYSTEM (p) REPEATABLE (1)
+  ) s
+  WHERE rn % 10 = 0 OR rn = n
+  ORDER BY rn
+  ```
+
+  These keys are the block bounds, with open edge blocks as for the
+  cutter. `p = min(100, 100 * 10 / block_size)` percent, so a block holds
+  about 10 sampled keys and about `block_size` rows on average, for any
+  table size (1% of the pages for a block size of 1000; the whole table
+  for a block size of 10 or less). The cost does not depend on
+  the visibility map. The blocks are not exact: on a heap that is not in
+  key order a block can be a few times larger than `block_size`. On a heap
+  in key order, every sampled page gives a run of neighbour keys, and the
+  blocks become very uneven, so the sample is not used there. The query
+  ends before hashing starts, so it does not hold a snapshot during the
+  run. It is one operation on the anchor node, so the block timeout limits
+  it: with a small block size the sample can read the whole table.
+
+  If the sample query fails, for example on a table whose access method
+  has no `TABLESAMPLE` or when it hits the block timeout, `auto` takes the
+  cutter. An explicit `--slicer=sample` fails with the error. If the
+  sample has fewer than 100 keys, the catalog overstated the number of
+  rows or the sample missed most of them. Its bounds are few, and one
+  block could hold most of the table, so `auto` takes the cutter here
+  too; an explicit `--slicer=sample` keeps the sample.
+- `auto` (the default) reads two values from the catalog of the anchor
+  node: `rho`, the largest absolute `pg_stats.correlation` over the primary
+  key columns, and `u`, the share of pages that are not all-visible:
+  `max(1 - relallvisible / relpages, min(1, 2 * n_mod_since_analyze /
+  relpages))`. `relallvisible` is exact only right after VACUUM or
+  ANALYZE, and each changed row can clear the bit of two pages, so the
+  second term covers the changes since then. ACE takes the cutter if a
+  row filter is set (`--table-filter`, `--against-origin` or `--until`),
+  if the table is partitioned or has child tables, if the table has fewer
+  than 100 blocks of rows, if a key column has no statistics or the number
+  of rows is not known (and advises ANALYZE), if `u <= 5%` or if
+  `rho >= 0.1`. Otherwise it takes the sample. When the cutter runs with
+  `u > 35%`, the log warns that the anchor node will be slower than the
+  other nodes and advises VACUUM.
+
+How much the sample saves depends on how many cutting workers the anchor
+node has against its hash workers. Every node has its own hash workers,
+one per connection, and on the anchor at least one connection in five
+goes to a cutting worker: with 8 connections, 2 cutting workers and 6 hash
+workers. A heap read of the cutter costs about as much as the hash of a
+row, so the cut takes about `3 * u` of the hashing time of the anchor, and
+it is on the critical path when more than about a third of the pages are
+not all-visible. With the sample, all connections of the anchor hash from
+the start. The threshold of 5% for `u` stays low on purpose: on a heap
+that is not in key order the sample costs only one query on a small share
+of the pages, so taking it too early loses little.
+
+The way to cut never changes the result: blocks are key ranges, and every
+node hashes the same ranges. Only the time can change. ACE does not switch
+the way to cut during a run, because all nodes share one set of blocks. If
+a run that was cut by a sample hits the block time limit, it stops with an
+error that names the way to cut, `rho` and `u`, and advises to run again
+with `--slicer=cutter`. If the cutter runs for at least 10 s and the hash
+workers of every node wait for blocks more than half of that time, the log
+says that the cut was slower than the hashing. The log, the diff file and
+the task store show the way to cut and the values it was chosen from
+(`slicer` in the summary). `TotalRowsChecked` is the sum of the row counts
+that the hash queries of the anchor node return, for both ways to cut.
+
 The log shows how ACE built the boundaries: the part source and why, the
 anchor node, the number of parts and workers, and, at the end, the number
 of blocks, the largest block, the time to the first block and the time to

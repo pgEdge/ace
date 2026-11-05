@@ -167,6 +167,25 @@ type DiffSummary struct {
 	// item to an error. For those pairs DiffRowsCount is only a lower bound,
 	// and zero means "not compared", not "no differences".
 	IncompletePairs []string `json:"incomplete_pairs,omitempty"`
+	// Slicer describes how ACE cut the table into blocks.
+	Slicer *SlicerSummary `json:"slicer,omitempty"`
+}
+
+// SlicerSummary describes how ACE cut the table into blocks on the anchor
+// node and the catalog values it chose from.
+type SlicerSummary struct {
+	// Requested is auto, cutter or sample; Method is cutter or sample.
+	Requested string `json:"requested"`
+	Method    string `json:"method"`
+	Reason    string `json:"reason"`
+	// KeyCorrelation is the largest |pg_stats.correlation| over the primary
+	// key columns. It is absent when a key column has no statistics.
+	KeyCorrelation *float64 `json:"key_correlation,omitempty"`
+	// NotAllVisible is the estimated share of heap pages that are not
+	// all-visible, from 0 to 1.
+	NotAllVisible *float64 `json:"not_all_visible,omitempty"`
+	// SamplePercent is the TABLESAMPLE SYSTEM rate of the sample method.
+	SamplePercent float64 `json:"sample_percent,omitempty"`
 }
 
 type KVPair struct {
