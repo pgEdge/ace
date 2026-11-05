@@ -177,10 +177,16 @@ the hashing, and the anchor node becomes slower than the other nodes.
   every 10th key:
 
   ```sql
-  SELECT rn, n, <key> FROM (
-      SELECT <key>, row_number() OVER (ORDER BY <key>) AS rn,
-             count(*) OVER () AS n
-      FROM t TABLESAMPLE SYSTEM (p) REPEATABLE (1)
+  SELECT rn, n, same, <key> FROM (
+      SELECT <key>, rn, count(*) OVER () AS n,
+             coalesce(sum(s) OVER (), 0) AS same
+      FROM (
+          SELECT <key>, row_number() OVER w AS rn,
+                 (lag(blk) OVER w = blk)::int AS s
+          FROM (SELECT <key>, (ctid::text::point)[0] AS blk
+                FROM t TABLESAMPLE SYSTEM (p) REPEATABLE (1)) t
+          WINDOW w AS (ORDER BY <key>)
+      ) u
   ) s
   WHERE rn % 10 = 0 OR rn = n
   ORDER BY rn
@@ -198,6 +204,18 @@ the hashing, and the anchor node becomes slower than the other nodes.
   ends before hashing starts, so it does not hold a snapshot during the
   run. It is one operation on the anchor node, so the block timeout limits
   it: with a small block size the sample can read the whole table.
+
+  The query also counts `same`, the sampled keys that lie on the same heap
+  page as the key before them in key order. On a heap that is not in key
+  order this share is close to 0 (about one in the number of sampled
+  pages); when rows with near keys share pages it is close to 1. The
+  catalog cannot show the second case when the correlation is low: for
+  example, many loaders that write separate key ranges at the same time
+  give a low correlation, but the rows of a block lie on a few pages. If
+  the share is above 50%, `auto` takes the cutter instead; no block has
+  been hashed yet, so this costs only the sample query. An explicit
+  `--slicer=sample` is kept, and the log warns that the blocks will be
+  very uneven.
 
   If the sample query fails, for example on a table whose access method
   has no `TABLESAMPLE` or when it hits the block timeout, `auto` takes the

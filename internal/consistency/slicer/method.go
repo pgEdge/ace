@@ -205,6 +205,9 @@ type Choice struct {
 	// that are not all-visible. It is 0 when the estimate means nothing:
 	// for the sample, a small table or a partitioned table.
 	cutShare float64
+	// SamePage is the share of sampled keys on the same heap page as the
+	// key before them, or nil when ACE did not read a sample.
+	SamePage *float64
 }
 
 // Choose reads the catalog of the anchor node and decides how to cut the
@@ -314,16 +317,34 @@ func (c *Choice) useSample(cfg *Config, reason string) {
 }
 
 // CheckSample looks at the sample of the anchor node before any block is
-// hashed. A sample with fewer than minSampleKeys keys gives few bounds, so
-// one block can hold most of the table. Then the auto mode takes the cutter,
-// and CheckSample returns true. An explicit sample is kept.
-func (c *Choice) CheckSample(cfg Config, s *Sample) bool {
-	if s.keys >= minSampleKeys || c.Requested != MethodAuto {
-		return false
+// hashed. Two cases make the blocks of a sample bad, and then the auto mode
+// takes the cutter. A sample with fewer than minSampleKeys keys gives few
+// bounds, so one block can hold most of the table. When rows with near keys
+// share heap pages, the blocks are very uneven; the catalog does not show
+// this, because a low correlation does not mean a random heap. An explicit
+// sample is kept. switched is true when the cutter replaces the sample;
+// warning is a line for the log, or empty.
+func (c *Choice) CheckSample(cfg Config, s *Sample) (switched bool, warning string) {
+	if s.keys < minSampleKeys {
+		if c.Requested != MethodAuto {
+			return false, ""
+		}
+		c.SamplePercent = 0
+		c.useCutter(&cfg, fmt.Sprintf("the sample has only %d keys", s.keys))
+		return true, ""
+	}
+	share := s.samePage
+	c.SamePage = &share
+	if !s.clustered() {
+		return false, ""
+	}
+	what := fmt.Sprintf("the sample shows that %s of the sampled keys lie on the same heap page as the key before them", percent(share))
+	if c.Requested != MethodAuto {
+		return false, what + ", so the blocks will be very uneven; --slicer=cutter gives exact blocks"
 	}
 	c.SamplePercent = 0
-	c.useCutter(&cfg, fmt.Sprintf("the sample has only %d keys", s.keys))
-	return true
+	c.useCutter(&cfg, "rows with near keys share heap pages")
+	return true, what + ", so its blocks would be very uneven; the cutter is used instead"
 }
 
 // SampleFailed is called when the sample query fails. The auto mode then
@@ -386,6 +407,9 @@ func (c *Choice) Describe(anchor string) string {
 			fmt.Fprintf(b, "; the cut can add up to about %s to the hashing time of the anchor node", percent(c.cutShare))
 		}
 	}
+	if c.SamePage != nil {
+		fmt.Fprintf(b, "; sampled keys on the page of the key before them: %s", percent(*c.SamePage))
+	}
 	return b.String()
 }
 
@@ -397,7 +421,8 @@ func (c *Choice) sampleRandomKey() bool {
 		return false
 	}
 	return c.Signals != nil && !c.Signals.Partitioned &&
-		c.Signals.Correlation != nil && *c.Signals.Correlation < maxSampleCorrelation
+		c.Signals.Correlation != nil && *c.Signals.Correlation < maxSampleCorrelation &&
+		(c.SamePage == nil || *c.SamePage <= maxSamePageShare)
 }
 
 // TimeoutAdvice explains a block that hit a time limit after a cut by the

@@ -222,10 +222,12 @@ func TestSampleBlocksSQL(t *testing.T) {
 	sql := sampleBlocksSQL(cfg, 1)
 	for _, want := range []string{
 		`TABLESAMPLE SYSTEM (1) REPEATABLE (1)`,
-		`SELECT "a" AS _ace_k0, "b" AS _ace_k1`,
-		`row_number() OVER (ORDER BY _ace_k0, _ace_k1)`,
+		`SELECT "a" AS _ace_k0, "b" AS _ace_k1, (ctid::text::point)[0] AS _ace_blk`,
+		`row_number() OVER _ace_w`,
+		`WINDOW _ace_w AS (ORDER BY _ace_k0, _ace_k1)`,
 		`count(*) OVER ()`,
 		`WHERE _ace_rn % 10 = 0 OR _ace_rn = _ace_n`,
+		`lag(_ace_blk) OVER _ace_w = _ace_blk`,
 		`ORDER BY _ace_rn`,
 		`FROM "s"."t"`,
 	} {
@@ -245,22 +247,51 @@ func TestCheckSample(t *testing.T) {
 	signals := func() *Signals {
 		return &Signals{Pages: 100000, AllVisiblePages: 36000, Tuples: 1e7, Correlation: corr(0.03)}
 	}
+	random := &Sample{keys: 40000, samePage: 0.01}
+	clustered := &Sample{keys: 40000, samePage: 0.98}
 
 	c, err := decide(&cfg, MethodAuto, signals())
 	if err != nil || c.Method != MethodSample {
 		t.Fatalf("decide: %v, %+v", err, c)
 	}
-	if c.CheckSample(cfg, &Sample{keys: 40000}) || c.Method != MethodSample {
-		t.Errorf("a large sample must be kept: %+v", c)
+	if sw, w := c.CheckSample(cfg, random); sw || w != "" || c.Method != MethodSample {
+		t.Errorf("random heap: switched=%v warning=%q method=%s", sw, w, c.Method)
 	}
-	if !c.CheckSample(cfg, &Sample{}) || c.Method != MethodCutter || c.SamplePercent != 0 ||
-		c.Reason != "the sample has only 0 keys" {
-		t.Errorf("auto must take the cutter for an empty sample: %+v", c)
+	if c.SamePage == nil || *c.SamePage != 0.01 {
+		t.Errorf("SamePage = %v", c.SamePage)
+	}
+
+	c, _ = decide(&cfg, MethodAuto, signals())
+	sw, w := c.CheckSample(cfg, clustered)
+	if !sw || c.Method != MethodCutter || !strings.Contains(w, "98%") || !strings.Contains(w, "cutter is used instead") {
+		t.Errorf("clustered heap, auto: switched=%v method=%s warning=%q", sw, c.Method, w)
+	}
+	if c.SamplePercent != 0 || !c.SlowAnchor || c.cutShare == 0 {
+		t.Errorf("after the switch the choice must describe the cutter: %+v", c)
+	}
+	if strings.Contains(c.SlowCutAdvice(0.7), "--slicer=sample") {
+		t.Error("a clustered sample must not suggest the sample")
+	}
+	if d := c.Describe("n1"); !strings.Contains(d, "slicer cutter (auto)") || !strings.Contains(d, "98%") {
+		t.Errorf("Describe() = %q", d)
 	}
 
 	c, _ = decide(&cfg, MethodSample, signals())
-	if c.CheckSample(cfg, &Sample{keys: 5}) || c.Method != MethodSample {
-		t.Errorf("an explicit sample must be kept: %+v", c)
+	sw, w = c.CheckSample(cfg, clustered)
+	if sw || c.Method != MethodSample || !strings.Contains(w, "--slicer=cutter") {
+		t.Errorf("clustered heap, explicit sample: switched=%v method=%s warning=%q", sw, c.Method, w)
+	}
+
+	// A sample with few keys says nothing about the heap order, but its
+	// bounds are too few: auto takes the cutter, an explicit sample is kept.
+	c, _ = decide(&cfg, MethodAuto, signals())
+	if sw, w := c.CheckSample(cfg, &Sample{keys: 50, samePage: 0.98}); !sw || w != "" ||
+		c.Method != MethodCutter || c.Reason != "the sample has only 50 keys" || c.SamePage != nil {
+		t.Errorf("a small sample, auto: switched=%v warning=%q %+v", sw, w, c)
+	}
+	c, _ = decide(&cfg, MethodSample, signals())
+	if sw, w := c.CheckSample(cfg, &Sample{}); sw || w != "" || c.Method != MethodSample {
+		t.Errorf("an empty sample, explicit sample: switched=%v warning=%q method=%s", sw, w, c.Method)
 	}
 }
 

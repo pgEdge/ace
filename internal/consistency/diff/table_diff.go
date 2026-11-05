@@ -1465,8 +1465,9 @@ func (t *TableDiffTask) ExecuteTask() (err error) {
 	t.slicerChoice = choice
 
 	// The sample is read before hashing starts, so the cutter can still
-	// replace it when the sample query fails or gives too few keys. The
-	// query can read much of the table, so the block timeout limits it.
+	// replace it when the sample query fails, gives too few keys or shows
+	// that rows with near keys share heap pages. The query can read much of
+	// the table, so the block timeout limits it.
 	var sample *slicer.Sample
 	if choice.Method == slicer.MethodSample {
 		err := t.withBlockConn(ctx, maxNode, func(ctx context.Context, conn *pgxpool.Conn) error {
@@ -1482,8 +1483,14 @@ func (t *TableDiffTask) ExecuteTask() (err error) {
 			sample = nil
 		}
 	}
-	if sample != nil && choice.CheckSample(sliceCfg, sample) {
-		sample = nil
+	if sample != nil {
+		switched, warning := choice.CheckSample(sliceCfg, sample)
+		if warning != "" {
+			logger.Warn("table-diff: %s", warning)
+		}
+		if switched {
+			sample = nil
+		}
 	}
 	t.DiffResult.Summary.Slicer = slicerSummary(choice)
 	logger.Info("table-diff: %s", choice.Describe(maxNode))

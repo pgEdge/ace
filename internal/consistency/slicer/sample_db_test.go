@@ -241,3 +241,49 @@ func TestChooseOnDB(t *testing.T) {
 		t.Error("a missing table must fail")
 	}
 }
+
+// TestSamplePageShareOnDB checks the share of sampled keys on the page of
+// the key before them: low on a random heap, high when rows with near keys
+// share pages, also when the correlation of the key is low.
+func TestSamplePageShareOnDB(t *testing.T) {
+	pool := testPool(t)
+	ctx := context.Background()
+	newTable(t, pool, "p_rand",
+		`CREATE TABLE ace_slicer_test.p_rand (id text PRIMARY KEY, v text) WITH (autovacuum_enabled = false)`,
+		`INSERT INTO ace_slicer_test.p_rand SELECT md5(g::text), repeat('x', 100) FROM generate_series(1, 200000) g`)
+	newTable(t, pool, "p_ord",
+		`CREATE TABLE ace_slicer_test.p_ord (id bigint PRIMARY KEY, v text) WITH (autovacuum_enabled = false)`,
+		`INSERT INTO ace_slicer_test.p_ord SELECT g, repeat('x', 100) FROM generate_series(1, 200000) g`)
+	// 32 key ranges written in turn, 100 rows at a time: the correlation of
+	// the key is low, but the rows of a block lie on a few pages.
+	newTable(t, pool, "p_chunk",
+		`CREATE TABLE ace_slicer_test.p_chunk (id bigint PRIMARY KEY, v text) WITH (autovacuum_enabled = false)`,
+		`INSERT INTO ace_slicer_test.p_chunk SELECT ((g - 1) / 100 % 32) * 6400 + (g - 1) / 3200 * 100 + (g - 1) % 100, repeat('x', 100) FROM generate_series(1, 200000) g`)
+	exec(t, pool, `ANALYZE ace_slicer_test.p_chunk`)
+
+	for _, c := range []struct {
+		table     string
+		clustered bool
+	}{{"p_rand", false}, {"p_ord", true}, {"p_chunk", true}} {
+		cfg := Config{Schema: "ace_slicer_test", Table: c.table, Key: []string{"id"}, BlockSize: 1000}
+		s, err := ReadSample(ctx, pool, cfg)
+		if err != nil {
+			t.Fatalf("%s: %v", c.table, err)
+		}
+		t.Logf("%s: %d keys, %d bounds, same page %.3f", c.table, s.keys, len(s.bounds), s.samePage)
+		if s.clustered() != c.clustered {
+			t.Errorf("%s: clustered() = %v, want %v (same page %.3f)", c.table, s.clustered(), c.clustered, s.samePage)
+		}
+		if want := s.keys / sampleKeysPerBlock; int64(len(s.bounds)) != want {
+			t.Errorf("%s: %d bounds from %d keys, want %d", c.table, len(s.bounds), s.keys, want)
+		}
+	}
+
+	var corr float64
+	if err := pool.QueryRow(ctx, `SELECT abs(correlation) FROM pg_stats WHERE schemaname = 'ace_slicer_test' AND tablename = 'p_chunk' AND attname = 'id'`).Scan(&corr); err != nil {
+		t.Fatal(err)
+	}
+	if corr >= maxSampleCorrelation {
+		t.Errorf("p_chunk must have a low correlation to test the blind spot of the catalog, got %.3f", corr)
+	}
+}
