@@ -46,11 +46,24 @@ func blockHashes(t *testing.T, ctx context.Context, conn *pgxpool.Conn, name, co
 
 	tdSQL, err := queries.BlockHashSQL("pg_temp", name, []string{"id"}, "TD_BLOCK_HASH", false, false, "", allCols, colTypes)
 	require.NoError(t, err)
-	var td string
-	require.NoError(t, conn.QueryRow(ctx, tdSQL).Scan(&td)) // nosemgrep
+	var (
+		td   string
+		rows int64
+	)
+	require.NoError(t, conn.QueryRow(ctx, tdSQL).Scan(&td, &rows)) // nosemgrep
+	requireRowCount(t, ctx, conn, name, rows)
 
 	checkBlockHash(t, ctx, conn, name, allCols, colTypes, leaf, td)
 	return leaf, td
+}
+
+// requireRowCount checks that the row count of the table-diff block hash
+// query is the number of rows of the table.
+func requireRowCount(t *testing.T, ctx context.Context, conn *pgxpool.Conn, name string, rows int64) {
+	t.Helper()
+	var want int64
+	require.NoError(t, conn.QueryRow(ctx, "SELECT count(*) FROM pg_temp."+name).Scan(&want)) // nosemgrep
+	require.Equal(t, want, rows, "row count of the block hash of %s", name)
 }
 
 // checkBlockHash checks the mtree leaf hash and the table-diff block hash of
@@ -129,8 +142,12 @@ func inheritedBlockHashes(t *testing.T, ctx context.Context, conn *pgxpool.Conn,
 	require.NoError(t, err)
 	tdSQL, err := queries.BlockHashSQL("pg_temp", name, []string{"id"}, "TD_BLOCK_HASH", false, false, "", allCols, nil)
 	require.NoError(t, err)
-	var td string
-	require.NoError(t, conn.QueryRow(ctx, tdSQL).Scan(&td)) // nosemgrep
+	var (
+		td   string
+		rows int64
+	)
+	require.NoError(t, conn.QueryRow(ctx, tdSQL).Scan(&td, &rows)) // nosemgrep
+	requireRowCount(t, ctx, conn, name, rows)
 
 	checkBlockHash(t, ctx, conn, name, allCols, nil, leaf, td)
 	return leaf

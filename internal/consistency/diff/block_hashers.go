@@ -39,6 +39,8 @@ type blockHashers struct {
 	mu      sync.Mutex
 	cursors map[string]*slicer.Cursor
 	results map[int]RangeResults
+	// rowsByNode sums the rows that the hash queries of each node counted.
+	rowsByNode map[string]int64
 }
 
 // newBlockHashers returns hashers with no workers. onErr is called after a
@@ -46,14 +48,15 @@ type blockHashers struct {
 func newBlockHashers(ctx context.Context, t *TableDiffTask, list *slicer.BlockList, bar *mpb.Bar, onErr func()) *blockHashers {
 	ctx, cancel := context.WithCancel(ctx)
 	return &blockHashers{
-		t:       t,
-		ctx:     ctx,
-		cancel:  cancel,
-		list:    list,
-		bar:     bar,
-		onErr:   onErr,
-		cursors: make(map[string]*slicer.Cursor),
-		results: make(map[int]RangeResults),
+		t:          t,
+		ctx:        ctx,
+		cancel:     cancel,
+		list:       list,
+		bar:        bar,
+		onErr:      onErr,
+		cursors:    make(map[string]*slicer.Cursor),
+		results:    make(map[int]RangeResults),
+		rowsByNode: make(map[string]int64),
 	}
 }
 
@@ -82,10 +85,13 @@ func (h *blockHashers) work(node string, conn *pgxpool.Conn, cur *slicer.Cursor)
 			return
 		}
 		r := h.t.rangeFromBlock(b)
-		var hash string
+		var (
+			hash string
+			rows int64
+		)
 		err := h.t.withBlockLimit(h.ctx, func(ctx context.Context) error {
 			var err error
-			hash, err = h.t.hashRangeOn(ctx, conn, node, r)
+			hash, rows, err = h.t.hashRangeOn(ctx, conn, node, r)
 			return err
 		})
 		if err != nil {
@@ -102,9 +108,18 @@ func (h *blockHashers) work(node string, conn *pgxpool.Conn, cur *slicer.Cursor)
 			h.results[idx] = make(RangeResults)
 		}
 		h.results[idx][node] = HashResult{hash: hash}
+		h.rowsByNode[node] += rows
 		h.mu.Unlock()
 		h.bar.Increment()
 	}
+}
+
+// rows returns the number of rows that the hash queries of node counted.
+// Call it after wait.
+func (h *blockHashers) rows(node string) int64 {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.rowsByNode[node]
 }
 
 // wait waits for all workers and returns the hashes, keyed by the index of
