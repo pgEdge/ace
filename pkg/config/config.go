@@ -77,6 +77,9 @@ type DiffConfig struct {
 	BlockTimeout *int `yaml:"block_timeout"`
 	// RunTimeout limits one table-diff run, in seconds. 0 means no limit.
 	RunTimeout int `yaml:"run_timeout"`
+	// Slicer is the way to cut a table into blocks: auto, cutter or
+	// sample. Empty means auto.
+	Slicer string `yaml:"slicer"`
 }
 
 // DefaultMaxConnections is the number of connections per node when neither

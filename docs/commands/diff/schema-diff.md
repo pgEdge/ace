@@ -29,6 +29,7 @@ table instead of its data or its mere presence.
 | `--concurrency-factor <float>` | `-c` | CPU ratio for the comparison of the blocks that differ (0.0–4.0); the number of hash workers comes from `--max-connections`. Default `0.5`. |
 | `--compare-unit-size <int>` | `-u` | Recursive split size for mismatched blocks. Default `10000`. |
 | `--output <json\|html>` | `-o` | Per-table diff report format. Default `json`. With `--compare=structure`, only `json` is accepted, and it only takes effect when given by hand (see below). |
+| `--slicer <auto\|cutter\|sample>` |  | How to cut each table into blocks; see `table-diff`. | `table_diff.slicer`, or `auto` |
 | `--override-block-size` | `-B` | Allow block sizes outside `ace.yaml` guardrails. |
 | `--block-timeout <int>` |  | Time limit in seconds for one query on one block of a table. `0` means no limit. | `table_diff.block_timeout`, or `60` |
 | `--run-timeout <int>` |  | Time limit in seconds for the diff of each table, counted for each table on its own. `0` means no limit. | `table_diff.run_timeout`, or `0` |

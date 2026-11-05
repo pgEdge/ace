@@ -468,6 +468,10 @@ components:
         max_connections:
           type: integer
           description: Connections per node for each table-diff task; a value that is set is a strict limit for the whole task. 0 or missing takes, in this order, max_connections.nodes.<cluster>.<node> or max_connections.default from ace.yaml, then table_diff.max_connections; if none is set, the task opens 8 for cutting and hashing, and the comparison can open more.
+        slicer:
+          type: string
+          enum: [auto, cutter, sample]
+          description: How to cut a table into blocks on the anchor node. Defaults to table_diff.slicer or auto.
         table_filter:
           type: string
           description: SQL WHERE predicate (without WHERE).
@@ -573,6 +577,10 @@ components:
         max_connections:
           type: integer
           description: Connections per node for each table-diff task; a value that is set is a strict limit for the whole task. 0 or missing takes, in this order, max_connections.nodes.<cluster>.<node> or max_connections.default from ace.yaml, then table_diff.max_connections; if none is set, the task opens 8 for cutting and hashing, and the comparison can open more.
+        slicer:
+          type: string
+          enum: [auto, cutter, sample]
+          description: How to cut a table into blocks on the anchor node. Defaults to table_diff.slicer or auto.
         output:
           type: string
           enum: [json, html]
@@ -610,6 +618,10 @@ components:
         max_connections:
           type: integer
           description: Connections per node for each table-diff task; a value that is set is a strict limit for the whole task. 0 or missing takes, in this order, max_connections.nodes.<cluster>.<node> or max_connections.default from ace.yaml, then table_diff.max_connections; if none is set, the task opens 8 for cutting and hashing, and the comparison can open more.
+        slicer:
+          type: string
+          enum: [auto, cutter, sample]
+          description: How to cut a table into blocks on the anchor node. Defaults to table_diff.slicer or auto.
         output:
           type: string
           enum: [json, html]

@@ -61,7 +61,10 @@ type RepsetDiffCmd struct {
 	Output            string
 	TableFilter       string
 	OverrideBlockSize bool
-	Ctx               context.Context
+	// Slicer is the way to cut each table into blocks: auto, cutter or
+	// sample. Empty means table_diff.slicer from the config, or auto.
+	Slicer string
+	Ctx    context.Context
 
 	ClientRole   string
 	InvokeMethod string
@@ -289,6 +292,9 @@ func (c *RepsetDiffCmd) Validate() error {
 	if err := cfg.CheckConnectionLimits(); err != nil {
 		return err
 	}
+	if _, err := configuredSlicer(c.Slicer, cfg); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -443,6 +449,7 @@ func RepsetDiff(task *RepsetDiffCmd) (err error) {
 		tdTask.Output = task.Output
 		tdTask.TableFilter = task.TableFilter
 		tdTask.OverrideBlockSize = task.OverrideBlockSize
+		tdTask.Slicer = task.Slicer
 		tdTask.QuietMode = task.Quiet
 		tdTask.Ctx = task.Ctx
 		tdTask.SkipDBUpdate = task.SkipDBUpdate
@@ -508,6 +515,7 @@ func (task *RepsetDiffCmd) CloneForSchedule(ctx context.Context) *RepsetDiffCmd 
 	clone.Output = task.Output
 	clone.TableFilter = task.TableFilter
 	clone.OverrideBlockSize = task.OverrideBlockSize
+	clone.Slicer = task.Slicer
 	clone.SkipDBUpdate = task.SkipDBUpdate
 	clone.TaskStore = task.TaskStore
 	clone.TaskStorePath = task.TaskStorePath
