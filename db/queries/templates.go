@@ -1295,7 +1295,7 @@ var SQLTemplates = Templates{
 	// aggregate reads the value four times, and without OFFSET 0 the row hash
 	// would be computed four times.
 	TDBlockHashSQL: template.Must(template.New("tdBlockHashSQL").Parse(`
-        SELECT encode(` + BlockHashAggExpr + `, 'hex')
+        SELECT encode(` + BlockHashAggExpr + `, 'hex'), count(*)
         FROM (
             SELECT ('x' || encode({{.RowHashExpr}}, 'hex'))::bit(256) AS ` + rowHashBitsCol + `
             FROM {{.SchemaIdent}}.{{.TableIdent}} AS {{.TableAlias}}

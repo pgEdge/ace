@@ -1558,9 +1558,10 @@ func (t *TableDiffTask) ExecuteTask() (err error) {
 	}
 
 	logger.Info("table-diff: cut %s on %s", cutStats, maxNode)
-	// The cut counted the rows of the anchor node that match the filter.
-	// This is exact, unlike the planner estimate that chose the anchor.
-	t.DiffResult.Summary.TotalRowsChecked = cutStats.Rows
+	// The hash queries of the anchor node counted its rows that match the
+	// filter. This is exact, unlike the planner estimate that chose the
+	// anchor.
+	t.DiffResult.Summary.TotalRowsChecked = hashers.rows(maxNode)
 	t.DiffResult.Summary.InitialRangesCount = len(blocks)
 
 	logger.Info("Initial hash calculations complete. Proceeding with comparisons for mismatches...")
@@ -1709,7 +1710,7 @@ func (t *TableDiffTask) hashRange(
 	var hash string
 	err := t.withBlockConn(ctx, node, func(ctx context.Context, conn *pgxpool.Conn) error {
 		var err error
-		hash, err = t.hashRangeOn(ctx, conn, node, r)
+		hash, _, err = t.hashRangeOn(ctx, conn, node, r)
 		return err
 	})
 	return hash, err
@@ -1722,30 +1723,34 @@ type rowQuerier interface {
 }
 
 // hashRangeOn runs the block hash query for the range r of node on q, a
-// connection or the pool of that node, and returns the hash as hex text.
+// connection or the pool of that node, and returns the hash as hex text and
+// the number of rows in the range.
 func (t *TableDiffTask) hashRangeOn(
 	ctx context.Context,
 	q rowQuerier,
 	node string,
 	r Range,
-) (string, error) {
+) (string, int64, error) {
 	startTime := time.Now()
-	var hash string
+	var (
+		hash string
+		rows int64
+	)
 
 	numPKCols := len(t.Key)
 
 	startVals, hasLower, err := extractRangeBoundValues(r.Start, numPKCols)
 	if err != nil {
-		return "", err
+		return "", 0, err
 	}
 	endVals, hasUpper, err := extractRangeBoundValues(r.End, numPKCols)
 	if err != nil {
-		return "", err
+		return "", 0, err
 	}
 
 	query, err := t.getBlockHashSQL(hasLower, hasUpper)
 	if err != nil {
-		return "", fmt.Errorf("failed to build block-hash SQL: %w", err)
+		return "", 0, fmt.Errorf("failed to build block-hash SQL: %w", err)
 	}
 
 	args := make([]any, 0, len(startVals)+len(endVals))
@@ -1758,12 +1763,12 @@ func (t *TableDiffTask) hashRangeOn(
 
 	logger.Debug("[%s] Hashing range: Start=%v, End=%v. SQL: %s, Args: %v", node, r.Start, r.End, query, args)
 
-	err = q.QueryRow(ctx, query, args...).Scan(&hash)
+	err = q.QueryRow(ctx, query, args...).Scan(&hash, &rows)
 
 	if err != nil {
 		duration := time.Since(startTime)
 		logger.Debug("[%s] ERROR after %v for range Start=%v, End=%v (using query: '%s', args: %v): %v", node, duration, r.Start, r.End, query, args, err)
-		return "", fmt.Errorf("BlockHash query failed for %s range %v-%v: %w", node, r.Start, r.End, err)
+		return "", 0, fmt.Errorf("BlockHash query failed for %s range %v-%v: %w", node, r.Start, r.End, err)
 	}
 
 	duration := time.Since(startTime)
@@ -1772,7 +1777,7 @@ func (t *TableDiffTask) hashRangeOn(
 	} else {
 		logger.Debug("[%s] Range Start=%v, End=%v took %v", node, r.Start, r.End, duration)
 	}
-	return hash, nil
+	return hash, rows, nil
 }
 
 func extractRangeBoundValues(bound any, numPKCols int) ([]any, bool, error) {

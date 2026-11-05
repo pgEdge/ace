@@ -681,8 +681,9 @@ func RowHashExpr(tableAlias string, allCols []string, colTypes map[string]string
 // schema.table: BlockHashAggExpr over the row hashes (RowHashExpr) of allCols.
 //
 // mode selects the result type. "TD_BLOCK_HASH" gives the hash as hex text
-// for table-diff; "MTREE_LEAF_HASH" gives the 32 raw bytes stored in an mtree
-// leaf. Both modes give the same hash for the same rows.
+// and the number of rows in the block for table-diff; "MTREE_LEAF_HASH"
+// gives the 32 raw bytes stored in an mtree leaf. Both modes give the same
+// hash for the same rows.
 //
 // The block is a range of the primary key. includeLower adds
 // "key >= lower bound" and includeUpper adds "key < upper bound"; the bound
