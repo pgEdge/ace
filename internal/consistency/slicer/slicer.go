@@ -30,7 +30,8 @@
 // sample of the key. Its blocks are not exact, but its cost does not depend
 // on the visibility map. The auto mode picks one of the two ways from the
 // catalog of the anchor node, and takes the cutter after all if the sample
-// query fails or gives too few keys.
+// query fails, gives too few keys or shows that rows with near keys share
+// heap pages.
 //
 // Blocks are half-open ranges [Start, End). The first block of the table has
 // no lower bound and the last one has no upper bound, so rows that sort

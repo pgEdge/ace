@@ -53,6 +53,10 @@ func slicerSummary(c *slicer.Choice) *types.SlicerSummary {
 		Reason:        c.Reason,
 		SamplePercent: c.SamplePercent,
 	}
+	if c.SamePage != nil {
+		share := *c.SamePage
+		sum.SamplePageShare = &share
+	}
 	if s := c.Signals; s != nil && !s.Partitioned {
 		if s.Correlation != nil {
 			corr := *s.Correlation

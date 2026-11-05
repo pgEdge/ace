@@ -186,6 +186,10 @@ type SlicerSummary struct {
 	NotAllVisible *float64 `json:"not_all_visible,omitempty"`
 	// SamplePercent is the TABLESAMPLE SYSTEM rate of the sample method.
 	SamplePercent float64 `json:"sample_percent,omitempty"`
+	// SamplePageShare is the share of sampled keys on the same heap page as
+	// the key before them in key order. It is absent when ACE did not read
+	// a sample.
+	SamplePageShare *float64 `json:"sample_page_share,omitempty"`
 }
 
 type KVPair struct {

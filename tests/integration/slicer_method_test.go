@@ -133,6 +133,44 @@ func TestTableDiffSlicerMethods(t *testing.T) {
 	}
 }
 
+// TestTableDiffSampleFallsBackOnClusteredHeap covers a heap that the catalog
+// cannot tell from a random one: 64 key ranges are written in turn, 50 rows
+// at a time, so the correlation of the key is low, but the rows with near
+// keys share heap pages. The auto mode takes the sample from the catalog,
+// sees in the sample that neighbour keys lie on one page, and takes the
+// cutter before any block is hashed.
+func TestTableDiffSampleFallsBackOnClusteredHeap(t *testing.T) {
+	ctx := context.Background()
+	table := "slicer_chunked"
+	qualified := testSchema + "." + table
+	ident := pgx.Identifier{testSchema, table}.Sanitize()
+	pools := []*pgxpool.Pool{pgCluster.Node1Pool, pgCluster.Node2Pool}
+
+	for _, p := range pools {
+		slicingExec(t, ctx, p, "DROP TABLE IF EXISTS "+ident)
+		slicingExec(t, ctx, p, fmt.Sprintf("CREATE TABLE %s (id bigint PRIMARY KEY, n int, v text) WITH (autovacuum_enabled = false)", ident))
+		slicingExec(t, ctx, p, fmt.Sprintf(`INSERT INTO %s SELECT ((g - 1) / 50 %% 64) * 1000 + (g - 1) / 3200 * 50 + (g - 1) %% 50, g, md5(g::text)
+			FROM generate_series(1, 64000) g`, ident))
+		slicingExec(t, ctx, p, "ANALYZE "+ident)
+	}
+	t.Cleanup(func() {
+		for _, p := range pools {
+			slicingExec(t, ctx, p, "DROP TABLE IF EXISTS "+ident)
+		}
+	})
+	slicingExec(t, ctx, pgCluster.Node2Pool, fmt.Sprintf("UPDATE %s SET v = 'changed' WHERE n %% 20000 = 7", ident))
+
+	diffs, summary := slicingDiffWith(t, qualified, slicer.MethodAuto)
+	require.Equal(t, 4, diffs, "n = 7, 20007, 40007, 60007")
+	require.NotNil(t, summary.Slicer)
+	require.Equal(t, slicer.MethodCutter, summary.Slicer.Method, "reason: %s", summary.Slicer.Reason)
+	require.Equal(t, "rows with near keys share heap pages", summary.Slicer.Reason)
+	require.NotNil(t, summary.Slicer.KeyCorrelation)
+	require.Less(t, *summary.Slicer.KeyCorrelation, 0.1, "the catalog must not show the clustering")
+	require.NotNil(t, summary.Slicer.SamplePageShare)
+	require.Greater(t, *summary.Slicer.SamplePageShare, 0.5)
+}
+
 // TestTableDiffSlicerFewConnections checks both ways to cut with one and two
 // connections per node. With one connection, the anchor has no hash worker
 // until the connection of the cut is free: the cutter gives it back when

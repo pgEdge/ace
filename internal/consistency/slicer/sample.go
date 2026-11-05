@@ -49,9 +49,10 @@ func sampleKeys(cfg *Config) (renamed, names string) {
 // sampleKeysPerBlock-th sampled key in key order. The server sorts the keys,
 // so the order follows its collations and the comparison of composite keys.
 //
-// Each row also carries the number of the row in key order and the size of
-// the sample. The last sampled key is returned too, so the size is known
-// even when the sample holds fewer keys than one block needs.
+// Each row also carries the number of the row in key order, the size of the
+// sample and the number of sampled keys that lie on the same heap page as
+// the key before them. The last sampled key is returned too, so the counts
+// are known even when the sample holds fewer keys than one block needs.
 func sampleBlocksSQL(cfg *Config, pct float64) string {
 	sample := ""
 	if pct < 100 {
@@ -59,15 +60,21 @@ func sampleBlocksSQL(cfg *Config, pct float64) string {
 	}
 	renamed, keys := sampleKeys(cfg)
 	return fmt.Sprintf(`
-SELECT _ace_rn, _ace_n, %[1]s
+SELECT _ace_rn, _ace_n, _ace_same, %[1]s
 FROM (
-	SELECT %[1]s,
-		row_number() OVER (ORDER BY %[1]s) AS _ace_rn,
-		count(*) OVER () AS _ace_n
+	SELECT %[1]s, _ace_rn,
+		count(*) OVER () AS _ace_n,
+		COALESCE(sum(_ace_s) OVER (), 0) AS _ace_same
 	FROM (
-		SELECT %[2]s
-		FROM %[3]s%[4]s
-	) _ace_t
+		SELECT %[1]s,
+			row_number() OVER _ace_w AS _ace_rn,
+			(lag(_ace_blk) OVER _ace_w = _ace_blk)::int AS _ace_s
+		FROM (
+			SELECT %[2]s, (ctid::text::point)[0] AS _ace_blk
+			FROM %[3]s%[4]s
+		) _ace_t
+		WINDOW _ace_w AS (ORDER BY %[1]s)
+	) _ace_u
 ) _ace_s
 WHERE _ace_rn %% %[5]d = 0 OR _ace_rn = _ace_n
 ORDER BY _ace_rn`, keys, renamed, cfg.tableIdent(), sample, sampleKeysPerBlock)
@@ -79,15 +86,31 @@ ORDER BY _ace_rn`, keys, renamed, cfg.tableIdent(), sample, sampleKeysPerBlock)
 // most of the table.
 const minSampleKeys = 100
 
+// maxSamePageShare is the largest share of sampled keys on the heap page of
+// the key before them that the auto mode accepts. Above it, the keys of a
+// block come in runs from a few pages, and the blocks are very uneven.
+const maxSamePageShare = 0.5
+
 // Sample is the result of the sample query on the anchor node.
 type Sample struct {
 	// bounds are the block bounds in key order.
 	bounds [][]any
 	// keys is the number of sampled keys.
 	keys int64
+	// samePage is the share of sampled keys that lie on the same heap page
+	// as the key before them in key order. On a heap that is not in key
+	// order it is close to 0; when rows with near keys share pages it is
+	// close to 1.
+	samePage float64
 	// pct is the TABLESAMPLE SYSTEM rate.
 	pct     float64
 	elapsed time.Duration
+}
+
+// clustered reports whether the sample shows that rows with near keys
+// share heap pages. The blocks of such a sample are very uneven.
+func (s *Sample) clustered() bool {
+	return s.keys >= minSampleKeys && s.samePage > maxSamePageShare
 }
 
 // ReadSample runs the sample query on the anchor node. The query ends
@@ -110,8 +133,9 @@ func ReadSample(ctx context.Context, q Querier, cfg Config) (*Sample, error) {
 		return nil, fmt.Errorf("slicer: sample block bounds: %w", err)
 	}
 	defer rows.Close()
-	const extra = 2
+	const extra = 3
 	nk := len(cfg.Key)
+	var same int64
 	for rows.Next() {
 		vals, err := rows.Values()
 		if err != nil {
@@ -122,10 +146,11 @@ func ReadSample(ctx context.Context, q Querier, cfg Config) (*Sample, error) {
 		}
 		rn, ok1 := vals[0].(int64)
 		n, ok2 := vals[1].(int64)
-		if !ok1 || !ok2 {
-			return nil, fmt.Errorf("slicer: unexpected types of the sample counts: %T, %T", vals[0], vals[1])
+		sm, ok3 := vals[2].(int64)
+		if !ok1 || !ok2 || !ok3 {
+			return nil, fmt.Errorf("slicer: unexpected types of the sample counts: %T, %T, %T", vals[0], vals[1], vals[2])
 		}
-		s.keys = n
+		s.keys, same = n, sm
 		// The last sampled key is returned for the counts only.
 		if rn%sampleKeysPerBlock == 0 {
 			s.bounds = append(s.bounds, append([]any(nil), vals[extra:]...))
@@ -134,6 +159,9 @@ func ReadSample(ctx context.Context, q Querier, cfg Config) (*Sample, error) {
 	rows.Close()
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("slicer: sample block bounds: %w", err)
+	}
+	if s.keys > 1 {
+		s.samePage = float64(same) / float64(s.keys-1)
 	}
 	s.elapsed = time.Since(start)
 	return s, nil

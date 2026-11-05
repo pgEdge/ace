@@ -330,8 +330,10 @@ of that version, and recreate the `#` operator as described in the
   table where more than 5% of the pages are not all-visible, and never
   with a row filter (`--table-filter`, `--against-origin`, `--until`) or
   on a partitioned table or a table with child tables. `auto` also takes
-  the cutter if the sample query fails or gives too few keys. The sample
-  query is limited by the block timeout. The result of a diff does
+  the cutter if the sample query fails or gives too few keys, and if the
+  sample shows that rows with near keys share heap pages (the catalog
+  cannot see this when the correlation is low). The sample query is
+  limited by the block timeout. The result of a diff does
   not depend on the way to cut. The log and the `slicer` field of the
   summary show the choice and why. If a run cut by a sample hits the block
   time limit, the error advises to run again with `--slicer=cutter`.
