@@ -156,7 +156,7 @@ func TestAdaptiveDrainEscalation(t *testing.T) {
 		pairKey = env.ServiceN2 + "/" + env.ServiceN1
 	}
 	countDiffs := func(task *mtree.MerkleTreeTask) int {
-		nodeDiffs, ok := task.DiffResult.NodeDiffs[pairKey]
+		nodeDiffs, ok := diffPairs(t, task)[pairKey]
 		if !ok {
 			return 0
 		}

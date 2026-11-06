@@ -141,6 +141,35 @@ func side(n *fakeNode, rows int64, known bool) Side {
 	return Side{Name: n.name, Conn: n, ColTypes: fakeTypes, Rows: rows, RowsKnown: known}
 }
 
+// collected holds the entries that a comparison gave to its sink.
+type collected struct {
+	entries []Entry
+	calls   int
+}
+
+// sink returns a Sink that keeps a copy of every entry.
+func (c *collected) sink() Sink {
+	return func(entries []Entry) error {
+		c.calls++
+		c.entries = append(c.entries, entries...)
+		return nil
+	}
+}
+
+// of returns the entries of one kind.
+func (c *collected) of(k Kind) []Entry {
+	var out []Entry
+	for _, e := range c.entries {
+		if e.Kind == k {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
+// discard is a Sink that drops the entries.
+func discard([]Entry) error { return nil }
+
 // TestCompareBuildSideAndResult checks that the node with fewer rows is the
 // build side and is read first, that a changed row and a row on each node
 // only are found, that the rows are read in batches, and that no query read
@@ -154,7 +183,8 @@ func TestCompareBuildSideAndResult(t *testing.T) {
 	n2.stored = map[string][]fakeRow{"b": {{9, "(0,2)", "b2"}}, "d": {{4, "(0,4)", "d2"}}}
 
 	// n2 has fewer rows, so its keys go into the map: its key query is first.
-	res, err := Compare(context.Background(), fakeTable, Block{Where: "TRUE"}, side(n1, 3, true), side(n2, 2, true), Options{BatchSize: 1})
+	var got collected
+	res, err := Compare(context.Background(), fakeTable, Block{Where: "TRUE"}, side(n1, 3, true), side(n2, 2, true), Options{BatchSize: 1}, got.sink())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -164,11 +194,22 @@ func TestCompareBuildSideAndResult(t *testing.T) {
 	if res.BuildNode != "n2" || res.DiffKeys != 3 {
 		t.Fatalf("BuildNode=%s DiffKeys=%d", res.BuildNode, res.DiffKeys)
 	}
-	if len(res.Only1) != 1 || len(res.Only2) != 1 || len(res.Changed) != 1 {
-		t.Fatalf("Only1=%d Only2=%d Changed=%d", len(res.Only1), len(res.Only2), len(res.Changed))
+	if res.Only1 != 1 || res.Only2 != 1 || res.Changed != 1 {
+		t.Fatalf("Only1=%d Only2=%d Changed=%d", res.Only1, res.Only2, res.Changed)
 	}
-	if v, _ := res.Changed[0].Row1.Get("v"); v != "b1" {
+	if len(got.of(KindOnly1)) != 1 || len(got.of(KindOnly2)) != 1 || len(got.of(KindChanged)) != 1 {
+		t.Fatalf("the sink got %d entries: %+v", len(got.entries), got.entries)
+	}
+	changed := got.of(KindChanged)[0]
+	if v, _ := changed.Row1.Get("v"); v != "b1" {
 		t.Fatalf("Row1 of the changed row comes from n2: %v", v)
+	}
+	if changed.Hash1 != RowHash(h(2)) || changed.Hash2 != RowHash(h(9)) {
+		t.Fatalf("hashes of the changed row: %x %x", changed.Hash1, changed.Hash2)
+	}
+	// Each batch of one key gives one entry, and the sink gets each batch.
+	if got.calls != 3 {
+		t.Fatalf("the sink was called %d times, want 3", got.calls)
 	}
 	// Three keys in batches of one: three row reads on each node.
 	reads := 0
@@ -194,7 +235,8 @@ func TestCompareEmptyBuildSideIsNotQueried(t *testing.T) {
 	n1, n2, log := twoNodes()
 	n1.keys = [][][]byte{keyRaw("a", 1)}
 	n1.stored = map[string][]fakeRow{"a": {{1, "(0,1)", "a"}}}
-	res, err := Compare(context.Background(), fakeTable, Block{Where: "TRUE"}, side(n1, 1, true), side(n2, 0, true), Options{})
+	var got collected
+	res, err := Compare(context.Background(), fakeTable, Block{Where: "TRUE"}, side(n1, 1, true), side(n2, 0, true), Options{}, got.sink())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -203,27 +245,8 @@ func TestCompareEmptyBuildSideIsNotQueried(t *testing.T) {
 			t.Fatalf("the empty build side was queried: %q", *log)
 		}
 	}
-	if len(res.Only1) != 1 {
-		t.Fatalf("Only1=%d, want 1", len(res.Only1))
-	}
-}
-
-// A probe that stops at MaxKeys is read to the end and not cancelled, so
-// that its connection stays open.
-func TestCompareEarlyStopReadsTheRestOfTheProbe(t *testing.T) {
-	n1, n2, _ := twoNodes()
-	n2.keys = [][][]byte{keyRaw("a", 1), keyRaw("b", 2), keyRaw("c", 3)}
-	n2.stored = map[string][]fakeRow{"a": {{1, "(0,1)", "a"}}}
-	res, err := Compare(context.Background(), fakeTable, Block{Where: "TRUE"}, side(n1, 0, true), side(n2, 3, true), Options{MaxKeys: 1})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !res.Truncated || res.DiffKeys != 1 {
-		t.Fatalf("Truncated=%v DiffKeys=%d", res.Truncated, res.DiffKeys)
-	}
-	probe := n2.opened[0]
-	if !probe.closed || probe.cancelledAtClose {
-		t.Fatalf("the probe stopped at MaxKeys must be closed without a cancel: closed=%v cancelled=%v", probe.closed, probe.cancelledAtClose)
+	if res.Only1 != 1 || len(got.of(KindOnly1)) != 1 {
+		t.Fatalf("Only1=%d, sink %d, want 1", res.Only1, len(got.of(KindOnly1)))
 	}
 }
 
@@ -236,7 +259,7 @@ func TestCompareMemoryLimitError(t *testing.T) {
 	n2.keys = [][][]byte{keyRaw("c", 1), keyRaw("d", 2), keyRaw("e", 3)}
 	idA, _ := encodeKeyID([][]byte{[]byte("a")})
 	_, err := Compare(context.Background(), fakeTable, Block{Where: "TRUE"}, side(n1, 2, true), side(n2, 3, true),
-		Options{MaxMemory: 2*keyCost(idA) + 1})
+		Options{MaxMemory: 2*keyCost(idA) + 1}, discard)
 	var me *MemoryLimitError
 	if !errors.As(err, &me) {
 		t.Fatalf("got %v, want a MemoryLimitError", err)
@@ -246,7 +269,7 @@ func TestCompareMemoryLimitError(t *testing.T) {
 	}
 	// The build side alone passes the limit: no probe node in the error.
 	_, err = Compare(context.Background(), fakeTable, Block{Where: "TRUE"}, side(n1, 2, true), side(n2, 3, true),
-		Options{MaxMemory: keyCost(idA)})
+		Options{MaxMemory: keyCost(idA)}, discard)
 	if !errors.As(err, &me) || me.ProbeNode != "" {
 		t.Fatalf("got %v, want a build-side MemoryLimitError", err)
 	}
@@ -272,7 +295,7 @@ func TestCompareBadKeyRows(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			n1, n2, _ := twoNodes()
 			n1.keys = [][][]byte{tt.row, keyRaw("b", 2)}
-			_, err := Compare(context.Background(), fakeTable, Block{Where: "TRUE"}, side(n1, 2, true), side(n2, 2, true), Options{})
+			_, err := Compare(context.Background(), fakeTable, Block{Where: "TRUE"}, side(n1, 2, true), side(n2, 2, true), Options{}, discard)
 			if err == nil || !strings.Contains(err.Error(), tt.want) {
 				t.Fatalf("got %v, want an error with %q", err, tt.want)
 			}
@@ -293,11 +316,38 @@ func TestCompareSameRowForTwoKeys(t *testing.T) {
 	n2.keys = [][][]byte{keyRaw("0", 2)}
 	n1.stored = map[string][]fakeRow{"-0": {{1, "(0,1)", "x"}}, "0": {{1, "(0,1)", "x"}}}
 	n2.stored = map[string][]fakeRow{"-0": {{2, "(0,1)", "x"}}, "0": {{2, "(0,1)", "x"}}}
-	res, err := Compare(context.Background(), fakeTable, Block{Where: "TRUE"}, side(n1, 1, true), side(n2, 1, true), Options{BatchSize: 1})
+	res, err := Compare(context.Background(), fakeTable, Block{Where: "TRUE"}, side(n1, 1, true), side(n2, 1, true), Options{BatchSize: 1}, discard)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if res.DiffKeys != 2 || len(res.Changed) != 1 || len(res.Only1)+len(res.Only2) != 0 {
-		t.Fatalf("DiffKeys=%d Changed=%d Only1=%d Only2=%d, want one changed row", res.DiffKeys, len(res.Changed), len(res.Only1), len(res.Only2))
+	if res.DiffKeys != 2 || res.Changed != 1 || res.Only1+res.Only2 != 0 {
+		t.Fatalf("DiffKeys=%d Changed=%d Only1=%d Only2=%d, want one changed row", res.DiffKeys, res.Changed, res.Only1, res.Only2)
+	}
+}
+
+// TestCompareSinkError checks that an error of the sink stops the comparison
+// after the first batch and is returned.
+func TestCompareSinkError(t *testing.T) {
+	n1, n2, log := twoNodes()
+	n1.keys = [][][]byte{keyRaw("a", 1), keyRaw("b", 2)}
+	n1.stored = map[string][]fakeRow{"a": {{1, "(0,1)", "a"}}, "b": {{2, "(0,2)", "b"}}}
+	stop := errors.New("disk full")
+	calls := 0
+	_, err := Compare(context.Background(), fakeTable, Block{Where: "TRUE"}, side(n1, 2, true), side(n2, 0, true), Options{BatchSize: 1},
+		func([]Entry) error {
+			calls++
+			return stop
+		})
+	if !errors.Is(err, stop) {
+		t.Fatalf("got %v, want the error of the sink", err)
+	}
+	reads := 0
+	for _, l := range *log {
+		if strings.HasSuffix(l, ":read") {
+			reads++
+		}
+	}
+	if calls != 1 || reads != 2 {
+		t.Fatalf("sink calls %d, row reads %d; want 1 and 2: the comparison must stop after the first batch", calls, reads)
 	}
 }

@@ -23,7 +23,8 @@ import (
 // hash makes the key stream of every mismatched block smaller.
 const rowHashSize = 8
 
-type rowHash [rowHashSize]byte
+// RowHash is the short row hash that the key query returns for every row.
+type RowHash [rowHashSize]byte
 
 // entryOverhead is the memory, in bytes, that one key costs in a Go map
 // besides the bytes of the key ID and of the row hash: the string header,
@@ -103,18 +104,18 @@ func keyCost(id string) int64 {
 // with the same key, so a key can have more rows: the first one is in first,
 // the others in more.
 type keyMap struct {
-	first map[string]rowHash
-	more  map[string][]rowHash
+	first map[string]RowHash
+	more  map[string][]RowHash
 	mem   *memCounter
 }
 
 func newKeyMap(mem *memCounter) *keyMap {
-	return &keyMap{first: make(map[string]rowHash), more: make(map[string][]rowHash), mem: mem}
+	return &keyMap{first: make(map[string]RowHash), more: make(map[string][]RowHash), mem: mem}
 }
 
 // add puts one row into the map. It returns false when the memory limit is
 // passed.
-func (m *keyMap) add(id string, h rowHash) bool {
+func (m *keyMap) add(id string, h RowHash) bool {
 	if _, ok := m.first[id]; ok {
 		m.more[id] = append(m.more[id], h)
 		return m.mem.add(rowHashSize + entryOverhead)
@@ -126,7 +127,7 @@ func (m *keyMap) add(id string, h rowHash) bool {
 // take looks for a row with the key id and the hash h and removes it.
 // found says if the key is in the map, matched says if a row with this hash
 // was there.
-func (m *keyMap) take(id string, h rowHash) (found, matched bool) {
+func (m *keyMap) take(id string, h RowHash) (found, matched bool) {
 	h0, ok := m.first[id]
 	if !ok {
 		return false, false
@@ -201,19 +202,10 @@ func (l *keyList) add(id string, inMap bool) bool {
 	return l.mem.add(cost)
 }
 
-func (l *keyList) has(id string) bool {
-	_, ok := l.seen[id]
-	return ok
-}
-
-func (l *keyList) len() int {
-	return len(l.ids)
-}
-
 // keyRow is one row of the key query.
 type keyRow struct {
 	id   string
-	hash rowHash
+	hash RowHash
 }
 
 // keySource is a stream of rows of the key query.
@@ -237,53 +229,39 @@ func (e *errMemory) Error() string {
 // and checks each row against the map. It returns the keys of the rows that
 // are not equal on the two sides. build may be nil: then the build side has
 // no rows.
-//
-// maxKeys limits the number of keys returned (0 means no limit). When one
-// more key would pass the limit, the search stops and truncated is true. The
-// keys left in the map at that moment are not returned, because rows that
-// the probe did not read yet can still match them.
-func findDiffKeys(build, probe keySource, maxKeys int, mem *memCounter) (ids []string, truncated bool, err error) {
+func findDiffKeys(build, probe keySource, mem *memCounter) ([]string, error) {
 	m := newKeyMap(mem)
 	if build != nil {
 		for build.Next() {
 			r := build.Row()
 			if !m.add(r.id, r.hash) {
-				return nil, false, &errMemory{build: true, used: mem.used}
+				return nil, &errMemory{build: true, used: mem.used}
 			}
 		}
 		if err := build.Err(); err != nil {
-			return nil, false, err
+			return nil, err
 		}
 	}
 
 	list := newKeyList(mem)
-	full := func(id string) bool {
-		return maxKeys > 0 && list.len() >= maxKeys && !list.has(id)
-	}
 	for probe.Next() {
 		r := probe.Row()
 		_, matched := m.take(r.id, r.hash)
 		if matched {
 			continue
 		}
-		if full(r.id) {
-			return list.ids, true, nil
-		}
 		if !list.add(r.id, false) {
-			return nil, false, &errMemory{used: mem.used}
+			return nil, &errMemory{used: mem.used}
 		}
 	}
 	if err := probe.Err(); err != nil {
-		return nil, false, err
+		return nil, err
 	}
 
 	for _, id := range m.sortedKeys() {
-		if full(id) {
-			return list.ids, true, nil
-		}
 		if !list.add(id, true) {
-			return nil, false, &errMemory{used: mem.used}
+			return nil, &errMemory{used: mem.used}
 		}
 	}
-	return list.ids, false, nil
+	return list.ids, nil
 }

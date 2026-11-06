@@ -206,7 +206,9 @@ In an inheritance tree the parent and a child can hold rows with the same key. T
 
 **Connections and time limit.** The queries of one comparison run one after another, so a comparison uses at most one connection at a time. Each of them is one operation on the block: `block_timeout` limits it, and the wait for a free connection does not count.
 
-**Early stop.** When a node pair reaches `max_diff_rows`, the probe stops. The keys left in the map are then not reported, because the rows that the probe did not read can still match them. ACE reads the rest of the probe query and drops it, instead of a cancel: a cancel closes the connection, and with a strict connection limit the pool may not be able to open a new one. So the server still computes the row hash of every row left in the block.
+**Result on disk.** The full rows of the differing keys are read in batches, and each batch goes to the file of its block in the result directory as soon as it is read. So the client holds the key map of a block and one batch of rows for each worker, however many rows differ. The rows of a block are in the order of the key list, not sorted; only the HTML report sorts the rows it shows.
+
+**Limit.** `max_diff_rows` counts the differing rows of all node pairs of a run. A block is compared completely or not at all. After a block, its rows are added to the count; when the count reaches the limit, the blocks that are not compared yet are skipped. The limit is approximate: the blocks in work at that moment are compared to the end.
 
 ### Comparison Notes: Simple vs Composite Primary Keys
 
@@ -249,14 +251,14 @@ flowchart LR
 - **max_connections**: The number of connections N that the task opens to each node at the start and keeps until the end. Cutting and hashing use exactly these connections: every hash worker and every cutting worker holds its own one, so no worker waits for the pool. A server with fewer free slots gives fewer connections, and the task goes on with them. If the user sets N (on the command line or in the configuration file), it is a strict limit for the whole task: the pool of a node holds exactly N connections, and the comparison phase runs at most N tasks at the same time, so it never waits for a connection. Without such a value the pool holds at least N connections and at least the number that the comparison phase needs.
 - **key_map_max_memory_mb**: Memory limit for the keys of one mismatched block. Raise it only for very large blocks or very long keys.
 - **compare_unit_size**: No longer used. ACE accepts it and writes a warning.
-- **max_diff_rows**: Early-exit guardrail. Lower caps keep runs short and reports small on divergent tables; raising/removing can grow memory and report size when drift is large.
+- **max_diff_rows**: Early-exit guardrail for all node pairs of a run, approximate. Lower caps keep runs short and results small on divergent tables; raising/removing can grow the result on disk and the run time when drift is large. It does not change the memory of the client.
 - **table_filter**: Narrows scope and cost; rows that do not match the filter do not count toward `block_size`. Must be identical across nodes to avoid false positives.
 - **override_block_size**: Skips safety rails from `ace.yaml`. Oversized blocks can spike memory and slow hashes, especially on wide rows.
 - **output (json/html)**: HTML adds minor post-processing; DB load is unaffected.
 
 ### Failure Modes and Safeguards
 
-- **Diff limit hit**: `max_diff_rows` stops the row search early and marks the report; more differences may exist.
+- **Diff limit hit**: `max_diff_rows` skips the blocks that are not compared yet and marks the report; more differences may exist.
 - **Key map too large**: a mismatched block that needs more memory than `key_map_max_memory_mb` stops the run with an error.
 - **Permission or schema/PK mismatch**: Validation fails before work starts; nothing is executed against the DB.
 - **Timeouts/slow ranges**: `block_timeout` limits each query on a block (a hash, or a key query or a row read of a block that differs), and `run_timeout` limits the whole run. The first error, a time limit or a signal stops the workers on all nodes, and the run reports that cause.

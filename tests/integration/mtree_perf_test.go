@@ -107,11 +107,11 @@ func (h *mtreePerf) cleanup() {
 			h.t.Logf("cleanup: failed to drop table: %v", err)
 		}
 	}
-	// Diff writers name reports "<schema>_<table>_diffs-<ts>.json"
-	// (pkg/common/utils.go); scope cleanup to this table only.
-	files, _ := filepath.Glob(fmt.Sprintf("%s_%s_diffs-*.json", testSchema, h.tableName))
+	// Diff results are named "<schema>_<table>_diffs-<ts>", a directory and
+	// a JSON report; scope cleanup to this table only.
+	files, _ := filepath.Glob(fmt.Sprintf("%s_%s_diffs-*", testSchema, h.tableName))
 	for _, f := range files {
-		os.Remove(f)
+		os.RemoveAll(f)
 	}
 	log.Println("Cleanup: perf test table and merkle tree torn down")
 }
@@ -167,7 +167,7 @@ func (h *mtreePerf) compare(label string) (mtreeDur, bruteDur time.Duration, mtr
 	mStart := time.Now()
 	require.NoError(h.t, h.task.DiffMtree(), "[%s] DiffMtree should succeed", label)
 	mtreeDur = time.Since(mStart)
-	mtreeCount = h.countDiffs(h.task.DiffResult)
+	mtreeCount = h.countDiffs(diffResultOf(h.t, h.task))
 
 	// Fresh brute-force task each round for a clean DiffResult.
 	td := diff.NewTableDiffTask()
@@ -194,7 +194,7 @@ func (h *mtreePerf) compare(label string) (mtreeDur, bruteDur time.Duration, mtr
 	bStart := time.Now()
 	require.NoError(h.t, td.ExecuteTask(), "[%s] table-diff ExecuteTask should succeed", label)
 	bruteDur = time.Since(bStart)
-	bruteCount = h.countDiffs(td.DiffResult)
+	bruteCount = h.countDiffs(diffResultOf(h.t, td))
 
 	log.Printf("=== Perf comparison @ %s scattered divergence ===", label)
 	log.Printf("  mtree  table-diff: %-14s (%d diffed rows)", mtreeDur, mtreeCount)

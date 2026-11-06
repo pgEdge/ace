@@ -141,7 +141,7 @@ func TestTableDiffAgainstOriginWithUntil(t *testing.T) {
 		pairKey = serviceN2 + "/" + serviceN1
 	}
 
-	nodeDiffs, ok := task.DiffResult.NodeDiffs[pairKey]
+	nodeDiffs, ok := diffPairs(t, task)[pairKey]
 	if !ok {
 		t.Fatalf("expected diffs for %s", pairKey)
 	}
@@ -151,7 +151,7 @@ func TestTableDiffAgainstOriginWithUntil(t *testing.T) {
 	if got := len(nodeDiffs.Rows[serviceN2]); got != 0 {
 		t.Fatalf("expected no rows present only on %s for origin n3 (they should be missing), got %d", serviceN2, got)
 	}
-	if val, _ := nodeDiffs.Rows[serviceN1][0].Get("id"); val != int32(insertedIDs[0]) {
+	if val, _ := nodeDiffs.Rows[serviceN1][0].Get("id"); fmt.Sprint(val) != fmt.Sprint(insertedIDs[0]) {
 		t.Fatalf("expected missing id %d on %s, got %v", insertedIDs[0], serviceN2, val)
 	}
 	if metaVal, ok := nodeDiffs.Rows[serviceN1][0].Get("_spock_metadata_"); ok {

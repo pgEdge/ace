@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/pgedge/ace/db/queries"
-	"github.com/pgedge/ace/internal/consistency/keydiff"
 	"github.com/pgedge/ace/pkg/types"
 )
 
@@ -21,91 +20,72 @@ func uuidBytes(b byte) [16]byte {
 	return out
 }
 
-// mtreeTaskWithDiffState returns a task wired just enough to exercise the diff
-// accumulator (appendDiffs) without a database.
-func mtreeTaskWithDiffState(maxDiffRows int64) *MerkleTreeTask {
-	m := &MerkleTreeTask{MaxDiffRows: maxDiffRows}
+// The differing rows of all node pairs count against one max_diff_rows.
+// Reaching the limit, also exactly, stops the workers and marks the diff.
+func TestMtreeDiffRowLimitIsForTheWholeDiff(t *testing.T) {
+	m := &MerkleTreeTask{MaxDiffRows: 5}
+	m.countDiffRows(3)
+	if m.diffLimitHit.Load() || m.compareStopped() {
+		t.Fatal("3 rows of 5 must not stop the diff")
+	}
+	m.countDiffRows(2)
+	if !m.diffLimitHit.Load() || !m.compareStopped() {
+		t.Fatal("5 rows of 5 must stop the diff")
+	}
+	m.countDiffRows(4)
+	if got := m.diffRows.Load(); got != 9 {
+		t.Fatalf("counted %d rows, want 9: a range that was in work when the limit was reached still counts", got)
+	}
+}
+
+// With no limit the diff never stops on rows.
+func TestMtreeDiffNoLimit(t *testing.T) {
+	m := &MerkleTreeTask{}
+	m.countDiffRows(1 << 30)
+	if m.diffLimitHit.Load() || m.compareStopped() {
+		t.Fatal("a diff with no max_diff_rows must not stop on rows")
+	}
+}
+
+// The ranges come in key order, the open-start range first, and a range
+// that starts where the one before it ends leaves out its lower bound, so
+// that a row on a shared bound is compared once.
+func TestPkeyBatchesOrderAndSharedBounds(t *testing.T) {
+	m := &MerkleTreeTask{}
 	m.Key = []string{"id"}
-	m.Cols = []string{"id", "val"}
-	m.DiffResult = types.DiffOutput{
-		NodeDiffs: make(map[string]types.DiffByNodePair),
-		Summary:   types.DiffSummary{DiffRowsCount: make(map[string]int)},
+	m.SimplePrimaryKey = true
+	b := func(v int64) []any { return []any{v} }
+	ranges := []types.LeafRange{
+		{RangeStart: nil, RangeEnd: b(10)},
+		{RangeStart: b(10), RangeEnd: b(20)},
+		{RangeStart: b(30), RangeEnd: b(40)},
+		{RangeStart: b(40), RangeEnd: nil},
 	}
-	m.diffRowKeySets = make(map[string]map[string]map[string]struct{})
-	m.diffRowCounts = make(map[string]int64)
-	return m
-}
-
-// node1OnlyRows builds n rows with unique primary keys, all absent from the peer.
-func node1OnlyRows(n int) []types.OrderedMap {
-	rows := make([]types.OrderedMap, n)
-	for i := range rows {
-		rows[i] = types.OrderedMap{{Key: "id", Value: fmt.Sprintf("%d", i)}, {Key: "val", Value: "x"}}
+	got := m.pkeyBatchesFromRanges(ranges)
+	type want struct {
+		start, end any
+		exclusive  bool
 	}
-	return rows
-}
-
-// A diverged table stops collecting at max_diff_rows and marks the report truncated.
-func TestMtreeDiffEnforcesMaxDiffRows(t *testing.T) {
-	const cap = 5
-	m := mtreeTaskWithDiffState(cap)
-	work := CompareRangesWorkItem{
-		Node1: map[string]any{"Name": "n1"},
-		Node2: map[string]any{"Name": "n2"},
+	first := func(v []any) any {
+		if len(v) == 0 {
+			return nil
+		}
+		return v[0]
 	}
-
-	if err := m.appendDiffs("n1/n2", work, keydiff.Result{Only1: node1OnlyRows(20)}); err != nil {
-		t.Fatalf("appendDiffs returned error: %v", err)
+	wants := []want{
+		{nil, int64(10), false},
+		{int64(10), int64(20), true},
+		{int64(30), int64(40), false},
+		{int64(40), nil, true},
 	}
-
-	if got := len(m.DiffResult.NodeDiffs["n1/n2"].Rows["n1"]); got != cap {
-		t.Errorf("collected %d rows for n1, want the cap of %d", got, cap)
+	if len(got) != len(wants) {
+		t.Fatalf("got %d ranges, want %d: %+v", len(got), len(wants), got)
 	}
-	if !m.DiffResult.Summary.DiffRowLimitReached {
-		t.Errorf("expected DiffRowLimitReached=true after exceeding the cap")
-	}
-}
-
-// A pair with exactly max_diff_rows diffs collects them all and IS marked
-// truncated, matching table-diff: reaching the cap is a report-size bound, so we
-// warn that additional differences may exist even at the exact boundary.
-func TestMtreeDiffExactCapMarksTruncated(t *testing.T) {
-	const cap = 5
-	m := mtreeTaskWithDiffState(cap)
-	work := CompareRangesWorkItem{
-		Node1: map[string]any{"Name": "n1"},
-		Node2: map[string]any{"Name": "n2"},
-	}
-
-	if err := m.appendDiffs("n1/n2", work, keydiff.Result{Only1: node1OnlyRows(cap)}); err != nil {
-		t.Fatalf("appendDiffs returned error: %v", err)
-	}
-
-	if got := len(m.DiffResult.NodeDiffs["n1/n2"].Rows["n1"]); got != cap {
-		t.Errorf("collected %d rows for n1, want all %d", got, cap)
-	}
-	if !m.DiffResult.Summary.DiffRowLimitReached {
-		t.Errorf("expected DiffRowLimitReached=true when diffs exactly equal the cap")
-	}
-}
-
-// With no cap configured, every differing row is collected and nothing is flagged truncated.
-func TestMtreeDiffNoLimitCollectsAll(t *testing.T) {
-	m := mtreeTaskWithDiffState(0)
-	work := CompareRangesWorkItem{
-		Node1: map[string]any{"Name": "n1"},
-		Node2: map[string]any{"Name": "n2"},
-	}
-
-	if err := m.appendDiffs("n1/n2", work, keydiff.Result{Only1: node1OnlyRows(20)}); err != nil {
-		t.Fatalf("appendDiffs returned error: %v", err)
-	}
-
-	if got := len(m.DiffResult.NodeDiffs["n1/n2"].Rows["n1"]); got != 20 {
-		t.Errorf("collected %d rows for n1, want all 20", got)
-	}
-	if m.DiffResult.Summary.DiffRowLimitReached {
-		t.Errorf("did not expect DiffRowLimitReached with no cap configured")
+	for i, w := range wants {
+		if first(got[i].start) != w.start || first(got[i].end) != w.end || got[i].startExclusive != w.exclusive {
+			t.Errorf("range %d = [%v, %v] exclusive=%v, want [%v, %v] exclusive=%v",
+				i, first(got[i].start), first(got[i].end), got[i].startExclusive, w.start, w.end, w.exclusive)
+		}
 	}
 }
 
@@ -117,31 +97,6 @@ func TestMtreeDiffRejectsNegativeMaxDiffRows(t *testing.T) {
 	err := m.DiffMtree()
 	if err == nil || !strings.Contains(err.Error(), "max_diff_rows must be >= 0") {
 		t.Fatalf("expected max_diff_rows validation error, got %v", err)
-	}
-}
-
-// A lost work item means the pair has no result. The summary has to say so,
-// otherwise a diff count of zero reads as a match.
-func TestIncompletePairsReportsFailedWorkItems(t *testing.T) {
-	m := &MerkleTreeTask{}
-
-	if got := m.incompletePairs(); got != nil {
-		t.Errorf("expected no incomplete pairs on a clean task, got %v", got)
-	}
-
-	m.recordPairCompareErr("n2/n3")
-	m.recordPairCompareErr("n1/n2")
-	m.recordPairCompareErr("n1/n2")
-
-	got := m.incompletePairs()
-	want := []string{"n1/n2", "n2/n3"}
-	if len(got) != len(want) {
-		t.Fatalf("incompletePairs() = %v, want %v", got, want)
-	}
-	for i := range want {
-		if got[i] != want[i] {
-			t.Fatalf("incompletePairs() = %v, want %v (stable, sorted)", got, want)
-		}
 	}
 }
 

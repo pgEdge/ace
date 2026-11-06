@@ -127,6 +127,9 @@ func (d DiffOutput) CheckFormatVersion() error {
 // and the Node1/Node2 fields here will store rows corresponding to nodeX and nodeY respectively.
 type DiffByNodePair struct {
 	Rows map[string][]OrderedMap `json:"rows"` // Keyed by actual node name e.g. "n1", "n2"
+	// RowHashes holds, for each node, the row hash of each row in Rows, in
+	// the same order, as hex text. A report can leave it out.
+	RowHashes map[string][]string `json:"row_hashes,omitempty"`
 }
 
 // DiffSummary provides metadata about the diff operation.
@@ -163,10 +166,17 @@ type DiffSummary struct {
 	// that row comparison resolved as false positives (stale hashes, no data
 	// differences) and that the diff refreshed from live data in place.
 	StaleBlocksRefreshed map[string]int `json:"stale_blocks_refreshed,omitempty"`
-	// IncompletePairs lists the node pairs that lost a range-comparison work
-	// item to an error. For those pairs DiffRowsCount is only a lower bound,
-	// and zero means "not compared", not "no differences".
-	IncompletePairs []string `json:"incomplete_pairs,omitempty"`
+}
+
+// DiffPairs returns the number of node pairs that have differing rows.
+func (s DiffSummary) DiffPairs() int {
+	n := 0
+	for _, c := range s.DiffRowsCount {
+		if c > 0 {
+			n++
+		}
+	}
+	return n
 }
 
 type KVPair struct {

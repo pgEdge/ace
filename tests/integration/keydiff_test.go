@@ -53,10 +53,49 @@ func keydiffTable(t *testing.T, ctx context.Context, env *testEnv, table string)
 	return keydiff.Table{Schema: testSchema, Name: table, Key: key, Cols: cols, HashTypes: types1}, types1, types2
 }
 
-func keydiffCompare(t *testing.T, ctx context.Context, env *testEnv, table string, o keydiff.Options) (keydiff.Result, error) {
+// keydiffChanged is a changed row that a comparison found.
+type keydiffChanged struct {
+	Row1, Row2 types.OrderedMap
+}
+
+// keydiffRows holds the rows that a comparison gave to its sink, by kind,
+// and the counts that it returned.
+type keydiffRows struct {
+	keydiff.Result
+	Only1   []types.OrderedMap
+	Only2   []types.OrderedMap
+	Changed []keydiffChanged
+}
+
+// compareRows runs keydiff.Compare and keeps every row it reports. It also
+// checks that the counts of the result agree with the rows.
+func compareRows(ctx context.Context, tbl keydiff.Table, block keydiff.Block, s1, s2 keydiff.Side, o keydiff.Options) (keydiffRows, error) {
+	var out keydiffRows
+	res, err := keydiff.Compare(ctx, tbl, block, s1, s2, o, func(entries []keydiff.Entry) error {
+		for _, e := range entries {
+			switch e.Kind {
+			case keydiff.KindOnly1:
+				out.Only1 = append(out.Only1, e.Row1)
+			case keydiff.KindOnly2:
+				out.Only2 = append(out.Only2, e.Row2)
+			case keydiff.KindChanged:
+				out.Changed = append(out.Changed, keydiffChanged{Row1: e.Row1, Row2: e.Row2})
+			}
+		}
+		return nil
+	})
+	out.Result = res
+	if err == nil && (res.Only1 != len(out.Only1) || res.Only2 != len(out.Only2) || res.Changed != len(out.Changed)) {
+		return out, fmt.Errorf("the counts %d/%d/%d do not match the rows %d/%d/%d",
+			res.Only1, res.Only2, res.Changed, len(out.Only1), len(out.Only2), len(out.Changed))
+	}
+	return out, err
+}
+
+func keydiffCompare(t *testing.T, ctx context.Context, env *testEnv, table string, o keydiff.Options) (keydiffRows, error) {
 	t.Helper()
 	tbl, types1, types2 := keydiffTable(t, ctx, env, table)
-	return keydiff.Compare(ctx, tbl, keydiff.Block{Where: "TRUE"},
+	return compareRows(ctx, tbl, keydiff.Block{Where: "TRUE"},
 		keydiff.Side{Name: env.ServiceN1, Conn: env.N1Pool, ColTypes: types1},
 		keydiff.Side{Name: env.ServiceN2, Conn: env.N2Pool, ColTypes: types2},
 		o)
@@ -237,7 +276,7 @@ func TestKeyDiffCompositeKey(t *testing.T) {
 
 	tbl, types1, types2 := keydiffTable(t, ctx, env, table)
 	block := keydiff.Block{Where: "ROW(a, b) >= ROW($1, $2) AND ROW(a, b) < ROW($3, $4)", Args: []any{10, "k0", 50, "k0"}}
-	res, err := keydiff.Compare(ctx, tbl, block,
+	res, err := compareRows(ctx, tbl, block,
 		keydiff.Side{Name: env.ServiceN1, Conn: env.N1Pool, ColTypes: types1},
 		keydiff.Side{Name: env.ServiceN2, Conn: env.N2Pool, ColTypes: types2},
 		keydiff.Options{})
@@ -265,22 +304,17 @@ func TestKeyDiffBuildSide(t *testing.T) {
 	tbl, types1, types2 := keydiffTable(t, ctx, env, table)
 	s1 := keydiff.Side{Name: env.ServiceN1, Conn: env.N1Pool, ColTypes: types1, Rows: 100, RowsKnown: true}
 	s2 := keydiff.Side{Name: env.ServiceN2, Conn: env.N2Pool, ColTypes: types2, Rows: 90, RowsKnown: true}
-	res, err := keydiff.Compare(ctx, tbl, keydiff.Block{Where: "TRUE"}, s1, s2, keydiff.Options{})
+	res, err := compareRows(ctx, tbl, keydiff.Block{Where: "TRUE"}, s1, s2, keydiff.Options{})
 	require.NoError(t, err)
 	require.Equal(t, env.ServiceN2, res.BuildNode)
 	require.Len(t, res.Only1, 10)
 
 	keydiffExec(t, ctx, env, env.N2Pool, "TRUNCATE "+ident)
 	s2.Rows = 0
-	res, err = keydiff.Compare(ctx, tbl, keydiff.Block{Where: "TRUE"}, s1, s2, keydiff.Options{})
+	res, err = compareRows(ctx, tbl, keydiff.Block{Where: "TRUE"}, s1, s2, keydiff.Options{})
 	require.NoError(t, err)
 	require.Equal(t, env.ServiceN2, res.BuildNode)
 	require.Len(t, res.Only1, 100)
-
-	res, err = keydiff.Compare(ctx, tbl, keydiff.Block{Where: "TRUE"}, s1, s2, keydiff.Options{MaxKeys: 30})
-	require.NoError(t, err)
-	require.True(t, res.Truncated)
-	require.Len(t, res.Only1, 30)
 }
 
 // TestKeyDiffInheritance checks a parent and a child with rows of the same
@@ -305,7 +339,7 @@ func TestKeyDiffInheritance(t *testing.T) {
 	for _, scan := range []bool{false, true} {
 		for _, batch := range []int{0, 1, 2} {
 			tbl.ScanChildren = scan
-			res, err := keydiff.Compare(ctx, tbl, keydiff.Block{Where: "TRUE"},
+			res, err := compareRows(ctx, tbl, keydiff.Block{Where: "TRUE"},
 				keydiff.Side{Name: env.ServiceN1, Conn: env.N1Pool, ColTypes: types1},
 				keydiff.Side{Name: env.ServiceN2, Conn: env.N2Pool, ColTypes: types2},
 				keydiff.Options{BatchSize: batch})
@@ -335,7 +369,7 @@ func TestKeyDiffReadFilter(t *testing.T) {
 
 	tbl, types1, types2 := keydiffTable(t, ctx, env, table)
 	filter := `"status" = 'open'`
-	res, err := keydiff.Compare(ctx, tbl, keydiff.Block{Where: filter, ReadFilter: filter},
+	res, err := compareRows(ctx, tbl, keydiff.Block{Where: filter, ReadFilter: filter},
 		keydiff.Side{Name: env.ServiceN1, Conn: env.N1Pool, ColTypes: types1},
 		keydiff.Side{Name: env.ServiceN2, Conn: env.N2Pool, ColTypes: types2},
 		keydiff.Options{})
@@ -343,41 +377,6 @@ func TestKeyDiffReadFilter(t *testing.T) {
 	require.Equal(t, []string{"v7"}, columnValues(t, res.Only1, "v"))
 	require.Empty(t, res.Only2)
 	require.Empty(t, res.Changed, "without the filter in the row read, row 7 would be a changed row")
-}
-
-// TestKeyDiffPoolAfterEarlyStop checks that a comparison that stops its probe
-// query early keeps the connection: a pool of one connection opens it once
-// for all comparisons.
-func TestKeyDiffPoolAfterEarlyStop(t *testing.T) {
-	ctx := context.Background()
-	env := newSpockEnv()
-	table := "keydiff_early_stop"
-	ident := pgx.Identifier{testSchema, table}.Sanitize()
-	dropOnBoth(t, ctx, env, "TABLE IF EXISTS "+ident)
-	for _, pool := range env.pools() {
-		keydiffExec(t, ctx, env, pool, fmt.Sprintf("CREATE TABLE %s (id int PRIMARY KEY, v text)", ident))
-	}
-	keydiffExec(t, ctx, env, env.N1Pool, fmt.Sprintf("INSERT INTO %s SELECT g, 'v' FROM generate_series(1, 100000) g", ident))
-
-	one := func(src *pgxpool.Pool) *pgxpool.Pool {
-		cfg := src.Config().Copy()
-		cfg.MaxConns = 1
-		p, err := pgxpool.NewWithConfig(ctx, cfg)
-		require.NoError(t, err)
-		t.Cleanup(p.Close)
-		return p
-	}
-	p1, p2 := one(env.N1Pool), one(env.N2Pool)
-	tbl, types1, types2 := keydiffTable(t, ctx, env, table)
-	s1 := keydiff.Side{Name: env.ServiceN1, Conn: p1, ColTypes: types1, Rows: 100000, RowsKnown: true}
-	s2 := keydiff.Side{Name: env.ServiceN2, Conn: p2, ColTypes: types2, Rows: 0, RowsKnown: true}
-	for i := 0; i < 3; i++ {
-		res, err := keydiff.Compare(ctx, tbl, keydiff.Block{Where: "TRUE"}, s1, s2, keydiff.Options{MaxKeys: 10})
-		require.NoError(t, err, "run %d", i)
-		require.True(t, res.Truncated)
-		require.Len(t, res.Only1, 10)
-	}
-	require.EqualValues(t, 1, p1.Stat().NewConnsCount(), "the probe node lost its connection")
 }
 
 // TestKeyDiffMemoryLimit checks the memory limit before and during the
@@ -408,7 +407,7 @@ func TestKeyDiffMemoryLimit(t *testing.T) {
 	require.Greater(t, width, int64(0))
 	s1 := keydiff.Side{Name: env.ServiceN1, Conn: env.N1Pool, ColTypes: types1, Rows: 1000, RowsKnown: true, KeyWidth: width}
 	s2 := keydiff.Side{Name: env.ServiceN2, Conn: env.N2Pool, ColTypes: types2, Rows: 1000, RowsKnown: true, KeyWidth: width}
-	_, err = keydiff.Compare(ctx, tbl, keydiff.Block{Where: "TRUE"}, s1, s2, o)
+	_, err = compareRows(ctx, tbl, keydiff.Block{Where: "TRUE"}, s1, s2, o)
 	var me *keydiff.MemoryLimitError
 	require.True(t, errors.As(err, &me), "got %v", err)
 	require.True(t, me.Estimated)
@@ -416,13 +415,13 @@ func TestKeyDiffMemoryLimit(t *testing.T) {
 
 	// During the build: no statistics.
 	s1.KeyWidth, s2.KeyWidth = 0, 0
-	_, err = keydiff.Compare(ctx, tbl, keydiff.Block{Where: "TRUE"}, s1, s2, o)
+	_, err = compareRows(ctx, tbl, keydiff.Block{Where: "TRUE"}, s1, s2, o)
 	require.True(t, errors.As(err, &me), "got %v", err)
 	require.False(t, me.Estimated)
 
 	// With enough memory the comparison works.
 	o.MaxMemory = 64 << 20
-	res, err := keydiff.Compare(ctx, tbl, keydiff.Block{Where: "TRUE"}, s1, s2, o)
+	res, err := compareRows(ctx, tbl, keydiff.Block{Where: "TRUE"}, s1, s2, o)
 	require.NoError(t, err)
 	require.Len(t, res.Changed, 1)
 }

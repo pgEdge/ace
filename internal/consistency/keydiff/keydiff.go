@@ -100,11 +100,6 @@ type Block struct {
 
 // Options limit one comparison.
 type Options struct {
-	// MaxKeys is the number of differing keys after which the search stops.
-	// A key usually gives one differing row (a changed row counts once), so
-	// it is a limit on the rows too; in an inheritance tree a key can give
-	// more. 0 means no limit.
-	MaxKeys int
 	// MaxMemory is the limit, in bytes, of the memory for the keys of the
 	// block. 0 means no limit.
 	MaxMemory int64
@@ -112,23 +107,43 @@ type Options struct {
 	BatchSize int
 }
 
-// ChangedRow is a row that exists on both nodes with different values.
-type ChangedRow struct {
-	Row1 types.OrderedMap
-	Row2 types.OrderedMap
+// Kind is the kind of a differing row.
+type Kind int
+
+const (
+	// KindOnly1 is a row that exists only on the first node.
+	KindOnly1 Kind = iota + 1
+	// KindOnly2 is a row that exists only on the second node.
+	KindOnly2
+	// KindChanged is a row that exists on both nodes with different values.
+	KindChanged
+)
+
+// Entry is one differing row. Row1 and Hash1 are set for KindOnly1 and
+// KindChanged, Row2 and Hash2 for KindOnly2 and KindChanged. Each row has
+// the columns commit_ts and node_origin, then the columns of the table.
+type Entry struct {
+	Kind  Kind
+	Row1  types.OrderedMap
+	Row2  types.OrderedMap
+	Hash1 RowHash
+	Hash2 RowHash
 }
 
-// Result lists the rows that differ. Each row has the columns commit_ts and
-// node_origin, then the columns of the table.
+// Sink receives the differing rows of one row read. Compare calls it once
+// for each batch of keys that gives at least one entry, and does not keep
+// the entries after the call. An error from the sink stops the comparison
+// and is returned by Compare.
+type Sink func(entries []Entry) error
+
+// Result counts the rows that differ.
 type Result struct {
-	// Only1 and Only2 are the rows that exist only on the first or only on
-	// the second node.
-	Only1   []types.OrderedMap
-	Only2   []types.OrderedMap
-	Changed []ChangedRow
-	// Truncated is true if the comparison stopped at Options.MaxKeys and
-	// more rows can differ.
-	Truncated bool
+	// Only1 and Only2 are the numbers of rows that exist only on the first
+	// or only on the second node; Changed is the number of rows that exist
+	// on both nodes with different values.
+	Only1   int
+	Only2   int
+	Changed int
 	// BuildNode is the name of the node whose keys went into the map.
 	BuildNode string
 	// DiffKeys is the number of keys that the key queries found different.
@@ -140,13 +155,14 @@ type Result struct {
 // Count returns the number of differing rows, with a changed row counted
 // once.
 func (r Result) Count() int {
-	return len(r.Only1) + len(r.Only2) + len(r.Changed)
+	return r.Only1 + r.Only2 + r.Changed
 }
 
-// Compare finds the rows of block that differ between the nodes s1 and s2.
-// A *MemoryLimitError means that the keys of the block need more memory than
+// Compare finds the rows of block that differ between the nodes s1 and s2
+// and gives them to sink, one batch of the row read at a time. A
+// *MemoryLimitError means that the keys of the block need more memory than
 // Options.MaxMemory.
-func Compare(ctx context.Context, t Table, b Block, s1, s2 Side, o Options) (Result, error) {
+func Compare(ctx context.Context, t Table, b Block, s1, s2 Side, o Options, sink Sink) (Result, error) {
 	if o.BatchSize <= 0 {
 		o.BatchSize = defaultBatchSize
 	}
@@ -165,7 +181,7 @@ func Compare(ctx context.Context, t Table, b Block, s1, s2 Side, o Options) (Res
 	}
 	mem := &memCounter{limit: o.MaxMemory}
 
-	ids, truncated, err := runFindDiffKeys(ctx, t, query, b.Args, build, probe, o.MaxKeys, mem)
+	ids, err := runFindDiffKeys(ctx, t, query, b.Args, build, probe, mem)
 	if err != nil {
 		var me *errMemory
 		if errors.As(err, &me) {
@@ -178,7 +194,6 @@ func Compare(ctx context.Context, t Table, b Block, s1, s2 Side, o Options) (Res
 		return Result{}, err
 	}
 	res := Result{BuildNode: build.Name}
-	res.Truncated = truncated
 	res.DiffKeys = len(ids)
 	if len(ids) == 0 {
 		return res, nil
@@ -186,6 +201,7 @@ func Compare(ctx context.Context, t Table, b Block, s1, s2 Side, o Options) (Res
 
 	seen1 := make(map[string]struct{})
 	seen2 := make(map[string]struct{})
+	var entries []Entry
 	for start := 0; start < len(ids); start += o.BatchSize {
 		end := min(start+o.BatchSize, len(ids))
 		batch := ids[start:end]
@@ -197,7 +213,14 @@ func Compare(ctx context.Context, t Table, b Block, s1, s2 Side, o Options) (Res
 		if err != nil {
 			return Result{}, err
 		}
-		classify(len(batch), rows1, rows2, &res)
+		entries = classify(len(batch), rows1, rows2, entries[:0], &res)
+		if len(entries) == 0 {
+			continue
+		}
+		if err := sink(entries); err != nil {
+			return Result{}, err
+		}
+		clear(entries)
 	}
 	return res, nil
 }
@@ -282,36 +305,26 @@ func checkEstimate(t Table, build Side, o Options) error {
 
 // runFindDiffKeys runs the key query on both sides and finds the differing
 // keys. A build side that is known to have no rows is not queried.
-func runFindDiffKeys(ctx context.Context, t Table, query string, args []any, build, probe Side, maxKeys int, mem *memCounter) ([]string, bool, error) {
+func runFindDiffKeys(ctx context.Context, t Table, query string, args []any, build, probe Side, mem *memCounter) ([]string, error) {
 	var buildSrc keySource
 	if !build.RowsKnown || build.Rows != 0 {
 		src, err := openKeySource(ctx, t, query, args, build)
 		if err != nil {
-			return nil, false, err
+			return nil, err
 		}
 		defer src.close()
 		buildSrc = src
 	}
 	probeSrc, err := openKeySource(ctx, t, query, args, probe)
 	if err != nil {
-		return nil, false, err
+		return nil, err
 	}
 	defer probeSrc.close()
 
 	// A key query is sent on the first call of Next, so the probe query
 	// starts only when the whole build side is in the map, and its
 	// connection is not busy while the build side is read.
-	ids, truncated, err := findDiffKeys(buildSrc, probeSrc, maxKeys, mem)
-	if err == nil && truncated {
-		// The comparison goes on, so the connection must stay open. A
-		// cancel of the probe query would close it, and with a strict
-		// limit of connections the pool could fail to open a new one. So
-		// the rest of the probe query is read and dropped. The server then
-		// computes the row hash of every row left in the block, which costs
-		// much only for a large block of very wide rows.
-		probeSrc.readRest = true
-	}
-	return ids, truncated, err
+	return findDiffKeys(buildSrc, probeSrc, mem)
 }
 
 // keyRows reads the rows of a key query.
@@ -331,9 +344,6 @@ type keyRows struct {
 	done  bool
 	// complete is true when all rows of the query were read.
 	complete bool
-	// readRest is true when close must read the rows that are left instead
-	// of cancelling the query.
-	readRest bool
 }
 
 // openKeySource returns the rows of the key query of side s. The query is
@@ -407,12 +417,12 @@ func (k *keyRows) Row() keyRow { return k.cur }
 
 func (k *keyRows) Err() error { return k.err }
 
-// close ends the query. If the rows were not all read and readRest is
-// false, the query is cancelled on the server first, so that closing it does
-// not read the rest of the block. The cancel closes the connection.
+// close ends the query. If the rows were not all read, the query is
+// cancelled on the server first, so that closing it does not read the rest
+// of the block. The cancel closes the connection.
 func (k *keyRows) close() {
 	if k.rows != nil {
-		if !k.complete && !k.readRest {
+		if !k.complete {
 			k.cancel()
 		}
 		k.rows.Close()
@@ -422,7 +432,7 @@ func (k *keyRows) close() {
 
 // readRow is one row of the row read.
 type readRow struct {
-	hash rowHash
+	hash RowHash
 	row  types.OrderedMap
 }
 
@@ -498,25 +508,31 @@ func readRows(ctx context.Context, t Table, filter string, s Side, ids []string,
 	return out, nil
 }
 
-// classify adds the rows of one batch to the result. For each key, the rows
-// with the same hash on both nodes cancel out. Of the rows left, as many as
-// possible are paired as changed rows, and the rest exist on one node only.
-// A key whose rows all cancel out (the row changed back, or was deleted on
-// both nodes, during the comparison) adds nothing.
-func classify(n int, rows1, rows2 [][]readRow, res *Result) {
+// classify appends the differing rows of one batch to entries and counts
+// them in res. For each key, the rows with the same hash on both nodes
+// cancel out. Of the rows left, as many as possible are paired as changed
+// rows, and the rest exist on one node only. A key whose rows all cancel out
+// (the row changed back, or was deleted on both nodes, during the
+// comparison) adds nothing.
+func classify(n int, rows1, rows2 [][]readRow, entries []Entry, res *Result) []Entry {
 	for i := 0; i < n; i++ {
 		left1, left2 := cancelEqual(rows1[i], rows2[i])
 		for len(left1) > 0 && len(left2) > 0 {
-			res.Changed = append(res.Changed, ChangedRow{Row1: left1[0].row, Row2: left2[0].row})
+			entries = append(entries, Entry{Kind: KindChanged, Row1: left1[0].row, Row2: left2[0].row,
+				Hash1: left1[0].hash, Hash2: left2[0].hash})
+			res.Changed++
 			left1, left2 = left1[1:], left2[1:]
 		}
 		for _, r := range left1 {
-			res.Only1 = append(res.Only1, r.row)
+			entries = append(entries, Entry{Kind: KindOnly1, Row1: r.row, Hash1: r.hash})
+			res.Only1++
 		}
 		for _, r := range left2 {
-			res.Only2 = append(res.Only2, r.row)
+			entries = append(entries, Entry{Kind: KindOnly2, Row2: r.row, Hash2: r.hash})
+			res.Only2++
 		}
 	}
+	return entries
 }
 
 // cancelEqual removes the pairs of rows with the same hash from a and b.

@@ -35,9 +35,9 @@ func createPartitionedTable(t *testing.T, ctx context.Context, env *testEnv, tab
 		for _, pool := range env.pools() {
 			_, _ = pool.Exec(ctx, "DROP TABLE IF EXISTS "+parent+" CASCADE") // nosemgrep
 		}
-		files, _ := filepath.Glob("*_diffs-*.json")
+		files, _ := filepath.Glob("*_diffs-*")
 		for _, f := range files {
-			os.Remove(f)
+			os.RemoveAll(f)
 		}
 	})
 
@@ -104,7 +104,7 @@ func TestMerkleTreeOnPartition(t *testing.T) {
 	})
 	require.NoError(t, task.BuildMtree())
 	require.NoError(t, task.DiffMtree())
-	if nodeDiffs, ok := task.DiffResult.NodeDiffs[env.pairKey()]; ok {
+	if nodeDiffs, ok := diffPairs(t, task)[env.pairKey()]; ok {
 		require.Empty(t, extractDiffIDs(nodeDiffs.Rows[env.ServiceN1]), "nodes seeded identically; first diff must be clean")
 		require.Empty(t, extractDiffIDs(nodeDiffs.Rows[env.ServiceN2]), "nodes seeded identically; first diff must be clean")
 	}
@@ -116,7 +116,7 @@ func TestMerkleTreeOnPartition(t *testing.T) {
 	})
 
 	require.NoError(t, task.DiffMtree())
-	nodeDiffs, ok := task.DiffResult.NodeDiffs[env.pairKey()]
+	nodeDiffs, ok := diffPairs(t, task)[env.pairKey()]
 	require.True(t, ok, "the change on n2 was not seen")
 	require.Equal(t, []int{150}, extractDiffIDs(nodeDiffs.Rows[env.ServiceN1]))
 	require.Equal(t, []int{150}, extractDiffIDs(nodeDiffs.Rows[env.ServiceN2]))
@@ -178,7 +178,7 @@ func TestMerkleTreeOnPartitionSeesRowsMovedBetweenPartitions(t *testing.T) {
 	})
 
 	require.NoError(t, task.DiffMtree())
-	nodeDiffs, ok := task.DiffResult.NodeDiffs[env.pairKey()]
+	nodeDiffs, ok := diffPairs(t, task)[env.pairKey()]
 	require.True(t, ok, "the rows moved on n2 were not seen")
 	require.Equal(t, []int{152}, extractDiffIDs(nodeDiffs.Rows[env.ServiceN1]), "152 left the partition on n2 only")
 	require.Equal(t, []int{151}, extractDiffIDs(nodeDiffs.Rows[env.ServiceN2]), "151 entered the partition on n2 only")

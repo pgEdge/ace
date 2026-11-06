@@ -19,8 +19,9 @@ This command compares the data in the specified table across nodes in a cluster 
 | `--block-size <int>` | `-b` | Rows processed per comparison block. Default `100000`. Honours `ace.yaml` limits unless `--override-block-size` is set. |
 | `--concurrency-factor <float>` | `-c` | CPU ratio for the comparison of the blocks that differ (0.0–4.0, e.g. 0.5 uses half of available CPUs); the number of hash workers comes from `--max-connections`. Default `0.5`. |
 | `--compare-unit-size <int>` | `-u` | Deprecated: no longer used. ACE accepts it and writes a warning. |
-| `--output <json\|html>` | `-o` | Report format. Default `json`. When `html`, both JSON and HTML files share the same timestamped prefix. |
-| `--max-html-rows <int>` |  | Maximum number of rows for each node pair in the HTML report. Default `0`, which means `table_diff.max_html_rows` from `ace.yaml`, or `10000` when that is not set either. There is no setting for "no limit"; set a large number instead. The JSON report always contains every row. |
+| `--output <json\|html>` | `-o` | Report format. Default `json`. The result directory and the JSON report are always written; with `html` the HTML report is added. All of them share the same timestamped prefix. |
+| `--max-html-rows <int>` |  | About how many rows of each node pair the HTML report shows; the limit is applied at a block boundary. Default `0`, which means `table_diff.max_html_rows` from `ace.yaml`, or `10000` when that is not set either. There is no setting for "no limit"; set a large number instead. The JSON report contains every row that the diff collected. When `max_diff_rows` stops the diff before every block is compared, the summary of the report has `diff_row_limit_reached`, and more differences may exist. |
+| `--max-html-value-length <int>` |  | The number of characters of a value that the HTML report shows; a longer value is cut at the right side. Key values are never cut. Default `0`, which means `table_diff.max_html_value_length` from `ace.yaml`, or `1024`. |
 | `--nodes <list>` | `-n` | Comma-separated node list or `all`. Up to three-way diffs are supported. |
 | `--table-filter <WHERE>` | `-F` | Optional SQL `WHERE` clause applied on every node before hashing. |
 | `--against-origin <node>` |  | Limit the diff to rows whose `node_origin` matches this Spock node id or name (useful for failed-node recovery). |
@@ -133,9 +134,13 @@ ace table-diff my-cluster public._events \
       row missing on one node. Each row takes several kilobytes of markup, so
       a report with hundreds of thousands of rows is too large for a browser.
       When the diff has more rows, the report says so at the top and in each
-      node pair section, and the full list stays in the JSON file. Rows are
-      taken in report order: value differences, then rows missing on the
-      second node, then rows missing on the first node.
+      node pair section, and the full list stays in the JSON file. The
+      report shows the blocks of the table in key order, and the rows of a
+      block sorted by key, with all kinds of differences together. It stops
+      at a block boundary.
+    - The HTML report is built from the result directory, so you can build
+      it again with other limits, without a database connection: see
+      [diff-report](diff-report.md).
     - A repair plan that you build in a truncated report has rules only for
       the rows shown, and its `default_action` is `skip`. So when you run
       `table-repair` with that plan and the full diff file, the rows that the
@@ -154,7 +159,16 @@ ace table-diff my-cluster public._events \
     - The cap applies globally across **all node pairs combined**, not to each
       pair individually. On a three-node cluster that diffs n1/n2 and n1/n3 at
       the same time, both pairs share the single cap. As a result, each pair
-      can report fewer differences than the table actually contains.
+      can report fewer differences than the table actually contains. A row
+      missing on one of three nodes counts once in each of its two pairs.
+    - The cap is approximate. A block is compared completely or not at all,
+      so the blocks that are in work when the cap is reached add their rows,
+      and the result can have more rows than the cap. The blocks are
+      compared in key order, so the result holds about the first
+      differences by key.
+    - The cap does not protect the memory of the client: the differing
+      rows go to disk as soon as they are found. It limits the size of the
+      result and the run time.
     - The `table-diff stopped after reaching max_diff_rows` warning indicates
       that the run hit the cap. Treat the reported result as partial whenever
       the warning appears. Re-run `table-diff` after each repair pass, and
@@ -165,6 +179,10 @@ ace table-diff my-cluster public._events \
 When the number of differences between nodes is very large (approaching or 
 exceeding `max_diff_rows`), `table-diff` emits a warning and stops 
 enumeration early:
+
+### The diff result
+
+When `table-diff` finds differences, it writes a result directory `<schema>_<table>_diffs-<timestamp>/` next to the JSON report, with one file for each compared block that has differences. The JSON report is built from it. A run that fails, times out or is stopped writes no result. See [diff-report](diff-report.md) for the layout. `repset-diff` and `schema-diff` write one result for each table.
 
 ### Recovery-focused options
 

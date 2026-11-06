@@ -2,7 +2,7 @@ package mtree
 
 import (
 	"context"
-	"slices"
+	"strings"
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -159,17 +159,24 @@ func TestDiffPoolSizeIsTheCapOrWorkersPlusOne(t *testing.T) {
 }
 
 // Compare workers do not open pools of their own. They use the per-node
-// pools the diff opened, so a node without a pool is a lost work item for
-// that pair, not a reason to dial the database.
-func TestCompareRangesWithoutPoolMarksPairIncomplete(t *testing.T) {
+// pools the diff opened, so a node without a pool is an error of the diff,
+// not a reason to dial the database.
+func TestCompareRangesWithoutPoolFailsTheDiff(t *testing.T) {
 	m := &MerkleTreeTask{Ctx: context.Background(), MaxCpuRatio: 0.1}
 	n1 := map[string]any{"Name": "n1"}
 	n2 := map[string]any{"Name": "n2"}
-	items := []CompareRangesWorkItem{{Node1: n1, Node2: n2, Ranges: [][2][]any{{{int64(1)}, {int64(2)}}}}}
+	items := []CompareRangesWorkItem{
+		{Node1: n1, Node2: n2, Range: [2][]any{{int64(1)}, {int64(2)}}},
+		{Node1: n1, Node2: n2, Range: [2][]any{{int64(2)}, {int64(3)}}, StartExclusive: true, Seq: 1},
+	}
 
 	m.CompareRanges(items, map[string]*pgxpool.Pool{})
 
-	if got := m.incompletePairs(); !slices.Equal(got, []string{"n1/n2"}) {
-		t.Fatalf("incompletePairs() = %v, want [n1/n2]", got)
+	err := m.firstCompareErr()
+	if err == nil || !strings.Contains(err.Error(), "no connection pool for node n1") {
+		t.Fatalf("firstCompareErr() = %v, want the missing pool of n1", err)
+	}
+	if !m.compareStopped() {
+		t.Fatal("after an error the workers must take no more work items")
 	}
 }

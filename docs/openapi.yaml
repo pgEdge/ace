@@ -465,7 +465,7 @@ components:
           deprecated: true
         max_diff_rows:
           type: integer
-          description: Defaults to table_diff.max_diff_rows or 0 (no limit).
+          description: Approximate limit of the differing rows of all node pairs together. Defaults to table_diff.max_diff_rows or 0 (no limit).
         max_connections:
           type: integer
           description: Connections per node for each table-diff task; a value that is set is a strict limit for the whole task. 0 or missing takes, in this order, max_connections.nodes.<cluster>.<node> or max_connections.default from ace.yaml, then table_diff.max_connections; if none is set, the task opens 8 for cutting and hashing, and the comparison can open more.

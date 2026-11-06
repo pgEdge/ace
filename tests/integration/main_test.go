@@ -332,18 +332,7 @@ func teardownPostgresCluster(t *testing.T) {
 		}
 	}
 	log.Printf("Cleaning up diff files...")
-	files, err := filepath.Glob("*_diffs-*.json")
-	if err != nil {
-		t.Logf("Error finding diff files: %v", err)
-		return
-	}
-	for _, f := range files {
-		if err := os.Remove(f); err != nil {
-			t.Logf("Failed to remove diff file %s: %v", f, err)
-		} else {
-			log.Printf("Removed diff file: %s", f)
-		}
-	}
+	removeTestDiffResults()
 	if err := os.Remove("test_cluster.json"); err != nil && !os.IsNotExist(err) {
 		t.Logf("failed to remove test_cluster.json: %v", err)
 	}
@@ -352,6 +341,26 @@ func teardownPostgresCluster(t *testing.T) {
 // TestMain loads the ACE config, then brings up the three-node spock cluster
 // and the shared customers tables that every test in this package compares
 // against, and tears the cluster down once the run finishes.
+// suiteStart is the time the test binary started. Diff results older than
+// that were not written by this run.
+var suiteStart = time.Now()
+
+// removeTestDiffResults removes the diff results, directories and reports,
+// that this test run wrote into the working directory. Results that were
+// there before the run are kept.
+func removeTestDiffResults() {
+	files, _ := filepath.Glob("*_diffs-*")
+	for _, f := range files {
+		st, err := os.Lstat(f)
+		if err != nil || st.ModTime().Before(suiteStart) {
+			continue
+		}
+		if err := os.RemoveAll(f); err != nil {
+			log.Printf("failed to remove diff result %s: %v", f, err)
+		}
+	}
+}
+
 func TestMain(m *testing.M) {
 	os.Setenv(
 		"TESTCONTAINERS_RYUK_DISABLED",

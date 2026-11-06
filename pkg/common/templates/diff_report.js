@@ -150,15 +150,7 @@
             if (!wrapper) return;
             const editor = wrapper.querySelector('.custom-editor');
             if (!editor) return;
-            const show = selectEl.value === 'custom';
-            editor.classList.toggle('is-visible', show);
-            if (show) {
-                const textarea = editor.querySelector('.custom-row-input');
-                if (textarea && !textarea.value.trim()) {
-                    const def = textarea.dataset.defaultJson || '';
-                    if (def) textarea.value = def;
-                }
-            }
+            editor.classList.toggle('is-visible', selectEl.value === 'custom');
         }
     });
 
@@ -305,8 +297,9 @@
             });
             lines.push('# default_action is skip, so table-repair does not change any other');
             lines.push('# row of the diff file, and those rows stay different. To cover all');
-            lines.push('# rows, run table-diff again with a larger max_html_rows');
-            lines.push('# (or --max-html-rows), or add rules by hand.');
+            lines.push('# rows, build the report again with a larger limit, or add rules');
+            lines.push('# by hand:');
+            lines.push('#   ace diff-report --diff-file ' + (report.diff_file || 'PATH') + ' --max-html-rows N');
             lines.push('# Full diff: ' + JSON.stringify(report.diff_file || ''));
         } else if (partialSelection) {
             lines.push('# This plan has rules only for the ' + selectionInfo.selectedCount + ' rows selected in the HTML report.');
