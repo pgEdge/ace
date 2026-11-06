@@ -47,7 +47,8 @@ func blockHashes(t *testing.T, ctx context.Context, conn *pgxpool.Conn, name, co
 	tdSQL, err := queries.BlockHashSQL("pg_temp", name, []string{"id"}, "TD_BLOCK_HASH", false, false, "", allCols, colTypes)
 	require.NoError(t, err)
 	var td string
-	require.NoError(t, conn.QueryRow(ctx, tdSQL).Scan(&td)) // nosemgrep
+	var tdRows int64
+	require.NoError(t, conn.QueryRow(ctx, tdSQL).Scan(&td, &tdRows)) // nosemgrep
 
 	checkBlockHash(t, ctx, conn, name, allCols, colTypes, leaf, td)
 	return leaf, td
@@ -130,7 +131,8 @@ func inheritedBlockHashes(t *testing.T, ctx context.Context, conn *pgxpool.Conn,
 	tdSQL, err := queries.BlockHashSQL("pg_temp", name, []string{"id"}, "TD_BLOCK_HASH", false, false, "", allCols, nil)
 	require.NoError(t, err)
 	var td string
-	require.NoError(t, conn.QueryRow(ctx, tdSQL).Scan(&td)) // nosemgrep
+	var tdRows int64
+	require.NoError(t, conn.QueryRow(ctx, tdSQL).Scan(&td, &tdRows)) // nosemgrep
 
 	checkBlockHash(t, ctx, conn, name, allCols, nil, leaf, td)
 	return leaf

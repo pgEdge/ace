@@ -73,6 +73,9 @@ func (h *blockHashers) addConn(node string, conn *pgxpool.Conn) {
 	go h.work(node, conn, cur)
 }
 
+// work hashes the blocks that cur gives, one after another, on conn, until
+// the list ends or a hash fails. The first error stops the list and the
+// queries of all other workers. conn goes back to its pool at the end.
 func (h *blockHashers) work(node string, conn *pgxpool.Conn, cur *slicer.Cursor) {
 	defer h.wg.Done()
 	defer conn.Release()
@@ -82,10 +85,13 @@ func (h *blockHashers) work(node string, conn *pgxpool.Conn, cur *slicer.Cursor)
 			return
 		}
 		r := h.t.rangeFromBlock(b)
-		var hash string
+		var (
+			hash string
+			rows int64
+		)
 		err := h.t.withBlockLimit(h.ctx, func(ctx context.Context) error {
 			var err error
-			hash, err = h.t.hashRangeOn(ctx, conn, node, r)
+			hash, rows, err = h.t.hashRangeOn(ctx, conn, node, r)
 			return err
 		})
 		if err != nil {
@@ -101,7 +107,7 @@ func (h *blockHashers) work(node string, conn *pgxpool.Conn, cur *slicer.Cursor)
 		if h.results[idx] == nil {
 			h.results[idx] = make(RangeResults)
 		}
-		h.results[idx][node] = HashResult{hash: hash}
+		h.results[idx][node] = HashResult{hash: hash, rows: rows}
 		h.mu.Unlock()
 		h.bar.Increment()
 	}

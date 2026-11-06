@@ -172,7 +172,6 @@ func (e *testEnv) newTableDiffTask(t *testing.T, qualifiedTableName string, node
 	task.Nodes = strings.Join(nodes, ",")
 	task.Output = "json"
 	task.BlockSize = 1000
-	task.CompareUnitSize = 100
 	task.ConcurrencyFactor = 1
 	task.MaxDiffRows = math.MaxInt64
 
@@ -301,10 +300,7 @@ func (e *testEnv) setupNullDivergence(t *testing.T, ctx context.Context, qualifi
 // runTableDiff executes a table-diff and returns the path to the latest diff file.
 func (e *testEnv) runTableDiff(t *testing.T, qualifiedTableName string, nodesToCompare []string) string {
 	t.Helper()
-	files, _ := filepath.Glob("*_diffs-*.json")
-	for _, f := range files {
-		os.Remove(f)
-	}
+	removeTestDiffResults()
 
 	tdTask := e.newTableDiffTask(t, qualifiedTableName, nodesToCompare)
 	err := tdTask.RunChecks(false)
@@ -328,7 +324,7 @@ func (e *testEnv) assertNoTableDiff(t *testing.T, qualifiedTableName string) {
 	err = tdTask.ExecuteTask()
 	require.NoError(t, err, "assertNoTableDiff: execution failed")
 
-	assert.Empty(t, tdTask.DiffResult.NodeDiffs, "Expected no differences after repair, but diffs were found")
+	assert.Empty(t, diffPairs(t, tdTask), "Expected no differences after repair, but diffs were found")
 }
 
 // repairTable finds the latest diff file and runs a repair.

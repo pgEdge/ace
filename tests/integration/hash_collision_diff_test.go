@@ -37,9 +37,9 @@ func createCollisionTable(t *testing.T, ctx context.Context, env *testEnv, table
 		for _, pool := range env.pools() {
 			_, _ = pool.Exec(ctx, "DROP TABLE IF EXISTS "+ident) // nosemgrep
 		}
-		files, _ := filepath.Glob("*_diffs-*.json")
+		files, _ := filepath.Glob("*_diffs-*")
 		for _, f := range files {
-			os.Remove(f)
+			os.RemoveAll(f)
 		}
 	})
 	for _, pool := range env.pools() {
@@ -118,7 +118,7 @@ func TestTableDiffFindsRowsThatCollidedInTheOldEncoding(t *testing.T) {
 	task := env.newTableDiffTask(t, qualified, []string{env.ServiceN1, env.ServiceN2})
 	require.NoError(t, task.RunChecks(false))
 	require.NoError(t, task.ExecuteTask())
-	requireCollidingRowsReported(t, env, task.DiffResult.NodeDiffs)
+	requireCollidingRowsReported(t, env, diffPairs(t, task))
 }
 
 // TestMerkleTreeFindsRowsThatCollidedInTheOldEncoding builds the tree before
@@ -141,7 +141,7 @@ func TestMerkleTreeFindsRowsThatCollidedInTheOldEncoding(t *testing.T) {
 	})
 	require.NoError(t, task.BuildMtree())
 	require.NoError(t, task.DiffMtree())
-	if pair, ok := task.DiffResult.NodeDiffs[env.pairKey()]; ok {
+	if pair, ok := diffPairs(t, task)[env.pairKey()]; ok {
 		require.Empty(t, pair.Rows[env.ServiceN1], "nodes seeded identically; first diff must be clean")
 		require.Empty(t, pair.Rows[env.ServiceN2], "nodes seeded identically; first diff must be clean")
 	}
@@ -149,5 +149,5 @@ func TestMerkleTreeFindsRowsThatCollidedInTheOldEncoding(t *testing.T) {
 	makeCollidingChanges(t, ctx, env, table)
 
 	require.NoError(t, task.DiffMtree())
-	requireCollidingRowsReported(t, env, task.DiffResult.NodeDiffs)
+	requireCollidingRowsReported(t, env, diffPairs(t, task))
 }

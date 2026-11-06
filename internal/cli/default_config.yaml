@@ -33,17 +33,21 @@ table_diff:
   concurrency_factor: 0.5
   max_diff_rows: 1000000
   max_html_rows: 10000         # max rows per node pair in the HTML report
+  max_html_value_length: 1024  # max characters of a value in the HTML report
   min_diff_block_size: 1
   max_diff_block_size: 1000000
   diff_block_size: 1000
   diff_batch_size: 1
   max_diff_batch_size: 1000
-  compare_unit_size: 10000
+  # Memory limit, in MB, for the keys of one mismatched block while ACE
+  # looks for the differing rows. 0 = no limit.
+  key_map_max_memory_mb: 512
   # Old name of max_connections.default below; used only when that is not
   # set. 0 = not set.
   max_connections: 0
   # Time limits in seconds; 0 means no limit. block_timeout limits one
-  # query on one block (a hash, a split of a range, a fetch of its rows).
+  # query on one block (a hash, or a read of the keys or of the rows of a
+  # block that differs).
   # run_timeout limits the diff of one table. A query that hits a limit
   # is cancelled on the server too.
   block_timeout: 60
@@ -89,10 +93,16 @@ mtree:
     min_block_size: 1000
     block_size: 100000
     max_block_size: 1000000
-    # Max differing rows collected per node pair; 0 or absent means unbounded.
+    # Max differing rows of all node pairs of a run (approximate); 0 or
+    # absent means unbounded.
     max_diff_rows: 1000000
     # Max rows per node pair in the HTML report (--output html).
     max_html_rows: 10000
+    # Max characters of a value in the HTML report.
+    max_html_value_length: 1024
+    # Memory limit, in MB, for the keys of one work item while mtree
+    # table-diff looks for the differing rows. 0 = no limit.
+    key_map_max_memory_mb: 512
 
 # Example scheduler configuration:
 # schedule_jobs:

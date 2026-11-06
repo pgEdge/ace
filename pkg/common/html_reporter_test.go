@@ -13,6 +13,7 @@ package common
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -24,6 +25,34 @@ import (
 
 	"github.com/pgedge/ace/pkg/types"
 )
+
+// storeTestDiff writes the rows of diff as a result directory in a temporary
+// directory and returns it. A diff with no rows gives a result with an empty
+// manifest, as a reader would see one.
+func storeTestDiff(t *testing.T, diff types.DiffOutput, blockSize int) *StoredDiff {
+	t.Helper()
+	base := filepath.Join(t.TempDir(), "public_t_diffs-20260101000000")
+	paths, err := StoreDiffOutput(context.Background(), diff, base, blockSize, DiffReportOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if paths.Dir == "" {
+		if err := os.Mkdir(base, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		m := DiffResultManifest{FormatVersion: DiffResultFormatVersion, Summary: diff.Summary, PrimaryKey: diff.Summary.PrimaryKey}
+		data, _ := json.Marshal(m)
+		if err := os.WriteFile(filepath.Join(base, DiffResultManifestName), data, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		paths.Dir = base
+	}
+	r, err := OpenDiffResult(paths.Dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return r
+}
 
 // htmlTestDiff builds a two-node diff with the given number of value
 // differences, rows missing on n2 and rows missing on n1. Primary keys are
@@ -88,10 +117,16 @@ var diffDataRe = regexp.MustCompile(`(?s)<script id="diff-data" type="applicatio
 // embedded diff data.
 func renderHTMLTestReport(t *testing.T, diff types.DiffOutput, maxRows int64) (string, htmlTestData) {
 	t.Helper()
-	jsonPath := filepath.Join(t.TempDir(), "public_t_diffs-20260101000000.json")
-	htmlPath, err := writeHTMLDiffReport(diff, jsonPath, maxRows)
+	return renderStoredTestReport(t, storeTestDiff(t, diff, 0), maxRows, 0)
+}
+
+// renderStoredTestReport writes the report of a stored diff and returns the
+// page and the parsed embedded diff data.
+func renderStoredTestReport(t *testing.T, r *StoredDiff, maxRows, maxLen int64) (string, htmlTestData) {
+	t.Helper()
+	htmlPath, err := WriteHTMLDiffReport(context.Background(), r, maxRows, maxLen)
 	if err != nil {
-		t.Fatalf("writeHTMLDiffReport: %v", err)
+		t.Fatalf("WriteHTMLDiffReport: %v", err)
 	}
 	raw, err := os.ReadFile(htmlPath)
 	if err != nil {
@@ -158,8 +193,8 @@ func TestHTMLReportNotTruncated(t *testing.T) {
 	}
 }
 
-// The limit takes entries in report order: value differences first, then
-// rows missing on n2, then rows missing on n1.
+// When the first block alone has more entries than the limit, the report
+// shows the first entries of that block.
 func TestHTMLReportTruncated(t *testing.T) {
 	// 25 value differences, 10 missing on n2, 5 missing on n1; limit 30.
 	page, data := renderHTMLTestReport(t, htmlTestDiff(25, 10, 5, "x"), 30)
@@ -173,12 +208,6 @@ func TestHTMLReportTruncated(t *testing.T) {
 	if got := countRows(page, "missing_in_a"); got != 0 {
 		t.Errorf("missing_in_a rows: got %d, want 0", got)
 	}
-	if !strings.Contains(page, ">Missing in n2<") {
-		t.Error("group of rows missing on n2 is not shown")
-	}
-	if strings.Contains(page, ">Missing in n1<") {
-		t.Error("group header for rows missing on n1 is shown, but none of its rows are")
-	}
 
 	for _, want := range []string{
 		"This report shows 30 of 40 rows",
@@ -189,7 +218,7 @@ func TestHTMLReportTruncated(t *testing.T) {
 		"Not shown: 5 missing in n2, 5 missing in n1.",
 		"table-repair skips the other rows",
 		"they stay different",
-		"--max-html-rows",
+		"ace diff-report --diff-file public_t_diffs-20260101000000.json --max-html-rows N",
 		"10 more rows are not shown (5 missing in n2, 5 missing in n1)",
 		"Default: insert from n1",
 		`data-truncated="true"`,
@@ -219,9 +248,6 @@ func TestHTMLReportTruncatedInsideValueDiffs(t *testing.T) {
 
 	if got := countRows(page, "value_diff"); got != 20 {
 		t.Errorf("value rows: got %d, want 20", got)
-	}
-	if strings.Contains(page, ">Missing Rows<") {
-		t.Error("missing rows separator is shown, but no missing row is")
 	}
 	want := "20 more rows are not shown (5 value differences, 10 missing in n2, 5 missing in n1)"
 	if !strings.Contains(page, want) {
@@ -270,7 +296,6 @@ func TestHTMLReportEmbeddedDataCannotCloseScript(t *testing.T) {
 
 func TestHTMLReportNoRows(t *testing.T) {
 	diff := htmlTestDiff(0, 0, 0, "")
-	diff.Summary.IncompletePairs = []string{"n1/n2"}
 	page, data := renderHTMLTestReport(t, diff, 0)
 
 	if !strings.Contains(page, "No row-level differences were recorded.") {
@@ -281,28 +306,72 @@ func TestHTMLReportNoRows(t *testing.T) {
 	}
 }
 
-func TestHTMLPairPlanApplyLimit(t *testing.T) {
-	p := &htmlPairPlan{
-		valueKeys:  make([]string, 3),
-		missingInB: make([]string, 4),
-		missingInA: make([]string, 5),
+// The limit is applied at a block boundary: a block that would pass it is
+// not shown at all.
+func TestHTMLReportCutsAtBlockBoundary(t *testing.T) {
+	r := storeTestDiff(t, htmlTestDiff(25, 10, 5, "x"), 10)
+	page, data := renderStoredTestReport(t, r, 25, 0)
+	if len(data.Rows) != 20 {
+		t.Fatalf("embedded rows: got %d, want the two first blocks of 10", len(data.Rows))
 	}
-	for _, tc := range []struct {
-		limit            int64
-		value, mb, ma, n int
-	}{
-		{limit: 1, value: 1, n: 1},
-		{limit: 3, value: 3, n: 3},
-		{limit: 5, value: 3, mb: 2, n: 5},
-		{limit: 9, value: 3, mb: 4, ma: 2, n: 9},
-		{limit: 12, value: 3, mb: 4, ma: 5, n: 12},
-		{limit: 1000, value: 3, mb: 4, ma: 5, n: 12},
-	} {
-		p.applyLimit(tc.limit)
-		if p.shownValue != tc.value || p.shownMissingB != tc.mb || p.shownMissingA != tc.ma || p.shown() != tc.n {
-			t.Errorf("limit %d: got %d/%d/%d (%d), want %d/%d/%d (%d)", tc.limit,
-				p.shownValue, p.shownMissingB, p.shownMissingA, p.shown(), tc.value, tc.mb, tc.ma, tc.n)
+	for i, row := range data.Rows {
+		if row.PK[0] != fmt.Sprint(i+1) {
+			t.Fatalf("embedded row %d has pk %v, want %d", i, row.PK, i+1)
 		}
+	}
+	if !strings.Contains(page, "20 more rows are not shown (5 value differences, 10 missing in n2, 5 missing in n1)") {
+		t.Error("footer does not count the rows of the blocks not shown")
+	}
+}
+
+// Rows of all kinds are shown together, sorted by key inside a block.
+func TestHTMLReportMixesKindsInKeyOrder(t *testing.T) {
+	d := htmlTestDiff(0, 0, 0, "x")
+	row := func(id int, v string) types.OrderedMap {
+		return types.OrderedMap{{Key: "id", Value: id}, {Key: "val", Value: v}, {Key: "note", Value: "x"}}
+	}
+	d.NodeDiffs = map[string]types.DiffByNodePair{"n1/n2": {Rows: map[string][]types.OrderedMap{
+		"n1": {row(10, "a"), row(2, "a"), row(5, "a")},
+		"n2": {row(10, "b"), row(7, "b"), row(5, "b")},
+	}}}
+	d.Summary.DiffRowsCount = map[string]int{"n1/n2": 4}
+	page, _ := renderHTMLTestReport(t, d, 0)
+	re := regexp.MustCompile(`class="row-select" data-pk="([^"]*)" data-type="([^"]*)"`)
+	var got []string
+	for _, m := range re.FindAllStringSubmatch(page, -1) {
+		got = append(got, m[1]+":"+m[2])
+	}
+	want := []string{"2:missing_in_b", "5:value_diff", "7:missing_in_a", "10:value_diff"}
+	if fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("rows %v, want %v", got, want)
+	}
+}
+
+// A long value is cut at the right side to the limit, counted in
+// characters, with a mark that gives its length. A key value is never cut.
+func TestHTMLReportCutsLongValues(t *testing.T) {
+	long := strings.Repeat("é", 40) + "TAIL"
+	longKey := strings.Repeat("k", 50)
+	d := htmlTestDiff(0, 0, 0, "x")
+	d.NodeDiffs = map[string]types.DiffByNodePair{"n1/n2": {Rows: map[string][]types.OrderedMap{
+		"n1": {{{Key: "id", Value: longKey}, {Key: "val", Value: long}}},
+		"n2": {{{Key: "id", Value: longKey}, {Key: "val", Value: long + "!"}}},
+	}}}
+	d.Summary.DiffRowsCount = map[string]int{"n1/n2": 1}
+	page, data := renderStoredTestReport(t, storeTestDiff(t, d, 0), 0, 10)
+	// The custom row editor of a row with a cut value is left empty, so
+	// the full value is nowhere on the page.
+	if strings.Contains(page, "TAIL") {
+		t.Error("the end of a long value is on the page")
+	}
+	if !strings.Contains(page, strings.Repeat("é", 10)+`<span class="value-cut">… (44 characters, differs after the shown part)</span>`) {
+		t.Error("node A value is not cut to 10 characters with a mark of its length")
+	}
+	if !strings.Contains(page, "(45 characters, differs after the shown part)") {
+		t.Error("node B value has no mark of its length")
+	}
+	if !strings.Contains(page, ">"+longKey+"<") || data.Rows[0].Key != longKey {
+		t.Error("a key value is cut")
 	}
 }
 
@@ -377,7 +446,7 @@ func TestHTMLReportPageAndDataHoldTheSameRows(t *testing.T) {
 		if n != 8 {
 			t.Errorf("%s: %d rows, want the limit 8", pc.pair, n)
 		}
-		if info := data.HTMLReport.Pairs[i]; info.Pair != pc.pair || info.Shown != n {
+		if info := data.HTMLReport.Pairs[i]; info.Pair != pc.pair || info.Shown != int64(n) {
 			t.Errorf("%s: report_info says %+v, page shows %d rows", pc.pair, info, n)
 		}
 	}
@@ -390,6 +459,14 @@ func TestHTMLReportPageAndDataHoldTheSameRows(t *testing.T) {
 // every digit and a text key that looks like a number stays text. Ranges are
 // allowed only when every key of the diff is a whole number.
 func TestHTMLReportPKLiterals(t *testing.T) {
+	mismatch := func(data htmlTestData) htmlPlanRow {
+		for _, r := range data.Rows {
+			if r.Type == planTypeMismatch {
+				return r
+			}
+		}
+		return htmlPlanRow{}
+	}
 	one := func(v1, v2 any) types.DiffOutput {
 		return types.DiffOutput{
 			NodeDiffs: map[string]types.DiffByNodePair{"n1/n2": {Rows: map[string][]types.OrderedMap{
@@ -412,8 +489,8 @@ func TestHTMLReportPKLiterals(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			_, data := renderHTMLTestReport(t, one(tc.v1, tc.v2), 0)
-			if data.Rows[0].PK[0] != tc.lit1 {
-				t.Errorf("pk literal: got %s, want %s", data.Rows[0].PK[0], tc.lit1)
+			if got := mismatch(data); len(got.PK) != 1 || got.PK[0] != tc.lit1 {
+				t.Errorf("pk literal: got %v, want %s", got.PK, tc.lit1)
 			}
 			if data.HTMLReport.IntegerPK != tc.integerPK {
 				t.Errorf("integer_pk: got %v, want %v", data.HTMLReport.IntegerPK, tc.integerPK)
@@ -423,7 +500,7 @@ func TestHTMLReportPKLiterals(t *testing.T) {
 }
 
 // The report shows a prefix of the sorted rows, so the sort must not depend
-// on map order. Keys that mix numbers and text used to break that.
+// on map order, also for keys that mix numbers and text.
 func TestHTMLReportIsDeterministic(t *testing.T) {
 	var a, b []types.OrderedMap
 	for i := 1; i <= 60; i++ {
@@ -438,10 +515,11 @@ func TestHTMLReportIsDeterministic(t *testing.T) {
 		Summary:   types.DiffSummary{Schema: "public", Table: "t", PrimaryKey: []string{"id"}, DiffRowsCount: map[string]int{"n1/n2": 121}},
 	}
 
+	stored := storeTestDiff(t, diff, 0)
 	var first string
 	for run := 0; run < 20; run++ {
 		var buf bytes.Buffer
-		if err := renderHTMLDiffReport(&buf, diff, "d.json", 20); err != nil {
+		if err := renderHTMLDiffReport(context.Background(), &buf, stored, "d.json", 20, 0); err != nil {
 			t.Fatal(err)
 		}
 		if run == 0 {
@@ -494,7 +572,7 @@ func TestHTMLReportRowsWithoutVisibleDifference(t *testing.T) {
 	pair.Rows["n2"] = append(pair.Rows["n2"], types.OrderedMap{{Key: "id", Value: 3}, {Key: "val", Value: "1"}, {Key: "note", Value: "x"}})
 	d.Summary.DiffRowsCount["n1/n2"] = 3
 
-	page, data := renderHTMLTestReport(t, d, 2)
+	page, data := renderHTMLTestReport(t, d, 0)
 	if strings.Contains(page, `class="truncation-banner"`) {
 		t.Error("report shows a truncation banner, but every row with a difference is shown")
 	}
@@ -528,9 +606,9 @@ func TestRenderHTMLDiffReportWriteError(t *testing.T) {
 	htmlWriteBufferSize = 16
 	t.Cleanup(func() { htmlWriteBufferSize = orig })
 
-	diff := htmlTestDiff(4, 2, 2, "x")
+	diff := storeTestDiff(t, htmlTestDiff(4, 2, 2, "x"), 0)
 	var full bytes.Buffer
-	if err := renderHTMLDiffReport(&full, diff, "d.json", 0); err != nil {
+	if err := renderHTMLDiffReport(context.Background(), &full, diff, "d.json", 0, 0); err != nil {
 		t.Fatal(err)
 	}
 	page := full.String()
@@ -541,30 +619,126 @@ func TestRenderHTMLDiffReportWriteError(t *testing.T) {
 		t.Fatal("could not find the parts of the page")
 	}
 	for name, at := range map[string]int{"head": 10, "rows": rowsAt + 10, "embedded data": dataAt + 60, "tail": tailAt + 10} {
-		err := renderHTMLDiffReport(&failingWriter{left: at}, diff, "d.json", 0)
+		err := renderHTMLDiffReport(context.Background(), &failingWriter{left: at}, diff, "d.json", 0, 0)
 		if err == nil || !strings.Contains(err.Error(), "disk full") {
 			t.Errorf("write error in the %s (after %d bytes): got %v", name, at, err)
 		}
 	}
 }
 
-// writeHTMLDiffReport must not leave a file behind when it fails.
+// WriteHTMLDiffReport must not leave a file behind when it fails.
 func TestWriteHTMLDiffReportRemovesFileOnError(t *testing.T) {
-	dir := t.TempDir()
-	jsonPath := filepath.Join(dir, "r.json")
-	htmlPath := filepath.Join(dir, "r.html")
+	stored := storeTestDiff(t, htmlTestDiff(1, 0, 0, "x"), 0)
+	htmlPath := stored.Dir + ".html"
 	orig := htmlDiffTemplate
 	htmlDiffTemplate = `{{define "report_head"}}{{.NoSuchField}}{{end}}`
 	t.Cleanup(func() { htmlDiffTemplate = orig })
 
-	got, err := writeHTMLDiffReport(htmlTestDiff(1, 0, 0, "x"), jsonPath, 0)
+	got, err := WriteHTMLDiffReport(context.Background(), stored, 0, 0)
 	if err == nil {
 		t.Fatal("expected an error from a broken template")
 	}
 	if got != "" {
 		t.Errorf("returned path %q on error", got)
 	}
-	if _, statErr := os.Stat(htmlPath); !os.IsNotExist(statErr) {
-		t.Errorf("HTML file left behind after error (stat: %v)", statErr)
+	left, _ := filepath.Glob(htmlPath + "*")
+	if len(left) != 0 {
+		t.Errorf("files left behind after error: %v", left)
+	}
+}
+
+// A cut first block ends the pair: a later block is not shown, even when
+// some rows of the first block were left out because they show no
+// difference.
+func TestHTMLReportStopsAfterACutFirstBlock(t *testing.T) {
+	d := htmlTestDiff(0, 0, 0, "x")
+	row := func(id int, v any) types.OrderedMap {
+		return types.OrderedMap{{Key: "id", Value: id}, {Key: "val", Value: v}, {Key: "note", Value: "x"}}
+	}
+	var a, b []types.OrderedMap
+	for i := 1; i <= 6; i++ {
+		if i <= 2 {
+			// no visible difference: 1 against "1"
+			a = append(a, row(i, 1))
+			b = append(b, row(i, "1"))
+		} else {
+			a = append(a, row(i, "a"))
+			b = append(b, row(i, "b"))
+		}
+	}
+	d.NodeDiffs = map[string]types.DiffByNodePair{"n1/n2": {Rows: map[string][]types.OrderedMap{"n1": a, "n2": b}}}
+	d.Summary.DiffRowsCount = map[string]int{"n1/n2": 6}
+	// Blocks of 4: rows 1-4 and 5-6. The limit 3 cuts the first block.
+	_, data := renderStoredTestReport(t, storeTestDiff(t, d, 4), 3, 0)
+	var keys []string
+	for _, r := range data.Rows {
+		keys = append(keys, r.Key)
+	}
+	if fmt.Sprint(keys) != "[3]" {
+		t.Fatalf("shown rows %v, want only row 3 of the first block", keys)
+	}
+}
+
+// The report shows the pair with the nodes in the order of the pair name,
+// also when the result calls the second node of the name node 1.
+func TestHTMLReportSwappedNodes(t *testing.T) {
+	w := NewDiffResultWriter("public", "t", []string{"id"})
+	w.base = filepath.Join(t.TempDir(), "public_t_diffs-20260101000000")
+	b := w.OpenBlock("n1/n2", "n2", "n1", 0, 0)
+	only := types.OrderedMap{{Key: "id", Value: 1}, {Key: "val", Value: "x"}}
+	if err := b.Add(DiffKindNode1Only, only, nil, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.Close(); err != nil {
+		t.Fatal(err)
+	}
+	paths, err := w.Finish(context.Background(), DiffResultManifest{PrimaryKey: []string{"id"},
+		Columns: []DiffResultColumn{{Name: "id"}, {Name: "val"}},
+		Summary: types.DiffSummary{PrimaryKey: []string{"id"}, DiffRowsCount: map[string]int{"n1/n2": 1}}},
+		DiffReportOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, err := OpenDiffResult(paths.Dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	page, data := renderStoredTestReport(t, r, 0, 0)
+	if len(data.Rows) != 1 || data.Rows[0].NodeA != "n1" || data.Rows[0].Type != planTypeMissingN1 {
+		t.Fatalf("embedded rows %+v, want one row missing on n1", data.Rows)
+	}
+	if countRows(page, "missing_in_a") != 1 {
+		t.Error("the row of node n2 must be shown as missing on n1")
+	}
+}
+
+// A cut value of a missing row is escaped before the mark is added.
+func TestHTMLReportCutsMissingRowValue(t *testing.T) {
+	long := "<b>" + strings.Repeat("é", 20)
+	d := htmlTestDiff(0, 0, 0, "x")
+	d.NodeDiffs = map[string]types.DiffByNodePair{"n1/n2": {Rows: map[string][]types.OrderedMap{
+		"n1": {{{Key: "id", Value: 1}, {Key: "val", Value: long}}},
+	}}}
+	d.Summary.DiffRowsCount = map[string]int{"n1/n2": 1}
+	page, _ := renderStoredTestReport(t, storeTestDiff(t, d, 0), 0, 5)
+	if strings.Contains(page, "<b>éé") {
+		t.Error("the value is not escaped")
+	}
+	if !strings.Contains(page, "&lt;b&gt;éé"+`<span class="value-cut">… (23 characters)</span>`) {
+		t.Error("the value is not cut to 5 characters with a mark")
+	}
+}
+
+// Two values that differ only after the cut get a mark that says so.
+func TestHTMLReportMarksDifferenceAfterTheCut(t *testing.T) {
+	d := htmlTestDiff(0, 0, 0, "x")
+	d.NodeDiffs = map[string]types.DiffByNodePair{"n1/n2": {Rows: map[string][]types.OrderedMap{
+		"n1": {{{Key: "id", Value: 1}, {Key: "val", Value: "abcdefgh1"}}},
+		"n2": {{{Key: "id", Value: 1}, {Key: "val", Value: "abcdefgh2"}}},
+	}}}
+	d.Summary.DiffRowsCount = map[string]int{"n1/n2": 1}
+	page, _ := renderStoredTestReport(t, storeTestDiff(t, d, 0), 0, 4)
+	if strings.Count(page, "differs after the shown part") != 2 {
+		t.Error("both cells need the mark of a difference after the cut")
 	}
 }

@@ -479,33 +479,6 @@ func TestStringifyOrderedMapKey_JsonNumberNoPKCollision(t *testing.T) {
 	require.NotEqual(t, key1, key2, "adjacent bigint PKs must not collide")
 }
 
-// The verdict is decided here and nowhere else, so both halves need a test.
-// An empty NodeDiffs is a match only if every node pair was really compared.
-// If work items were lost to errors it means "we do not know", and the summary
-// that names those pairs must still be written to disk.
-func TestWriteDiffReportNoMatchVerdictWhenIncomplete(t *testing.T) {
-	t.Chdir(t.TempDir()) // WriteDiffReport writes the report into the current directory
-
-	clean := types.DiffOutput{
-		Summary: types.DiffSummary{Schema: "public", Table: "t"},
-	}
-	jsonPath, _, err := WriteDiffReport(clean, "public", "t", "json", 0)
-	require.NoError(t, err)
-	require.Empty(t, jsonPath, "a fully compared run with no diffs is a match, so nothing is written")
-
-	incomplete := types.DiffOutput{
-		Summary: types.DiffSummary{
-			Schema:          "public",
-			Table:           "t",
-			IncompletePairs: []string{"n1/n2"},
-		},
-	}
-	jsonPath, _, err = WriteDiffReport(incomplete, "public", "t", "json", 0)
-	require.NoError(t, err)
-	require.NotEmpty(t, jsonPath, "an incomplete comparison must not be reported as a match")
-	require.FileExists(t, jsonPath)
-}
-
 // Row keys are matched across nodes, so an ambiguous encoding loses rows: with
 // the parts joined raw, ("a|b","c") and ("a","b|c") produce one key and one of
 // the two rows disappears from the comparison.
@@ -587,39 +560,11 @@ func TestRowKeyFromStringsIsInjective(t *testing.T) {
 	}
 }
 
-// The report must not reorder its rows between runs on identical input. Two
-// rows can share a display key while having distinct identities, and the input
-// order comes from map iteration, so the sort needs a tie-break to be a total
-// order rather than merely a mostly-consistent one.
-func TestSortPKKeysIsDeterministicOnTiedDisplays(t *testing.T) {
-	// Both identities render as the same display string.
-	idA := RowKeyFromStrings([]string{"a|b", "c"})
-	idB := RowKeyFromStrings([]string{"a", "b|c"})
-	display := map[string]string{idA: "a|b|c", idB: "a|b|c"}
-
-	var first []string
-	for run := 0; run < 20; run++ {
-		keys := []string{idA, idB}
-		if run%2 == 1 {
-			keys = []string{idB, idA} // the map-iteration order flips too
-		}
-		sortPKKeys(keys, display)
-		if first == nil {
-			first = append([]string(nil), keys...)
-			continue
-		}
-		require.Equal(t, first, keys, "tied displays must sort to a stable order")
-	}
-
-	// Numerically equal but differently spelled displays tie the same way.
-	keys := []string{"id-b", "id-a"}
-	sortPKKeys(keys, map[string]string{"id-a": "1.0", "id-b": "1"})
-	require.Equal(t, []string{"id-a", "id-b"}, keys, "a tie falls back to the identity key")
-
-	// An ordinary numeric ordering is untouched by the tie-break.
-	keys = []string{"id-10", "id-2"}
-	sortPKKeys(keys, map[string]string{"id-2": "2", "id-10": "10"})
-	require.Equal(t, []string{"id-2", "id-10"}, keys, "2 must still sort before 10")
+// comparePKKey orders numbers by value, so 2 comes before 10.
+func TestComparePKKeyNumericOrder(t *testing.T) {
+	require.Negative(t, comparePKKey("2", "10"))
+	require.Negative(t, comparePKKey("1|9", "1|10"))
+	require.Zero(t, comparePKKey("1.0", "1"))
 }
 
 // The rows are matched by key, so the order of the input rows must not change

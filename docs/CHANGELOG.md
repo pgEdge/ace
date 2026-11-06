@@ -19,6 +19,17 @@ All notable changes to ACE will be captured in this document. This project follo
   API and of scheduled jobs has the same meaning. `mtree` commands keep
   the old meaning of the flag and of `mtree.max_connections`.
 
+- **`max_diff_rows` is one approximate limit for all node pairs of a run.**
+  `table-diff` and `mtree table-diff` applied it to each node pair; now the
+  differing rows of all pairs count against one limit. A block is compared
+  completely or not at all, so the result can have more rows than the
+  limit: at most the rows of the blocks that were in work when the limit
+  was reached. `repset-diff` and `schema-diff` still apply it to each table.
+  The same holds for `max_diff_rows` in the HTTP API and in scheduled jobs.
+- **The `incomplete_pairs` field of the diff summary is removed.** When the
+  comparison of a range fails, `mtree table-diff` now fails without a
+  report, as `table-diff` does. Old reports with this field still load.
+
 ### Upgrading
 - **Check `table_diff.max_connections` in `ace.yaml`.** It is now the old
   name of `max_connections.default`, so its value has a new meaning. It
@@ -32,25 +43,51 @@ All notable changes to ACE will be captured in this document. This project follo
   task may use, or to `0` to let cutting and hashing use 8. The same
   applies to `--max-connections` in scripts, and to `max_connections` in
   HTTP requests and in scheduled jobs.
+- `compare_unit_size` (`--compare-unit-size` / `-u`, the HTTP API field,
+  the scheduler job argument and `table_diff.compare_unit_size` in the
+  settings file) is no longer used. ACE still accepts it, ignores it and
+  writes a warning. Remove it from your commands, jobs and settings file.
 
 ### Added
+- **Diff result directory.** `table-diff` and `mtree table-diff` (and the
+  per-table runs of `repset-diff` and `schema-diff`) write the differing
+  rows to disk while they compare the blocks, into a directory
+  `<schema>_<table>_diffs-<timestamp>/` next to the JSON report: a manifest
+  and one file for each compared block that has differences. The JSON
+  report is built from it at the end of the run. So the memory of the
+  client no longer grows with the number of differences, and a diff with
+  millions of differing rows no longer runs out of memory while it writes
+  the report. A run that fails, times out or is stopped writes no result.
+  The task context of the task store and of the HTTP API has the path of
+  the directory as `diff_result_dir`.
+- **`ace diff-report`** builds the HTML report from a result directory,
+  without a database connection, and can run again with other limits.
+  `--output html` of `table-diff` and `mtree table-diff` runs it at the end
+  of the diff.
+- **`--max-html-value-length`** (`table_diff.max_html_value_length` and
+  `mtree.diff.max_html_value_length` in `ace.yaml`, default 1024) cuts each
+  value that the HTML report shows to this number of characters, with a
+  mark that gives the full length. Key values are never cut.
+- The JSON report has the row hash of each row of each node in the new
+  optional field `row_hashes`.
 - **Time limits for `table-diff`, `repset-diff` and `schema-diff`.**
   `--block-timeout` (`table_diff.block_timeout` in `ace.yaml`, default 60 s)
-  limits one query on one block: the hash of a block, the split of a range,
-  or the fetch of its rows. `--run-timeout` (`table_diff.run_timeout`,
+  limits one query on one block: the hash of a block, or a key query or a
+  row read of a block that differs. `--run-timeout` (`table_diff.run_timeout`,
   default 0, no limit) limits the diff of one table; for `repset-diff` and
   `schema-diff` it applies to each table on its own, and `table-rerun` has
   it too. When a limit is reached, ACE cancels its queries on all nodes
-  and the diff fails with an error that names the limit. A hash, split or
-  fetch query holds a snapshot only while it runs, so the block limit also
-  bounds how long such a query holds back vacuum on a node. The block limit
+  and the diff fails with an error that names the limit. Each such query
+  holds a snapshot only while it runs, so the block limit also bounds how
+  long it holds back vacuum on a node. The block limit
   does not apply to the cut of the table into blocks: a cutting worker
   holds one snapshot for all its parts, and only `run_timeout` limits it,
   which by default means no limit. The block limit was a fixed 60 s for the
   hash queries only. In the comparison of the blocks that differ, the time
   spent waiting for a free connection counted toward it; now the wait does
-  not count. **The fetch of rows and
-  the split of a range had no limit before and now have the 60 s default.**
+  not count. **The queries that look
+  for the differing rows of a block had no limit before and now have the
+  60 s default.**
   If a diff of very wide rows fails with a block timeout after the
   upgrade, raise `table_diff.block_timeout` or set it to `0`.
 - Diff reports have a `format_version` field. `table-repair` and
@@ -79,8 +116,24 @@ All notable changes to ACE will be captured in this document. This project follo
   the whole task, the comparison of mismatched blocks included. Without
   any value, cutting and hashing use 8 connections, and the comparison can
   open more, up to the number that `--concurrency-factor` gives.
+- `table_diff.key_map_max_memory_mb` (default 512): the memory limit for
+  the keys of one mismatched block while table-diff, repset-diff and
+  schema-diff look for the differing rows. A block that needs more stops
+  the run with an error that names the table, the block, the nodes and the
+  setting. `0` means no limit.
+- `mtree.diff.key_map_max_memory_mb` (default 512): the same limit for
+  `mtree table-diff`.
 
 ### Changed
+- **The HTML report shows the rows in a new order.** It shows the blocks of
+  the table in key order and the rows of a block sorted by key, with value
+  differences and missing rows together. It showed all value differences
+  first, then the missing rows. The limit `max_html_rows` is applied at a
+  block boundary, so a report can show somewhat fewer rows than the limit.
+- **The JSON report is compact**, with every row on a line of its own,
+  instead of indented. Its content and `format_version` do not change. The
+  rows of a node pair are no longer sorted by key: they come in block order,
+  and inside a block in no fixed order.
 - Every ACE connection sets `client_connection_check_interval = 5000` (ms),
   so a backend in a long query stops it within a few seconds when ACE stops
   without closing its connections, for example when the kernel kills it.
@@ -111,10 +164,19 @@ All notable changes to ACE will be captured in this document. This project follo
   cannot vacuum rows that became dead after it started; the cut reads the
   key index once, so this lasts one pass over the index. This applies to
   `mtree build` too.
-- `table-diff` splits a mismatched range at the median of the rows that
-  match `--table-filter`, as the hash and the fetch of rows read only these
-  rows. Before, the split counted all rows of the range, so with a
-  selective filter it could read many more rows than the hash.
+- table-diff finds the differing rows of a mismatched block in one pass
+  over the block on each node, instead of splitting the block in two again
+  and again and reading all rows of the last ranges. Each node sends only
+  the key and an 8-byte row hash of every row; the keys of the node with
+  fewer rows go into a map, and the other node is checked against it.
+  Only the differing rows are then read in full, by primary key, one index
+  lookup per key. The key values are compared as text, so no key type
+  needs special code on the client. In an inheritance tree, rows with the
+  same key in the parent and in a child are now each compared.
+- `mtree table-diff` uses the same row search. It no longer reads the
+  keys and row hashes of both nodes into memory, and it no longer stops
+  with an error when a mismatched block has a `numeric` or `time` primary
+  key.
 
 ### Fixed
 - **Ctrl-C or SIGTERM during `table-diff`, `table-rerun`, `repset-diff` or

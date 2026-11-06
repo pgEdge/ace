@@ -142,9 +142,9 @@ func (s *nativeClusterState) teardown(t *testing.T) {
 		}
 	}
 	// Clean up diff files and cluster config
-	files, _ := filepath.Glob("*_diffs-*.json")
+	files, _ := filepath.Glob("*_diffs-*")
 	for _, f := range files {
-		os.Remove(f)
+		os.RemoveAll(f)
 	}
 	os.Remove(nativeClusterName + ".json")
 }
@@ -269,7 +269,7 @@ func TestNativePG(t *testing.T) {
 		require.NoError(t, task.RunChecks(false))
 		require.NoError(t, task.ExecuteTask())
 
-		pair, ok := task.DiffResult.NodeDiffs[env.pairKey()]
+		pair, ok := diffPairs(t, task)[env.pairKey()]
 		require.True(t, ok, "table-diff must find the row that n1 has twice and n2 does not have")
 		require.NotEmpty(t, pair.Rows[env.ServiceN1], "the row must be reported on %s", env.ServiceN1)
 		require.Empty(t, pair.Rows[env.ServiceN2])

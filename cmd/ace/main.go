@@ -57,12 +57,13 @@ func main() {
 			}
 		}
 
-		if cfgPath == "" {
+		switch {
+		case cfgPath != "":
+			if err := config.Init(cfgPath); err != nil {
+				logger.Fatal("loading config (%s): %v", cfgPath, err)
+			}
+		case !configOptional(os.Args[1:]):
 			logger.Fatal("config file 'ace.yaml' not found")
-		}
-
-		if err := config.Init(cfgPath); err != nil {
-			logger.Fatal("loading config (%s): %v", cfgPath, err)
 		}
 	}
 
@@ -80,6 +81,23 @@ func main() {
 		}
 		os.Exit(code)
 	}
+}
+
+// configOptional tells whether the command can run without a config file:
+// it reads the file when there is one, and uses its defaults otherwise.
+// diff-report needs no database, so it must also work on a host that has
+// only the result directory.
+func configOptional(args []string) bool {
+	for _, arg := range args {
+		if arg == "--" {
+			break
+		}
+		if strings.HasPrefix(arg, "-") {
+			continue
+		}
+		return arg == "diff-report"
+	}
+	return false
 }
 
 func shouldSkipConfig(args []string) bool {

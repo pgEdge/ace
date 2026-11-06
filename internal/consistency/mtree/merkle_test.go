@@ -1,85 +1,16 @@
 package mtree
 
 import (
-	"bytes"
 	"context"
-	"crypto/sha256"
 	"fmt"
 	"math"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgconn"
-	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/pgedge/ace/db/queries"
 	"github.com/pgedge/ace/pkg/types"
 )
-
-// fakeRows is the smallest pgx.Rows that readRowHashes needs. Scan copies
-// values into *any destinations, which is how an untyped scan buffer receives
-// the driver's own Go values: a uuid arrives as [16]byte, not as text. It
-// also fills *pgtype.DriverBytes destinations, which is how the row hash is
-// scanned. Like the real driver, it hands out the same buffer for every row,
-// so a reader that keeps the slice instead of copying it sees the last row.
-type fakeRows struct {
-	rows [][]any
-	pos  int
-	buf  []byte
-}
-
-func (r *fakeRows) Close()                                       {}
-func (r *fakeRows) Err() error                                   { return nil }
-func (r *fakeRows) CommandTag() pgconn.CommandTag                { return pgconn.CommandTag{} }
-func (r *fakeRows) FieldDescriptions() []pgconn.FieldDescription { return nil }
-func (r *fakeRows) Next() bool                                   { r.pos++; return r.pos <= len(r.rows) }
-func (r *fakeRows) RawValues() [][]byte                          { return nil }
-func (r *fakeRows) Conn() *pgx.Conn                              { return nil }
-
-// current returns the row that Next stopped on. A real pgx.Rows returns an
-// error when it is read past the last row instead of panicking. Do the same
-// here, so that a later test of the error path fails with a message rather
-// than an index panic.
-func (r *fakeRows) current() ([]any, error) {
-	if r.pos < 1 || r.pos > len(r.rows) {
-		return nil, fmt.Errorf("read at position %d, outside the %d rows", r.pos, len(r.rows))
-	}
-	return r.rows[r.pos-1], nil
-}
-
-func (r *fakeRows) Values() ([]any, error) { return r.current() }
-
-func (r *fakeRows) Scan(dest ...any) error {
-	row, err := r.current()
-	if err != nil {
-		return err
-	}
-	if len(dest) != len(row) {
-		return fmt.Errorf("scanning into %d destinations, row has %d values", len(dest), len(row))
-	}
-	for i := range dest {
-		switch p := dest[i].(type) {
-		case *any:
-			*p = row[i]
-		case *pgtype.DriverBytes:
-			v, ok := row[i].([]byte)
-			if !ok {
-				return fmt.Errorf("value %d is %T, cannot scan into *pgtype.DriverBytes", i, row[i])
-			}
-			r.buf = append(r.buf[:0], v...)
-			*p = r.buf
-		default:
-			return fmt.Errorf("dest[%d] is %T, want *any or *pgtype.DriverBytes", i, dest[i])
-		}
-	}
-	return nil
-}
-
-// rowHash returns a 32-byte row hash with every byte set to b.
-func rowHash(b byte) []byte {
-	return bytes.Repeat([]byte{b}, sha256.Size)
-}
 
 func uuidBytes(b byte) [16]byte {
 	var out [16]byte
@@ -89,91 +20,72 @@ func uuidBytes(b byte) [16]byte {
 	return out
 }
 
-// mtreeTaskWithDiffState returns a task wired just enough to exercise the diff
-// accumulator (appendDiffs) without a database.
-func mtreeTaskWithDiffState(maxDiffRows int64) *MerkleTreeTask {
-	m := &MerkleTreeTask{MaxDiffRows: maxDiffRows}
+// The differing rows of all node pairs count against one max_diff_rows.
+// Reaching the limit, also exactly, stops the workers and marks the diff.
+func TestMtreeDiffRowLimitIsForTheWholeDiff(t *testing.T) {
+	m := &MerkleTreeTask{MaxDiffRows: 5}
+	m.countDiffRows(3)
+	if m.diffLimitHit.Load() || m.compareStopped() {
+		t.Fatal("3 rows of 5 must not stop the diff")
+	}
+	m.countDiffRows(2)
+	if !m.diffLimitHit.Load() || !m.compareStopped() {
+		t.Fatal("5 rows of 5 must stop the diff")
+	}
+	m.countDiffRows(4)
+	if got := m.diffRows.Load(); got != 9 {
+		t.Fatalf("counted %d rows, want 9: a range that was in work when the limit was reached still counts", got)
+	}
+}
+
+// With no limit the diff never stops on rows.
+func TestMtreeDiffNoLimit(t *testing.T) {
+	m := &MerkleTreeTask{}
+	m.countDiffRows(1 << 30)
+	if m.diffLimitHit.Load() || m.compareStopped() {
+		t.Fatal("a diff with no max_diff_rows must not stop on rows")
+	}
+}
+
+// The ranges come in key order, the open-start range first, and a range
+// that starts where the one before it ends leaves out its lower bound, so
+// that a row on a shared bound is compared once.
+func TestPkeyBatchesOrderAndSharedBounds(t *testing.T) {
+	m := &MerkleTreeTask{}
 	m.Key = []string{"id"}
-	m.Cols = []string{"id", "val"}
-	m.DiffResult = types.DiffOutput{
-		NodeDiffs: make(map[string]types.DiffByNodePair),
-		Summary:   types.DiffSummary{DiffRowsCount: make(map[string]int)},
+	m.SimplePrimaryKey = true
+	b := func(v int64) []any { return []any{v} }
+	ranges := []types.LeafRange{
+		{RangeStart: nil, RangeEnd: b(10)},
+		{RangeStart: b(10), RangeEnd: b(20)},
+		{RangeStart: b(30), RangeEnd: b(40)},
+		{RangeStart: b(40), RangeEnd: nil},
 	}
-	m.diffRowKeySets = make(map[string]map[string]map[string]struct{})
-	m.diffRowCounts = make(map[string]int64)
-	return m
-}
-
-// node1OnlyRows builds n rows with unique primary keys, all absent from the peer.
-func node1OnlyRows(n int) []types.OrderedMap {
-	rows := make([]types.OrderedMap, n)
-	for i := range rows {
-		rows[i] = types.OrderedMap{{Key: "id", Value: fmt.Sprintf("%d", i)}, {Key: "val", Value: "x"}}
+	got := m.pkeyBatchesFromRanges(ranges)
+	type want struct {
+		start, end any
+		exclusive  bool
 	}
-	return rows
-}
-
-// A diverged table stops collecting at max_diff_rows and marks the report truncated.
-func TestMtreeDiffEnforcesMaxDiffRows(t *testing.T) {
-	const cap = 5
-	m := mtreeTaskWithDiffState(cap)
-	work := CompareRangesWorkItem{
-		Node1: map[string]any{"Name": "n1"},
-		Node2: map[string]any{"Name": "n2"},
+	first := func(v []any) any {
+		if len(v) == 0 {
+			return nil
+		}
+		return v[0]
 	}
-
-	if err := m.appendDiffs("n1/n2", work, node1OnlyRows(20), nil); err != nil {
-		t.Fatalf("appendDiffs returned error: %v", err)
+	wants := []want{
+		{nil, int64(10), false},
+		{int64(10), int64(20), true},
+		{int64(30), int64(40), false},
+		{int64(40), nil, true},
 	}
-
-	if got := len(m.DiffResult.NodeDiffs["n1/n2"].Rows["n1"]); got != cap {
-		t.Errorf("collected %d rows for n1, want the cap of %d", got, cap)
+	if len(got) != len(wants) {
+		t.Fatalf("got %d ranges, want %d: %+v", len(got), len(wants), got)
 	}
-	if !m.DiffResult.Summary.DiffRowLimitReached {
-		t.Errorf("expected DiffRowLimitReached=true after exceeding the cap")
-	}
-}
-
-// A pair with exactly max_diff_rows diffs collects them all and IS marked
-// truncated, matching table-diff: reaching the cap is a report-size bound, so we
-// warn that additional differences may exist even at the exact boundary.
-func TestMtreeDiffExactCapMarksTruncated(t *testing.T) {
-	const cap = 5
-	m := mtreeTaskWithDiffState(cap)
-	work := CompareRangesWorkItem{
-		Node1: map[string]any{"Name": "n1"},
-		Node2: map[string]any{"Name": "n2"},
-	}
-
-	if err := m.appendDiffs("n1/n2", work, node1OnlyRows(cap), nil); err != nil {
-		t.Fatalf("appendDiffs returned error: %v", err)
-	}
-
-	if got := len(m.DiffResult.NodeDiffs["n1/n2"].Rows["n1"]); got != cap {
-		t.Errorf("collected %d rows for n1, want all %d", got, cap)
-	}
-	if !m.DiffResult.Summary.DiffRowLimitReached {
-		t.Errorf("expected DiffRowLimitReached=true when diffs exactly equal the cap")
-	}
-}
-
-// With no cap configured, every differing row is collected and nothing is flagged truncated.
-func TestMtreeDiffNoLimitCollectsAll(t *testing.T) {
-	m := mtreeTaskWithDiffState(0)
-	work := CompareRangesWorkItem{
-		Node1: map[string]any{"Name": "n1"},
-		Node2: map[string]any{"Name": "n2"},
-	}
-
-	if err := m.appendDiffs("n1/n2", work, node1OnlyRows(20), nil); err != nil {
-		t.Fatalf("appendDiffs returned error: %v", err)
-	}
-
-	if got := len(m.DiffResult.NodeDiffs["n1/n2"].Rows["n1"]); got != 20 {
-		t.Errorf("collected %d rows for n1, want all 20", got)
-	}
-	if m.DiffResult.Summary.DiffRowLimitReached {
-		t.Errorf("did not expect DiffRowLimitReached with no cap configured")
+	for i, w := range wants {
+		if first(got[i].start) != w.start || first(got[i].end) != w.end || got[i].startExclusive != w.exclusive {
+			t.Errorf("range %d = [%v, %v] exclusive=%v, want [%v, %v] exclusive=%v",
+				i, first(got[i].start), first(got[i].end), got[i].startExclusive, w.start, w.end, w.exclusive)
+		}
 	}
 }
 
@@ -185,112 +97,6 @@ func TestMtreeDiffRejectsNegativeMaxDiffRows(t *testing.T) {
 	err := m.DiffMtree()
 	if err == nil || !strings.Contains(err.Error(), "max_diff_rows must be >= 0") {
 		t.Fatalf("expected max_diff_rows validation error, got %v", err)
-	}
-}
-
-// The pkey values that reach the row-fetch query must be the ones pgx decoded,
-// not the map key. For a uuid the key prints as "[17 17 ...]", which the server
-// rejects as invalid uuid input.
-func TestReadRowHashesKeepsScannedPkey(t *testing.T) {
-	id := uuidBytes(0x11)
-	rows := &fakeRows{rows: [][]any{{id, rowHash(0xab)}}}
-
-	got, err := readRowHashes(rows, 1)
-	if err != nil {
-		t.Fatalf("readRowHashes returned error: %v", err)
-	}
-	if len(got) != 1 {
-		t.Fatalf("read %d entries, want 1", len(got))
-	}
-	for _, e := range got {
-		if !bytes.Equal(e.hash[:], rowHash(0xab)) {
-			t.Errorf("hash = %x, want %x", e.hash, rowHash(0xab))
-		}
-		if len(e.pkey) != 1 {
-			t.Fatalf("pkey has %d values, want 1", len(e.pkey))
-		}
-		if e.pkey[0] != id {
-			t.Errorf("pkey[0] = %#v (%T), want the scanned [16]byte", e.pkey[0], e.pkey[0])
-		}
-	}
-}
-
-// Composite keys must not collide. Without quotes, ("a|b","c") and
-// ("a","b|c") join into the same string, and one of the two rows drops out of
-// the comparison.
-func TestReadRowHashesKeysDoNotCollide(t *testing.T) {
-	rows := &fakeRows{rows: [][]any{
-		{"a|b", "c", rowHash(1)},
-		{"a", "b|c", rowHash(2)},
-	}}
-
-	got, err := readRowHashes(rows, 2)
-	if err != nil {
-		t.Fatalf("readRowHashes returned error: %v", err)
-	}
-	if len(got) != 2 {
-		t.Fatalf("read %d entries, want 2 distinct keys", len(got))
-	}
-}
-
-// pkey points into the scan buffer, so that buffer has to stay inside the
-// loop. Moving it out would leave every entry pointing at the last row. The
-// hash arrives in a driver buffer that is reused for every row, so each entry
-// must hold its own copy of it.
-func TestReadRowHashesRowsDoNotAlias(t *testing.T) {
-	rows := &fakeRows{rows: [][]any{
-		{uuidBytes(0x01), rowHash(1)},
-		{uuidBytes(0x02), rowHash(2)},
-	}}
-
-	got, err := readRowHashes(rows, 1)
-	if err != nil {
-		t.Fatalf("readRowHashes returned error: %v", err)
-	}
-	seen := make(map[[16]byte][sha256.Size]byte, len(got))
-	for _, e := range got {
-		seen[e.pkey[0].([16]byte)] = e.hash
-	}
-	if len(seen) != 2 {
-		t.Errorf("entries share %d distinct pkeys, want 2", len(seen))
-	}
-	h1, h2 := seen[uuidBytes(0x01)], seen[uuidBytes(0x02)]
-	if !bytes.Equal(h1[:], rowHash(1)) || !bytes.Equal(h2[:], rowHash(2)) {
-		t.Errorf("hashes = %x, %x; want each row to keep its own hash", h1, h2)
-	}
-}
-
-// A row hash that is not 32 bytes means the query and the reader disagree
-// on the hash. Comparing such hashes would give a wrong answer, so stop.
-func TestReadRowHashesRejectsWrongHashSize(t *testing.T) {
-	rows := &fakeRows{rows: [][]any{{uuidBytes(0x01), []byte{1, 2, 3}}}}
-	if _, err := readRowHashes(rows, 1); err == nil {
-		t.Errorf("readRowHashes accepted a 3-byte row hash")
-	}
-}
-
-// A lost work item means the pair has no result. The summary has to say so,
-// otherwise a diff count of zero reads as a match.
-func TestIncompletePairsReportsFailedWorkItems(t *testing.T) {
-	m := &MerkleTreeTask{}
-
-	if got := m.incompletePairs(); got != nil {
-		t.Errorf("expected no incomplete pairs on a clean task, got %v", got)
-	}
-
-	m.recordPairCompareErr("n2/n3")
-	m.recordPairCompareErr("n1/n2")
-	m.recordPairCompareErr("n1/n2")
-
-	got := m.incompletePairs()
-	want := []string{"n1/n2", "n2/n3"}
-	if len(got) != len(want) {
-		t.Fatalf("incompletePairs() = %v, want %v", got, want)
-	}
-	for i := range want {
-		if got[i] != want[i] {
-			t.Fatalf("incompletePairs() = %v, want %v (stable, sorted)", got, want)
-		}
 	}
 }
 
@@ -337,156 +143,6 @@ func TestComparePkeyValuesNaNSortsLast(t *testing.T) {
 	}
 	if got, ok := comparePkeyValues(nan, nan); !ok || got != 0 {
 		t.Errorf("comparePkeyValues(NaN, NaN) = %d, %v; want 0, true", got, ok)
-	}
-}
-
-func TestBuildRowHashQuery(t *testing.T) {
-	tests := []struct {
-		name           string
-		schema         string
-		table          string
-		key            []string
-		cols           []string
-		whereClause    string
-		colTypes       map[string]string
-		wantContains   []string
-		wantNotContain []string
-	}{
-		{
-			name:        "nil colTypes - no trim_scale",
-			schema:      "public",
-			table:       "orders",
-			key:         []string{"id"},
-			cols:        []string{"id", "name", "amount"},
-			whereClause: "TRUE",
-			colTypes:    nil,
-			wantContains: []string{
-				`SELECT "id", sha256(convert_to(ROW("id", "name", "amount")::text, 'UTF8')) AS row_hash`,
-				`FROM "public"."orders"`,
-				`WHERE TRUE`,
-			},
-			wantNotContain: []string{
-				`trim_scale`,
-			},
-		},
-		{
-			name:        "numeric column gets trim_scale",
-			schema:      "public",
-			table:       "orders",
-			key:         []string{"id"},
-			cols:        []string{"id", "name", "price"},
-			whereClause: "TRUE",
-			colTypes:    map[string]string{"id": "integer", "name": "text", "price": "numeric(10,2)"},
-			wantContains: []string{
-				`ROW("id", "name", trim_scale("price"))::text`,
-			},
-		},
-		{
-			name:        "decimal column gets trim_scale",
-			schema:      "public",
-			table:       "ledger",
-			key:         []string{"txn_id"},
-			cols:        []string{"txn_id", "debit", "credit"},
-			whereClause: `"txn_id" >= $1`,
-			colTypes:    map[string]string{"txn_id": "bigint", "debit": "decimal(18,4)", "credit": "DECIMAL"},
-			wantContains: []string{
-				`ROW("txn_id", trim_scale("debit"), trim_scale("credit"))::text`,
-				`WHERE "txn_id" >= $1`,
-			},
-		},
-		{
-			name:        "composite primary key",
-			schema:      "sales",
-			table:       "line_items",
-			key:         []string{"order_id", "line_num"},
-			cols:        []string{"order_id", "line_num", "qty", "unit_price"},
-			whereClause: "TRUE",
-			colTypes:    map[string]string{"order_id": "integer", "line_num": "integer", "qty": "integer", "unit_price": "numeric"},
-			wantContains: []string{
-				`SELECT "order_id", "line_num", sha256(convert_to(`,
-				`ROW("order_id", "line_num", "qty", trim_scale("unit_price"))::text`,
-			},
-		},
-		{
-			name:        "no numeric columns - no trim_scale even with colTypes",
-			schema:      "public",
-			table:       "users",
-			key:         []string{"user_id"},
-			cols:        []string{"user_id", "email", "created_at"},
-			whereClause: "TRUE",
-			colTypes:    map[string]string{"user_id": "integer", "email": "text", "created_at": "timestamp"},
-			wantContains: []string{
-				`ROW("user_id", "email", "created_at")::text`,
-			},
-			wantNotContain: []string{
-				`trim_scale`,
-			},
-		},
-	}
-
-	// The row hash of the diff and the row hash inside the leaf hash must be
-	// the same expression, or a leaf can differ while every row matches.
-	t.Run("same row hash as the leaf hash", func(t *testing.T) {
-		cols := []string{"id", "price"}
-		colTypes := map[string]string{"price": "numeric"}
-		query, err := buildRowHashQuery("public", "orders", []string{"id"}, cols, "TRUE", colTypes)
-		if err != nil {
-			t.Fatalf("buildRowHashQuery() error = %v", err)
-		}
-		want, err := queries.RowHashExpr("", cols, colTypes)
-		if err != nil {
-			t.Fatalf("RowHashExpr() error = %v", err)
-		}
-		if !strings.Contains(query, want) {
-			t.Errorf("row hash query %q does not use %q", query, want)
-		}
-		// readRowHashes scans the hash as bytes.
-		if strings.Contains(query, "::text AS row_hash") {
-			t.Errorf("row hash must stay a bytea: %q", query)
-		}
-	})
-
-	t.Run("no columns is an error", func(t *testing.T) {
-		if _, err := buildRowHashQuery("public", "orders", []string{"id"}, nil, "TRUE", nil); err == nil {
-			t.Errorf("buildRowHashQuery() with no columns: want an error")
-		}
-	})
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			query, err := buildRowHashQuery(tt.schema, tt.table, tt.key, tt.cols, tt.whereClause, tt.colTypes)
-			if err != nil {
-				t.Fatalf("buildRowHashQuery() error = %v", err)
-			}
-
-			// The hashes are matched by key, so the database must not sort them.
-			if strings.Contains(query, "ORDER BY") {
-				t.Errorf("row hash query sorts the rows: %s", query)
-			}
-
-			for _, substr := range tt.wantContains {
-				if !strings.Contains(query, substr) {
-					t.Errorf("query missing expected substring %q\nquery: %s", substr, query)
-				}
-			}
-			for _, substr := range tt.wantNotContain {
-				if strings.Contains(query, substr) {
-					t.Errorf("query should NOT contain %q\nquery: %s", substr, query)
-				}
-			}
-		})
-	}
-}
-
-// The fetched rows of the two nodes are matched by key, so the fetch must not
-// make the database sort them.
-func TestBuildFetchRowsSQLHasNoOrderBy(t *testing.T) {
-	simple, _ := buildFetchRowsSQLSimple("public", "orders", "id", `trim_scale("id") AS "id"`, []any{1, 2})
-	composite, _ := buildFetchRowsSQLComposite("public", "orders", []string{"a", "b"}, `"a", "b"`, [][]any{{1, 2}})
-	for _, q := range []string{simple, composite} {
-		if strings.Contains(q, "ORDER BY") {
-			t.Errorf("row fetch sorts the rows: %s", q)
-		}
 	}
 }
 

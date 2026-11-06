@@ -343,7 +343,6 @@ func TestCatastrophicSingleNodeFailure(t *testing.T) {
 	diffTask.Nodes = strings.Join([]string{serviceN2, serviceN3}, ",")
 	diffTask.Output = "json"
 	diffTask.BlockSize = 1000
-	diffTask.CompareUnitSize = 100
 	diffTask.ConcurrencyFactor = 1
 	diffTask.MaxDiffRows = math.MaxInt64
 	// --against-origin takes the Spock node name ("n1"), not the service name.
@@ -372,7 +371,7 @@ func TestCatastrophicSingleNodeFailure(t *testing.T) {
 	if strings.Compare(serviceN2, serviceN3) > 0 {
 		pairKey = serviceN3 + "/" + serviceN2
 	}
-	nodeDiffs, ok := diffTask.DiffResult.NodeDiffs[pairKey]
+	nodeDiffs, ok := diffPairs(t, diffTask)[pairKey]
 	require.True(t, ok, "expected diffs for pair %s", pairKey)
 
 	// n3 is ahead: it has the rows n2 never received.
@@ -392,10 +391,10 @@ func TestCatastrophicSingleNodeFailure(t *testing.T) {
 
 	// The single n2-side row must be the stale version of updatedID.
 	staleID, _ := n2Rows[0].Get("id")
-	require.Equal(t, int32(updatedID), staleID,
+	require.Equal(t, fmt.Sprint(updatedID), fmt.Sprint(staleID),
 		"n2-side diff row should be id=%d (the stale update)", updatedID)
 	staleVersion, _ := n2Rows[0].Get("version")
-	require.Equal(t, int32(1), staleVersion,
+	require.Equal(t, "1", fmt.Sprint(staleVersion),
 		"n2-side diff row should still be version=1 (the old value)")
 
 	// Verify _spock_metadata_ is populated in the diff rows.
@@ -438,7 +437,6 @@ func TestCatastrophicSingleNodeFailure(t *testing.T) {
 	validateTask.Nodes = strings.Join([]string{serviceN2, serviceN3}, ",")
 	validateTask.Output = "json"
 	validateTask.BlockSize = 1000
-	validateTask.CompareUnitSize = 100
 	validateTask.ConcurrencyFactor = 1
 	validateTask.MaxDiffRows = math.MaxInt64
 	validateTask.DiffResult = types.DiffOutput{
@@ -455,7 +453,7 @@ func TestCatastrophicSingleNodeFailure(t *testing.T) {
 	require.NoError(t, validateTask.RunChecks(false))
 	require.NoError(t, validateTask.ExecuteTask())
 
-	require.Empty(t, validateTask.DiffResult.NodeDiffs,
+	require.Empty(t, diffPairs(t, validateTask),
 		"n2 and n3 should fully match after recovery")
 	log.Printf("Phase 5 complete: n2 and n3 are in full agreement")
 

@@ -265,8 +265,8 @@ func testTableRepair_InsertOnly(t *testing.T, env *testEnv) {
 			// - n1 has 2 differing rows (its versions of rows 1, 2)
 			// - n2 has 4 differing rows (its versions of rows 1, 2 + unique rows 2001, 2002)
 			// - Total diff count is 4
-			assert.Equal(t, 2, len(tdTask.DiffResult.NodeDiffs[pairKey].Rows[env.ServiceN1]))
-			assert.Equal(t, 4, len(tdTask.DiffResult.NodeDiffs[pairKey].Rows[env.ServiceN2]))
+			assert.Equal(t, 2, len(diffPairs(t, tdTask)[pairKey].Rows[env.ServiceN1]))
+			assert.Equal(t, 4, len(diffPairs(t, tdTask)[pairKey].Rows[env.ServiceN2]))
 			assert.Equal(t, 4, tdTask.DiffResult.Summary.DiffRowsCount[pairKey])
 		})
 	}
@@ -335,8 +335,8 @@ func testTableRepair_UpsertOnly(t *testing.T, env *testEnv) {
 			require.NoError(t, err)
 
 			pairKey := env.pairKey()
-			assert.Equal(t, 0, len(tdTask.DiffResult.NodeDiffs[pairKey].Rows[env.ServiceN1]))
-			assert.Equal(t, 2, len(tdTask.DiffResult.NodeDiffs[pairKey].Rows[env.ServiceN2]))
+			assert.Equal(t, 0, len(diffPairs(t, tdTask)[pairKey].Rows[env.ServiceN1]))
+			assert.Equal(t, 2, len(diffPairs(t, tdTask)[pairKey].Rows[env.ServiceN2]))
 			assert.Equal(t, 2, tdTask.DiffResult.Summary.DiffRowsCount[pairKey])
 		})
 	}
@@ -620,9 +620,9 @@ CREATE TABLE IF NOT EXISTS %s.%s (
 		for _, pool := range []*pgxpool.Pool{env.N1Pool, env.N2Pool} {
 			_, _ = pool.Exec(ctx, fmt.Sprintf("DROP TABLE IF EXISTS %s CASCADE", qualifiedTableName))
 		}
-		files, _ := filepath.Glob("*_diffs-*.json")
+		files, _ := filepath.Glob("*_diffs-*")
 		for _, f := range files {
-			_ = os.Remove(f)
+			_ = os.RemoveAll(f)
 		}
 	})
 
@@ -939,9 +939,9 @@ CREATE TABLE IF NOT EXISTS %s.%s (
 		for _, pool := range []*pgxpool.Pool{env.N1Pool, env.N2Pool} {
 			_, _ = pool.Exec(ctx, fmt.Sprintf("DROP TABLE IF EXISTS %s CASCADE", qualifiedTableName))
 		}
-		files, _ := filepath.Glob("*_diffs-*.json")
+		files, _ := filepath.Glob("*_diffs-*")
 		for _, f := range files {
-			_ = os.Remove(f)
+			_ = os.RemoveAll(f)
 		}
 	})
 
@@ -1579,9 +1579,9 @@ func TestTableRepair_FixNulls_PreserveOrigin(t *testing.T) {
 			pool.Exec(ctx, fmt.Sprintf(
 				"DROP TABLE IF EXISTS %s CASCADE;", qualifiedTableName))
 		}
-		files, _ := filepath.Glob("*_diffs-*.json")
+		files, _ := filepath.Glob("*_diffs-*")
 		for _, f := range files {
-			os.Remove(f)
+			os.RemoveAll(f)
 		}
 	})
 
@@ -1714,9 +1714,9 @@ func TestTableRepair_Bidirectional_PreserveOrigin(t *testing.T) {
 				"DROP TABLE IF EXISTS %s CASCADE;",
 				qualifiedTableName))
 		}
-		files, _ := filepath.Glob("*_diffs-*.json")
+		files, _ := filepath.Glob("*_diffs-*")
 		for _, f := range files {
-			os.Remove(f)
+			os.RemoveAll(f)
 		}
 	})
 
@@ -1863,9 +1863,9 @@ func TestTableRepair_MixedOps_PreserveOrigin(t *testing.T) {
 			_, _ = pool.Exec(ctx, fmt.Sprintf(`SELECT spock.repset_remove_table('default', '%s');`, qualifiedTableName))
 			pool.Exec(ctx, fmt.Sprintf("DROP TABLE IF EXISTS %s CASCADE;", qualifiedTableName))
 		}
-		files, _ := filepath.Glob("*_diffs-*.json")
+		files, _ := filepath.Glob("*_diffs-*")
 		for _, f := range files {
-			os.Remove(f)
+			os.RemoveAll(f)
 		}
 	})
 
@@ -2132,9 +2132,9 @@ CREATE TABLE IF NOT EXISTS %s.%s (
 		for _, pool := range []*pgxpool.Pool{env.N1Pool, env.N2Pool} {
 			_, _ = pool.Exec(ctx, fmt.Sprintf("DROP TABLE IF EXISTS %s CASCADE", qualifiedTableName))
 		}
-		files, _ := filepath.Glob("*_diffs-*.json")
+		files, _ := filepath.Glob("*_diffs-*")
 		for _, f := range files {
-			_ = os.Remove(f)
+			_ = os.RemoveAll(f)
 		}
 	})
 

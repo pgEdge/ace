@@ -278,6 +278,9 @@ func (s *APIServer) resolveConcurrency(cfg *config.Config, requested float64) fl
 	return 0.5
 }
 
+// resolveCompareUnitSize returns the compare unit size of a request: the
+// requested value, else table_diff.compare_unit_size from the configuration
+// file, else 0. The value is no longer used; a run that gets one warns.
 func (s *APIServer) resolveCompareUnitSize(cfg *config.Config, requested int) int {
 	if requested > 0 {
 		return requested
@@ -285,7 +288,7 @@ func (s *APIServer) resolveCompareUnitSize(cfg *config.Config, requested int) in
 	if cfg != nil && cfg.TableDiff.CompareUnitSize > 0 {
 		return cfg.TableDiff.CompareUnitSize
 	}
-	return 10000
+	return 0
 }
 
 func (s *APIServer) resolveMaxDiffRows(cfg *config.Config, requested int64) int64 {

@@ -83,7 +83,7 @@ schedule_config:
 Key points:
 
 - `type` is optional when the target is unambiguous (for example, providing `table_name` implies `table-diff`).
-- The `args` map mirrors CLI flags using snake_case keys (`block_size`, `concurrency_factor`, `compare_unit_size`, `override_block_size`, `table_filter`, etc.).
+- The `args` map mirrors CLI flags using snake_case keys (`block_size`, `concurrency_factor`, `override_block_size`, `table_filter`, etc.).
 - Each entry in `schedule_config` must reference a job from `schedule_jobs`. Exactly one of `run_frequency` or `crontab_schedule` must be set, and `enabled` controls whether the scheduler registers the job.
 - Jobs run once immediately and then follow the defined cadence. Failures are logged; ACE keeps the schedule alive unless you stop it.
 
