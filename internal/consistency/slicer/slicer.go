@@ -26,6 +26,13 @@
 //     block_size rows, so a block holds at most block_size rows there when
 //     it is cut, whatever the key distribution or the physical row order.
 //
+// A second way to cut takes the block bounds from a TABLESAMPLE SYSTEM
+// sample of the key. Its blocks are not exact, but its cost does not depend
+// on the visibility map. The auto mode picks one of the two ways from the
+// catalog of the anchor node, and takes the cutter after all if the sample
+// query fails, gives too few keys or shows that rows with near keys share
+// heap pages.
+//
 // Blocks are half-open ranges [Start, End). The first block of the table has
 // no lower bound and the last one has no upper bound, so rows that sort
 // before the first or after the last key of the anchor node are still
@@ -207,18 +214,32 @@ func KeyOrder(blocks []Block) []int {
 
 // Stats describes a finished cut.
 type Stats struct {
+	// Method is MethodCutter or MethodSample.
+	Method string
 	Blocks int64
-	// Rows is the number of rows the anchor node had in the cut ranges.
+	// Rows is the number of rows the anchor node had in the cut ranges. The
+	// sample does not count rows, and Rows is 0 then.
 	Rows int64
-	// MaxBlockRows is the size of the largest block on the anchor node.
+	// MaxBlockRows is the size of the largest block on the anchor node, or
+	// 0 for the sample.
 	MaxBlockRows int64
-	// FirstBlock is the time from the start of Cut to the first block.
+	// SamplePercent and SampleKeys are the TABLESAMPLE SYSTEM rate and the
+	// number of sampled keys of the sample.
+	SamplePercent float64
+	SampleKeys    int64
+	// FirstBlock is the time from the start of the cut to the first block.
 	FirstBlock time.Duration
 	Elapsed    time.Duration
 }
 
 // String returns a one-line description of a finished cut for the log.
 func (st *Stats) String() string {
+	if st.Method == MethodSample {
+		// The blocks go to the list at once, so the time of the cut is
+		// the time of the sample query.
+		return fmt.Sprintf("%d blocks in %s from a sample of %d keys (%.4g%% of the pages)",
+			st.Blocks, st.FirstBlock.Round(time.Millisecond), st.SampleKeys, st.SamplePercent)
+	}
 	return fmt.Sprintf("%d blocks in %s (first block after %s, largest block %d rows)",
 		st.Blocks, st.Elapsed.Round(time.Millisecond), st.FirstBlock.Round(time.Millisecond), st.MaxBlockRows)
 }
@@ -938,6 +959,7 @@ func Cut(ctx context.Context, conns []Querier, cfg Config, plan *Plan, out chan<
 		return nil, err
 	}
 	return &Stats{
+		Method:       MethodCutter,
 		Blocks:       c.blocks.Load(),
 		Rows:         c.rows.Load(),
 		MaxBlockRows: c.maxRows.Load(),

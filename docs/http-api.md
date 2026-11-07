@@ -94,6 +94,7 @@ Request body:
 | `compare_unit_size` | int | no | Defaults to `table_diff.compare_unit_size` or `10000`. |
 | `max_diff_rows` | int64 | no | Defaults to `table_diff.max_diff_rows` or `0` (no limit). |
 | `max_connections` | int | no | Connections per node for each `table-diff` task; a value that is set is a strict limit for the whole task. `0` or missing takes, in this order, `max_connections.nodes.<cluster>.<node>` or `max_connections.default` from `ace.yaml`, then `table_diff.max_connections`; if none is set, the task opens 8 for cutting and hashing, and the comparison can open more. |
+| `slicer` | string | no | How to cut a table into blocks: `auto`, `cutter` or `sample`. Defaults to `table_diff.slicer` or `auto`. |
 | `table_filter` | string | no | SQL `WHERE` predicate (without `WHERE`). |
 | `override_block_size` | bool | no | Bypass block-size guardrails. |
 | `quiet` | bool | no | Suppress progress output. |
@@ -194,6 +195,7 @@ Request body:
 | `concurrency_factor` | float | no | CPU ratio (0.0–4.0). Defaults to `table_diff.concurrency_factor` or `0.5`. |
 | `compare_unit_size` | int | no | Defaults to `table_diff.compare_unit_size` or `10000`. |
 | `max_connections` | int | no | Connections per node for each `table-diff` task; a value that is set is a strict limit for the whole task. `0` or missing takes, in this order, `max_connections.nodes.<cluster>.<node>` or `max_connections.default` from `ace.yaml`, then `table_diff.max_connections`; if none is set, the task opens 8 for cutting and hashing, and the comparison can open more. |
+| `slicer` | string | no | How to cut a table into blocks: `auto`, `cutter` or `sample`. Defaults to `table_diff.slicer` or `auto`. |
 | `output` | string | no | `json` (default) or `html`. |
 | `override_block_size` | bool | no | Bypass block-size guardrails. |
 | `quiet` | bool | no | Suppress output. |
@@ -216,6 +218,7 @@ Request body:
 | `concurrency_factor` | float | no | CPU ratio (0.0–4.0). Defaults to `table_diff.concurrency_factor` or `0.5`. |
 | `compare_unit_size` | int | no | Defaults to `table_diff.compare_unit_size` or `10000`. |
 | `max_connections` | int | no | Connections per node for each `table-diff` task; a value that is set is a strict limit for the whole task. `0` or missing takes, in this order, `max_connections.nodes.<cluster>.<node>` or `max_connections.default` from `ace.yaml`, then `table_diff.max_connections`; if none is set, the task opens 8 for cutting and hashing, and the comparison can open more. |
+| `slicer` | string | no | How to cut a table into blocks: `auto`, `cutter` or `sample`. Defaults to `table_diff.slicer` or `auto`. |
 | `output` | string | no | `json` (default) or `html`. |
 | `override_block_size` | bool | no | Bypass block-size guardrails. |
 | `quiet` | bool | no | Suppress output. |

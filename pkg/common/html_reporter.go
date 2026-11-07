@@ -438,6 +438,19 @@ func (p *htmlPairPlan) missingRow(key string, missingInB bool, pkSet map[string]
 	return row
 }
 
+// formatSlicer describes how the table was cut into blocks. When ACE chose
+// the way to cut, the request follows in parentheses, for example
+// "sample (auto)".
+func formatSlicer(s *types.SlicerSummary) string {
+	if s == nil || s.Method == "" {
+		return ""
+	}
+	if s.Requested != "" && s.Requested != s.Method {
+		return s.Method + " (" + s.Requested + ")"
+	}
+	return s.Method
+}
+
 func buildHTMLSummaryItems(summary types.DiffSummary, shown, total int, truncated bool) []htmlSummaryItem {
 	items := []htmlSummaryItem{
 		{Label: "Table", Value: fmt.Sprintf("%s.%s", summary.Schema, summary.Table)},
@@ -456,6 +469,7 @@ func buildHTMLSummaryItems(summary types.DiffSummary, shown, total int, truncate
 		htmlSummaryItem{Label: "Initial Ranges", Value: formatInt64WithCommas(int64(summary.InitialRangesCount))},
 		htmlSummaryItem{Label: "Mismatched Ranges", Value: formatInt64WithCommas(int64(summary.MismatchedRangesCount))},
 		htmlSummaryItem{Label: "Block Size", Value: formatInt64WithCommas(int64(summary.BlockSize))},
+		htmlSummaryItem{Label: "Slicer", Value: formatSlicer(summary.Slicer)},
 		htmlSummaryItem{Label: "Compare Unit Size", Value: formatInt64WithCommas(int64(summary.CompareUnitSize))},
 		htmlSummaryItem{Label: "Concurrency Factor", Value: strconv.FormatFloat(summary.ConcurrencyFactor, 'f', -1, 64)},
 		htmlSummaryItem{Label: "Time Taken", Value: formatDurationHuman(summary.TimeTaken)},

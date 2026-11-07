@@ -96,7 +96,10 @@ type SchemaDiffCmd struct {
 	OutputExplicit    bool
 	TableFilter       string
 	OverrideBlockSize bool
-	Ctx               context.Context
+	// Slicer is the way to cut each table into blocks: auto, cutter or
+	// sample. Empty means table_diff.slicer from the config, or auto.
+	Slicer string
+	Ctx    context.Context
 
 	SkipDBUpdate  bool
 	TaskStore     *taskstore.Store
@@ -245,6 +248,9 @@ func (c *SchemaDiffCmd) Validate() error {
 			config.MaxConnectionsPerNode, c.MaxConnections)
 	}
 	if err := cfg.CheckConnectionLimits(); err != nil {
+		return err
+	}
+	if _, err := configuredSlicer(c.Slicer, cfg); err != nil {
 		return err
 	}
 
@@ -948,6 +954,7 @@ func (task *SchemaDiffCmd) SchemaTableDiff() (err error) {
 		tdTask.Output = task.Output
 		tdTask.TableFilter = task.TableFilter
 		tdTask.OverrideBlockSize = task.OverrideBlockSize
+		tdTask.Slicer = task.Slicer
 		tdTask.QuietMode = task.Quiet
 		tdTask.Ctx = task.Ctx
 
@@ -1013,6 +1020,7 @@ func (task *SchemaDiffCmd) CloneForSchedule(ctx context.Context) *SchemaDiffCmd 
 	clone.OutputExplicit = task.OutputExplicit
 	clone.TableFilter = task.TableFilter
 	clone.OverrideBlockSize = task.OverrideBlockSize
+	clone.Slicer = task.Slicer
 	clone.SkipDBUpdate = task.SkipDBUpdate
 	clone.TaskStore = task.TaskStore
 	clone.TaskStorePath = task.TaskStorePath

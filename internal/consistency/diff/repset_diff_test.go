@@ -248,11 +248,16 @@ func TestRepsetDiffCmd_CloneForSchedule(t *testing.T) {
 		Output:            "json",
 		TableFilter:       "id > 10",
 		OverrideBlockSize: true,
+		Slicer:            "sample",
 		SkipDBUpdate:      true,
 		TaskStorePath:     "/tmp/store.db",
 	}
 
 	clone := original.CloneForSchedule(original.Ctx)
+
+	if clone.Slicer != original.Slicer {
+		t.Errorf("Slicer = %q, want %q", clone.Slicer, original.Slicer)
+	}
 
 	// All config fields should be copied.
 	if clone.ClusterName != original.ClusterName {
