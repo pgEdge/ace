@@ -3,8 +3,8 @@
 #
 # Full certification of all 14 ACE detector cells (42 legs: each cell on PG16/17/18)
 # with ACE's own repository client certificate, through the release adapter and
-# certifier, every PEP call pinned to the candidate commit 17584fd (PEP branch
-# feature/pep-ace-support): this workflow -> pep-release-certify -> pep-certify ->
+# certifier, every PEP call pinned to the candidate commit 9c6e993 (PEP branch
+# validate/pep-next-group-combined): this workflow -> pep-release-certify -> pep-certify ->
 # pep-capture and pep-integration. The branch starts at ACE v3.0.0 (af0a33f), whose
 # packaging/ tree the real detector reads. One push of its branch starts this one
 # run; ACE's own release.yaml (v* tags, manual dispatch) and test.yml (main) do not
@@ -28,7 +28,7 @@ name: PEP chain check, ACE full, all 14 cells (validation, no build or publicati
 
 on:
     push:
-        branches: [validate/pep-17584fd-ace-full14]
+        branches: [validate/pep-9c6e993-ace-full14]
 
 permissions:
     contents: read
@@ -123,7 +123,7 @@ jobs:
                   bind those files to this run's cells only and do not establish their original build
                   provenance (this is not evidence that ACE's release workflow built them).
                   `simulated: false` and the `success` publication inputs are synthetic validation inputs.
-                  Every PEP call is pinned to the candidate 17584fd.
+                  Every PEP call is pinned to the candidate 9c6e993.
                   EOF
 
     package-rpm:
@@ -169,7 +169,7 @@ jobs:
                   path: output/el${{ steps.cell.outputs.os_version }}-${{ matrix.arch }}/
                   retention-days: 7
             - name: Generate pep-receipt/2 for the RPM cell
-              uses: pgEdge/pgedge-pep-test/.github/actions/pep-package-receipt@17584fd4efab8ed82ae89cf58bc3cb0bee880278
+              uses: pgEdge/pgedge-pep-test/.github/actions/pep-package-receipt@9c6e9937e93c1e92fa7bdcc672218e6a3c192a05
               with:
                   cell_id: ${{ matrix.cell_id }}
                   family: rpm
@@ -221,7 +221,7 @@ jobs:
                   path: output/${{ steps.cell.outputs.distro }}-${{ matrix.arch }}/
                   retention-days: 7
             - name: Generate pep-receipt/2 for the DEB cell
-              uses: pgEdge/pgedge-pep-test/.github/actions/pep-package-receipt@17584fd4efab8ed82ae89cf58bc3cb0bee880278
+              uses: pgEdge/pgedge-pep-test/.github/actions/pep-package-receipt@9c6e9937e93c1e92fa7bdcc672218e6a3c192a05
               with:
                   cell_id: ${{ matrix.cell_id }}
                   family: deb
@@ -239,7 +239,7 @@ jobs:
         permissions:
             contents: read      # nested checkouts of the pinned PEP implementation
             actions: read       # capture lists THIS run's jobs + downloads its artifacts by id
-        uses: pgEdge/pgedge-pep-test/.github/workflows/pep-release-certify.yml@17584fd4efab8ed82ae89cf58bc3cb0bee880278
+        uses: pgEdge/pgedge-pep-test/.github/workflows/pep-release-certify.yml@9c6e9937e93c1e92fa7bdcc672218e6a3c192a05
         with:
             rpm_matrix:      ${{ needs.select-cells.outputs.rpm_matrix }}
             deb_matrix:      ${{ needs.select-cells.outputs.deb_matrix }}
