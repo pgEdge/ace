@@ -68,7 +68,11 @@ type DiffConfig struct {
 	MaxCPURatio       float64 `yaml:"max_cpu_ratio"`
 	BatchSize         int     `yaml:"diff_batch_size"`
 	MaxBatchSize      int     `yaml:"max_diff_batch_size"`
-	CompareUnitSize   int     `yaml:"compare_unit_size"`
+	// CompareUnitSize is no longer used; a run that gets it warns.
+	CompareUnitSize int `yaml:"compare_unit_size"`
+	// KeyMapMaxMemoryMB limits the memory for the keys of one mismatched
+	// block, in megabytes. Not set means the default; 0 means no limit.
+	KeyMapMaxMemoryMB *int `yaml:"key_map_max_memory_mb"`
 	// MaxConnections is the old name of max_connections.default. It is used
 	// only when max_connections.default is not set.
 	MaxConnections int `yaml:"max_connections"`
@@ -189,6 +193,10 @@ type MTreeConfig struct {
 		MaxBlockSize int   `yaml:"max_block_size"`
 		MaxDiffRows  int64 `yaml:"max_diff_rows"`
 		MaxHTMLRows  int64 `yaml:"max_html_rows"`
+		// KeyMapMaxMemoryMB limits the memory for the keys of one
+		// mismatched block, in megabytes. Not set means the default; 0
+		// means no limit.
+		KeyMapMaxMemoryMB *int `yaml:"key_map_max_memory_mb"`
 	} `yaml:"diff"`
 }
 

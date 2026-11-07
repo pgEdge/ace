@@ -14,7 +14,6 @@ package mtree
 import (
 	"cmp"
 	"context"
-	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -39,9 +38,9 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
-	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/pgedge/ace/db/queries"
+	"github.com/pgedge/ace/internal/consistency/keydiff"
 	"github.com/pgedge/ace/internal/consistency/slicer"
 	"github.com/pgedge/ace/internal/infra/cdc"
 	"github.com/pgedge/ace/internal/infra/db"
@@ -119,6 +118,12 @@ type MerkleTreeTask struct {
 	// node pair. 0 means mtree.diff.max_html_rows from the config, and if
 	// that is not set either, utils.DefaultMaxHTMLRows.
 	MaxHTMLRows int64
+
+	// KeyMapMaxMemory is the limit, in bytes, of the memory for the keys of
+	// one work item while the diff looks for the differing rows. 0 means
+	// mtree.diff.key_map_max_memory_mb from the settings file; a negative
+	// value means no limit.
+	KeyMapMaxMemory int64
 
 	DiffResult     types.DiffOutput
 	diffMutex      sync.Mutex
@@ -430,9 +435,9 @@ func (m *MerkleTreeTask) recordPairCompareErr(pairKey string) {
 }
 
 // processWorkItem compares the rows of the mismatched leaf ranges in work on
-// two nodes. It reads the primary key and the row hash (queries.RowHashExpr)
-// of every row in these ranges from both nodes, and then fetches and records
-// only the rows whose hashes differ or that exist on one node only.
+// two nodes and records the rows that differ. Each node sends the key and a
+// short row hash of every row in these ranges; full rows are read only for
+// the keys that differ.
 func (m *MerkleTreeTask) processWorkItem(work CompareRangesWorkItem, pool1, pool2 *pgxpool.Pool) error {
 	logger.Debug("Processing work item with %d ranges for %s and %s", len(work.Ranges), work.Node1["Name"], work.Node2["Name"])
 	var whereClause string
@@ -513,158 +518,93 @@ func (m *MerkleTreeTask) processWorkItem(work CompareRangesWorkItem, pool1, pool
 		whereClause = fmt.Sprintf("(%s) AND %s", whereClause, f)
 	}
 
-	rowHashQuery, err := buildRowHashQuery(m.Schema, m.Table, m.Key, m.Cols, whereClause, m.ColTypes["_ref"])
-	if err != nil {
-		return fmt.Errorf("failed to build row hash query: %w", err)
-	}
-	logger.Debug("Row-hash Query: %s, Args: %v", rowHashQuery, args)
-
-	rowsH1, err := pool1.Query(m.Ctx, rowHashQuery, args...) // nosemgrep
-	if err != nil {
-		return fmt.Errorf("worker failed to get row hashes from %s: %v", work.Node1["Name"], err)
-	}
-	node1Hashes, err := readRowHashes(rowsH1, len(m.Key))
-	if err != nil {
-		return fmt.Errorf("failed to read row hashes from %s: %v", work.Node1["Name"], err)
-	}
-
-	rowsH2, err := pool2.Query(m.Ctx, rowHashQuery, args...) // nosemgrep
-	if err != nil {
-		return fmt.Errorf("worker failed to get row hashes from %s: %v", work.Node2["Name"], err)
-	}
-	node2Hashes, err := readRowHashes(rowsH2, len(m.Key))
-	if err != nil {
-		return fmt.Errorf("failed to read row hashes from %s: %v", work.Node2["Name"], err)
-	}
-
-	mismatchedSimple := make([]any, 0)
-	mismatchedComposite := make([][]any, 0)
-	isComposite := !m.SimplePrimaryKey
-
-	// Use the scanned pkey values, never the map key: the key is only a
-	// printed form and loses information.
-	if isComposite {
-		for k, e1 := range node1Hashes {
-			if e2, ok := node2Hashes[k]; !ok || e1.hash != e2.hash {
-				mismatchedComposite = append(mismatchedComposite, e1.pkey)
-			}
-		}
-		for k, e2 := range node2Hashes {
-			if e1, ok := node1Hashes[k]; !ok || e1.hash != e2.hash {
-				mismatchedComposite = append(mismatchedComposite, e2.pkey)
-			}
-		}
-	} else {
-		for k, e1 := range node1Hashes {
-			if e2, ok := node2Hashes[k]; !ok || e1.hash != e2.hash {
-				mismatchedSimple = append(mismatchedSimple, e1.pkey[0])
-			}
-		}
-		for k, e2 := range node2Hashes {
-			if e1, ok := node1Hashes[k]; !ok || e1.hash != e2.hash {
-				mismatchedSimple = append(mismatchedSimple, e2.pkey[0])
-			}
-		}
-	}
-
-	if (!isComposite && len(mismatchedSimple) == 0) || (isComposite && len(mismatchedComposite) == 0) {
-		return nil
-	}
-
-	const fetchBatchSize = 2000
 	// Stable per-pair key: getNodePairs emits each pair once in a fixed order,
 	// so this is not canonicalised (unlike table_diff.pairKeyFor).
 	nodePairKey := fmt.Sprintf("%s/%s", work.Node1["Name"], work.Node2["Name"])
+	maxKeys, full := m.pairRowsLeft(nodePairKey)
+	if full {
+		// The remaining mismatched rows are real diffs we are skipping.
+		m.notePairLimitReached(nodePairKey)
+		return nil
+	}
 
-	// Build the row-fetch SELECT list with the same cast policy as the classic
-	// engine (SelectColExpr): complex/unknown types arrive as Postgres text
-	// instead of opaque driver structs, so the diff report stays repairable.
+	node1Name, _ := work.Node1["Name"].(string)
+	node2Name, _ := work.Node2["Name"].(string)
+	// mtree requires the same column types on every node, so the types of
+	// the reference node are right for the key casts on both nodes. The
+	// leaves have no row counts, so the first node is the build side, and
+	// the memory limit is checked only while the keys are read. mtree refuses
+	// inheritance parents, so there are no children to scan.
 	refTypes := m.ColTypes["_ref"]
-	colExprs := make([]string, 0, len(m.Cols))
-	for _, c := range m.Cols {
-		colExprs = append(colExprs, queries.SelectColExpr("", c, refTypes[c]))
-	}
-	selectCols := "pg_xact_commit_timestamp(xmin) as commit_ts, " +
-		"to_json(pg_xact_commit_timestamp_origin(xmin))->>'roident' as node_origin, " +
-		strings.Join(colExprs, ", ")
-
-	if isComposite {
-		for i := 0; i < len(mismatchedComposite); i += fetchBatchSize {
-			if m.pairCapReached(nodePairKey) {
-				// The remaining mismatched keys are real diffs we are skipping.
-				m.notePairLimitReached(nodePairKey)
-				break
-			}
-			end := i + fetchBatchSize
-			if end > len(mismatchedComposite) {
-				end = len(mismatchedComposite)
-			}
-			batch := mismatchedComposite[i:end]
-
-			q, qArgs := buildFetchRowsSQLComposite(m.Schema, m.Table, m.Key, selectCols, batch)
-
-			r1, err := pool1.Query(m.Ctx, q, qArgs...) // nosemgrep
-			if err != nil {
-				return fmt.Errorf("failed to fetch rows (composite) from %s: %v", work.Node1["Name"], err)
-			}
-			pr1, err := processRows(r1)
-			if err != nil {
-				return fmt.Errorf("failed to process rows (composite) from %s: %v", work.Node1["Name"], err)
-			}
-
-			r2, err := pool2.Query(m.Ctx, q, qArgs...) // nosemgrep
-			if err != nil {
-				return fmt.Errorf("failed to fetch rows (composite) from %s: %v", work.Node2["Name"], err)
-			}
-			pr2, err := processRows(r2)
-			if err != nil {
-				return fmt.Errorf("failed to process rows (composite) from %s: %v", work.Node2["Name"], err)
-			}
-
-			if err := m.appendDiffs(nodePairKey, work, pr1, pr2); err != nil {
-				return err
-			}
+	s1 := keydiff.Side{Name: node1Name, Conn: pool1, ColTypes: refTypes}
+	s2 := keydiff.Side{Name: node2Name, Conn: pool2, ColTypes: refTypes}
+	tbl := keydiff.Table{Schema: m.Schema, Name: m.Table, Key: m.Key, Cols: m.Cols, HashTypes: refTypes}
+	block := keydiff.Block{Where: whereClause, Args: args, ReadFilter: queries.CommitTimestampFilter(m.untilTime)}
+	res, err := keydiff.Compare(m.Ctx, tbl, block, s1, s2, keydiff.Options{
+		MaxKeys:   maxKeys,
+		MaxMemory: m.keyMapMaxMemory(),
+	})
+	if err != nil {
+		var me *keydiff.MemoryLimitError
+		if errors.As(err, &me) {
+			err = fmt.Errorf("%w; raise %s or use smaller blocks", err, keyMapMaxMemorySetting)
 		}
-	} else {
-		for i := 0; i < len(mismatchedSimple); i += fetchBatchSize {
-			if m.pairCapReached(nodePairKey) {
-				// The remaining mismatched keys are real diffs we are skipping.
-				m.notePairLimitReached(nodePairKey)
-				break
-			}
-			end := i + fetchBatchSize
-			if end > len(mismatchedSimple) {
-				end = len(mismatchedSimple)
-			}
-			batch := mismatchedSimple[i:end]
-
-			q, qArgs := buildFetchRowsSQLSimple(m.Schema, m.Table, m.Key[0], selectCols, batch)
-
-			r1, err := pool1.Query(m.Ctx, q, qArgs...) // nosemgrep
-			if err != nil {
-				return fmt.Errorf("failed to fetch rows from %s: %v", work.Node1["Name"], err)
-			}
-			pr1, err := processRows(r1)
-			if err != nil {
-				return fmt.Errorf("failed to process rows from %s: %v", work.Node1["Name"], err)
-			}
-
-			r2, err := pool2.Query(m.Ctx, q, qArgs...) // nosemgrep
-			if err != nil {
-				return fmt.Errorf("failed to fetch rows from %s: %v", work.Node2["Name"], err)
-			}
-			pr2, err := processRows(r2)
-			if err != nil {
-				return fmt.Errorf("failed to process rows from %s: %v", work.Node2["Name"], err)
-			}
-
-			if err := m.appendDiffs(nodePairKey, work, pr1, pr2); err != nil {
-				return err
-			}
-		}
+		return fmt.Errorf("compare rows of %s.%s in %d leaf ranges on %s and %s: %w",
+			m.Schema, m.Table, len(work.Ranges), node1Name, node2Name, err)
 	}
-
+	logger.Debug("[%s vs %s] %d leaf ranges: %d differing keys (map on %s)",
+		node1Name, node2Name, len(work.Ranges), res.DiffKeys, res.BuildNode)
+	if res.Count() == 0 && !res.Truncated {
+		return nil
+	}
+	if err := m.appendDiffs(nodePairKey, work, res); err != nil {
+		return fmt.Errorf("record the differing rows of %s.%s on %s and %s: %w",
+			m.Schema, m.Table, node1Name, node2Name, err)
+	}
 	return nil
+}
+
+// DefaultKeyMapMaxMemoryMB is the default limit, in megabytes, of the memory
+// for the keys of one work item.
+const DefaultKeyMapMaxMemoryMB = 512
+
+const keyMapMaxMemorySetting = "mtree.diff.key_map_max_memory_mb"
+
+// keyMapMaxMemory returns the limit, in bytes, of the memory for the keys of
+// one work item. 0 means no limit, as does a setting of 0 or less.
+func (m *MerkleTreeTask) keyMapMaxMemory() int64 {
+	if m.KeyMapMaxMemory < 0 {
+		return 0
+	}
+	if m.KeyMapMaxMemory > 0 {
+		return m.KeyMapMaxMemory
+	}
+	mb := DefaultKeyMapMaxMemoryMB
+	if cfg := config.Get(); cfg != nil && cfg.MTree.Diff.KeyMapMaxMemoryMB != nil {
+		mb = *cfg.MTree.Diff.KeyMapMaxMemoryMB
+	}
+	if mb <= 0 {
+		return 0
+	}
+	return int64(mb) << 20
+}
+
+// pairRowsLeft returns how many more differing rows the node pair may
+// collect (0 means no limit), and whether the pair is already full.
+func (m *MerkleTreeTask) pairRowsLeft(pairKey string) (int, bool) {
+	if m.MaxDiffRows <= 0 {
+		return 0, false
+	}
+	m.diffMutex.Lock()
+	defer m.diffMutex.Unlock()
+	left := m.MaxDiffRows - m.diffRowCounts[pairKey]
+	if left <= 0 {
+		return 0, true
+	}
+	if left > math.MaxInt32 {
+		return 0, false
+	}
+	return int(left), false
 }
 
 func (m *MerkleTreeTask) loadNodeOriginNames() error {
@@ -706,18 +646,6 @@ func (m *MerkleTreeTask) pairLimitReachedLocked(pairKey string) bool {
 	return m.MaxDiffRows > 0 && m.diffRowCounts[pairKey] >= m.MaxDiffRows
 }
 
-// pairCapReached is the lock-safe counterpart of pairLimitReachedLocked, for
-// callers (e.g. the fetch loop) that do not already hold diffMutex. It lets a
-// worker stop fetching further batches once the pair is full.
-func (m *MerkleTreeTask) pairCapReached(pairKey string) bool {
-	if m.MaxDiffRows <= 0 {
-		return false
-	}
-	m.diffMutex.Lock()
-	defer m.diffMutex.Unlock()
-	return m.diffRowCounts[pairKey] >= m.MaxDiffRows
-}
-
 // recordPairRowLocked accounts for one collected differing row-pair. The caller
 // must hold diffMutex. Reaching MaxDiffRows flags the report truncated, matching
 // table-diff: the cap is a report-size bound, so once a pair holds max_diff_rows
@@ -748,21 +676,16 @@ func (m *MerkleTreeTask) notePairLimitReachedLocked(pairKey string) {
 }
 
 // notePairLimitReached is the lock-safe counterpart of notePairLimitReachedLocked,
-// for callers (e.g. the fetch loop) that do not already hold diffMutex.
+// for callers that do not already hold diffMutex.
 func (m *MerkleTreeTask) notePairLimitReached(pairKey string) {
 	m.diffMutex.Lock()
 	defer m.diffMutex.Unlock()
 	m.notePairLimitReachedLocked(pairKey)
 }
 
-// appendDiffs records the differences between two fetched row batches, stopping
-// once the node pair reaches MaxDiffRows.
-func (m *MerkleTreeTask) appendDiffs(nodePairKey string, work CompareRangesWorkItem, pr1, pr2 []types.OrderedMap) error {
-	diffResult, err := utils.CompareRowSets(pr1, pr2, m.Key, m.Cols)
-	if err != nil {
-		return fmt.Errorf("worker failed to compare row sets: %v", err)
-	}
-
+// appendDiffs records the differing rows of one work item, stopping once the
+// node pair reaches MaxDiffRows.
+func (m *MerkleTreeTask) appendDiffs(nodePairKey string, work CompareRangesWorkItem, res keydiff.Result) error {
 	m.diffMutex.Lock()
 	defer m.diffMutex.Unlock()
 
@@ -780,12 +703,17 @@ func (m *MerkleTreeTask) appendDiffs(nodePairKey string, work CompareRangesWorkI
 		m.DiffResult.NodeDiffs[nodePairKey].Rows[node2Name] = []types.OrderedMap{}
 	}
 
+	// The row search stopped at the limit, so more rows can differ.
+	if res.Truncated {
+		m.notePairLimitReachedLocked(nodePairKey)
+	}
+
 	// Each loop stops at its top check the moment it is asked to record a row
 	// while the pair is already full; recordPairRowLocked flags truncation as
 	// soon as a pair reaches the cap, matching table-diff.
 	var currentDiffRowsForPair int
 
-	for _, row := range diffResult.Node1OnlyRows {
+	for _, row := range res.Only1 {
 		if m.pairLimitReachedLocked(nodePairKey) {
 			m.notePairLimitReachedLocked(nodePairKey)
 			break
@@ -799,7 +727,7 @@ func (m *MerkleTreeTask) appendDiffs(nodePairKey string, work CompareRangesWorkI
 			m.recordPairRowLocked(nodePairKey)
 		}
 	}
-	for _, row := range diffResult.Node2OnlyRows {
+	for _, row := range res.Only2 {
 		if m.pairLimitReachedLocked(nodePairKey) {
 			m.notePairLimitReachedLocked(nodePairKey)
 			break
@@ -813,16 +741,16 @@ func (m *MerkleTreeTask) appendDiffs(nodePairKey string, work CompareRangesWorkI
 			m.recordPairRowLocked(nodePairKey)
 		}
 	}
-	for _, modRow := range diffResult.ModifiedRows {
+	for _, changed := range res.Changed {
 		if m.pairLimitReachedLocked(nodePairKey) {
 			m.notePairLimitReachedLocked(nodePairKey)
 			break
 		}
-		added1, err := m.addRowToDiff(nodePairKey, node1Name, modRow.Node1Data)
+		added1, err := m.addRowToDiff(nodePairKey, node1Name, changed.Row1)
 		if err != nil {
 			return err
 		}
-		added2, err := m.addRowToDiff(nodePairKey, node2Name, modRow.Node2Data)
+		added2, err := m.addRowToDiff(nodePairKey, node2Name, changed.Row2)
 		if err != nil {
 			return err
 		}
@@ -889,29 +817,6 @@ func (m *MerkleTreeTask) buildRowKey(row types.OrderedMap) (string, error) {
 		values[i] = fmt.Sprintf("%v", val)
 	}
 	return utils.RowKeyFromStrings(values), nil
-}
-
-// buildRowHashQuery returns the query that lists the primary key and the
-// hash of every row in the mismatched blocks. The row hash is
-// queries.RowHashExpr, the same one the leaf hash is built from. There is no
-// ORDER BY: the hashes of the two nodes are matched by key, so their order is
-// not used.
-func buildRowHashQuery(schema, table string, key []string, cols []string, whereClause string, colTypes map[string]string) (string, error) {
-	pkQuoted := make([]string, len(key))
-	for i, k := range key {
-		pkQuoted[i] = pgx.Identifier{k}.Sanitize()
-	}
-
-	rowHash, err := queries.RowHashExpr("", cols, colTypes)
-	if err != nil {
-		return "", err
-	}
-
-	qualifiedTable := fmt.Sprintf("%s.%s", pgx.Identifier{schema}.Sanitize(), pgx.Identifier{table}.Sanitize())
-	selectList := strings.Join(pkQuoted, ", ") + ", " + rowHash + " AS row_hash"
-
-	query := fmt.Sprintf("SELECT %s FROM %s WHERE %s", selectList, qualifiedTable, whereClause)
-	return query, nil
 }
 
 // pkeyKind classifies a primary-key value that pgx decoded into an untyped
@@ -1060,114 +965,6 @@ func pkeyIdentity(v any) (string, bool) {
 		return hex.EncodeToString(v.([]byte)), true
 	}
 	return "", false
-}
-
-// rowHashEntry holds a row's hash together with the pkey values it was built
-// from. Keep pkey: the map key is only a printed form, and rebuilding pkey
-// values from it is what broke uuid keys. pkey points into the scan
-// buffer of readRowHashes, so that buffer has to be allocated inside the loop.
-// Moving the allocation out of the loop would make every entry point at the
-// last row.
-type rowHashEntry struct {
-	hash [sha256.Size]byte
-	pkey []any
-}
-
-// readRowHashes reads the primary key and the row hash of every row. The hash
-// is scanned as pgtype.DriverBytes, which points into the memory of the
-// driver and is valid only until the next rows.Next, so it is copied into
-// the entry at once.
-func readRowHashes(rows pgx.Rows, numPK int) (map[string]rowHashEntry, error) {
-	defer rows.Close()
-	result := make(map[string]rowHashEntry)
-	var h pgtype.DriverBytes
-	scanPtrs := make([]any, numPK+1)
-	scanPtrs[numPK] = &h
-	for rows.Next() {
-		// A new buffer for every row: the entry keeps pointing into it.
-		scan := make([]any, numPK)
-		for i := range scan {
-			scanPtrs[i] = &scan[i]
-		}
-		if err := rows.Scan(scanPtrs...); err != nil {
-			return nil, err
-		}
-		// Point into the scan buffer instead of copying it: a mismatched block
-		// can hold up to mtree.max_block_size rows, and this map stays in
-		// memory for the whole work item, on both nodes at once.
-		pkey := scan
-		parts := make([]string, numPK)
-		for i := 0; i < numPK; i++ {
-			id, ok := pkeyIdentity(scan[i])
-			if !ok {
-				return nil, fmt.Errorf("primary-key value of type %T cannot be used "+
-					"as a row identity; mtree does not support this column type", scan[i])
-			}
-			parts[i] = id
-		}
-		// The key identifies a row across nodes and nothing else. It is NOT a
-		// pkey value and must never reach SQL, a diff report or repair: use
-		// rowHashEntry.pkey for those.
-		key := utils.RowKeyFromStrings(parts)
-		entry := rowHashEntry{pkey: pkey}
-		if len(h) != len(entry.hash) {
-			return nil, fmt.Errorf("row hash has %d bytes, want %d", len(h), len(entry.hash))
-		}
-		copy(entry.hash[:], h)
-		result[key] = entry
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return result, nil
-}
-
-// buildFetchRowsSQLSimple and buildFetchRowsSQLComposite build the fetch of
-// the rows of a mismatched block. There is no ORDER BY: the rows of the two
-// nodes are matched by key, so their order is not used. An ORDER BY on the
-// key would refer to the select-list entry of the same name, which can be an
-// expression (trim_scale, ::TEXT), and the database would have to sort the
-// rows.
-func buildFetchRowsSQLSimple(schema, table, pk, selectCols string, keys []any) (string, []any) {
-	placeholders := make([]string, len(keys))
-	args := make([]any, len(keys))
-	for i := range keys {
-		placeholders[i] = fmt.Sprintf("$%d", i+1)
-		args[i] = keys[i]
-	}
-	qualifiedTable := fmt.Sprintf("%s.%s", pgx.Identifier{schema}.Sanitize(), pgx.Identifier{table}.Sanitize())
-	where := fmt.Sprintf("%s IN (%s)", pgx.Identifier{pk}.Sanitize(), strings.Join(placeholders, ","))
-	q := fmt.Sprintf("SELECT %s FROM %s WHERE %s", selectCols, qualifiedTable, where)
-	return q, args
-}
-
-func buildFetchRowsSQLComposite(schema, table string, pk []string, selectCols string, keys [][]any) (string, []any) {
-	tupleCols := make([]string, len(pk))
-	for i, k := range pk {
-		tupleCols[i] = pgx.Identifier{k}.Sanitize()
-	}
-	var tuples []string
-	var args []any
-	argPos := 1
-	for _, kv := range keys {
-		ph := make([]string, len(kv))
-		for j := range kv {
-			ph[j] = fmt.Sprintf("$%d", argPos)
-			args = append(args, kv[j])
-			argPos++
-		}
-		tuples = append(tuples, fmt.Sprintf("(%s)", strings.Join(ph, ",")))
-	}
-	qualifiedTable := fmt.Sprintf("%s.%s", pgx.Identifier{schema}.Sanitize(), pgx.Identifier{table}.Sanitize())
-	where := fmt.Sprintf("( %s ) IN ( %s )", strings.Join(tupleCols, ","), strings.Join(tuples, ","))
-	q := fmt.Sprintf("SELECT %s FROM %s WHERE %s", selectCols, qualifiedTable, where)
-	return q, args
-}
-
-// processRows reads the fetched rows of a mismatched block, with the values
-// in the form of a diff report.
-func processRows(rows pgx.Rows) ([]types.OrderedMap, error) {
-	return utils.ScanRows(rows)
 }
 
 // renumberBlockRanges sets the NodePosition of each block to its index in

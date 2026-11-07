@@ -14,6 +14,9 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// TestTableDiffAgainstOriginWithUntil checks table-diff with --against-origin
+// and --until after n3 stops: a row from n3 that is on n1 but missing on n2
+// is reported, and a recovery repair puts it back on n2.
 func TestTableDiffAgainstOriginWithUntil(t *testing.T) {
 	ctx := context.Background()
 
@@ -122,7 +125,6 @@ func TestTableDiffAgainstOriginWithUntil(t *testing.T) {
 	task.Nodes = strings.Join([]string{serviceN1, serviceN2}, ",")
 	task.Output = "json"
 	task.BlockSize = 1000
-	task.CompareUnitSize = 100
 	task.ConcurrencyFactor = 1
 	task.MaxDiffRows = 100
 	task.AgainstOrigin = "n3"

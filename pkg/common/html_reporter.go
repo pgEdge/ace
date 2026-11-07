@@ -438,6 +438,10 @@ func (p *htmlPairPlan) missingRow(key string, missingInB bool, pkSet map[string]
 	return row
 }
 
+// buildHTMLSummaryItems returns the label and value pairs of the summary at
+// the top of the HTML report. shown and total are the numbers of rows that
+// the report shows and that the diff found; truncated says that the report
+// shows fewer rows. Items with an empty or zero value are left out.
 func buildHTMLSummaryItems(summary types.DiffSummary, shown, total int, truncated bool) []htmlSummaryItem {
 	items := []htmlSummaryItem{
 		{Label: "Table", Value: fmt.Sprintf("%s.%s", summary.Schema, summary.Table)},
@@ -456,7 +460,6 @@ func buildHTMLSummaryItems(summary types.DiffSummary, shown, total int, truncate
 		htmlSummaryItem{Label: "Initial Ranges", Value: formatInt64WithCommas(int64(summary.InitialRangesCount))},
 		htmlSummaryItem{Label: "Mismatched Ranges", Value: formatInt64WithCommas(int64(summary.MismatchedRangesCount))},
 		htmlSummaryItem{Label: "Block Size", Value: formatInt64WithCommas(int64(summary.BlockSize))},
-		htmlSummaryItem{Label: "Compare Unit Size", Value: formatInt64WithCommas(int64(summary.CompareUnitSize))},
 		htmlSummaryItem{Label: "Concurrency Factor", Value: strconv.FormatFloat(summary.ConcurrencyFactor, 'f', -1, 64)},
 		htmlSummaryItem{Label: "Time Taken", Value: formatDurationHuman(summary.TimeTaken)},
 		htmlSummaryItem{Label: "Start Time", Value: formatTimestampHuman(summary.StartTime)},

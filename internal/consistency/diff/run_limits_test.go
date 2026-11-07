@@ -20,6 +20,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/pgedge/ace/pkg/config"
 	"github.com/vbauerster/mpb/v8"
 )
@@ -104,19 +105,6 @@ func TestRunContextErrorBeforeTimeout(t *testing.T) {
 	}
 }
 
-func TestIsBlockTimeout(t *testing.T) {
-	err := &blockTimeoutError{Limit: time.Second}
-	if !isBlockTimeout(err) {
-		t.Fatal("isBlockTimeout is false for a blockTimeoutError")
-	}
-	if !isBlockTimeout(errors.Join(errors.New("hash failed"), err)) {
-		t.Fatal("isBlockTimeout is false for a wrapped blockTimeoutError")
-	}
-	if isBlockTimeout(context.DeadlineExceeded) {
-		t.Fatal("isBlockTimeout is true for another error")
-	}
-}
-
 func intPtr(v int) *int { return &v }
 
 // TestTimeLimits checks that a limit set on the task wins over ace.yaml,
@@ -165,10 +153,10 @@ func TestTimeLimits(t *testing.T) {
 	}
 }
 
-// When the run stops while the diff workers wait for a free slot, they end
+// When the run stops while the comparisons wait for a free slot, they end
 // without an error. The run must still fail with the cause of the stop, so
 // that an incomplete diff is not reported as a complete one.
-func TestStoppedRecursiveDiffsFailTheRun(t *testing.T) {
+func TestStoppedComparesFailTheRun(t *testing.T) {
 	task := NewTableDiffTask()
 	ctx, stop := newRunContext(nil, 0)
 	task.stopRun = stop
@@ -185,12 +173,12 @@ func TestStoppedRecursiveDiffsFailTheRun(t *testing.T) {
 	task.diffSem <- struct{}{}
 
 	p := mpb.New(mpb.WithOutput(io.Discard))
-	tasks := []RecursiveDiffTask{
-		{Node1Name: "n1", Node2Name: "n2"},
-		{Node1Name: "n1", Node2Name: "n2"},
+	tasks := []mismatchTask{
+		{node1: "n1", node2: "n2"},
+		{node1: "n1", node2: "n2"},
 	}
 	bar := p.AddBar(int64(len(tasks)))
-	task.runRecursiveDiffs(ctx, tasks, bar)
+	task.runCompares(ctx, tasks, bar)
 	p.Wait()
 
 	if err := task.getFirstError(); err != nil {
@@ -237,5 +225,65 @@ func TestTimeLimitTooLarge(t *testing.T) {
 	}
 	if _, err := timeLimit("block_timeout", nil, tooLarge); err == nil {
 		t.Fatalf("timeLimit from config (%d) = no error, want an error", tooLarge)
+	}
+}
+
+// fakeRows return no row and then the error err.
+type fakeRows struct {
+	pgx.Rows
+	err    error
+	closed bool
+}
+
+func (r *fakeRows) Next() bool { return false }
+func (r *fakeRows) Close()     { r.closed = true }
+func (r *fakeRows) Err() error { return r.err }
+
+// The rows of a block query close at their end, and the block timeout is
+// cancelled then. The error of the query must stay the same after that, and
+// must not become the error of the cancel. The connection is given back once.
+func TestBlockRowsKeepTheQueryError(t *testing.T) {
+	want := errors.New("invalid input syntax")
+	task := NewTableDiffTask()
+	task.blockTimeout = time.Minute
+	ctx := context.Background()
+	opCtx, cancel := task.blockContext(ctx)
+	released := 0
+	inner := &fakeRows{err: want}
+	rows := &blockRows{Rows: inner, ctx: ctx, opCtx: opCtx, cancel: cancel, release: func() { released++ }}
+
+	if rows.Next() {
+		t.Fatal("Next = true, want false")
+	}
+	if !inner.closed || released != 1 {
+		t.Fatalf("after the last row: closed %v, released %d times, want closed and once", inner.closed, released)
+	}
+	if err := rows.Err(); err != want {
+		t.Fatalf("Err = %v, want %v", err, want)
+	}
+	rows.Close()
+	if released != 1 {
+		t.Fatalf("released %d times after a second Close, want once", released)
+	}
+	if err := rows.Err(); err != want {
+		t.Fatalf("Err after Close = %v, want %v", err, want)
+	}
+}
+
+// A block query that runs longer than the block timeout fails with the
+// block timeout error, also when the error is read after the rows closed.
+func TestBlockRowsReportTheBlockTimeout(t *testing.T) {
+	task := NewTableDiffTask()
+	task.blockTimeout = time.Millisecond
+	ctx := context.Background()
+	opCtx, cancel := task.blockContext(ctx)
+	<-opCtx.Done()
+	inner := &fakeRows{err: context.DeadlineExceeded}
+	rows := &blockRows{Rows: inner, ctx: ctx, opCtx: opCtx, cancel: cancel, release: func() {}}
+
+	rows.Next()
+	var bt *blockTimeoutError
+	if err := rows.Err(); !errors.As(err, &bt) {
+		t.Fatalf("Err = %v, want a block timeout error", err)
 	}
 }

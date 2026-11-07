@@ -681,8 +681,9 @@ func RowHashExpr(tableAlias string, allCols []string, colTypes map[string]string
 // schema.table: BlockHashAggExpr over the row hashes (RowHashExpr) of allCols.
 //
 // mode selects the result type. "TD_BLOCK_HASH" gives the hash as hex text
-// for table-diff; "MTREE_LEAF_HASH" gives the 32 raw bytes stored in an mtree
-// leaf. Both modes give the same hash for the same rows.
+// and the number of rows in the block for table-diff; "MTREE_LEAF_HASH" gives
+// the 32 raw bytes stored in an mtree leaf. Both modes give the same hash for
+// the same rows.
 //
 // The block is a range of the primary key. includeLower adds
 // "key >= lower bound" and includeUpper adds "key < upper bound"; the bound
@@ -713,6 +714,41 @@ func BlockHashSQL(schema, table string, primaryKeyCols []string, mode string, in
 	tableIdent := pgx.Identifier{table}.Sanitize()
 	tableAlias := "_tbl_"
 
+	whereClause := BlockWhereClause(primaryKeyCols, includeLower, includeUpper, filter)
+
+	var tmpl *template.Template
+	switch mode {
+	case "TD_BLOCK_HASH":
+		tmpl = SQLTemplates.TDBlockHashSQL
+	case "MTREE_LEAF_HASH":
+		tmpl = SQLTemplates.MtreeLeafHashSQL
+	default:
+		return "", fmt.Errorf("invalid mode: %s", mode)
+	}
+
+	rowHash, err := RowHashExpr(tableAlias, allCols, colTypes)
+	if err != nil {
+		return "", err
+	}
+
+	data := map[string]any{
+		"SchemaIdent": schemaIdent,
+		"TableIdent":  tableIdent,
+		"TableAlias":  tableAlias,
+		"WhereClause": whereClause,
+		"RowHashExpr": rowHash,
+	}
+	return RenderSQL(tmpl, data)
+}
+
+// BlockWhereClause returns the WHERE clause of one block of a table: a range
+// of the primary key and the filter. includeLower adds "key >= lower bound"
+// and includeUpper adds "key < upper bound"; the bound values are the query
+// parameters, the lower bound first. A composite key is compared as a row.
+// filter, if not empty, is added as it is; the caller must make sure it is
+// safe. The block hash and the row search of a block both use this clause,
+// so that they cover the same rows.
+func BlockWhereClause(primaryKeyCols []string, includeLower, includeUpper bool, filter string) string {
 	quotedPKColIdents := make([]string, len(primaryKeyCols))
 	for i, pkCol := range primaryKeyCols {
 		quotedPKColIdents[i] = pgx.Identifier{pkCol}.Sanitize()
@@ -767,32 +803,9 @@ func BlockHashSQL(schema, table string, primaryKeyCols []string, mode string, in
 	}
 
 	if len(whereParts) == 0 {
-		whereParts = append(whereParts, "TRUE")
+		return "TRUE"
 	}
-
-	var tmpl *template.Template
-	switch mode {
-	case "TD_BLOCK_HASH":
-		tmpl = SQLTemplates.TDBlockHashSQL
-	case "MTREE_LEAF_HASH":
-		tmpl = SQLTemplates.MtreeLeafHashSQL
-	default:
-		return "", fmt.Errorf("invalid mode: %s", mode)
-	}
-
-	rowHash, err := RowHashExpr(tableAlias, allCols, colTypes)
-	if err != nil {
-		return "", err
-	}
-
-	data := map[string]any{
-		"SchemaIdent": schemaIdent,
-		"TableIdent":  tableIdent,
-		"TableAlias":  tableAlias,
-		"WhereClause": strings.Join(whereParts, " AND "),
-		"RowHashExpr": rowHash,
-	}
-	return RenderSQL(tmpl, data)
+	return strings.Join(whereParts, " AND ")
 }
 
 func GetPrimaryKey(ctx context.Context, db DBQuerier, schema, table string) ([]string, error) {

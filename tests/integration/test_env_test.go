@@ -172,7 +172,6 @@ func (e *testEnv) newTableDiffTask(t *testing.T, qualifiedTableName string, node
 	task.Nodes = strings.Join(nodes, ",")
 	task.Output = "json"
 	task.BlockSize = 1000
-	task.CompareUnitSize = 100
 	task.ConcurrencyFactor = 1
 	task.MaxDiffRows = math.MaxInt64
 

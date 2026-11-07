@@ -37,7 +37,6 @@ func newTestRepsetDiffTask(repsetName string) *diff.RepsetDiffCmd {
 	task.Quiet = true
 	task.SkipDBUpdate = true
 	task.BlockSize = 10000
-	task.CompareUnitSize = 100
 	task.ConcurrencyFactor = 1
 	return task
 }
