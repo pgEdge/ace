@@ -100,31 +100,6 @@ func TestMtreeDiffRejectsNegativeMaxDiffRows(t *testing.T) {
 	}
 }
 
-// A lost work item means the pair has no result. The summary has to say so,
-// otherwise a diff count of zero reads as a match.
-func TestIncompletePairsReportsFailedWorkItems(t *testing.T) {
-	m := &MerkleTreeTask{}
-
-	if got := m.incompletePairs(); got != nil {
-		t.Errorf("expected no incomplete pairs on a clean task, got %v", got)
-	}
-
-	m.recordPairCompareErr("n2/n3")
-	m.recordPairCompareErr("n1/n2")
-	m.recordPairCompareErr("n1/n2")
-
-	got := m.incompletePairs()
-	want := []string{"n1/n2", "n2/n3"}
-	if len(got) != len(want) {
-		t.Fatalf("incompletePairs() = %v, want %v", got, want)
-	}
-	for i := range want {
-		if got[i] != want[i] {
-			t.Fatalf("incompletePairs() = %v, want %v (stable, sorted)", got, want)
-		}
-	}
-}
-
 // uuid and bytea bounds must be sorted like uuid_cmp() and byteacmp(), not by
 // their printed Go form. 0x02 against 0x11 is the pair the fmt fallback got
 // backwards: as text, "[17 ..." comes before "[2 ...".

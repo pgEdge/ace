@@ -134,11 +134,9 @@ type MerkleTreeTask struct {
 	// rangesSkipped is set when a work item is not compared because the
 	// limit was reached.
 	rangesSkipped atomic.Bool
-	// pairCompareErrs records node pairs whose range comparison lost work items
-	// to errors. A zero diff count for such a pair means "not fully compared",
-	// not "no differences", so stale-block healing must not act on it. Guarded
-	// by diffMutex.
-	pairCompareErrs map[string]bool
+	// compareErr is the first error of a range comparison. After it, no
+	// worker takes another work item. Guarded by diffMutex.
+	compareErr error
 	// boundarySortWarned keeps the "cannot sort these bounds" warning to one
 	// line per task. It is raised from inside a sort comparator, which runs
 	// O(n log n) times per block set and again for every leaf in
@@ -396,8 +394,9 @@ func (m *MerkleTreeTask) CompareRanges(workItems []CompareRangesWorkItem, pools 
 }
 
 // compareRangesWorker drains jobs, comparing each range on the two nodes
-// of its pair through the shared per-node pools. A pair whose node has no
-// pool is recorded as incompletely compared; the worker never dials.
+// of its pair through the shared per-node pools. After the first error of
+// any worker, or when the differing rows reach MaxDiffRows, it takes no more
+// work items; the items left are only counted on the progress bar.
 func (m *MerkleTreeTask) compareRangesWorker(wg *sync.WaitGroup, jobs <-chan CompareRangesWorkItem, bar *mpb.Bar, pools map[string]*pgxpool.Pool) {
 	defer wg.Done()
 
@@ -414,8 +413,7 @@ func (m *MerkleTreeTask) compareRangesWorker(wg *sync.WaitGroup, jobs <-chan Com
 		node1Name := work.Node1["Name"].(string)
 		pool1, ok := pools[node1Name]
 		if !ok {
-			logger.Error("no connection pool for node %s; skipping range comparison for %s", node1Name, nodePairKey)
-			m.recordPairCompareErr(nodePairKey)
+			m.recordCompareErr(fmt.Errorf("no connection pool for node %s; cannot compare %s", node1Name, nodePairKey))
 			bar.Increment()
 			continue
 		}
@@ -423,24 +421,39 @@ func (m *MerkleTreeTask) compareRangesWorker(wg *sync.WaitGroup, jobs <-chan Com
 		node2Name := work.Node2["Name"].(string)
 		pool2, ok := pools[node2Name]
 		if !ok {
-			logger.Error("no connection pool for node %s; skipping range comparison for %s", node2Name, nodePairKey)
-			m.recordPairCompareErr(nodePairKey)
+			m.recordCompareErr(fmt.Errorf("no connection pool for node %s; cannot compare %s", node2Name, nodePairKey))
 			bar.Increment()
 			continue
 		}
 
-		err := m.processWorkItem(work, pool1, pool2)
-		if err != nil {
-			logger.Error("failed to process work item for %s: %v", nodePairKey, err)
-			m.recordPairCompareErr(nodePairKey)
+		if err := m.processWorkItem(work, pool1, pool2); err != nil {
+			m.recordCompareErr(fmt.Errorf("compare %s: %w", nodePairKey, err))
 		}
 		bar.Increment()
 	}
 }
 
+// recordCompareErr keeps the first error of a range comparison.
+func (m *MerkleTreeTask) recordCompareErr(err error) {
+	m.diffMutex.Lock()
+	defer m.diffMutex.Unlock()
+	if m.compareErr == nil {
+		m.compareErr = err
+	} else {
+		logger.Debug("mtree table-diff: another comparison error: %v", err)
+	}
+}
+
+// firstCompareErr returns the first error of a range comparison, or nil.
+func (m *MerkleTreeTask) firstCompareErr() error {
+	m.diffMutex.Lock()
+	defer m.diffMutex.Unlock()
+	return m.compareErr
+}
+
 // compareStopped tells whether the workers must take no more work items.
 func (m *MerkleTreeTask) compareStopped() bool {
-	return m.diffLimitHit.Load() || (m.Ctx != nil && m.Ctx.Err() != nil)
+	return m.diffLimitHit.Load() || m.firstCompareErr() != nil || (m.Ctx != nil && m.Ctx.Err() != nil)
 }
 
 // countDiffRows adds the differing rows of one work item to the count of the
@@ -452,18 +465,6 @@ func (m *MerkleTreeTask) countDiffRows(n int) {
 	if m.diffRows.Add(int64(n)) >= m.MaxDiffRows && m.diffLimitHit.CompareAndSwap(false, true) {
 		logger.Warn("mtree table-diff: reached max_diff_rows limit (%d); the ranges that are not compared yet are skipped", m.MaxDiffRows)
 	}
-}
-
-// recordPairCompareErr flags a node pair as incompletely compared: at least one
-// of its range-comparison work items was lost to an error, so a zero diff
-// count for the pair cannot be trusted.
-func (m *MerkleTreeTask) recordPairCompareErr(pairKey string) {
-	m.diffMutex.Lock()
-	defer m.diffMutex.Unlock()
-	if m.pairCompareErrs == nil {
-		m.pairCompareErrs = make(map[string]bool)
-	}
-	m.pairCompareErrs[pairKey] = true
 }
 
 // processWorkItem compares the rows of the mismatched leaf ranges in work on
@@ -2523,7 +2524,7 @@ func (m *MerkleTreeTask) DiffMtree() (err error) {
 	m.diffRows.Store(0)
 	m.diffLimitHit.Store(false)
 	m.rangesSkipped.Store(false)
-	m.pairCompareErrs = make(map[string]bool)
+	m.compareErr = nil
 	m.DiffResult = types.DiffOutput{
 		FormatVersion: types.DiffFormatVersion,
 		NodeDiffs:     make(map[string]types.DiffByNodePair),
@@ -2626,11 +2627,12 @@ func (m *MerkleTreeTask) DiffMtree() (err error) {
 
 	if len(workItems) > 0 {
 		m.CompareRanges(workItems, pools)
-
-		// Read the worker errors once, under the mutex, and use that copy
-		// below. The workers write pairCompareErrs, so no code here may read
-		// it directly.
-		m.DiffResult.Summary.IncompletePairs = m.incompletePairs()
+		if err := m.firstCompareErr(); err != nil {
+			return fmt.Errorf("mtree table-diff of %s.%s failed: %w", m.Schema, m.Table, err)
+		}
+		if m.Ctx != nil && m.Ctx.Err() != nil {
+			return m.Ctx.Err()
+		}
 		if m.diffLimitHit.Load() {
 			m.DiffResult.Summary.DiffRowLimitReached = true
 		}
@@ -2642,19 +2644,13 @@ func (m *MerkleTreeTask) DiffMtree() (err error) {
 		// contradiction -- and rehash those leaves from live data so the
 		// phantom mismatch does not recur on every subsequent diff. A zero diff
 		// count only proves staleness when every work item for the pair was
-		// actually compared and no row filter narrowed the comparison, so pairs
-		// with lost work items, a diff that stopped at max_diff_rows -- and any
-		// run under --until, whose comparison deliberately excludes rows past
-		// the cutoff -- are left alone.
+		// actually compared and no row filter narrowed the comparison, so a
+		// diff that stopped at max_diff_rows -- and any run under --until,
+		// whose comparison deliberately excludes rows past the cutoff --
+		// leaves the trees alone.
 		for _, pairKey := range pairKeys {
 			entry := allNodePairBatches[pairKey]
 			if len(entry.positions) == 0 || m.DiffResult.Summary.DiffRowsCount[pairKey] > 0 {
-				continue
-			}
-			if slices.Contains(m.DiffResult.Summary.IncompletePairs, pairKey) {
-				logger.Warn("comparison between %s and %s was incomplete (worker errors); "+
-					"skipping stale-block refresh -- re-run the diff",
-					entry.node1["Name"], entry.node2["Name"])
 				continue
 			}
 			if m.rangesSkipped.Load() || m.untilTime != nil {
@@ -2717,33 +2713,7 @@ func (m *MerkleTreeTask) DiffMtree() (err error) {
 			"guaranteed-current diff.", m.CDCSkippedNodes)
 	}
 
-	// A lost work item means the run has no result, not that the tables agree.
-	// Callers, and the exit code, must not read it as "no differences".
-	if pairs := m.DiffResult.Summary.IncompletePairs; len(pairs) > 0 {
-		return fmt.Errorf("mtree table-diff of %s.%s has no result: the range comparison "+
-			"failed part way through for node pair(s) %s (see the errors above). "+
-			"Run the diff again",
-			m.Schema, m.Table, strings.Join(pairs, ", "))
-	}
-
 	return nil
-}
-
-// incompletePairs lists the node pairs whose range comparison lost a work
-// item. The list is sorted so that the diff report does not change between
-// runs.
-func (m *MerkleTreeTask) incompletePairs() []string {
-	m.diffMutex.Lock()
-	defer m.diffMutex.Unlock()
-	if len(m.pairCompareErrs) == 0 {
-		return nil
-	}
-	pairs := make([]string, 0, len(m.pairCompareErrs))
-	for pair := range m.pairCompareErrs {
-		pairs = append(pairs, pair)
-	}
-	sort.Strings(pairs)
-	return pairs
 }
 
 // refreshStaleLeaves rehashes exactly the given leaf blocks from live table
