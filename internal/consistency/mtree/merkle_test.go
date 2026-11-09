@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/pgedge/ace/db/queries"
-	"github.com/pgedge/ace/internal/consistency/keydiff"
 	"github.com/pgedge/ace/pkg/types"
 )
 
@@ -21,99 +20,30 @@ func uuidBytes(b byte) [16]byte {
 	return out
 }
 
-// mtreeTaskWithDiffState returns a task wired just enough to exercise the diff
-// accumulator (appendDiffs) without a database.
-func mtreeTaskWithDiffState(maxDiffRows int64) *MerkleTreeTask {
-	m := &MerkleTreeTask{MaxDiffRows: maxDiffRows}
-	m.Key = []string{"id"}
-	m.Cols = []string{"id", "val"}
-	m.DiffResult = types.DiffOutput{
-		NodeDiffs: make(map[string]types.DiffByNodePair),
-		Summary:   types.DiffSummary{DiffRowsCount: make(map[string]int)},
+// The differing rows of all node pairs count against one max_diff_rows.
+// Reaching the limit, also exactly, stops the workers and marks the diff.
+func TestMtreeDiffRowLimitIsForTheWholeDiff(t *testing.T) {
+	m := &MerkleTreeTask{MaxDiffRows: 5}
+	m.countDiffRows(3)
+	if m.diffLimitHit.Load() || m.compareStopped() {
+		t.Fatal("3 rows of 5 must not stop the diff")
 	}
-	m.diffRowCounts = make(map[string]int64)
-	return m
-}
-
-// node1OnlyEntries makes an entry only on node 1 of each row.
-func node1OnlyEntries(rows []types.OrderedMap) []keydiff.Entry {
-	out := make([]keydiff.Entry, len(rows))
-	for i, r := range rows {
-		out[i] = keydiff.Entry{Kind: keydiff.KindOnly1, Row1: r}
+	m.countDiffRows(2)
+	if !m.diffLimitHit.Load() || !m.compareStopped() {
+		t.Fatal("5 rows of 5 must stop the diff")
 	}
-	return out
-}
-
-// node1OnlyRows builds n rows with unique primary keys, all absent from the peer.
-func node1OnlyRows(n int) []types.OrderedMap {
-	rows := make([]types.OrderedMap, n)
-	for i := range rows {
-		rows[i] = types.OrderedMap{{Key: "id", Value: fmt.Sprintf("%d", i)}, {Key: "val", Value: "x"}}
-	}
-	return rows
-}
-
-// A diverged table stops collecting at max_diff_rows and marks the report truncated.
-func TestMtreeDiffEnforcesMaxDiffRows(t *testing.T) {
-	const cap = 5
-	m := mtreeTaskWithDiffState(cap)
-	work := CompareRangesWorkItem{
-		Node1: map[string]any{"Name": "n1"},
-		Node2: map[string]any{"Name": "n2"},
-	}
-
-	if err := m.appendDiffs("n1/n2", work, keydiff.Result{Only1: len(node1OnlyRows(20))}, node1OnlyEntries(node1OnlyRows(20))); err != nil {
-		t.Fatalf("appendDiffs returned error: %v", err)
-	}
-
-	if got := len(m.DiffResult.NodeDiffs["n1/n2"].Rows["n1"]); got != cap {
-		t.Errorf("collected %d rows for n1, want the cap of %d", got, cap)
-	}
-	if !m.DiffResult.Summary.DiffRowLimitReached {
-		t.Errorf("expected DiffRowLimitReached=true after exceeding the cap")
+	m.countDiffRows(4)
+	if got := m.diffRows.Load(); got != 9 {
+		t.Fatalf("counted %d rows, want 9: a range that was in work when the limit was reached still counts", got)
 	}
 }
 
-// A pair with exactly max_diff_rows diffs collects them all and IS marked
-// truncated, matching table-diff: reaching the cap is a report-size bound, so we
-// warn that additional differences may exist even at the exact boundary.
-func TestMtreeDiffExactCapMarksTruncated(t *testing.T) {
-	const cap = 5
-	m := mtreeTaskWithDiffState(cap)
-	work := CompareRangesWorkItem{
-		Node1: map[string]any{"Name": "n1"},
-		Node2: map[string]any{"Name": "n2"},
-	}
-
-	if err := m.appendDiffs("n1/n2", work, keydiff.Result{Only1: len(node1OnlyRows(cap))}, node1OnlyEntries(node1OnlyRows(cap))); err != nil {
-		t.Fatalf("appendDiffs returned error: %v", err)
-	}
-
-	if got := len(m.DiffResult.NodeDiffs["n1/n2"].Rows["n1"]); got != cap {
-		t.Errorf("collected %d rows for n1, want all %d", got, cap)
-	}
-	if !m.DiffResult.Summary.DiffRowLimitReached {
-		t.Errorf("expected DiffRowLimitReached=true when diffs exactly equal the cap")
-	}
-}
-
-// With no cap configured, every differing row is collected and nothing is flagged truncated.
-func TestMtreeDiffNoLimitCollectsAll(t *testing.T) {
-	m := mtreeTaskWithDiffState(0)
-	work := CompareRangesWorkItem{
-		Node1: map[string]any{"Name": "n1"},
-		Node2: map[string]any{"Name": "n2"},
-	}
-
-	if err := m.appendDiffs("n1/n2", work, keydiff.Result{Only1: len(node1OnlyRows(20))}, node1OnlyEntries(node1OnlyRows(20))); err != nil {
-		t.Fatalf("appendDiffs returned error: %v", err)
-	}
-
-	if got := len(m.DiffResult.NodeDiffs["n1/n2"].Rows["n1"]); got != 20 {
-		t.Errorf("collected %d rows for n1, want all 20", got)
-	}
-	if m.DiffResult.Summary.DiffRowLimitReached {
-		t.Errorf("did not expect DiffRowLimitReached with no cap configured")
+// With no limit the diff never stops on rows.
+func TestMtreeDiffNoLimit(t *testing.T) {
+	m := &MerkleTreeTask{}
+	m.countDiffRows(1 << 30)
+	if m.diffLimitHit.Load() || m.compareStopped() {
+		t.Fatal("a diff with no max_diff_rows must not stop on rows")
 	}
 }
 

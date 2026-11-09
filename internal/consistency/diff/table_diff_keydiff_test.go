@@ -14,45 +14,31 @@ package diff
 import (
 	"reflect"
 	"testing"
-
-	"github.com/pgedge/ace/internal/consistency/keydiff"
-	"github.com/pgedge/ace/pkg/types"
 )
 
-// Two blocks of one pair can both find a difference while the pair has room
-// for one row only. The block that adds its rows second must add nothing.
-func TestAddDiffRowsKeepsPairLimit(t *testing.T) {
-	task := &TableDiffTask{
-		MaxDiffRows: 1,
-		DiffResult:  types.DiffOutput{NodeDiffs: map[string]types.DiffByNodePair{}},
+// The rows of all node pairs count against one max_diff_rows limit. The
+// limit is reached when the count gets to it, and a block that was in work
+// at that moment still adds its rows to the count.
+func TestCountDiffRowsSharedLimit(t *testing.T) {
+	task := &TableDiffTask{MaxDiffRows: 3}
+
+	task.countDiffRows(2)
+	if task.diffLimitReached() {
+		t.Fatal("limit reached after 2 of 3 rows")
 	}
-	task.Cols = []string{"id"}
-	pairKey := pairKeyFor("n1", "n2")
-	row := func(id int) types.OrderedMap {
-		return types.OrderedMap{{Key: "id", Value: id}}
+	task.countDiffRows(2)
+	if !task.diffLimitReached() {
+		t.Fatal("limit not reached after 4 of 3 rows")
+	}
+	task.countDiffRows(1)
+	if got := task.diffRows.Load(); got != 5 {
+		t.Fatalf("diffRows = %d, want 5", got)
 	}
 
-	task.addDiffRows(pairKey, "n1", "n2", keydiff.Result{Only1: 1}, []keydiff.Entry{
-		{Kind: keydiff.KindOnly1, Row1: row(1)},
-	})
-	task.addDiffRows(pairKey, "n1", "n2", keydiff.Result{Only1: 1, Only2: 1, Changed: 1}, []keydiff.Entry{
-		{Kind: keydiff.KindOnly1, Row1: row(2)},
-		{Kind: keydiff.KindOnly2, Row2: row(3)},
-		{Kind: keydiff.KindChanged, Row1: row(4), Row2: row(4)},
-	})
-
-	rows := task.DiffResult.NodeDiffs[pairKey].Rows
-	if got := len(rows["n1"]) + len(rows["n2"]); got != 1 {
-		t.Fatalf("pair holds %d rows, want 1", got)
-	}
-	if got := task.DiffResult.Summary.DiffRowsCount[pairKey]; got != 1 {
-		t.Fatalf("DiffRowsCount = %d, want 1", got)
-	}
-	if got := task.pairCounter(pairKey).Load(); got != 1 {
-		t.Fatalf("pair counter = %d, want 1", got)
-	}
-	if !task.DiffResult.Summary.DiffRowLimitReached {
-		t.Fatal("DiffRowLimitReached = false, want true")
+	noLimit := &TableDiffTask{}
+	noLimit.countDiffRows(10)
+	if noLimit.diffLimitReached() {
+		t.Fatal("limit reached with max_diff_rows = 0")
 	}
 }
 

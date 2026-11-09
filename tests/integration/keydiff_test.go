@@ -315,11 +315,6 @@ func TestKeyDiffBuildSide(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, env.ServiceN2, res.BuildNode)
 	require.Len(t, res.Only1, 100)
-
-	res, err = compareRows(ctx, tbl, keydiff.Block{Where: "TRUE"}, s1, s2, keydiff.Options{MaxKeys: 30})
-	require.NoError(t, err)
-	require.True(t, res.Truncated)
-	require.Len(t, res.Only1, 30)
 }
 
 // TestKeyDiffInheritance checks a parent and a child with rows of the same
@@ -382,41 +377,6 @@ func TestKeyDiffReadFilter(t *testing.T) {
 	require.Equal(t, []string{"v7"}, columnValues(t, res.Only1, "v"))
 	require.Empty(t, res.Only2)
 	require.Empty(t, res.Changed, "without the filter in the row read, row 7 would be a changed row")
-}
-
-// TestKeyDiffPoolAfterEarlyStop checks that a comparison that stops its probe
-// query early keeps the connection: a pool of one connection opens it once
-// for all comparisons.
-func TestKeyDiffPoolAfterEarlyStop(t *testing.T) {
-	ctx := context.Background()
-	env := newSpockEnv()
-	table := "keydiff_early_stop"
-	ident := pgx.Identifier{testSchema, table}.Sanitize()
-	dropOnBoth(t, ctx, env, "TABLE IF EXISTS "+ident)
-	for _, pool := range env.pools() {
-		keydiffExec(t, ctx, env, pool, fmt.Sprintf("CREATE TABLE %s (id int PRIMARY KEY, v text)", ident))
-	}
-	keydiffExec(t, ctx, env, env.N1Pool, fmt.Sprintf("INSERT INTO %s SELECT g, 'v' FROM generate_series(1, 100000) g", ident))
-
-	one := func(src *pgxpool.Pool) *pgxpool.Pool {
-		cfg := src.Config().Copy()
-		cfg.MaxConns = 1
-		p, err := pgxpool.NewWithConfig(ctx, cfg)
-		require.NoError(t, err)
-		t.Cleanup(p.Close)
-		return p
-	}
-	p1, p2 := one(env.N1Pool), one(env.N2Pool)
-	tbl, types1, types2 := keydiffTable(t, ctx, env, table)
-	s1 := keydiff.Side{Name: env.ServiceN1, Conn: p1, ColTypes: types1, Rows: 100000, RowsKnown: true}
-	s2 := keydiff.Side{Name: env.ServiceN2, Conn: p2, ColTypes: types2, Rows: 0, RowsKnown: true}
-	for i := 0; i < 3; i++ {
-		res, err := compareRows(ctx, tbl, keydiff.Block{Where: "TRUE"}, s1, s2, keydiff.Options{MaxKeys: 10})
-		require.NoError(t, err, "run %d", i)
-		require.True(t, res.Truncated)
-		require.Len(t, res.Only1, 10)
-	}
-	require.EqualValues(t, 1, p1.Stat().NewConnsCount(), "the probe node lost its connection")
 }
 
 // TestKeyDiffMemoryLimit checks the memory limit before and during the

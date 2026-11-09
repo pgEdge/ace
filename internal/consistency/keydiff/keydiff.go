@@ -100,11 +100,6 @@ type Block struct {
 
 // Options limit one comparison.
 type Options struct {
-	// MaxKeys is the number of differing keys after which the search stops.
-	// A key usually gives one differing row (a changed row counts once), so
-	// it is a limit on the rows too; in an inheritance tree a key can give
-	// more. 0 means no limit.
-	MaxKeys int
 	// MaxMemory is the limit, in bytes, of the memory for the keys of the
 	// block. 0 means no limit.
 	MaxMemory int64
@@ -149,9 +144,6 @@ type Result struct {
 	Only1   int
 	Only2   int
 	Changed int
-	// Truncated is true if the comparison stopped at Options.MaxKeys and
-	// more rows can differ.
-	Truncated bool
 	// BuildNode is the name of the node whose keys went into the map.
 	BuildNode string
 	// DiffKeys is the number of keys that the key queries found different.
@@ -189,7 +181,7 @@ func Compare(ctx context.Context, t Table, b Block, s1, s2 Side, o Options, sink
 	}
 	mem := &memCounter{limit: o.MaxMemory}
 
-	ids, truncated, err := runFindDiffKeys(ctx, t, query, b.Args, build, probe, o.MaxKeys, mem)
+	ids, err := runFindDiffKeys(ctx, t, query, b.Args, build, probe, mem)
 	if err != nil {
 		var me *errMemory
 		if errors.As(err, &me) {
@@ -202,7 +194,6 @@ func Compare(ctx context.Context, t Table, b Block, s1, s2 Side, o Options, sink
 		return Result{}, err
 	}
 	res := Result{BuildNode: build.Name}
-	res.Truncated = truncated
 	res.DiffKeys = len(ids)
 	if len(ids) == 0 {
 		return res, nil
@@ -314,36 +305,26 @@ func checkEstimate(t Table, build Side, o Options) error {
 
 // runFindDiffKeys runs the key query on both sides and finds the differing
 // keys. A build side that is known to have no rows is not queried.
-func runFindDiffKeys(ctx context.Context, t Table, query string, args []any, build, probe Side, maxKeys int, mem *memCounter) ([]string, bool, error) {
+func runFindDiffKeys(ctx context.Context, t Table, query string, args []any, build, probe Side, mem *memCounter) ([]string, error) {
 	var buildSrc keySource
 	if !build.RowsKnown || build.Rows != 0 {
 		src, err := openKeySource(ctx, t, query, args, build)
 		if err != nil {
-			return nil, false, err
+			return nil, err
 		}
 		defer src.close()
 		buildSrc = src
 	}
 	probeSrc, err := openKeySource(ctx, t, query, args, probe)
 	if err != nil {
-		return nil, false, err
+		return nil, err
 	}
 	defer probeSrc.close()
 
 	// A key query is sent on the first call of Next, so the probe query
 	// starts only when the whole build side is in the map, and its
 	// connection is not busy while the build side is read.
-	ids, truncated, err := findDiffKeys(buildSrc, probeSrc, maxKeys, mem)
-	if err == nil && truncated {
-		// The comparison goes on, so the connection must stay open. A
-		// cancel of the probe query would close it, and with a strict
-		// limit of connections the pool could fail to open a new one. So
-		// the rest of the probe query is read and dropped. The server then
-		// computes the row hash of every row left in the block, which costs
-		// much only for a large block of very wide rows.
-		probeSrc.readRest = true
-	}
-	return ids, truncated, err
+	return findDiffKeys(buildSrc, probeSrc, mem)
 }
 
 // keyRows reads the rows of a key query.
@@ -363,9 +344,6 @@ type keyRows struct {
 	done  bool
 	// complete is true when all rows of the query were read.
 	complete bool
-	// readRest is true when close must read the rows that are left instead
-	// of cancelling the query.
-	readRest bool
 }
 
 // openKeySource returns the rows of the key query of side s. The query is
@@ -439,12 +417,12 @@ func (k *keyRows) Row() keyRow { return k.cur }
 
 func (k *keyRows) Err() error { return k.err }
 
-// close ends the query. If the rows were not all read and readRest is
-// false, the query is cancelled on the server first, so that closing it does
-// not read the rest of the block. The cancel closes the connection.
+// close ends the query. If the rows were not all read, the query is
+// cancelled on the server first, so that closing it does not read the rest
+// of the block. The cancel closes the connection.
 func (k *keyRows) close() {
 	if k.rows != nil {
-		if !k.complete && !k.readRest {
+		if !k.complete {
 			k.cancel()
 		}
 		k.rows.Close()

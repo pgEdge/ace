@@ -142,12 +142,9 @@ func TestFindDiffKeys(t *testing.T) {
 				b = tt.build
 			}
 			mem := &memCounter{}
-			got, truncated, err := findDiffKeys(b, tt.probe, 0, mem)
+			got, err := findDiffKeys(b, tt.probe, mem)
 			if err != nil {
 				t.Fatal(err)
-			}
-			if truncated {
-				t.Fatal("must not be truncated")
 			}
 			if !reflect.DeepEqual(sorted(got), sorted(tt.want)) {
 				t.Fatalf("got %q, want %q", got, tt.want)
@@ -161,7 +158,7 @@ func TestFindDiffKeys(t *testing.T) {
 func TestFindDiffKeysOrder(t *testing.T) {
 	// Probe rows in the order read, then the keys left in the map in byte
 	// order, so that the result does not depend on the order of a Go map.
-	got, _, err := findDiffKeys(src(kr("z", 1), kr("b", 2), kr("m", 3)), src(kr("q", 1), kr("b", 9), kr("a", 1)), 0, &memCounter{})
+	got, err := findDiffKeys(src(kr("z", 1), kr("b", 2), kr("m", 3)), src(kr("q", 1), kr("b", 9), kr("a", 1)), &memCounter{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -174,7 +171,7 @@ func TestFindDiffKeysOrder(t *testing.T) {
 // the memory count.
 func TestFindDiffKeysMemoryKeepsPeak(t *testing.T) {
 	mem := &memCounter{}
-	got, _, err := findDiffKeys(src(kr("1", 1), kr("2", 2), kr("2", 3)), src(kr("2", 3), kr("2", 2), kr("1", 1)), 0, mem)
+	got, err := findDiffKeys(src(kr("1", 1), kr("2", 2), kr("2", 3)), src(kr("2", 3), kr("2", 2), kr("1", 1)), mem)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -188,41 +185,12 @@ func TestFindDiffKeysMemoryKeepsPeak(t *testing.T) {
 	}
 }
 
-// TestFindDiffKeysMaxKeys checks the stop after a number of differing keys,
-// on the probe side and among the keys left in the map, and that a result of
-// exactly that number is not a stop.
-func TestFindDiffKeysMaxKeys(t *testing.T) {
-	probe := src(kr("1", 1), kr("2", 2), kr("3", 3))
-	got, truncated, err := findDiffKeys(nil, probe, 2, &memCounter{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !truncated || len(got) != 2 {
-		t.Fatalf("got %q truncated=%v, want 2 keys and truncated", got, truncated)
-	}
-	if probe.i != 3 {
-		t.Fatalf("the probe read %d rows, want 3: it must stop at the first key over the limit", probe.i)
-	}
-
-	// Exactly as many keys as the limit: not truncated.
-	got, truncated, err = findDiffKeys(nil, src(kr("1", 1), kr("2", 2)), 2, &memCounter{})
-	if err != nil || truncated || len(got) != 2 {
-		t.Fatalf("got %q truncated=%v err=%v, want 2 keys, not truncated", got, truncated, err)
-	}
-
-	// The limit is reached by the keys left in the map.
-	got, truncated, err = findDiffKeys(src(kr("1", 1), kr("2", 2), kr("3", 3)), src(), 1, &memCounter{})
-	if err != nil || !truncated || !reflect.DeepEqual(got, []string{"1"}) {
-		t.Fatalf("got %q truncated=%v err=%v, want [1] and truncated", got, truncated, err)
-	}
-}
-
 // TestFindDiffKeysMemoryLimit checks the memory limit on the build side and
 // on the probe side, and the memory counted for a changed key.
 func TestFindDiffKeysMemoryLimit(t *testing.T) {
 	// Build side over the limit.
 	mem := &memCounter{limit: 2 * keyCost("1")}
-	_, _, err := findDiffKeys(src(kr("1", 1), kr("2", 2), kr("3", 3)), src(), 0, mem)
+	_, err := findDiffKeys(src(kr("1", 1), kr("2", 2), kr("3", 3)), src(), mem)
 	var me *errMemory
 	if !errors.As(err, &me) || !me.build {
 		t.Fatalf("got %v, want a memory error on the build side", err)
@@ -230,14 +198,14 @@ func TestFindDiffKeysMemoryLimit(t *testing.T) {
 
 	// Empty build side, all probe rows differ.
 	mem = &memCounter{limit: 2 * keyCost("1")}
-	_, _, err = findDiffKeys(nil, src(kr("1", 1), kr("2", 2), kr("3", 3)), 0, mem)
+	_, err = findDiffKeys(nil, src(kr("1", 1), kr("2", 2), kr("3", 3)), mem)
 	if !errors.As(err, &me) || me.build {
 		t.Fatalf("got %v, want a memory error on the probe side", err)
 	}
 
 	// Rows that match do not make room for new ones.
 	mem = &memCounter{limit: 2 * keyCost("1")}
-	_, _, err = findDiffKeys(src(kr("1", 1), kr("2", 2)), src(kr("1", 1), kr("2", 2), kr("3", 3)), 0, mem)
+	_, err = findDiffKeys(src(kr("1", 1), kr("2", 2)), src(kr("1", 1), kr("2", 2), kr("3", 3)), mem)
 	if !errors.As(err, &me) || me.build {
 		t.Fatalf("got %v, want a memory error on the probe side", err)
 	}
@@ -245,12 +213,12 @@ func TestFindDiffKeysMemoryLimit(t *testing.T) {
 	// A changed key read from the probe side is a string of its own, so the
 	// list counts its full cost, although the map holds the same key.
 	mem = &memCounter{limit: 3 * keyCost("1")}
-	got, _, err := findDiffKeys(src(kr("1", 1), kr("2", 2)), src(kr("1", 1), kr("2", 9)), 0, mem)
+	got, err := findDiffKeys(src(kr("1", 1), kr("2", 2)), src(kr("1", 1), kr("2", 9)), mem)
 	if err != nil || !reflect.DeepEqual(got, []string{"2"}) {
 		t.Fatalf("got %q err=%v, want [2]", got, err)
 	}
 	mem = &memCounter{limit: 3*keyCost("1") - 1}
-	_, _, err = findDiffKeys(src(kr("1", 1), kr("2", 2)), src(kr("1", 1), kr("2", 9)), 0, mem)
+	_, err = findDiffKeys(src(kr("1", 1), kr("2", 2)), src(kr("1", 1), kr("2", 9)), mem)
 	if !errors.As(err, &me) || me.build {
 		t.Fatalf("got %v, want a memory error on the probe side", err)
 	}
@@ -260,11 +228,11 @@ func TestFindDiffKeysMemoryLimit(t *testing.T) {
 // the probe stream is returned.
 func TestFindDiffKeysSourceError(t *testing.T) {
 	boom := errors.New("boom")
-	_, _, err := findDiffKeys(&fakeSource{err: boom}, src(), 0, &memCounter{})
+	_, err := findDiffKeys(&fakeSource{err: boom}, src(), &memCounter{})
 	if !errors.Is(err, boom) {
 		t.Fatalf("got %v, want the build error", err)
 	}
-	_, _, err = findDiffKeys(src(), &fakeSource{err: boom}, 0, &memCounter{})
+	_, err = findDiffKeys(src(), &fakeSource{err: boom}, &memCounter{})
 	if !errors.Is(err, boom) {
 		t.Fatalf("got %v, want the probe error", err)
 	}
