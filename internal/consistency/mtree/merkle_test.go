@@ -31,7 +31,6 @@ func mtreeTaskWithDiffState(maxDiffRows int64) *MerkleTreeTask {
 		NodeDiffs: make(map[string]types.DiffByNodePair),
 		Summary:   types.DiffSummary{DiffRowsCount: make(map[string]int)},
 	}
-	m.diffRowKeySets = make(map[string]map[string]map[string]struct{})
 	m.diffRowCounts = make(map[string]int64)
 	return m
 }
@@ -106,6 +105,48 @@ func TestMtreeDiffNoLimitCollectsAll(t *testing.T) {
 	}
 	if m.DiffResult.Summary.DiffRowLimitReached {
 		t.Errorf("did not expect DiffRowLimitReached with no cap configured")
+	}
+}
+
+// The ranges come in key order, the open-start range first, and a range
+// that starts where the one before it ends leaves out its lower bound, so
+// that a row on a shared bound is compared once.
+func TestPkeyBatchesOrderAndSharedBounds(t *testing.T) {
+	m := &MerkleTreeTask{}
+	m.Key = []string{"id"}
+	m.SimplePrimaryKey = true
+	b := func(v int64) []any { return []any{v} }
+	ranges := []types.LeafRange{
+		{RangeStart: nil, RangeEnd: b(10)},
+		{RangeStart: b(10), RangeEnd: b(20)},
+		{RangeStart: b(30), RangeEnd: b(40)},
+		{RangeStart: b(40), RangeEnd: nil},
+	}
+	got := m.pkeyBatchesFromRanges(ranges)
+	type want struct {
+		start, end any
+		exclusive  bool
+	}
+	first := func(v []any) any {
+		if len(v) == 0 {
+			return nil
+		}
+		return v[0]
+	}
+	wants := []want{
+		{nil, int64(10), false},
+		{int64(10), int64(20), true},
+		{int64(30), int64(40), false},
+		{int64(40), nil, true},
+	}
+	if len(got) != len(wants) {
+		t.Fatalf("got %d ranges, want %d: %+v", len(got), len(wants), got)
+	}
+	for i, w := range wants {
+		if first(got[i].start) != w.start || first(got[i].end) != w.end || got[i].startExclusive != w.exclusive {
+			t.Errorf("range %d = [%v, %v] exclusive=%v, want [%v, %v] exclusive=%v",
+				i, first(got[i].start), first(got[i].end), got[i].startExclusive, w.start, w.end, w.exclusive)
+		}
 	}
 }
 

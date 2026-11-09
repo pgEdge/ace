@@ -125,9 +125,8 @@ type MerkleTreeTask struct {
 	// value means no limit.
 	KeyMapMaxMemory int64
 
-	DiffResult     types.DiffOutput
-	diffMutex      sync.Mutex
-	diffRowKeySets map[string]map[string]map[string]struct{}
+	DiffResult types.DiffOutput
+	diffMutex  sync.Mutex
 	// diffRowCounts tracks differing rows collected per node pair for the
 	// MaxDiffRows cap; diffLimitWarned makes the "limit reached" warning fire
 	// once. Both are guarded by diffMutex.
@@ -150,10 +149,18 @@ type MerkleTreeTask struct {
 	Ctx context.Context
 }
 
+// CompareRangesWorkItem is one key range of a node pair to compare row by
+// row. Range holds the lower and the upper bound; a nil or all-NULL bound
+// means no bound. Both bounds are inclusive, except that StartExclusive
+// leaves out the lower bound: the range before it in the list of the pair
+// ends at the same key, and the rows of that key are compared there. Seq is
+// the position of the range in the list of the pair, in key order.
 type CompareRangesWorkItem struct {
-	Node1  map[string]any
-	Node2  map[string]any
-	Ranges [][2][]any
+	Node1          map[string]any
+	Node2          map[string]any
+	Range          [2][]any
+	StartExclusive bool
+	Seq            int
 }
 
 type CompareRangesResult struct {
@@ -439,15 +446,19 @@ func (m *MerkleTreeTask) recordPairCompareErr(pairKey string) {
 // short row hash of every row in these ranges; full rows are read only for
 // the keys that differ.
 func (m *MerkleTreeTask) processWorkItem(work CompareRangesWorkItem, pool1, pool2 *pgxpool.Pool) error {
-	logger.Debug("Processing work item with %d ranges for %s and %s", len(work.Ranges), work.Node1["Name"], work.Node2["Name"])
+	logger.Debug("Processing range %d for %s and %s", work.Seq, work.Node1["Name"], work.Node2["Name"])
 	var whereClause string
 	var args []any
 	paramIndex := 1
 	var orClauses []string
+	lower := ">="
+	if work.StartExclusive {
+		lower = ">"
+	}
 
 	if m.SimplePrimaryKey {
 		sanitisedKey := pgx.Identifier{m.Key[0]}.Sanitize()
-		for _, r := range work.Ranges {
+		for _, r := range [][2][]any{work.Range} {
 			var andClauses []string
 			var startVal, endVal any
 			if len(r[0]) > 0 {
@@ -458,7 +469,7 @@ func (m *MerkleTreeTask) processWorkItem(work CompareRangesWorkItem, pool1, pool
 			}
 
 			if startVal != nil {
-				andClauses = append(andClauses, fmt.Sprintf("%s >= $%d", sanitisedKey, paramIndex))
+				andClauses = append(andClauses, fmt.Sprintf("%s %s $%d", sanitisedKey, lower, paramIndex))
 				args = append(args, startVal)
 				paramIndex++
 			}
@@ -478,7 +489,7 @@ func (m *MerkleTreeTask) processWorkItem(work CompareRangesWorkItem, pool1, pool
 		}
 		pkeyColsStr := strings.Join(sanitisedKeys, ", ")
 
-		for _, r := range work.Ranges {
+		for _, r := range [][2][]any{work.Range} {
 			startVals := r[0]
 			endVals := r[1]
 
@@ -491,7 +502,7 @@ func (m *MerkleTreeTask) processWorkItem(work CompareRangesWorkItem, pool1, pool
 					args = append(args, v)
 					paramIndex++
 				}
-				andClauses = append(andClauses, fmt.Sprintf("ROW(%s) >= ROW(%s)", pkeyColsStr, strings.Join(placeholders, ", ")))
+				andClauses = append(andClauses, fmt.Sprintf("ROW(%s) %s ROW(%s)", pkeyColsStr, lower, strings.Join(placeholders, ", ")))
 			}
 			if !queries.AllNil(endVals) {
 				placeholders := make([]string, len(endVals))
@@ -549,11 +560,11 @@ func (m *MerkleTreeTask) processWorkItem(work CompareRangesWorkItem, pool1, pool
 		if errors.As(err, &me) {
 			err = fmt.Errorf("%w; raise %s or use smaller blocks", err, keyMapMaxMemorySetting)
 		}
-		return fmt.Errorf("compare rows of %s.%s in %d leaf ranges on %s and %s: %w",
-			m.Schema, m.Table, len(work.Ranges), node1Name, node2Name, err)
+		return fmt.Errorf("compare rows of %s.%s in range %d on %s and %s: %w",
+			m.Schema, m.Table, work.Seq, node1Name, node2Name, err)
 	}
-	logger.Debug("[%s vs %s] %d leaf ranges: %d differing keys (map on %s)",
-		node1Name, node2Name, len(work.Ranges), res.DiffKeys, res.BuildNode)
+	logger.Debug("[%s vs %s] range %d: %d differing keys (map on %s)",
+		node1Name, node2Name, work.Seq, res.DiffKeys, res.BuildNode)
 	if res.Count() == 0 && !res.Truncated {
 		return nil
 	}
@@ -718,46 +729,28 @@ func (m *MerkleTreeTask) appendDiffs(nodePairKey string, work CompareRangesWorkI
 			m.notePairLimitReachedLocked(nodePairKey)
 			break
 		}
-		added, err := m.addRowToDiff(nodePairKey, node1Name, row)
-		if err != nil {
-			return err
-		}
-		if added {
-			currentDiffRowsForPair++
-			m.recordPairRowLocked(nodePairKey)
-		}
+		m.addRowToDiff(nodePairKey, node1Name, row)
+		currentDiffRowsForPair++
+		m.recordPairRowLocked(nodePairKey)
 	}
 	for _, row := range res.Only2 {
 		if m.pairLimitReachedLocked(nodePairKey) {
 			m.notePairLimitReachedLocked(nodePairKey)
 			break
 		}
-		added, err := m.addRowToDiff(nodePairKey, node2Name, row)
-		if err != nil {
-			return err
-		}
-		if added {
-			currentDiffRowsForPair++
-			m.recordPairRowLocked(nodePairKey)
-		}
+		m.addRowToDiff(nodePairKey, node2Name, row)
+		currentDiffRowsForPair++
+		m.recordPairRowLocked(nodePairKey)
 	}
 	for _, changed := range res.Changed {
 		if m.pairLimitReachedLocked(nodePairKey) {
 			m.notePairLimitReachedLocked(nodePairKey)
 			break
 		}
-		added1, err := m.addRowToDiff(nodePairKey, node1Name, changed.Row1)
-		if err != nil {
-			return err
-		}
-		added2, err := m.addRowToDiff(nodePairKey, node2Name, changed.Row2)
-		if err != nil {
-			return err
-		}
-		if added1 || added2 {
-			currentDiffRowsForPair++
-			m.recordPairRowLocked(nodePairKey)
-		}
+		m.addRowToDiff(nodePairKey, node1Name, changed.Row1)
+		m.addRowToDiff(nodePairKey, node2Name, changed.Row2)
+		currentDiffRowsForPair++
+		m.recordPairRowLocked(nodePairKey)
 	}
 
 	if m.DiffResult.Summary.DiffRowsCount == nil {
@@ -767,56 +760,12 @@ func (m *MerkleTreeTask) appendDiffs(nodePairKey string, work CompareRangesWorkI
 	return nil
 }
 
-func (m *MerkleTreeTask) addRowToDiff(nodePairKey, nodeName string, row types.OrderedMap) (bool, error) {
-	if m.diffRowKeySets == nil {
-		m.diffRowKeySets = make(map[string]map[string]map[string]struct{})
-	}
-
+// addRowToDiff adds one differing row of nodeName to the diff result.
+func (m *MerkleTreeTask) addRowToDiff(nodePairKey, nodeName string, row types.OrderedMap) {
 	rowMap := utils.OrderedMapToMap(row)
 	rowMap["node_origin"] = utils.TranslateNodeOrigin(rowMap["node_origin"], m.NodeOriginNames[nodeName])
-	rowWithMeta := utils.AddSpockMetadata(rowMap)
-	orderedRow := utils.MapToOrderedMap(rowWithMeta, m.Cols)
-
-	pairSet, ok := m.diffRowKeySets[nodePairKey]
-	if !ok {
-		pairSet = make(map[string]map[string]struct{})
-		m.diffRowKeySets[nodePairKey] = pairSet
-	}
-
-	nodeSet, ok := pairSet[nodeName]
-	if !ok {
-		nodeSet = make(map[string]struct{})
-		pairSet[nodeName] = nodeSet
-	}
-
-	key, err := m.buildRowKey(orderedRow)
-	if err != nil {
-		return false, err
-	}
-
-	if _, exists := nodeSet[key]; exists {
-		return false, nil
-	}
-
-	nodeSet[key] = struct{}{}
+	orderedRow := utils.MapToOrderedMap(utils.AddSpockMetadata(rowMap), m.Cols)
 	m.DiffResult.NodeDiffs[nodePairKey].Rows[nodeName] = append(m.DiffResult.NodeDiffs[nodePairKey].Rows[nodeName], orderedRow)
-	return true, nil
-}
-
-// buildRowKey renders the primary key of a diff row into the key used to
-// deduplicate rows already recorded for a node pair. It uses the same encoding
-// as the rest of the codebase so that a pkey value containing the delimiter
-// cannot make two distinct rows look like one and silently drop a difference.
-func (m *MerkleTreeTask) buildRowKey(row types.OrderedMap) (string, error) {
-	values := make([]string, len(m.Key))
-	for i, col := range m.Key {
-		val, ok := row.Get(col)
-		if !ok {
-			return "", fmt.Errorf("primary key column %s not found in diff row", col)
-		}
-		values[i] = fmt.Sprintf("%v", val)
-	}
-	return utils.RowKeyFromStrings(values), nil
 }
 
 // pkeyKind classifies a primary-key value that pgx decoded into an untyped
@@ -2619,7 +2568,7 @@ func (m *MerkleTreeTask) DiffMtree() (err error) {
 	type pairDiffWork struct {
 		node1     map[string]any
 		node2     map[string]any
-		batches   [][2][]any
+		batches   []pkeyBatch
 		positions []int64
 		pool1     *pgxpool.Pool
 		pool2     *pgxpool.Pool
@@ -2657,7 +2606,6 @@ func (m *MerkleTreeTask) DiffMtree() (err error) {
 			CDCSkippedNodes: m.CDCSkippedNodes,
 		},
 	}
-	m.diffRowKeySets = make(map[string]map[string]map[string]struct{})
 
 	for _, pair := range nodePairs {
 		node1 := pair[0]
@@ -2724,15 +2672,15 @@ func (m *MerkleTreeTask) DiffMtree() (err error) {
 
 	}
 
-	const rangesPerWorkItem = 1
 	var workItems []CompareRangesWorkItem
 	for _, entry := range allNodePairBatches {
-		for i := 0; i < len(entry.batches); i += rangesPerWorkItem {
-			end := min(i+rangesPerWorkItem, len(entry.batches))
+		for i, b := range entry.batches {
 			workItems = append(workItems, CompareRangesWorkItem{
-				Node1:  entry.node1,
-				Node2:  entry.node2,
-				Ranges: entry.batches[i:end],
+				Node1:          entry.node1,
+				Node2:          entry.node2,
+				Range:          [2][]any{b.start, b.end},
+				StartExclusive: b.startExclusive,
+				Seq:            i,
 			})
 		}
 	}
@@ -2983,7 +2931,18 @@ func (m *MerkleTreeTask) findMismatchedLeaves(pool1, pool2 *pgxpool.Pool, parent
 	return mismatched, nil
 }
 
-func (m *MerkleTreeTask) getPkeyBatches(pool1, pool2 *pgxpool.Pool, mismatchedPositions []int64) ([][2][]any, error) {
+// pkeyBatch is one key range to compare. Both bounds are inclusive, except
+// that startExclusive leaves out the lower bound, because the range before
+// it ends at the same key.
+type pkeyBatch struct {
+	start, end     []any
+	startExclusive bool
+}
+
+// getPkeyBatches returns the key ranges that cover the mismatched leaves of
+// both nodes, in key order. Neighbour ranges share a bound; the rows at a
+// shared bound are compared only in the first of the two ranges.
+func (m *MerkleTreeTask) getPkeyBatches(pool1, pool2 *pgxpool.Pool, mismatchedPositions []int64) ([]pkeyBatch, error) {
 	mtreeTableIdentifier := pgx.Identifier{m.aceSchema(), fmt.Sprintf("ace_mtree_%s_%s", m.Schema, m.Table)}
 	mtreeTableName := mtreeTableIdentifier.Sanitize()
 
@@ -2997,7 +2956,12 @@ func (m *MerkleTreeTask) getPkeyBatches(pool1, pool2 *pgxpool.Pool, mismatchedPo
 	}
 
 	allRanges := append(leafRanges1, leafRanges2...)
+	return m.pkeyBatchesFromRanges(allRanges), nil
+}
 
+// pkeyBatchesFromRanges builds the key ranges to compare from the leaf
+// ranges of both nodes, in key order.
+func (m *MerkleTreeTask) pkeyBatchesFromRanges(allRanges []types.LeafRange) []pkeyBatch {
 	// The last leaf has range_end = NULL, and the first leaf has no lower
 	// bound (GetLeafRanges returns a nil start for it, see
 	// queries.FirstBlockPosition). So the boundary set must track open sides
@@ -3035,6 +2999,9 @@ func (m *MerkleTreeTask) getPkeyBatches(pool1, pool2 *pgxpool.Pool, mismatchedPo
 	})
 
 	var slices [][2]any
+	if len(sortedBoundaries) > 0 && hasOpenStart {
+		slices = append(slices, [2]any{nil, sortedBoundaries[0]})
+	}
 	switch len(sortedBoundaries) {
 	case 0:
 		if hasOpenStart || hasOpenEnd {
@@ -3057,27 +3024,23 @@ func (m *MerkleTreeTask) getPkeyBatches(pool1, pool2 *pgxpool.Pool, mismatchedPo
 		}
 	}
 
-	if len(sortedBoundaries) > 0 {
-		if hasOpenStart {
-			slices = append(slices, [2]any{nil, sortedBoundaries[0]})
+	if len(sortedBoundaries) > 0 && hasOpenEnd {
+		slices = append(slices, [2]any{sortedBoundaries[len(sortedBoundaries)-1], nil})
+	}
+
+	batches := make([]pkeyBatch, 0, len(slices))
+	for i, slice := range slices {
+		b := pkeyBatch{start: boundaryToSlice(slice[0]), end: boundaryToSlice(slice[1])}
+		// The slices are in key order, so a slice that starts where the one
+		// before it ends shares that bound with it. The bounds are compared
+		// as values: two spellings of one key (1.0 and 1.00) are one bound.
+		if i > 0 && slice[0] != nil && slices[i-1][1] != nil &&
+			m.compareBoundaries(slices[i-1][1], slice[0]) == 0 {
+			b.startExclusive = true
 		}
-		if hasOpenEnd {
-			slices = append(slices, [2]any{sortedBoundaries[len(sortedBoundaries)-1], nil})
-		}
+		batches = append(batches, b)
 	}
-
-	if len(slices) == 0 {
-		return [][2][]any{}, nil
-	}
-
-	var batches [][2][]any
-	for _, slice := range slices {
-		start := boundaryToSlice(slice[0])
-		end := boundaryToSlice(slice[1])
-		batches = append(batches, [2][]any{start, end})
-	}
-
-	return batches, nil
+	return batches
 }
 
 // boundaryKey renders a block bound into the key that de-duplicates the cut
