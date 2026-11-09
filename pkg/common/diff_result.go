@@ -413,9 +413,10 @@ type DiffReportPaths struct {
 type DiffReportOptions struct {
 	// Format is the output format of the run; "html" adds the HTML report.
 	Format string
-	// MaxHTMLRows limits the HTML report; a value of 0 or less means the
-	// default.
-	MaxHTMLRows int64
+	// MaxHTMLRows and MaxHTMLValueLength limit the HTML report; a value of 0
+	// or less means the default.
+	MaxHTMLRows        int64
+	MaxHTMLValueLength int64
 }
 
 // Finish completes the result: it writes the manifest and the JSON report,
@@ -470,7 +471,7 @@ func (w *DiffResultWriter) Finish(ctx context.Context, m DiffResultManifest, o D
 
 	if strings.EqualFold(o.Format, "html") {
 		r := &StoredDiff{Dir: paths.Dir, Manifest: m}
-		htmlPath, err := WriteHTMLDiffReport(ctx, r, o.MaxHTMLRows, 0)
+		htmlPath, err := WriteHTMLDiffReport(ctx, r, o.MaxHTMLRows, o.MaxHTMLValueLength)
 		if err != nil {
 			logger.Warn("the HTML report was not written: %v; the diff result %s is complete, "+
 				"build the report with: ace diff-report --diff-file %s", err, paths.Dir, paths.Dir)

@@ -33,6 +33,7 @@ table_diff:
   concurrency_factor: 0.5
   max_diff_rows: 1000000
   max_html_rows: 10000         # max rows per node pair in the HTML report
+  max_html_value_length: 1024  # max characters of a value in the HTML report
   min_diff_block_size: 1
   max_diff_block_size: 1000000
   diff_block_size: 1000
@@ -103,6 +104,8 @@ mtree:
     max_diff_rows: 1000000
     # Max rows per node pair in the HTML report (--output html).
     max_html_rows: 10000
+    # Max characters of a value in the HTML report.
+    max_html_value_length: 1024
     # Memory limit, in MB, for the keys of one work item while mtree
     # table-diff looks for the differing rows. 0 = no limit.
     key_map_max_memory_mb: 512
