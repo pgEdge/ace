@@ -354,3 +354,56 @@ func TestRenumberBlockRanges(t *testing.T) {
 		})
 	}
 }
+
+// A primary key column with another type on a node stops the diff; other
+// columns may differ.
+func TestKeyTypesMatch(t *testing.T) {
+	ref := map[string]string{"id": "character varying(3)", "v": "text"}
+	if err := keyTypesMatch([]string{"id"}, ref, map[string]string{"id": "character varying(3)", "v": "integer"}, "n1", "n2"); err != nil {
+		t.Fatalf("a non-key column of another type must not stop the diff: %v", err)
+	}
+	err := keyTypesMatch([]string{"id"}, ref, map[string]string{"id": "text", "v": "text"}, "n1", "n2")
+	if err == nil || !strings.Contains(err.Error(), `"id" has type character varying(3) on n1 and text on n2`) {
+		t.Fatalf("got %v, want an error that names the column, both types and both nodes", err)
+	}
+}
+
+// The row read of a node uses the column types of that node, and the types
+// of the reference node when the node was not read.
+func TestNodeColTypes(t *testing.T) {
+	m := &MerkleTreeTask{}
+	m.ColTypes = map[string]map[string]string{}
+	key := []string{"id"}
+	if err := m.addNodeColTypes("n1", map[string]string{"id": "integer", "v": "text"}, key); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.addNodeColTypes("n2", map[string]string{"id": "integer", "v": "jsonb"}, key); err != nil {
+		t.Fatal(err)
+	}
+	if got := m.nodeColTypes("n2")["v"]; got != "jsonb" {
+		t.Errorf("n2: got %s, want jsonb", got)
+	}
+	if got := m.nodeColTypes("n3")["v"]; got != "text" {
+		t.Errorf("n3: got %s, want the reference type text", got)
+	}
+}
+
+// The types of the reference node are kept apart from the types of the
+// nodes, so a node name cannot replace them.
+func TestNodeNameDoesNotReplaceReferenceTypes(t *testing.T) {
+	m := &MerkleTreeTask{}
+	m.ColTypes = map[string]map[string]string{}
+	key := []string{"id"}
+	if err := m.addNodeColTypes("n1", map[string]string{"id": "integer", "v": "text"}, key); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"_ref", "ref", ""} {
+		err := m.addNodeColTypes(name, map[string]string{"id": "bigint", "v": "text"}, key)
+		if err == nil || !strings.Contains(err.Error(), "primary key column") {
+			t.Errorf("node %q with another key type: got %v, want a key type error", name, err)
+		}
+		if got := m.refColTypes["id"]; got != "integer" {
+			t.Errorf("after node %q the reference key type is %s, want integer", name, got)
+		}
+	}
+}
