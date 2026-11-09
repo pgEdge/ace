@@ -19,7 +19,7 @@ the last pair block and before "report_tail".
         <div class="truncation-banner" role="status">
             <div class="truncation-title">This report shows {{.Truncation.Shown}} of {{.Truncation.Total}} rows</div>
             <div>The HTML report shows at most {{.Truncation.Limit}} rows for each node pair (max_html_rows). The full diff is in <code>{{.Truncation.DiffFile}}</code>.</div>
-            <div>A repair plan built on this page has rules only for the rows shown. Its default action is <code>skip</code>, so table-repair does not change the other rows, and they stay different between the nodes. To see or repair them, run table-diff again with a larger <code>--max-html-rows</code>.</div>
+            <div>A repair plan built on this page has rules only for the rows shown. Its default action is <code>skip</code>, so table-repair does not change the other rows, and they stay different between the nodes. To see or repair them, build the report again with a larger limit: <code>ace diff-report --diff-file {{.Truncation.DiffFile}} --max-html-rows N</code>.</div>
         </div>
         {{end}}
         <div class="plan-builder">
@@ -83,15 +83,6 @@ the last pair block and before "report_tail".
                         <tbody>
 {{end}}
 
-{{define "separator"}}
-                        <tr class="row-separator"><td colspan="100%">{{.}}</td></tr>
-{{end}}
-
-{{define "group_head"}}
-                            {{if .DividerBefore}}<tr class="row-divider"><td colspan="100%"></td></tr>{{end}}
-                            <tr class="row-subseparator"><td colspan="100%">{{.Title}}</td></tr>
-{{end}}
-
 {{define "value_row"}}
                             {{if not .First}}<tr class="row-divider"><td colspan="100%"></td></tr>{{end}}
                             <tr class="diff-row">
@@ -116,7 +107,7 @@ the last pair block and before "report_tail".
                                             <div class="custom-editor-header">Custom action</div>
                                             <label class="custom-field">
                                                 <span>Custom row (JSON)</span>
-                                                <textarea class="custom-row-input" data-default-json='{{.NodeAJSON}}' placeholder='{"col":"value"}'>{{- .NodeAJSON -}}</textarea>
+                                                <textarea class="custom-row-input" placeholder='{"col":"value"}'>{{- .NodeAJSON -}}</textarea>
                                             </label>
                                                 <div class="custom-helpers">
                                                     <label class="custom-field">
@@ -189,7 +180,7 @@ the last pair block and before "report_tail".
                                                 <div class="custom-editor-header">Custom action</div>
                                                 <label class="custom-field">
                                                     <span>Custom row (JSON)</span>
-                                                    <textarea class="custom-row-input" data-default-json='{{.NodeAJSON}}' placeholder='{"col":"value"}'>{{- .NodeAJSON -}}</textarea>
+                                                    <textarea class="custom-row-input" placeholder='{"col":"value"}'>{{- .NodeAJSON -}}</textarea>
                                                 </label>
                                                 <div class="custom-helpers">
                                                     <label class="custom-field">

@@ -322,9 +322,9 @@ func testMerkleTreeDiffDataOnlyOnNode1(t *testing.T, env *testEnv, tableName str
 			t.Logf("Warning: MtreeTeardown failed during cleanup: %v", err)
 		}
 		env.repairTable(t, qualifiedTableName, env.ServiceN2)
-		files, _ := filepath.Glob("*_diffs-*.json")
+		files, _ := filepath.Glob("*_diffs-*")
 		for _, f := range files {
-			os.Remove(f)
+			os.RemoveAll(f)
 		}
 	})
 	err = mtreeTask.BuildMtree()
@@ -358,7 +358,7 @@ func testMerkleTreeDiffDataOnlyOnNode1(t *testing.T, env *testEnv, tableName str
 		pairKey = env.ServiceN2 + "/" + env.ServiceN1
 	}
 
-	nodeDiffs, ok := mtreeTask.DiffResult.NodeDiffs[pairKey]
+	nodeDiffs, ok := diffPairs(t, mtreeTask)[pairKey]
 	require.True(t, ok, "Expected diffs for pair %s, but none found. Result: %+v", pairKey, mtreeTask.DiffResult)
 
 	require.GreaterOrEqual(t, len(nodeDiffs.Rows[env.ServiceN1]), 1, "Expected at least 1 modified row on %s, got %d", env.ServiceN1, len(nodeDiffs.Rows[env.ServiceN1]))
@@ -369,13 +369,13 @@ func testMerkleTreeDiffDataOnlyOnNode1(t *testing.T, env *testEnv, tableName str
 	// Find the row with index=1 in the diff (block-based diff may include other rows in the same block)
 	var diffRowN1, diffRowN2 types.OrderedMap
 	for _, row := range nodeDiffs.Rows[env.ServiceN1] {
-		if idx, ok := row.Get("index"); ok && idx.(int32) == 1 {
+		if idx, ok := row.Get("index"); ok && fmt.Sprint(idx) == "1" {
 			diffRowN1 = row
 			break
 		}
 	}
 	for _, row := range nodeDiffs.Rows[env.ServiceN2] {
-		if idx, ok := row.Get("index"); ok && idx.(int32) == 1 {
+		if idx, ok := row.Get("index"); ok && fmt.Sprint(idx) == "1" {
 			diffRowN2 = row
 			break
 		}
@@ -414,9 +414,9 @@ func testMerkleTreeDiffBoundaryModifications(t *testing.T, env *testEnv, tableNa
 			t.Logf("Warning: MtreeTeardown failed during cleanup: %v", err)
 		}
 		env.repairTable(t, qualifiedTableName, env.ServiceN1)
-		files, _ := filepath.Glob("*_diffs-*.json")
+		files, _ := filepath.Glob("*_diffs-*")
 		for _, f := range files {
-			os.Remove(f)
+			os.RemoveAll(f)
 		}
 	})
 	err = mtreeTask.BuildMtree()
@@ -514,7 +514,7 @@ func testMerkleTreeDiffBoundaryModifications(t *testing.T, env *testEnv, tableNa
 		pairKey = env.ServiceN2 + "/" + env.ServiceN1
 	}
 
-	nodeDiffs, ok := mtreeTask.DiffResult.NodeDiffs[pairKey]
+	nodeDiffs, ok := diffPairs(t, mtreeTask)[pairKey]
 	require.True(t, ok, "Expected diffs for pair %s, but none found.", pairKey)
 
 	expectedDiffCount := len(pkeysToModify)
@@ -527,13 +527,13 @@ func testMerkleTreeDiffBoundaryModifications(t *testing.T, env *testEnv, tableNa
 			foundN1 := false
 			foundN2 := false
 			for _, row := range nodeDiffs.Rows[env.ServiceN1] {
-				if rIndex, ok := row.Get("index"); ok && rIndex == pkey {
+				if rIndex, ok := row.Get("index"); ok && fmt.Sprint(rIndex) == fmt.Sprint(pkey) {
 					foundN1 = true
 					break
 				}
 			}
 			for _, row := range nodeDiffs.Rows[env.ServiceN2] {
-				if rIndex, ok := row.Get("index"); ok && rIndex == pkey {
+				if rIndex, ok := row.Get("index"); ok && fmt.Sprint(rIndex) == fmt.Sprint(pkey) {
 					foundN2 = true
 					emailVal, _ := row.Get("email")
 					expectedEmail := fmt.Sprintf("boundary.update.%v@example.com", pkey)
@@ -552,7 +552,7 @@ func testMerkleTreeDiffBoundaryModifications(t *testing.T, env *testEnv, tableNa
 			for _, row := range nodeDiffs.Rows[env.ServiceN1] {
 				rIndex, _ := row.Get("index")
 				rCustomerID, _ := row.Get("customer_id")
-				if rIndex == ckey.Index && rCustomerID == ckey.CustomerID {
+				if fmt.Sprint(rIndex) == fmt.Sprint(ckey.Index) && fmt.Sprint(rCustomerID) == fmt.Sprint(ckey.CustomerID) {
 					foundN1 = true
 					break
 				}
@@ -560,7 +560,7 @@ func testMerkleTreeDiffBoundaryModifications(t *testing.T, env *testEnv, tableNa
 			for _, row := range nodeDiffs.Rows[env.ServiceN2] {
 				rIndex, _ := row.Get("index")
 				rCustomerID, _ := row.Get("customer_id")
-				if rIndex == ckey.Index && rCustomerID == ckey.CustomerID {
+				if fmt.Sprint(rIndex) == fmt.Sprint(ckey.Index) && fmt.Sprint(rCustomerID) == fmt.Sprint(ckey.CustomerID) {
 					foundN2 = true
 					emailVal, _ := row.Get("email")
 					expectedEmail := fmt.Sprintf("boundary.update.%v@example.com", ckey.Index)
@@ -597,9 +597,9 @@ func testMerkleTreeContinuousCDC(t *testing.T, env *testEnv, tableName string) {
 			t.Logf("Warning: MtreeTeardown failed during cleanup: %v", err)
 		}
 		env.repairTable(t, qualifiedTableName, env.ServiceN2)
-		files, _ := filepath.Glob("*_diffs-*.json")
+		files, _ := filepath.Glob("*_diffs-*")
 		for _, f := range files {
-			os.Remove(f)
+			os.RemoveAll(f)
 		}
 	})
 
@@ -768,9 +768,9 @@ func testMerkleTreeDiffWhileListenActive(t *testing.T, env *testEnv, tableName s
 			t.Logf("Warning: MtreeTeardown failed during cleanup: %v", err)
 		}
 		env.repairTable(t, qualifiedTableName, env.ServiceN2)
-		files, _ := filepath.Glob("*_diffs-*.json")
+		files, _ := filepath.Glob("*_diffs-*")
 		for _, f := range files {
-			os.Remove(f)
+			os.RemoveAll(f)
 		}
 	})
 
@@ -885,9 +885,9 @@ func runMerkleTreeMergeTest(t *testing.T, env *testEnv, tableName string, mc mer
 			t.Logf("Warning: MtreeTeardown failed during cleanup: %v", err)
 		}
 		env.repairTable(t, qualifiedTableName, env.ServiceN2)
-		files, _ := filepath.Glob("*_diffs-*.json")
+		files, _ := filepath.Glob("*_diffs-*")
 		for _, f := range files {
-			os.Remove(f)
+			os.RemoveAll(f)
 		}
 	})
 	err = mtreeTask.BuildMtree()
@@ -1003,7 +1003,7 @@ func runMerkleTreeMergeTest(t *testing.T, env *testEnv, tableName string, mc mer
 		pairKey = env.ServiceN2 + "/" + env.ServiceN1
 	}
 
-	nodeDiffs, ok := mtreeTask.DiffResult.NodeDiffs[pairKey]
+	nodeDiffs, ok := diffPairs(t, mtreeTask)[pairKey]
 	require.True(t, ok, "Expected diffs for pair %s, but none found.", pairKey)
 
 	require.Equal(t, 0, len(nodeDiffs.Rows[env.ServiceN1]), "Expected 0 extra rows on %s", env.ServiceN1)
@@ -1056,9 +1056,9 @@ func runMerkleTreeSplitTest(t *testing.T, env *testEnv, tableName string, sc spl
 
 	t.Cleanup(func() {
 		env.repairTable(t, qualifiedTableName, env.ServiceN1)
-		files, _ := filepath.Glob("*_diffs-*.json")
+		files, _ := filepath.Glob("*_diffs-*")
 		for _, f := range files {
-			os.Remove(f)
+			os.RemoveAll(f)
 		}
 
 		_, err = env.N2Pool.Exec(ctx, "DROP TABLE IF EXISTS "+tempTableName)
@@ -1130,7 +1130,7 @@ func runMerkleTreeSplitTest(t *testing.T, env *testEnv, tableName string, sc spl
 	// mtreeTask.NoCDC = true
 	// err = mtreeTask.DiffMtree()
 	// require.NoError(t, err, "DiffMtree after splits should succeed")
-	// require.Empty(t, mtreeTask.DiffResult.NodeDiffs, "Merkle trees should be in sync after identical splits")
+	// require.Empty(t, diffPairs(t, mtreeTask), "Merkle trees should be in sync after identical splits")
 }
 
 func testMerkleTreeDiffModifiedRows(t *testing.T, env *testEnv, tableName string) {
@@ -1150,9 +1150,9 @@ func testMerkleTreeDiffModifiedRows(t *testing.T, env *testEnv, tableName string
 			t.Logf("Warning: MtreeTeardown failed during cleanup: %v", err)
 		}
 		env.repairTable(t, qualifiedTableName, env.ServiceN1)
-		files, _ := filepath.Glob("*_diffs-*.json")
+		files, _ := filepath.Glob("*_diffs-*")
 		for _, f := range files {
-			os.Remove(f)
+			os.RemoveAll(f)
 		}
 	})
 	err = mtreeTask.BuildMtree()
@@ -1196,7 +1196,7 @@ func testMerkleTreeDiffModifiedRows(t *testing.T, env *testEnv, tableName string
 		pairKey = env.ServiceN2 + "/" + env.ServiceN1
 	}
 
-	nodeDiffs, ok := mtreeTask.DiffResult.NodeDiffs[pairKey]
+	nodeDiffs, ok := diffPairs(t, mtreeTask)[pairKey]
 	require.True(t, ok, "Expected diffs for pair %s, but none found.", pairKey)
 
 	expectedDiffCount := len(modifications)
@@ -1209,7 +1209,7 @@ func testMerkleTreeDiffModifiedRows(t *testing.T, env *testEnv, tableName string
 		foundN1 := false
 		foundN2 := false
 		for _, row := range nodeDiffs.Rows[env.ServiceN1] {
-			if rIndex, ok := row.Get("index"); ok && rIndex.(int32) == int32(mod.indexVal) {
+			if rIndex, ok := row.Get("index"); ok && fmt.Sprint(rIndex) == fmt.Sprint(mod.indexVal) {
 				foundN1 = true
 				fieldVal, _ := row.Get(mod.field)
 				require.NotEqual(t, mod.value, fieldVal, "Original row on node1 should not have the modified value")
@@ -1217,7 +1217,7 @@ func testMerkleTreeDiffModifiedRows(t *testing.T, env *testEnv, tableName string
 			}
 		}
 		for _, row := range nodeDiffs.Rows[env.ServiceN2] {
-			if rIndex, ok := row.Get("index"); ok && rIndex.(int32) == int32(mod.indexVal) {
+			if rIndex, ok := row.Get("index"); ok && fmt.Sprint(rIndex) == fmt.Sprint(mod.indexVal) {
 				foundN2 = true
 				fieldVal, _ := row.Get(mod.field)
 				require.Equal(t, mod.value, fieldVal, "Modified row on node2 does not contain the new value")
@@ -1360,7 +1360,7 @@ func testMerkleTreeNumericScaleInvariance(t *testing.T, env *testEnv) {
 		pairKey = env.ServiceN2 + "/" + env.ServiceN1
 	}
 
-	if nodeDiffs, ok := mtreeTask.DiffResult.NodeDiffs[pairKey]; ok {
+	if nodeDiffs, ok := diffPairs(t, mtreeTask)[pairKey]; ok {
 		n1Rows := len(nodeDiffs.Rows[env.ServiceN1])
 		n2Rows := len(nodeDiffs.Rows[env.ServiceN2])
 		require.Equal(t, 0, n1Rows, "Expected 0 diff rows on %s, got %d (numeric scale should not cause diffs)", env.ServiceN1, n1Rows)
@@ -2198,9 +2198,9 @@ func TestMerkleTreeBidirectionalDiff(t *testing.T) {
 				for _, pool := range env.pools() {
 					_, _ = pool.Exec(ctx, "DROP TABLE IF EXISTS "+safeTable+" CASCADE") // nosemgrep
 				}
-				files, _ := filepath.Glob("*_diffs-*.json")
+				files, _ := filepath.Glob("*_diffs-*")
 				for _, f := range files {
-					os.Remove(f)
+					os.RemoveAll(f)
 				}
 			})
 
@@ -2263,7 +2263,7 @@ func TestMerkleTreeBidirectionalDiff(t *testing.T) {
 			require.NoError(t, mtreeTask.DiffMtree())
 
 			pair := env.pairKey()
-			nodeDiffs, ok := mtreeTask.DiffResult.NodeDiffs[pair]
+			nodeDiffs, ok := diffPairs(t, mtreeTask)[pair]
 			require.True(t, ok, "diff missing pair %s; full result: %+v",
 				pair, mtreeTask.DiffResult)
 
@@ -2294,13 +2294,8 @@ func extractDiffIDsByColumn(rows []types.OrderedMap, col string) []int {
 		if !ok {
 			continue
 		}
-		switch x := v.(type) {
-		case int32:
-			ids = append(ids, int(x))
-		case int64:
-			ids = append(ids, int(x))
-		case int:
-			ids = append(ids, x)
+		if n, ok := intValue(v); ok {
+			ids = append(ids, int(n))
 		}
 	}
 	sort.Ints(ids)
@@ -2349,9 +2344,9 @@ func TestMerkleTreeReferenceMaxInMultiLeafTail(t *testing.T) {
 		for _, pool := range env.pools() {
 			_, _ = pool.Exec(ctx, "DROP TABLE IF EXISTS "+safeTable+" CASCADE") // nosemgrep
 		}
-		files, _ := filepath.Glob("*_diffs-*.json")
+		files, _ := filepath.Glob("*_diffs-*")
 		for _, f := range files {
-			os.Remove(f)
+			os.RemoveAll(f)
 		}
 	})
 
@@ -2380,9 +2375,9 @@ func TestMerkleTreeReferenceMaxInMultiLeafTail(t *testing.T) {
 	require.NoError(t, mtreeTask.BuildMtree())
 	require.NoError(t, mtreeTask.DiffMtree())
 
-	nodeDiffs, ok := mtreeTask.DiffResult.NodeDiffs[env.pairKey()]
+	nodeDiffs, ok := diffPairs(t, mtreeTask)[env.pairKey()]
 	require.True(t, ok, "no diff for pair %s; result: %+v",
-		env.pairKey(), mtreeTask.DiffResult.NodeDiffs)
+		env.pairKey(), diffPairs(t, mtreeTask))
 
 	expected := make([]int, 0, 10)
 	for i := 2001; i <= 2010; i++ {
@@ -2495,9 +2490,9 @@ func TestMerkleTreeThreeNodeReferenceTail(t *testing.T) {
 		for _, pool := range pools {
 			_, _ = pool.Exec(ctx, "DROP TABLE IF EXISTS "+safeTable+" CASCADE") // nosemgrep
 		}
-		files, _ := filepath.Glob("*_diffs-*.json")
+		files, _ := filepath.Glob("*_diffs-*")
 		for _, f := range files {
-			os.Remove(f)
+			os.RemoveAll(f)
 		}
 	})
 
@@ -2529,10 +2524,10 @@ func TestMerkleTreeThreeNodeReferenceTail(t *testing.T) {
 
 	// Pair keys follow cluster-node order; look up under either ordering.
 	findPair := func(a, b string) (types.DiffByNodePair, bool) {
-		if d, ok := mtreeTask.DiffResult.NodeDiffs[a+"/"+b]; ok {
+		if d, ok := diffPairs(t, mtreeTask)[a+"/"+b]; ok {
 			return d, true
 		}
-		d, ok := mtreeTask.DiffResult.NodeDiffs[b+"/"+a]
+		d, ok := diffPairs(t, mtreeTask)[b+"/"+a]
 		return d, ok
 	}
 	rangeIDs := func(lo, hi int) []int {
@@ -2544,17 +2539,17 @@ func TestMerkleTreeThreeNodeReferenceTail(t *testing.T) {
 	}
 
 	d13, ok := findPair(env.ServiceN1, env.ServiceN3)
-	require.True(t, ok, "no diff for n1/n3; result: %+v", mtreeTask.DiffResult.NodeDiffs)
+	require.True(t, ok, "no diff for n1/n3; result: %+v", diffPairs(t, mtreeTask))
 	require.Equal(t, rangeIDs(2001, 2010), extractDiffIDs(d13.Rows[env.ServiceN3]),
 		"n1/n3: reference's max (2010) dropped from the open tail")
 
 	d23, ok := findPair(env.ServiceN2, env.ServiceN3)
-	require.True(t, ok, "no diff for n2/n3; result: %+v", mtreeTask.DiffResult.NodeDiffs)
+	require.True(t, ok, "no diff for n2/n3; result: %+v", diffPairs(t, mtreeTask))
 	require.Equal(t, rangeIDs(2006, 2010), extractDiffIDs(d23.Rows[env.ServiceN3]),
 		"n2/n3: reference's max (2010) dropped from the open tail")
 
 	d12, ok := findPair(env.ServiceN1, env.ServiceN2)
-	require.True(t, ok, "no diff for n1/n2; result: %+v", mtreeTask.DiffResult.NodeDiffs)
+	require.True(t, ok, "no diff for n1/n2; result: %+v", diffPairs(t, mtreeTask))
 	require.Equal(t, rangeIDs(2001, 2005), extractDiffIDs(d12.Rows[env.ServiceN2]),
 		"n1/n2: rows below the reference's max should be reported in full")
 }

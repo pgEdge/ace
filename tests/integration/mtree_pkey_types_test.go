@@ -192,9 +192,9 @@ func TestMtreePkeyTypesFindDivergence(t *testing.T) {
 			// repairs from "the most recent diff file" picks it up and fails with a
 			// table mismatch -- measured against TestMerkleTreeSimplePK.
 			t.Cleanup(func() {
-				files, _ := filepath.Glob("*_diffs-*.json")
+				files, _ := filepath.Glob("*_diffs-*")
 				for _, f := range files {
-					os.Remove(f)
+					os.RemoveAll(f)
 				}
 				files, _ = filepath.Glob("*_diffs-*.html")
 				for _, f := range files {

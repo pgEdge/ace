@@ -981,7 +981,7 @@ func (task *SchemaDiffCmd) SchemaTableDiff() (err error) {
 			continue
 		}
 
-		if len(tdTask.DiffResult.NodeDiffs) > 0 {
+		if tdTask.DiffResult.Summary.DiffPairs() > 0 {
 			summary.DifferedTables = append(summary.DifferedTables, qualifiedTableName)
 		} else {
 			summary.MatchedTables = append(summary.MatchedTables, qualifiedTableName)

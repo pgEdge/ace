@@ -69,9 +69,9 @@ func TestTableDiffMemoryUsage(t *testing.T) {
 				t.Logf("cleanup: failed to drop table: %v", err)
 			}
 		}
-		files, _ := filepath.Glob("*_diffs-*.json")
+		files, _ := filepath.Glob("*_diffs-*")
 		for _, f := range files {
-			os.Remove(f)
+			os.RemoveAll(f)
 		}
 		log.Println("Cleanup: memory test table dropped")
 	})
@@ -158,7 +158,7 @@ func TestTableDiffMemoryUsage(t *testing.T) {
 		pairKey = serviceN2 + "/" + serviceN1
 	}
 
-	nodeDiffs, ok := tdTask.DiffResult.NodeDiffs[pairKey]
+	nodeDiffs, ok := diffPairs(t, tdTask)[pairKey]
 	require.True(t, ok, "expected diffs for pair %s", pairKey)
 
 	node1OnlyRows := len(nodeDiffs.Rows[serviceN1])

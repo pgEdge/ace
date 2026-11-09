@@ -12,6 +12,7 @@
 package common
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
@@ -71,38 +72,38 @@ func TestMkdirAllSecure(t *testing.T) {
 	assertOwnerOnly(t, dir)
 }
 
-// The real writer: WriteDiffReport emits row data, so neither the JSON nor the
-// HTML report may be readable by other local users.
-func TestWriteDiffReportIsNotWorldReadable(t *testing.T) {
+// The real writer: the diff result holds row data, so neither its directory
+// and files nor the JSON and HTML reports may be readable by other local
+// users.
+func TestDiffResultIsNotWorldReadable(t *testing.T) {
 	for _, format := range []string{"json", "html"} {
 		t.Run(format, func(t *testing.T) {
-			cwd, err := os.Getwd()
+			t.Chdir(t.TempDir())
+			w := NewDiffResultWriter("public", "customers", []string{"id"})
+			b := w.OpenBlock("n1/n2", "n1", "n2", 0, 0)
+			row := types.OrderedMap{{Key: "id", Value: 1}, {Key: "v", Value: "a"}}
+			if err := b.Add(DiffKindNode1Only, row, nil, []byte{1, 2, 3, 4, 5, 6, 7, 8}, nil); err != nil {
+				t.Fatal(err)
+			}
+			if err := b.Close(); err != nil {
+				t.Fatal(err)
+			}
+			paths, err := w.Finish(context.Background(), DiffResultManifest{
+				Schema: "public", Table: "customers", PrimaryKey: []string{"id"},
+				Columns: []DiffResultColumn{{Name: "id", Type: "integer"}, {Name: "v", Type: "text"}},
+				Summary: types.DiffSummary{Schema: "public", Table: "customers", PrimaryKey: []string{"id"},
+					DiffRowsCount: map[string]int{"n1/n2": 1}},
+			}, DiffReportOptions{Format: format})
 			if err != nil {
-				t.Fatalf("getwd: %v", err)
+				t.Fatalf("Finish: %v", err)
 			}
-			if err := os.Chdir(t.TempDir()); err != nil {
-				t.Fatalf("chdir: %v", err)
-			}
-			t.Cleanup(func() { _ = os.Chdir(cwd) })
-
-			diff := types.DiffOutput{
-				NodeDiffs: map[string]types.DiffByNodePair{
-					"n1/n2": {Rows: map[string][]types.OrderedMap{"n1": {}, "n2": {}}},
-				},
-				Summary: types.DiffSummary{
-					Schema: "public", Table: "customers",
-					Nodes: []string{"n1", "n2"}, PrimaryKey: []string{"id"},
-					DiffRowsCount: map[string]int{"n1/n2": 0},
-				},
-			}
-
-			jsonPath, htmlPath, err := WriteDiffReport(diff, "public", "customers", format, 0)
-			if err != nil {
-				t.Fatalf("WriteDiffReport: %v", err)
-			}
-			assertOwnerOnly(t, jsonPath)
+			assertOwnerOnly(t, paths.Dir)
+			assertOwnerOnly(t, filepath.Join(paths.Dir, "n1_n2"))
+			assertOwnerOnly(t, filepath.Join(paths.Dir, "n1_n2", DiffBlockName(0, 0)))
+			assertOwnerOnly(t, filepath.Join(paths.Dir, DiffResultManifestName))
+			assertOwnerOnly(t, paths.JSON)
 			if format == "html" {
-				assertOwnerOnly(t, htmlPath)
+				assertOwnerOnly(t, paths.HTML)
 			}
 		})
 	}

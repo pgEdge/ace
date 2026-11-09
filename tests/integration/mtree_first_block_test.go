@@ -132,9 +132,9 @@ func TestMerkleTreeRowsBelowReferenceMin(t *testing.T) {
 			require.NoError(t, mtreeTask.BuildMtree())
 			require.NoError(t, mtreeTask.DiffMtree())
 
-			nodeDiffs, ok := mtreeTask.DiffResult.NodeDiffs[env.pairKey()]
+			nodeDiffs, ok := diffPairs(t, mtreeTask)[env.pairKey()]
 			require.True(t, ok, "no diff for pair %s; result: %+v",
-				env.pairKey(), mtreeTask.DiffResult.NodeDiffs)
+				env.pairKey(), diffPairs(t, mtreeTask))
 
 			require.Equal(t, idRange(2001, 2200), extractDiffIDs(nodeDiffs.Rows[env.ServiceN1]),
 				"rows present only on n1 (the reference)")
@@ -194,9 +194,9 @@ func TestMerkleTreeFirstLeafHashUpgrade(t *testing.T) {
 		require.Equal(t, queries.CurrentHashVersion, version, "hash version after update")
 	}
 
-	nodeDiffs, ok := mtreeTask.DiffResult.NodeDiffs[env.pairKey()]
+	nodeDiffs, ok := diffPairs(t, mtreeTask)[env.pairKey()]
 	require.True(t, ok, "no diff for pair %s; result: %+v",
-		env.pairKey(), mtreeTask.DiffResult.NodeDiffs)
+		env.pairKey(), diffPairs(t, mtreeTask))
 	require.Equal(t, idRange(2001, 2200), extractDiffIDs(nodeDiffs.Rows[env.ServiceN1]))
 	require.Equal(t, idRange(1, 100), extractDiffIDs(nodeDiffs.Rows[env.ServiceN2]))
 }
@@ -274,9 +274,9 @@ func TestMerkleTreeSplitFirstBlockBelowMin(t *testing.T) {
 				}
 			}
 
-			nodeDiffs, ok := mtreeTask.DiffResult.NodeDiffs[env.pairKey()]
+			nodeDiffs, ok := diffPairs(t, mtreeTask)[env.pairKey()]
 			require.True(t, ok, "no diff for pair %s; result: %+v",
-				env.pairKey(), mtreeTask.DiffResult.NodeDiffs)
+				env.pairKey(), diffPairs(t, mtreeTask))
 			require.Equal(t, []int{7}, extractDiffIDs(nodeDiffs.Rows[env.ServiceN1]))
 			require.Equal(t, []int{7}, extractDiffIDs(nodeDiffs.Rows[env.ServiceN2]))
 		})
@@ -353,7 +353,7 @@ func TestMerkleTreeMergeCountsRowsBelowFirstBlockStart(t *testing.T) {
 			"range_end of the first block changed on %s", name)
 	}
 
-	nodeDiffs := mtreeTask.DiffResult.NodeDiffs[env.pairKey()]
+	nodeDiffs := diffPairs(t, mtreeTask)[env.pairKey()]
 	require.Empty(t, nodeDiffs.Rows[env.ServiceN1], "nodes hold the same rows")
 	require.Empty(t, nodeDiffs.Rows[env.ServiceN2], "nodes hold the same rows")
 }
@@ -401,7 +401,7 @@ func TestMerkleTreeSplitFirstBlockOnOneNode(t *testing.T) {
 			require.Greater(t, leaves(env.N2Pool), leaves(env.N1Pool),
 				"only n2 should have split its first block")
 
-			nodeDiffs := mtreeTask.DiffResult.NodeDiffs[env.pairKey()]
+			nodeDiffs := diffPairs(t, mtreeTask)[env.pairKey()]
 			require.Empty(t, extractDiffIDs(nodeDiffs.Rows[env.ServiceN1]))
 			require.Equal(t, idRange(1, 1500), extractDiffIDs(nodeDiffs.Rows[env.ServiceN2]))
 		})
@@ -473,7 +473,7 @@ func TestMerkleTreeFirstLeafKeepsPositionOnTie(t *testing.T) {
 
 	insertIDRange(t, env.N2Pool, safe, shape.ins, 50, 50)
 	require.NoError(t, mtreeTask.DiffMtree())
-	nodeDiffs := mtreeTask.DiffResult.NodeDiffs[env.pairKey()]
+	nodeDiffs := diffPairs(t, mtreeTask)[env.pairKey()]
 	require.Empty(t, extractDiffIDs(nodeDiffs.Rows[env.ServiceN1]))
 	require.Equal(t, []int{50}, extractDiffIDs(nodeDiffs.Rows[env.ServiceN2]))
 }
@@ -551,9 +551,9 @@ func TestMerkleTreeSplitWithMixedCaseKey(t *testing.T) {
 					"the first and the last block were not split on %s", name)
 			}
 
-			nodeDiffs, ok := mtreeTask.DiffResult.NodeDiffs[env.pairKey()]
+			nodeDiffs, ok := diffPairs(t, mtreeTask)[env.pairKey()]
 			require.True(t, ok, "no diff for pair %s; result: %+v",
-				env.pairKey(), mtreeTask.DiffResult.NodeDiffs)
+				env.pairKey(), diffPairs(t, mtreeTask))
 			require.Equal(t, []int{5000}, extractDiffIDsByColumn(nodeDiffs.Rows[env.ServiceN1], "UserId"))
 			require.Equal(t, []int{5000}, extractDiffIDsByColumn(nodeDiffs.Rows[env.ServiceN2], "UserId"))
 		})

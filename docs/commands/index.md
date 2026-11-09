@@ -6,6 +6,7 @@ This section documents the ACE (Active Consistency Engine) CLI commands. Be sure
 
 | Command                         | Description                                                                                               |
 | ------------------------------- | --------------------------------------------------------------------------------------------------------- |
+| [diff-report](diff/diff-report.md)   | Builds the HTML report of a finished diff from its result directory, without a database connection.       |
 | [repset-diff](diff/repset-diff.md)   | Runs table-diff on every table in a specified replication set and aggregates results.                     |
 | [schema-diff](diff/schema-diff.md)   | Compares objects (and optionally data via per-table diffs) across nodes for an entire schema.             |
 | [spock-diff](diff/spock-diff.md)     | Compares Spock metadata/state across nodes to find configuration divergences.                             |

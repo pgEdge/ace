@@ -49,6 +49,25 @@ All notable changes to ACE will be captured in this document. This project follo
   writes a warning. Remove it from your commands, jobs and settings file.
 
 ### Added
+- **Diff result directory.** `table-diff` and `mtree table-diff` (and the
+  per-table runs of `repset-diff` and `schema-diff`) write the differing
+  rows to disk while they compare the blocks, into a directory
+  `<schema>_<table>_diffs-<timestamp>/` next to the JSON report: a manifest
+  and one file for each compared block that has differences. The JSON
+  report is built from it at the end of the run. So the memory of the
+  client no longer grows with the number of differences, and a diff with
+  millions of differing rows no longer runs out of memory while it writes
+  the report. A run that fails, times out or is stopped writes no result.
+  The task context of the task store and of the HTTP API has the path of
+  the directory as `diff_result_dir`.
+- **`ace diff-report`** builds the HTML report from a result directory,
+  without a database connection, and can run again with other limits.
+  `--output html` of `table-diff` and `mtree table-diff` runs it at the end
+  of the diff.
+- The HTML report cuts each value that it shows to 1024 characters, with a
+  mark that gives the full length. Key values are never cut.
+- The JSON report has the row hash of each row of each node in the new
+  optional field `row_hashes`.
 - **Time limits for `table-diff`, `repset-diff` and `schema-diff`.**
   `--block-timeout` (`table_diff.block_timeout` in `ace.yaml`, default 60 s)
   limits one query on one block: the hash of a block, or a key query or a
@@ -104,6 +123,16 @@ All notable changes to ACE will be captured in this document. This project follo
   `mtree table-diff`.
 
 ### Changed
+- **The HTML report shows the rows in a new order.** It shows the blocks of
+  the table in key order and the rows of a block sorted by the text of the
+  key, with value differences and missing rows together. It showed all value
+  differences first, then the missing rows, and compared numbers in a key as
+  numbers; now 10 comes before 9. The last block shown can be cut; its rows
+  are then the first rows of its block file, not in key order.
+- **The JSON report is compact**, with every row on a line of its own,
+  instead of indented. Its content and `format_version` do not change. The
+  rows of a node pair are no longer sorted by key: they come in block order,
+  and inside a block in no fixed order.
 - Every ACE connection sets `client_connection_check_interval = 5000` (ms),
   so a backend in a long query stops it within a few seconds when ACE stops
   without closing its connections, for example when the kernel kills it.

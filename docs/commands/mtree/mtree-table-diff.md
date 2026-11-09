@@ -46,10 +46,12 @@ holding the node's slot, then re-run, if you need a guaranteed-current drain.
 
 **Notes**
 
-- With `--output html`, both JSON and HTML reports are generated with matching timestamps.
+- When the diff finds differences, it writes a result directory and the JSON report with matching names; `--output html` adds the HTML report. The HTML report can be built again from the result directory with [diff-report](../diff/diff-report.md).
 - The HTML report shows at most `max_html_rows` rows for each node pair
-  (`mtree.diff.max_html_rows`, default `10000`). The JSON report always
-  contains every row. When the HTML report is truncated, it says so, and a
+  (`mtree.diff.max_html_rows`, default `10000`). The JSON report contains
+  every row that the diff collected; when `max_diff_rows` stops the diff
+  early, its summary has `diff_row_limit_reached`, and more differences may
+  exist. When the HTML report is truncated, it says so, and a
   repair plan built in it has rules only for the rows shown and
   `default_action: skip`, so `table-repair` does not change the other rows.
   With three or more nodes this holds per key, not per node pair: see the
@@ -61,10 +63,11 @@ holding the node's slot, then re-run, if you need a guaranteed-current drain.
   compared in the order of their names, so the first pairs can take the whole
   bound. When the bound is reached, the ranges left are skipped, the report's
   `diff_row_limit_reached` flag is set, a warning is logged, and no stale
-  block is refreshed. This keeps a heavily diverged table from exhausting
-  memory; lower the value in `ace.yaml` on memory-constrained hosts, and
-  re-run after repairing to surface the remaining differences.
-- If the comparison of a range fails, the diff fails and writes no report.
+  block is refreshed. Re-run after repairing to surface the remaining
+  differences. The differing rows go to disk as soon as they are found, so
+  the bound does not protect the memory of the client; it limits the size of
+  the result and the run time.
+- If the comparison of a range fails, the diff fails and writes no result.
 - Merkle trees do not order every primary key type the way the server does. `text`
   keys are compared byte by byte, so a collation other than `C`, and also `enum`
   or `citext` keys, can sort differently here than in the database; `numeric` and

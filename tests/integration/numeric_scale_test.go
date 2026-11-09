@@ -108,8 +108,8 @@ func testNumericScaleInMismatchedBlock(t *testing.T, env *testEnv) {
 		task := env.newTableDiffTask(t, qualifiedTable, nodes)
 		require.NoError(t, task.RunChecks(false))
 		require.NoError(t, task.ExecuteTask())
-		requireOnlyDiffIDs(t, task.DiffResult, pairKey, env.ServiceN1, env.ServiceN2, "6")
-		requireDiffAmount(t, task.DiffResult, pairKey, "7.5")
+		requireOnlyDiffIDs(t, diffResultOf(t, task), pairKey, env.ServiceN1, env.ServiceN2, "6")
+		requireDiffAmount(t, diffResultOf(t, task), pairKey, "7.5")
 	})
 
 	t.Run("mtree", func(t *testing.T) {
@@ -121,8 +121,8 @@ func testNumericScaleInMismatchedBlock(t *testing.T, env *testEnv) {
 		require.NoError(t, task.BuildMtree())
 		task.NoCDC = true
 		require.NoError(t, task.DiffMtree())
-		requireOnlyDiffIDs(t, task.DiffResult, pairKey, env.ServiceN1, env.ServiceN2, "6")
-		requireDiffAmount(t, task.DiffResult, pairKey, "7.5")
+		requireOnlyDiffIDs(t, diffResultOf(t, task), pairKey, env.ServiceN1, env.ServiceN2, "6")
+		requireDiffAmount(t, diffResultOf(t, task), pairKey, "7.5")
 	})
 }
 
