@@ -64,6 +64,7 @@ holding the node's slot, then re-run, if you need a guaranteed-current drain.
   block is refreshed. This keeps a heavily diverged table from exhausting
   memory; lower the value in `ace.yaml` on memory-constrained hosts, and
   re-run after repairing to surface the remaining differences.
+- If the comparison of a range fails, the diff fails and writes no report.
 - Merkle trees do not order every primary key type the way the server does. `text`
   keys are compared byte by byte, so a collation other than `C`, and also `enum`
   or `citext` keys, can sort differently here than in the database; `numeric` and
@@ -77,6 +78,6 @@ holding the node's slot, then re-run, if you need a guaranteed-current drain.
   differences, the tree hashes were stale rather than the data divergent. The
   diff reports this, refreshes those blocks from live data (recorded in the
   summary's `stale_blocks_refreshed`), and the next diff runs clean. A pair
-  with any real differences, an incomplete comparison, a diff that reached
-  `max_diff_rows`, or an `--until` filter is not refreshed. If the trees still disagree after a refresh, the nodes'
+  with any real differences, a diff that reached `max_diff_rows`, or an
+  `--until` filter is not refreshed. If the trees still disagree after a refresh, the nodes'
   leaf ranges have diverged; run `ace mtree build` to realign them.

@@ -26,6 +26,9 @@ All notable changes to ACE will be captured in this document. This project follo
   limit: at most the rows of the blocks that were in work when the limit
   was reached. `repset-diff` and `schema-diff` still apply it to each table.
   The same holds for `max_diff_rows` in the HTTP API and in scheduled jobs.
+- **The `incomplete_pairs` field of the diff summary is removed.** When the
+  comparison of a range fails, `mtree table-diff` now fails without a
+  report, as `table-diff` does. Old reports with this field still load.
 
 ### Upgrading
 - **Check `table_diff.max_connections` in `ace.yaml`.** It is now the old

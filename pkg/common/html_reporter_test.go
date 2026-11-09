@@ -270,7 +270,6 @@ func TestHTMLReportEmbeddedDataCannotCloseScript(t *testing.T) {
 
 func TestHTMLReportNoRows(t *testing.T) {
 	diff := htmlTestDiff(0, 0, 0, "")
-	diff.Summary.IncompletePairs = []string{"n1/n2"}
 	page, data := renderHTMLTestReport(t, diff, 0)
 
 	if !strings.Contains(page, "No row-level differences were recorded.") {

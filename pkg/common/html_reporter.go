@@ -506,16 +506,6 @@ func summaryLimitItems(summary types.DiffSummary) []htmlSummaryItem {
 			})
 		}
 	}
-
-	// Without this, an incomplete run produces an HTML report that looks just
-	// like a clean one. People who read the report never see the worker
-	// errors, which only went to the log.
-	if len(summary.IncompletePairs) > 0 {
-		items = append(items, htmlSummaryItem{
-			Label: "Comparison Incomplete",
-			Value: strings.Join(summary.IncompletePairs, ", ") + " (counts are lower bounds)",
-		})
-	}
 	return items
 }
 

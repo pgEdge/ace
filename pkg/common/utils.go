@@ -1530,13 +1530,7 @@ func MapToOrderedMap(m map[string]any, cols []string) types.OrderedMap {
 // shows for each node pair; a value <= 0 means DefaultMaxHTMLRows. The JSON
 // report always has every row.
 func WriteDiffReport(diffResult types.DiffOutput, schema, table, format string, maxHTMLRows int64) (string, string, error) {
-	// An empty NodeDiffs means "the tables match" only if every node pair was
-	// really compared. If work items were lost to errors, it means "we do not
-	// know", and the summary that names those pairs is still worth writing to
-	// disk, even with no rows to show. Engines that never set IncompletePairs
-	// are not affected.
-	incomplete := len(diffResult.Summary.IncompletePairs) > 0
-	if len(diffResult.NodeDiffs) == 0 && !incomplete {
+	if len(diffResult.NodeDiffs) == 0 {
 		logger.Info("%s TABLES MATCH", CheckMark)
 		return "", "", nil
 	}
@@ -1579,15 +1573,9 @@ func WriteDiffReport(diffResult types.DiffOutput, schema, table, format string, 
 		return "", "", fmt.Errorf("failed to close diffs file: %w", err)
 	}
 
-	if len(diffResult.NodeDiffs) > 0 {
-		logger.Warn("%s TABLES DO NOT MATCH", CrossMark)
-		for key, diffCount := range diffResult.Summary.DiffRowsCount {
-			logger.Warn("Found %d differences between %s", diffCount, key)
-		}
-	}
-	if incomplete {
-		logger.Warn("%s COMPARISON INCOMPLETE for node pair(s) %s -- the counts above are lower bounds",
-			CrossMark, strings.Join(diffResult.Summary.IncompletePairs, ", "))
+	logger.Warn("%s TABLES DO NOT MATCH", CrossMark)
+	for key, diffCount := range diffResult.Summary.DiffRowsCount {
+		logger.Warn("Found %d differences between %s", diffCount, key)
 	}
 	logger.Info("Diff report written to %s", jsonFileName)
 
