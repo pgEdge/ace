@@ -165,7 +165,10 @@ func TestCompareRangesWithoutPoolMarksPairIncomplete(t *testing.T) {
 	m := &MerkleTreeTask{Ctx: context.Background(), MaxCpuRatio: 0.1}
 	n1 := map[string]any{"Name": "n1"}
 	n2 := map[string]any{"Name": "n2"}
-	items := []CompareRangesWorkItem{{Node1: n1, Node2: n2, Ranges: [][2][]any{{{int64(1)}, {int64(2)}}}}}
+	items := []CompareRangesWorkItem{
+		{Node1: n1, Node2: n2, Range: [2][]any{{int64(1)}, {int64(2)}}},
+		{Node1: n1, Node2: n2, Range: [2][]any{{int64(2)}, {int64(3)}}, StartExclusive: true, Seq: 1},
+	}
 
 	m.CompareRanges(items, map[string]*pgxpool.Pool{})
 
