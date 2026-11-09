@@ -551,9 +551,13 @@ func (m *MerkleTreeTask) processWorkItem(work CompareRangesWorkItem, pool1, pool
 	s2 := keydiff.Side{Name: node2Name, Conn: pool2, ColTypes: refTypes}
 	tbl := keydiff.Table{Schema: m.Schema, Name: m.Table, Key: m.Key, Cols: m.Cols, HashTypes: refTypes}
 	block := keydiff.Block{Where: whereClause, Args: args, ReadFilter: queries.CommitTimestampFilter(m.untilTime)}
+	var entries []keydiff.Entry
 	res, err := keydiff.Compare(m.Ctx, tbl, block, s1, s2, keydiff.Options{
 		MaxKeys:   maxKeys,
 		MaxMemory: m.keyMapMaxMemory(),
+	}, func(batch []keydiff.Entry) error {
+		entries = append(entries, batch...)
+		return nil
 	})
 	if err != nil {
 		var me *keydiff.MemoryLimitError
@@ -568,7 +572,7 @@ func (m *MerkleTreeTask) processWorkItem(work CompareRangesWorkItem, pool1, pool
 	if res.Count() == 0 && !res.Truncated {
 		return nil
 	}
-	if err := m.appendDiffs(nodePairKey, work, res); err != nil {
+	if err := m.appendDiffs(nodePairKey, work, res, entries); err != nil {
 		return fmt.Errorf("record the differing rows of %s.%s on %s and %s: %w",
 			m.Schema, m.Table, node1Name, node2Name, err)
 	}
@@ -696,7 +700,7 @@ func (m *MerkleTreeTask) notePairLimitReached(pairKey string) {
 
 // appendDiffs records the differing rows of one work item, stopping once the
 // node pair reaches MaxDiffRows.
-func (m *MerkleTreeTask) appendDiffs(nodePairKey string, work CompareRangesWorkItem, res keydiff.Result) error {
+func (m *MerkleTreeTask) appendDiffs(nodePairKey string, work CompareRangesWorkItem, res keydiff.Result, entries []keydiff.Entry) error {
 	m.diffMutex.Lock()
 	defer m.diffMutex.Unlock()
 
@@ -724,31 +728,20 @@ func (m *MerkleTreeTask) appendDiffs(nodePairKey string, work CompareRangesWorkI
 	// soon as a pair reaches the cap, matching table-diff.
 	var currentDiffRowsForPair int
 
-	for _, row := range res.Only1 {
+	for _, e := range entries {
 		if m.pairLimitReachedLocked(nodePairKey) {
 			m.notePairLimitReachedLocked(nodePairKey)
 			break
 		}
-		m.addRowToDiff(nodePairKey, node1Name, row)
-		currentDiffRowsForPair++
-		m.recordPairRowLocked(nodePairKey)
-	}
-	for _, row := range res.Only2 {
-		if m.pairLimitReachedLocked(nodePairKey) {
-			m.notePairLimitReachedLocked(nodePairKey)
-			break
+		switch e.Kind {
+		case keydiff.KindOnly1:
+			m.addRowToDiff(nodePairKey, node1Name, e.Row1)
+		case keydiff.KindOnly2:
+			m.addRowToDiff(nodePairKey, node2Name, e.Row2)
+		default:
+			m.addRowToDiff(nodePairKey, node1Name, e.Row1)
+			m.addRowToDiff(nodePairKey, node2Name, e.Row2)
 		}
-		m.addRowToDiff(nodePairKey, node2Name, row)
-		currentDiffRowsForPair++
-		m.recordPairRowLocked(nodePairKey)
-	}
-	for _, changed := range res.Changed {
-		if m.pairLimitReachedLocked(nodePairKey) {
-			m.notePairLimitReachedLocked(nodePairKey)
-			break
-		}
-		m.addRowToDiff(nodePairKey, node1Name, changed.Row1)
-		m.addRowToDiff(nodePairKey, node2Name, changed.Row2)
 		currentDiffRowsForPair++
 		m.recordPairRowLocked(nodePairKey)
 	}

@@ -1937,9 +1937,13 @@ func (t *TableDiffTask) compareMismatch(ctx context.Context, task mismatchTask) 
 		Args:       args,
 		ReadFilter: t.EffectiveFilter,
 	}
+	var entries []keydiff.Entry
 	res, err := keydiff.Compare(ctx, tbl, block, s1, s2, keydiff.Options{
 		MaxKeys:   maxKeys,
 		MaxMemory: t.keyMapMaxMemory(),
+	}, func(batch []keydiff.Entry) error {
+		entries = append(entries, batch...)
+		return nil
 	})
 	if err != nil {
 		fail(err)
@@ -1947,13 +1951,13 @@ func (t *TableDiffTask) compareMismatch(ctx context.Context, task mismatchTask) 
 	}
 	logger.Debug("[%s vs %s] range %v-%v: %d differing keys (map on %s), %d only on %s, %d only on %s, %d changed",
 		task.node1, task.node2, task.r.Start, task.r.End, res.DiffKeys, res.BuildNode,
-		len(res.Only1), task.node1, len(res.Only2), task.node2, len(res.Changed))
-	t.addDiffRows(pairKey, task.node1, task.node2, res)
+		res.Only1, task.node1, res.Only2, task.node2, res.Changed)
+	t.addDiffRows(pairKey, task.node1, task.node2, res, entries)
 }
 
 // addDiffRows adds the differing rows of one block to the diff result and
 // counts them against max_diff_rows.
-func (t *TableDiffTask) addDiffRows(pairKey, node1Name, node2Name string, res keydiff.Result) {
+func (t *TableDiffTask) addDiffRows(pairKey, node1Name, node2Name string, res keydiff.Result, entries []keydiff.Entry) {
 	if res.Count() == 0 && !res.Truncated {
 		return
 	}
@@ -1999,26 +2003,19 @@ func (t *TableDiffTask) addDiffRows(pairKey, node1Name, node2Name string, res ke
 			full = true
 		}
 	}
-	for _, row := range res.Only1 {
+	for _, e := range entries {
 		if full {
 			break
 		}
-		add(node1Name, row)
-		count()
-	}
-	for _, row := range res.Only2 {
-		if full {
-			break
+		switch e.Kind {
+		case keydiff.KindOnly1:
+			add(node1Name, e.Row1)
+		case keydiff.KindOnly2:
+			add(node2Name, e.Row2)
+		default:
+			add(node1Name, e.Row1)
+			add(node2Name, e.Row2)
 		}
-		add(node2Name, row)
-		count()
-	}
-	for _, c := range res.Changed {
-		if full {
-			break
-		}
-		add(node1Name, c.Row1)
-		add(node2Name, c.Row2)
 		count()
 	}
 

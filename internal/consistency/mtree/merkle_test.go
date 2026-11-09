@@ -35,6 +35,15 @@ func mtreeTaskWithDiffState(maxDiffRows int64) *MerkleTreeTask {
 	return m
 }
 
+// node1OnlyEntries makes an entry only on node 1 of each row.
+func node1OnlyEntries(rows []types.OrderedMap) []keydiff.Entry {
+	out := make([]keydiff.Entry, len(rows))
+	for i, r := range rows {
+		out[i] = keydiff.Entry{Kind: keydiff.KindOnly1, Row1: r}
+	}
+	return out
+}
+
 // node1OnlyRows builds n rows with unique primary keys, all absent from the peer.
 func node1OnlyRows(n int) []types.OrderedMap {
 	rows := make([]types.OrderedMap, n)
@@ -53,7 +62,7 @@ func TestMtreeDiffEnforcesMaxDiffRows(t *testing.T) {
 		Node2: map[string]any{"Name": "n2"},
 	}
 
-	if err := m.appendDiffs("n1/n2", work, keydiff.Result{Only1: node1OnlyRows(20)}); err != nil {
+	if err := m.appendDiffs("n1/n2", work, keydiff.Result{Only1: len(node1OnlyRows(20))}, node1OnlyEntries(node1OnlyRows(20))); err != nil {
 		t.Fatalf("appendDiffs returned error: %v", err)
 	}
 
@@ -76,7 +85,7 @@ func TestMtreeDiffExactCapMarksTruncated(t *testing.T) {
 		Node2: map[string]any{"Name": "n2"},
 	}
 
-	if err := m.appendDiffs("n1/n2", work, keydiff.Result{Only1: node1OnlyRows(cap)}); err != nil {
+	if err := m.appendDiffs("n1/n2", work, keydiff.Result{Only1: len(node1OnlyRows(cap))}, node1OnlyEntries(node1OnlyRows(cap))); err != nil {
 		t.Fatalf("appendDiffs returned error: %v", err)
 	}
 
@@ -96,7 +105,7 @@ func TestMtreeDiffNoLimitCollectsAll(t *testing.T) {
 		Node2: map[string]any{"Name": "n2"},
 	}
 
-	if err := m.appendDiffs("n1/n2", work, keydiff.Result{Only1: node1OnlyRows(20)}); err != nil {
+	if err := m.appendDiffs("n1/n2", work, keydiff.Result{Only1: len(node1OnlyRows(20))}, node1OnlyEntries(node1OnlyRows(20))); err != nil {
 		t.Fatalf("appendDiffs returned error: %v", err)
 	}
 
