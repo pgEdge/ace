@@ -98,8 +98,8 @@ func (f *fakeSource) Next() bool {
 func (f *fakeSource) Row() keyRow { return f.rows[f.i-1] }
 func (f *fakeSource) Err() error  { return f.err }
 
-func h(b byte) rowHash {
-	var x rowHash
+func h(b byte) RowHash {
+	var x RowHash
 	x[0] = b
 	return x
 }
@@ -301,32 +301,40 @@ func TestClassify(t *testing.T) {
 		{rr("f", 2)},
 	}
 	var res Result
-	classify(len(rows1), rows1, rows2, &res)
+	entries := classify(len(rows1), rows1, rows2, nil, &res)
 
-	ids := func(rows []types.OrderedMap) []string {
-		var out []string
-		for _, r := range rows {
-			v, _ := r.Get("id")
-			out = append(out, v.(string))
+	id := func(row types.OrderedMap) string {
+		v, _ := row.Get("id")
+		return v.(string)
+	}
+	var only1, only2, changed []string
+	for _, e := range entries {
+		switch e.Kind {
+		case KindOnly1:
+			only1 = append(only1, id(e.Row1))
+			if e.Row2 != nil || e.Hash1 == (RowHash{}) {
+				t.Fatalf("an entry only on node 1 has a row of node 2 or no hash: %+v", e)
+			}
+		case KindOnly2:
+			only2 = append(only2, id(e.Row2))
+		case KindChanged:
+			changed = append(changed, id(e.Row1))
+			if e.Hash1 == e.Hash2 {
+				t.Fatalf("a changed entry has equal hashes: %+v", e)
+			}
 		}
-		return out
 	}
-	if got := ids(res.Only1); !reflect.DeepEqual(got, []string{"only1", "f"}) {
-		t.Fatalf("Only1 = %q", got)
+	if !reflect.DeepEqual(only1, []string{"only1", "f"}) {
+		t.Fatalf("Only1 = %q", only1)
 	}
-	if got := ids(res.Only2); !reflect.DeepEqual(got, []string{"only2"}) {
-		t.Fatalf("Only2 = %q", got)
-	}
-	var changed []string
-	for _, c := range res.Changed {
-		v, _ := c.Row1.Get("id")
-		changed = append(changed, v.(string))
+	if !reflect.DeepEqual(only2, []string{"only2"}) {
+		t.Fatalf("Only2 = %q", only2)
 	}
 	if !reflect.DeepEqual(changed, []string{"chg", "d", "e", "e"}) {
 		t.Fatalf("Changed = %q", changed)
 	}
-	if res.Count() != 7 {
-		t.Fatalf("Count = %d, want 7", res.Count())
+	if res.Count() != 7 || res.Only1 != 2 || res.Only2 != 1 || res.Changed != 4 {
+		t.Fatalf("Count = %d (%d/%d/%d), want 7", res.Count(), res.Only1, res.Only2, res.Changed)
 	}
 }
 

@@ -32,11 +32,13 @@ func TestAddDiffRowsKeepsPairLimit(t *testing.T) {
 		return types.OrderedMap{{Key: "id", Value: id}}
 	}
 
-	task.addDiffRows(pairKey, "n1", "n2", keydiff.Result{Only1: []types.OrderedMap{row(1)}})
-	task.addDiffRows(pairKey, "n1", "n2", keydiff.Result{
-		Only1:   []types.OrderedMap{row(2)},
-		Only2:   []types.OrderedMap{row(3)},
-		Changed: []keydiff.ChangedRow{{Row1: row(4), Row2: row(4)}},
+	task.addDiffRows(pairKey, "n1", "n2", keydiff.Result{Only1: 1}, []keydiff.Entry{
+		{Kind: keydiff.KindOnly1, Row1: row(1)},
+	})
+	task.addDiffRows(pairKey, "n1", "n2", keydiff.Result{Only1: 1, Only2: 1, Changed: 1}, []keydiff.Entry{
+		{Kind: keydiff.KindOnly1, Row1: row(2)},
+		{Kind: keydiff.KindOnly2, Row2: row(3)},
+		{Kind: keydiff.KindChanged, Row1: row(4), Row2: row(4)},
 	})
 
 	rows := task.DiffResult.NodeDiffs[pairKey].Rows

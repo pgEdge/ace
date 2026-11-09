@@ -23,7 +23,8 @@ import (
 // hash makes the key stream of every mismatched block smaller.
 const rowHashSize = 8
 
-type rowHash [rowHashSize]byte
+// RowHash is the short row hash that the key query returns for every row.
+type RowHash [rowHashSize]byte
 
 // entryOverhead is the memory, in bytes, that one key costs in a Go map
 // besides the bytes of the key ID and of the row hash: the string header,
@@ -103,18 +104,18 @@ func keyCost(id string) int64 {
 // with the same key, so a key can have more rows: the first one is in first,
 // the others in more.
 type keyMap struct {
-	first map[string]rowHash
-	more  map[string][]rowHash
+	first map[string]RowHash
+	more  map[string][]RowHash
 	mem   *memCounter
 }
 
 func newKeyMap(mem *memCounter) *keyMap {
-	return &keyMap{first: make(map[string]rowHash), more: make(map[string][]rowHash), mem: mem}
+	return &keyMap{first: make(map[string]RowHash), more: make(map[string][]RowHash), mem: mem}
 }
 
 // add puts one row into the map. It returns false when the memory limit is
 // passed.
-func (m *keyMap) add(id string, h rowHash) bool {
+func (m *keyMap) add(id string, h RowHash) bool {
 	if _, ok := m.first[id]; ok {
 		m.more[id] = append(m.more[id], h)
 		return m.mem.add(rowHashSize + entryOverhead)
@@ -126,7 +127,7 @@ func (m *keyMap) add(id string, h rowHash) bool {
 // take looks for a row with the key id and the hash h and removes it.
 // found says if the key is in the map, matched says if a row with this hash
 // was there.
-func (m *keyMap) take(id string, h rowHash) (found, matched bool) {
+func (m *keyMap) take(id string, h RowHash) (found, matched bool) {
 	h0, ok := m.first[id]
 	if !ok {
 		return false, false
@@ -213,7 +214,7 @@ func (l *keyList) len() int {
 // keyRow is one row of the key query.
 type keyRow struct {
 	id   string
-	hash rowHash
+	hash RowHash
 }
 
 // keySource is a stream of rows of the key query.
