@@ -125,6 +125,12 @@ All notable changes to ACE will be captured in this document. This project follo
   `mtree table-diff`.
 
 ### Changed
+- **mtree commands stop when a primary key column has another type on a
+  node**, for example `varchar(3)` on one node and `text` on another. The
+  diff looks up a row by its key cast to the key type, and such a cast can
+  cut the key, so the row was lost from the diff without an error. Other
+  columns may still have other types; the diff reads the rows of each node
+  with the column types of that node.
 - **The HTML report shows the rows in a new order.** It shows the blocks of
   the table in key order and the rows of a block sorted by the text of the
   key, with value differences and missing rows together. It showed all value

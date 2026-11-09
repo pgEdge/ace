@@ -102,6 +102,12 @@ type MerkleTreeTask struct {
 
 	untilTime *time.Time
 
+	// refColTypes are the column types (format_type) of refNode, the first
+	// node that the checks read. The row and leaf hashes use them on every
+	// node. ColTypes holds the types of each node by node name.
+	refColTypes map[string]string
+	refNode     string
+
 	TaskStore     *taskstore.Store
 	TaskStorePath string
 
@@ -574,14 +580,16 @@ func (m *MerkleTreeTask) processWorkItem(work CompareRangesWorkItem, pool1, pool
 
 	node1Name, _ := work.Node1["Name"].(string)
 	node2Name, _ := work.Node2["Name"].(string)
-	// mtree requires the same column types on every node, so the types of
-	// the reference node are right for the key casts on both nodes. The
-	// leaves have no row counts, so the first node is the build side, and
-	// the memory limit is checked only while the keys are read. mtree refuses
-	// inheritance parents, so there are no children to scan.
-	refTypes := m.ColTypes["_ref"]
-	s1 := keydiff.Side{Name: node1Name, Conn: pool1, ColTypes: refTypes}
-	s2 := keydiff.Side{Name: node2Name, Conn: pool2, ColTypes: refTypes}
+	// The row read of each node uses the column types of that node, for the
+	// key casts and the select list; the checks of the task have made sure
+	// that the key types are the same on every node. The row hash uses the types
+	// of the reference node on both nodes, so that equal rows get equal
+	// hashes. The leaves have no row counts, so the first node is the build
+	// side, and the memory limit is checked only while the keys are read.
+	// mtree refuses inheritance parents, so there are no children to scan.
+	refTypes := m.refColTypes
+	s1 := keydiff.Side{Name: node1Name, Conn: pool1, ColTypes: m.nodeColTypes(node1Name)}
+	s2 := keydiff.Side{Name: node2Name, Conn: pool2, ColTypes: m.nodeColTypes(node2Name)}
 	tbl := keydiff.Table{Schema: m.Schema, Name: m.Table, Key: m.Key, Cols: m.Cols, HashTypes: refTypes}
 	block := keydiff.Block{Where: whereClause, Args: args, ReadFilter: queries.CommitTimestampFilter(m.untilTime)}
 	out := m.result.OpenBlock(nodePairKey, node1Name, node2Name, 0, work.Seq)
@@ -608,6 +616,16 @@ func (m *MerkleTreeTask) processWorkItem(work CompareRangesWorkItem, pool1, pool
 		m.countDiffRows(n)
 	}
 	return nil
+}
+
+// nodeColTypes returns the column types (format_type) of node, as the checks
+// of the task read them, or the types of the reference node if the checks
+// did not read that node.
+func (m *MerkleTreeTask) nodeColTypes(node string) map[string]string {
+	if t, ok := m.ColTypes[node]; ok {
+		return t
+	}
+	return m.refColTypes
 }
 
 // entryRow returns the function that adds the spock metadata of node to a
@@ -1363,6 +1381,34 @@ func (m *MerkleTreeTask) Validate() error {
 	return nil
 }
 
+// keyTypesMatch returns an error if a primary key column has another type
+// (format_type) on node than on refNode. The key gives the bounds of the
+// blocks of the tree, and a row is found by its key cast to the key type,
+// so a key of one node must mean the same value on every node: a cast to a
+// shorter varchar, for example, cuts the key and the row is not found.
+func keyTypesMatch(key []string, refTypes, types map[string]string, refNode, node string) error {
+	for _, col := range key {
+		if refTypes[col] != types[col] {
+			return fmt.Errorf("primary key column %q has type %s on %s and %s on %s; "+
+				"mtree needs the same key types on every node",
+				col, refTypes[col], refNode, types[col], node)
+		}
+	}
+	return nil
+}
+
+// addNodeColTypes keeps the column types of node. The first node is the
+// reference node. It returns an error if a key column of node has another
+// type than on the reference node.
+func (m *MerkleTreeTask) addNodeColTypes(node string, colTypes map[string]string, key []string) error {
+	if m.refColTypes == nil {
+		m.refColTypes = colTypes
+		m.refNode = node
+	}
+	m.ColTypes[node] = colTypes
+	return keyTypesMatch(key, m.refColTypes, colTypes, m.refNode, node)
+}
+
 func (m *MerkleTreeTask) RunChecks(skipValidation bool) error {
 	if !skipValidation {
 		if err := m.Validate(); err != nil {
@@ -1370,8 +1416,11 @@ func (m *MerkleTreeTask) RunChecks(skipValidation bool) error {
 		}
 	}
 	var localCols, localKey []string
+	m.ColTypes = make(map[string]map[string]string)
+	m.refColTypes, m.refNode = nil, ""
 
 	for _, nodeInfo := range m.ClusterNodes {
+		nodeName, _ := nodeInfo["Name"].(string)
 		pool, err := auth.GetClusterNodeConnection(m.Ctx, nodeInfo, m.connOpts())
 		if err != nil {
 			return fmt.Errorf("failed to get connection pool for node %s: %w", nodeInfo["Name"], err)
@@ -1428,15 +1477,13 @@ func (m *MerkleTreeTask) RunChecks(skipValidation bool) error {
 				return fmt.Errorf("failed to get pkey column types on node %s: %w", nodeInfo["Name"], err)
 			}
 			m.PKeyTypes = pkeyTypes
-
-			if m.ColTypes == nil {
-				m.ColTypes = make(map[string]map[string]string)
-			}
-			m.ColTypes["_ref"] = colTypes
 		}
 
 		if strings.Join(currentColsSlice, ",") != strings.Join(localCols, ",") || strings.Join(currentKeySlice, ",") != strings.Join(localKey, ",") {
 			return fmt.Errorf("table schemas or primary keys do not match between nodes")
+		}
+		if err := m.addNodeColTypes(nodeName, colTypes, localKey); err != nil {
+			return fmt.Errorf("'%s': %w", m.QualifiedTableName, err)
 		}
 	}
 
@@ -2725,7 +2772,7 @@ func (m *MerkleTreeTask) DiffMtree() (err error) {
 // resultManifest returns the description of the result of the diff. The
 // result writer adds the pairs.
 func (m *MerkleTreeTask) resultManifest() utils.DiffResultManifest {
-	refTypes := m.ColTypes["_ref"]
+	refTypes := m.refColTypes
 	cols := make([]utils.DiffResultColumn, 0, len(m.Cols))
 	for _, c := range m.Cols {
 		cols = append(cols, utils.DiffResultColumn{Name: c, Type: refTypes[c]})
@@ -3325,7 +3372,7 @@ func (lh *leafHashers) work(name string, pool *pgxpool.Pool, cur *slicer.Cursor)
 		if !ok {
 			return
 		}
-		h, err := queries.ComputeLeafHashes(lh.ctx, pool, m.Schema, m.Table, m.SimplePrimaryKey, m.Key, b.Start, b.End, m.Cols, m.ColTypes["_ref"])
+		h, err := queries.ComputeLeafHashes(lh.ctx, pool, m.Schema, m.Table, m.SimplePrimaryKey, m.Key, b.Start, b.End, m.Cols, m.refColTypes)
 		if err != nil {
 			lh.fail(fmt.Errorf("failed to compute leaf hash for block %v-%v on node %s: %w", b.Start, b.End, name, err))
 			return

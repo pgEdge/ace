@@ -69,6 +69,7 @@ holding the node's slot, then re-run, if you need a guaranteed-current drain.
   the bound does not protect the memory of the client; it limits the size of
   the result and the run time.
 - If the comparison of a range fails, the diff fails and writes no result.
+- The primary key columns must have the same types on every node; otherwise the command stops with an error that names the column, the types and the nodes. Other columns may have other types on the nodes.
 - Merkle trees do not order every primary key type the way the server does. `text`
   keys are compared byte by byte, so a collation other than `C`, and also `enum`
   or `citext` keys, can sort differently here than in the database; `numeric` and

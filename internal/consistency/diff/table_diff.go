@@ -1574,6 +1574,8 @@ func (t *TableDiffTask) ExecuteTask() (err error) {
 		}
 	}
 
+	t.DiffResult.Summary.MismatchedRangesCount = len(mismatchedTasks)
+
 	if len(mismatchedTasks) > 0 {
 		logger.Debug("Found %d initial mismatched ranges. Comparing their rows.", len(mismatchedTasks))
 		t.prepareKeyCompare(ctx, nodeNames)
