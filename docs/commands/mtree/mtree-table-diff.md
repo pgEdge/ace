@@ -54,13 +54,16 @@ holding the node's slot, then re-run, if you need a guaranteed-current drain.
   `default_action: skip`, so `table-repair` does not change the other rows.
   With three or more nodes this holds per key, not per node pair: see the
   known limit in the `table-diff` docs.
-- The number of differing rows collected per node pair is bounded by
+- The number of differing rows of all node pairs together is bounded by
   `mtree.diff.max_diff_rows` (the shipped `ace.yaml` sets `1000000`; if the key
-  is absent or `0`, the diff is unbounded). When the cap is reached, enumeration
-  for that pair stops, the report's `diff_row_limit_reached` flag is set, and a
-  warning is logged. This keeps a heavily diverged table from exhausting memory;
-  lower the value in `ace.yaml` on memory-constrained hosts, and re-run after
-  repairing to surface the remaining differences.
+  is absent or `0`, the diff is unbounded). The bound is approximate: the
+  ranges in work when it is reached are compared to the end. The pairs are
+  compared in the order of their names, so the first pairs can take the whole
+  bound. When the bound is reached, the ranges left are skipped, the report's
+  `diff_row_limit_reached` flag is set, a warning is logged, and no stale
+  block is refreshed. This keeps a heavily diverged table from exhausting
+  memory; lower the value in `ace.yaml` on memory-constrained hosts, and
+  re-run after repairing to surface the remaining differences.
 - Merkle trees do not order every primary key type the way the server does. `text`
   keys are compared byte by byte, so a collation other than `C`, and also `enum`
   or `citext` keys, can sort differently here than in the database; `numeric` and
@@ -74,6 +77,6 @@ holding the node's slot, then re-run, if you need a guaranteed-current drain.
   differences, the tree hashes were stale rather than the data divergent. The
   diff reports this, refreshes those blocks from live data (recorded in the
   summary's `stale_blocks_refreshed`), and the next diff runs clean. A pair
-  with any real differences, an incomplete comparison, or an `--until` filter
-  is not refreshed. If the trees still disagree after a refresh, the nodes'
+  with any real differences, an incomplete comparison, a diff that reached
+  `max_diff_rows`, or an `--until` filter is not refreshed. If the trees still disagree after a refresh, the nodes'
   leaf ranges have diverged; run `ace mtree build` to realign them.

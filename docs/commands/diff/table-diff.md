@@ -155,7 +155,13 @@ ace table-diff my-cluster public._events \
     - The cap applies globally across **all node pairs combined**, not to each
       pair individually. On a three-node cluster that diffs n1/n2 and n1/n3 at
       the same time, both pairs share the single cap. As a result, each pair
-      can report fewer differences than the table actually contains.
+      can report fewer differences than the table actually contains. A row
+      missing on one of three nodes counts once in each of its two pairs.
+    - The cap is approximate. A block is compared completely or not at all,
+      so the blocks that are in work when the cap is reached add their rows,
+      and the result can have more rows than the cap. The blocks are
+      compared in key order, so the result holds about the first
+      differences by key.
     - The `table-diff stopped after reaching max_diff_rows` warning indicates
       that the run hit the cap. Treat the reported result as partial whenever
       the warning appears. Re-run `table-diff` after each repair pass, and

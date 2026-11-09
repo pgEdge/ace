@@ -202,15 +202,6 @@ func (l *keyList) add(id string, inMap bool) bool {
 	return l.mem.add(cost)
 }
 
-func (l *keyList) has(id string) bool {
-	_, ok := l.seen[id]
-	return ok
-}
-
-func (l *keyList) len() int {
-	return len(l.ids)
-}
-
 // keyRow is one row of the key query.
 type keyRow struct {
 	id   string
@@ -238,53 +229,39 @@ func (e *errMemory) Error() string {
 // and checks each row against the map. It returns the keys of the rows that
 // are not equal on the two sides. build may be nil: then the build side has
 // no rows.
-//
-// maxKeys limits the number of keys returned (0 means no limit). When one
-// more key would pass the limit, the search stops and truncated is true. The
-// keys left in the map at that moment are not returned, because rows that
-// the probe did not read yet can still match them.
-func findDiffKeys(build, probe keySource, maxKeys int, mem *memCounter) (ids []string, truncated bool, err error) {
+func findDiffKeys(build, probe keySource, mem *memCounter) ([]string, error) {
 	m := newKeyMap(mem)
 	if build != nil {
 		for build.Next() {
 			r := build.Row()
 			if !m.add(r.id, r.hash) {
-				return nil, false, &errMemory{build: true, used: mem.used}
+				return nil, &errMemory{build: true, used: mem.used}
 			}
 		}
 		if err := build.Err(); err != nil {
-			return nil, false, err
+			return nil, err
 		}
 	}
 
 	list := newKeyList(mem)
-	full := func(id string) bool {
-		return maxKeys > 0 && list.len() >= maxKeys && !list.has(id)
-	}
 	for probe.Next() {
 		r := probe.Row()
 		_, matched := m.take(r.id, r.hash)
 		if matched {
 			continue
 		}
-		if full(r.id) {
-			return list.ids, true, nil
-		}
 		if !list.add(r.id, false) {
-			return nil, false, &errMemory{used: mem.used}
+			return nil, &errMemory{used: mem.used}
 		}
 	}
 	if err := probe.Err(); err != nil {
-		return nil, false, err
+		return nil, err
 	}
 
 	for _, id := range m.sortedKeys() {
-		if full(id) {
-			return list.ids, true, nil
-		}
 		if !list.add(id, true) {
-			return nil, false, &errMemory{used: mem.used}
+			return nil, &errMemory{used: mem.used}
 		}
 	}
-	return list.ids, false, nil
+	return list.ids, nil
 }

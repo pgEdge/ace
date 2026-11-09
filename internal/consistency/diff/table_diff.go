@@ -135,11 +135,11 @@ type TableDiffTask struct {
 	firstErrorMu  sync.Mutex
 	errorRecorded atomic.Bool
 
-	// pairDiffRows enforces max_diff_rows per node pair, keyed by pairKey ->
-	// *atomic.Int64, so one pair's divergence cannot exhaust the row budget
-	// on clusters with more than two nodes.
-	pairDiffRows       sync.Map
-	diffLimitTriggered atomic.Bool
+	// diffRows counts the differing rows of all node pairs of the run
+	// against max_diff_rows. diffLimitHit is set when the count reaches
+	// the limit.
+	diffRows     atomic.Int64
+	diffLimitHit atomic.Bool
 
 	// diffSem limits how many mismatched blocks are compared at the same
 	// time. It is a buffered channel with one slot per comparison task. A
@@ -231,47 +231,23 @@ func pairKeyFor(node1, node2 string) string {
 	return node1 + "/" + node2
 }
 
-// pairCounter returns the per-pair diff-row counter, creating it on first use.
-func (t *TableDiffTask) pairCounter(pairKey string) *atomic.Int64 {
-	v, _ := t.pairDiffRows.LoadOrStore(pairKey, new(atomic.Int64))
-	return v.(*atomic.Int64)
+// diffLimitReached tells whether the differing rows of the run reached
+// max_diff_rows.
+func (t *TableDiffTask) diffLimitReached() bool {
+	return t.diffLimitHit.Load()
 }
 
-// shouldStopPair returns true if enumeration for this node pair should cease,
-// either because the pair reached max_diff_rows or because a node error has
-// been recorded (a circuit breaker that prevents OOM when a node starts
-// failing). The row limit is per pair so one pair's divergence cannot
-// exhaust another pair's budget on clusters with more than two nodes.
-//
-// This check runs without diffMutex, so concurrent comparisons for the same
-// pair can each pass it just under the limit. The rows are added to the
-// result under diffMutex, and the counter is checked there again, so the
-// pair never holds more than max_diff_rows rows.
-func (t *TableDiffTask) shouldStopPair(pairKey string) bool {
-	if t.hasError() {
-		return true
+// countDiffRows adds the differing rows of one compared block to the count
+// of the run. When the count reaches max_diff_rows, the blocks that are not
+// compared yet are skipped. The limit is approximate: the blocks that are in
+// work at that moment are still compared to the end.
+func (t *TableDiffTask) countDiffRows(n int) {
+	if n <= 0 || t.MaxDiffRows <= 0 {
+		return
 	}
-	if t.MaxDiffRows <= 0 {
-		return false
+	if t.diffRows.Add(int64(n)) >= t.MaxDiffRows && t.diffLimitHit.CompareAndSwap(false, true) {
+		logger.Warn("table-diff: reached max_diff_rows limit (%d); the blocks that are not compared yet are skipped", t.MaxDiffRows)
 	}
-	return t.pairCounter(pairKey).Load() >= t.MaxDiffRows
-}
-
-// incrementPairDiffRowsLocked requires the caller to hold diffMutex.
-func (t *TableDiffTask) incrementPairDiffRowsLocked(pairKey string, delta int) bool {
-	if delta <= 0 || t.MaxDiffRows <= 0 {
-		return false
-	}
-
-	total := t.pairCounter(pairKey).Add(int64(delta))
-	if total >= t.MaxDiffRows {
-		t.DiffResult.Summary.DiffRowLimitReached = true
-		if t.diffLimitTriggered.CompareAndSwap(false, true) {
-			logger.Warn("table-diff: %s reached max_diff_rows limit (%d); enumeration for this pair stops (other pairs continue)", pairKey, t.MaxDiffRows)
-		}
-		return true
-	}
-	return false
 }
 
 func (t *TableDiffTask) loadNodeOriginNames() error {
@@ -1088,11 +1064,8 @@ func (t *TableDiffTask) ExecuteTask() (err error) {
 	t.Task.TaskStatus = taskstore.StatusRunning
 	t.Task.ClusterName = t.ClusterName
 
-	t.pairDiffRows.Range(func(k, _ any) bool {
-		t.pairDiffRows.Delete(k)
-		return true
-	})
-	t.diffLimitTriggered.Store(false)
+	t.diffRows.Store(0)
+	t.diffLimitHit.Store(false)
 	t.errorRecorded.Store(false)
 	t.firstErrorMu.Lock()
 	t.firstError = nil
@@ -1581,7 +1554,7 @@ func (t *TableDiffTask) ExecuteTask() (err error) {
 
 	p.Wait()
 
-	if t.diffLimitTriggered.Load() {
+	if t.diffLimitReached() {
 		t.DiffResult.Summary.DiffRowLimitReached = true
 	}
 
@@ -1618,9 +1591,11 @@ func (t *TableDiffTask) ExecuteTask() (err error) {
 func (t *TableDiffTask) runCompares(ctx context.Context, tasks []mismatchTask, bar *mpb.Bar) {
 	var wg sync.WaitGroup
 	for i, task := range tasks {
-		if t.shouldStopPair(pairKeyFor(task.node1, task.node2)) {
-			bar.Increment()
-			continue
+		// After an error or at max_diff_rows, the blocks left are not
+		// compared.
+		if t.hasError() || t.diffLimitReached() {
+			bar.IncrBy(len(tasks) - i)
+			break
 		}
 		// Take a slot before the goroutine starts, so that at most as many
 		// goroutines as there are slots exist at a time, however many
@@ -1640,6 +1615,12 @@ func (t *TableDiffTask) runCompares(ctx context.Context, tasks []mismatchTask, b
 			bar.IncrBy(len(tasks) - i)
 			wg.Wait()
 			return
+		}
+		// Waiting for the slot can take long; check again.
+		if t.hasError() || t.diffLimitReached() {
+			<-t.diffSem
+			bar.IncrBy(len(tasks) - i)
+			break
 		}
 		wg.Add(1)
 		go func(task mismatchTask) {
@@ -1873,20 +1854,6 @@ func anyNode(nodes []string, f func(node string) bool) bool {
 // hashes do not match, and adds them to the diff result.
 func (t *TableDiffTask) compareMismatch(ctx context.Context, task mismatchTask) {
 	pairKey := pairKeyFor(task.node1, task.node2)
-	if t.shouldStopPair(pairKey) {
-		return
-	}
-
-	maxKeys := 0
-	if t.MaxDiffRows > 0 {
-		left := t.MaxDiffRows - t.pairCounter(pairKey).Load()
-		if left <= 0 {
-			return
-		}
-		if left < math.MaxInt32 {
-			maxKeys = int(left)
-		}
-	}
 
 	fail := func(err error) {
 		var me *keydiff.MemoryLimitError
@@ -1939,7 +1906,6 @@ func (t *TableDiffTask) compareMismatch(ctx context.Context, task mismatchTask) 
 	}
 	var entries []keydiff.Entry
 	res, err := keydiff.Compare(ctx, tbl, block, s1, s2, keydiff.Options{
-		MaxKeys:   maxKeys,
 		MaxMemory: t.keyMapMaxMemory(),
 	}, func(batch []keydiff.Entry) error {
 		entries = append(entries, batch...)
@@ -1952,28 +1918,18 @@ func (t *TableDiffTask) compareMismatch(ctx context.Context, task mismatchTask) 
 	logger.Debug("[%s vs %s] range %v-%v: %d differing keys (map on %s), %d only on %s, %d only on %s, %d changed",
 		task.node1, task.node2, task.r.Start, task.r.End, res.DiffKeys, res.BuildNode,
 		res.Only1, task.node1, res.Only2, task.node2, res.Changed)
-	t.addDiffRows(pairKey, task.node1, task.node2, res, entries)
+	t.addDiffRows(pairKey, task.node1, task.node2, entries)
+	t.countDiffRows(res.Count())
 }
 
-// addDiffRows adds the differing rows of one block to the diff result and
-// counts them against max_diff_rows.
-func (t *TableDiffTask) addDiffRows(pairKey, node1Name, node2Name string, res keydiff.Result, entries []keydiff.Entry) {
-	if res.Count() == 0 && !res.Truncated {
+// addDiffRows adds the differing rows of one block to the diff result.
+func (t *TableDiffTask) addDiffRows(pairKey, node1Name, node2Name string, entries []keydiff.Entry) {
+	if len(entries) == 0 {
 		return
 	}
 
 	t.diffMutex.Lock()
 	defer t.diffMutex.Unlock()
-
-	if res.Truncated {
-		t.DiffResult.Summary.DiffRowLimitReached = true
-		if t.diffLimitTriggered.CompareAndSwap(false, true) {
-			logger.Warn("table-diff: %s reached max_diff_rows limit (%d); enumeration for this pair stops (other pairs continue)", pairKey, t.MaxDiffRows)
-		}
-	}
-	if res.Count() == 0 {
-		return
-	}
 
 	if _, ok := t.DiffResult.NodeDiffs[pairKey]; !ok {
 		t.DiffResult.NodeDiffs[pairKey] = types.DiffByNodePair{
@@ -1992,21 +1948,7 @@ func (t *TableDiffTask) addDiffRows(pairKey, node1Name, node2Name string, res ke
 		withMeta := t.withSpockMetadata(utils.OrderedMapToMap(row), node)
 		rows[node] = append(rows[node], utils.MapToOrderedMap(withMeta, t.Cols))
 	}
-
-	// Another block of the same pair can fill the limit while this block is
-	// compared, so check the counter again under the lock.
-	var added int
-	full := t.MaxDiffRows > 0 && t.pairCounter(pairKey).Load() >= t.MaxDiffRows
-	count := func() {
-		added++
-		if t.incrementPairDiffRowsLocked(pairKey, 1) {
-			full = true
-		}
-	}
 	for _, e := range entries {
-		if full {
-			break
-		}
 		switch e.Kind {
 		case keydiff.KindOnly1:
 			add(node1Name, e.Row1)
@@ -2016,13 +1958,12 @@ func (t *TableDiffTask) addDiffRows(pairKey, node1Name, node2Name string, res ke
 			add(node1Name, e.Row1)
 			add(node2Name, e.Row2)
 		}
-		count()
 	}
 
 	if t.DiffResult.Summary.DiffRowsCount == nil {
 		t.DiffResult.Summary.DiffRowsCount = make(map[string]int)
 	}
-	t.DiffResult.Summary.DiffRowsCount[pairKey] += added
+	t.DiffResult.Summary.DiffRowsCount[pairKey] += len(entries)
 }
 
 func (t *TableDiffTask) AddPrimaryKeyToDiffSummary() {

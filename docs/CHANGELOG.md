@@ -19,6 +19,14 @@ All notable changes to ACE will be captured in this document. This project follo
   API and of scheduled jobs has the same meaning. `mtree` commands keep
   the old meaning of the flag and of `mtree.max_connections`.
 
+- **`max_diff_rows` is one approximate limit for all node pairs of a run.**
+  `table-diff` and `mtree table-diff` applied it to each node pair; now the
+  differing rows of all pairs count against one limit. A block is compared
+  completely or not at all, so the result can have more rows than the
+  limit: at most the rows of the blocks that were in work when the limit
+  was reached. `repset-diff` and `schema-diff` still apply it to each table.
+  The same holds for `max_diff_rows` in the HTTP API and in scheduled jobs.
+
 ### Upgrading
 - **Check `table_diff.max_connections` in `ace.yaml`.** It is now the old
   name of `max_connections.default`, so its value has a new meaning. It

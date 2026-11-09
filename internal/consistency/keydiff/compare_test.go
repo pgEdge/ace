@@ -250,25 +250,6 @@ func TestCompareEmptyBuildSideIsNotQueried(t *testing.T) {
 	}
 }
 
-// A probe that stops at MaxKeys is read to the end and not cancelled, so
-// that its connection stays open.
-func TestCompareEarlyStopReadsTheRestOfTheProbe(t *testing.T) {
-	n1, n2, _ := twoNodes()
-	n2.keys = [][][]byte{keyRaw("a", 1), keyRaw("b", 2), keyRaw("c", 3)}
-	n2.stored = map[string][]fakeRow{"a": {{1, "(0,1)", "a"}}}
-	res, err := Compare(context.Background(), fakeTable, Block{Where: "TRUE"}, side(n1, 0, true), side(n2, 3, true), Options{MaxKeys: 1}, discard)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !res.Truncated || res.DiffKeys != 1 {
-		t.Fatalf("Truncated=%v DiffKeys=%d", res.Truncated, res.DiffKeys)
-	}
-	probe := n2.opened[0]
-	if !probe.closed || probe.cancelledAtClose {
-		t.Fatalf("the probe stopped at MaxKeys must be closed without a cancel: closed=%v cancelled=%v", probe.closed, probe.cancelledAtClose)
-	}
-}
-
 // TestCompareMemoryLimitError checks the error of the memory limit during the
 // build and during the probe, the nodes that it names, and that the build
 // query stopped by the limit is cancelled.

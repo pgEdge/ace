@@ -1261,19 +1261,14 @@ func testTableDiff_TableFilterNoRows(t *testing.T, env *testEnv) {
 	require.Contains(t, err.Error(), "table filter produced no rows")
 }
 
-// TestTableDiffMaxDiffRowsPerPair guards that max_diff_rows bounds EACH node
-// pair independently, not as one budget shared across all pairs. The bug it
-// guards against: a single global counter (totalDiffRows) is incremented by
-// every pair's rows, so on a 3-node cluster the cap is reached by the SUM across
-// pairs and enumeration is truncated and split arbitrarily.
+// TestTableDiffMaxDiffRowsAllPairs checks that max_diff_rows is one limit
+// for the differing rows of all node pairs of a run.
 //
-// Setup avoids the open-tail/boundary confound: n1 holds ids 1..20;
-// n2 and n3 each hold the same {1..5, 16..20} (10 MIDDLE rows missing). So
-// n1/n2 and n1/n3 each differ by exactly 10, n2/n3 match, and all nodes share
-// min=1/max=20. With max_diff_rows=14 a per-pair cap reports all 10+10 and never
-// trips the limit; the global-counter bug stops at 14 total (each pair < 10) and
-// sets DiffRowLimitReached.
-func TestTableDiffMaxDiffRowsPerPair(t *testing.T) {
+// n1 holds ids 1..20; n2 and n3 each hold the same {1..5, 16..20} (10 middle
+// rows missing). So n1/n2 and n1/n3 each differ by exactly 10, n2/n3 match,
+// and all nodes share min=1/max=20. With max_diff_rows=14 the sum of the two
+// pairs passes the limit.
+func TestTableDiffMaxDiffRowsAllPairs(t *testing.T) {
 	ctx := context.Background()
 	env := newSpockEnv()
 	if env.N3Pool == nil {
@@ -1343,14 +1338,29 @@ func TestTableDiffMaxDiffRowsPerPair(t *testing.T) {
 	}
 	counts := tdTask.DiffResult.Summary.DiffRowsCount
 
-	require.False(t, tdTask.DiffResult.Summary.DiffRowLimitReached,
-		"per-pair divergence (10) is under max_diff_rows (14); a global counter would trip the limit on the cross-pair sum")
-	require.Equal(t, 10, counts[pk(env.ServiceN1, env.ServiceN2)],
-		"n1/n2 must report all 10 differing rows")
-	require.Equal(t, 10, counts[pk(env.ServiceN1, env.ServiceN3)],
-		"n1/n3 must report all 10 differing rows")
+	// One counter covers all pairs: 10 + 10 differing rows pass the limit
+	// of 14. The limit is approximate, so the run can report more than 14
+	// rows, but it stops and says so.
+	require.True(t, tdTask.DiffResult.Summary.DiffRowLimitReached,
+		"the rows of all pairs (20) pass max_diff_rows (14)")
+	total := counts[pk(env.ServiceN1, env.ServiceN2)] + counts[pk(env.ServiceN1, env.ServiceN3)]
+	require.GreaterOrEqual(t, total, 14, "the run stops only after the limit is reached")
+	require.LessOrEqual(t, total, 20)
 	require.Zero(t, counts[pk(env.ServiceN2, env.ServiceN3)],
 		"n2/n3 are identical and must report no differences")
+
+	// Without a limit every pair reports all its rows.
+	tdTask = env.newTableDiffTask(t, qualifiedTable,
+		[]string{env.ServiceN1, env.ServiceN2, env.ServiceN3})
+	tdTask.ClusterName = clusterName
+	tdTask.BlockSize = 10
+	tdTask.MaxDiffRows = 0
+	require.NoError(t, tdTask.RunChecks(false))
+	require.NoError(t, tdTask.ExecuteTask())
+	counts = tdTask.DiffResult.Summary.DiffRowsCount
+	require.False(t, tdTask.DiffResult.Summary.DiffRowLimitReached)
+	require.Equal(t, 10, counts[pk(env.ServiceN1, env.ServiceN2)])
+	require.Equal(t, 10, counts[pk(env.ServiceN1, env.ServiceN3)])
 }
 
 // testTableDiff_MaxDiffRowsLimit changes four rows on n2 and runs table-diff
