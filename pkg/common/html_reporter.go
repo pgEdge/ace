@@ -49,7 +49,8 @@ var htmlDiffJS string
 const DefaultMaxHTMLRows int64 = 10000
 
 // DefaultMaxHTMLValueLength is the number of characters of a value that the
-// HTML report shows. A longer value is cut at the right side.
+// HTML report shows when neither the command line nor the config file sets
+// max_html_value_length. A longer value is cut at the right side.
 const DefaultMaxHTMLValueLength int64 = 1024
 
 // htmlWriteBufferSize is the size of the buffer in front of the report file.

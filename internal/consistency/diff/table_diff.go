@@ -127,6 +127,11 @@ type TableDiffTask struct {
 	// node pair. 0 means table_diff.max_html_rows from the config, and if
 	// that is not set either, utils.DefaultMaxHTMLRows.
 	MaxHTMLRows int64
+	// MaxHTMLValueLength is the number of characters of a value that the
+	// HTML report shows. 0 means table_diff.max_html_value_length from the
+	// config, and if that is not set either,
+	// utils.DefaultMaxHTMLValueLength.
+	MaxHTMLValueLength int64
 
 	// DiffResult holds the summary of the run. The differing rows are not
 	// kept in memory: they go to the result directory, DiffResultDir.
@@ -572,6 +577,16 @@ func (t *TableDiffTask) Validate() error {
 		t.MaxHTMLRows = cfg.TableDiff.MaxHTMLRows
 	}
 
+	if t.MaxHTMLValueLength < 0 {
+		return fmt.Errorf("max_html_value_length must be >= 0")
+	}
+	if cfg.TableDiff.MaxHTMLValueLength < 0 {
+		return fmt.Errorf("table_diff.max_html_value_length in the config must be >= 0, got %d", cfg.TableDiff.MaxHTMLValueLength)
+	}
+	if t.MaxHTMLValueLength == 0 && cfg.TableDiff.MaxHTMLValueLength > 0 {
+		t.MaxHTMLValueLength = cfg.TableDiff.MaxHTMLValueLength
+	}
+
 	if t.ConcurrencyFactor > 4.0 || t.ConcurrencyFactor <= 0 {
 		return fmt.Errorf("invalid value range for concurrency_factor, must be > 0 and <= 4.0")
 	}
@@ -907,6 +922,7 @@ func (t *TableDiffTask) CloneForSchedule(ctx context.Context) *TableDiffTask {
 	cloned.CompareUnitSize = t.CompareUnitSize
 	cloned.MaxDiffRows = t.MaxDiffRows
 	cloned.MaxHTMLRows = t.MaxHTMLRows
+	cloned.MaxHTMLValueLength = t.MaxHTMLValueLength
 	cloned.AgainstOrigin = t.AgainstOrigin
 	cloned.Until = t.Until
 	cloned.Ctx = ctx
@@ -1598,8 +1614,9 @@ func (t *TableDiffTask) ExecuteTask() (err error) {
 	t.AddPrimaryKeyToDiffSummary()
 
 	paths, err := t.result.Finish(ctx, t.resultManifest(), utils.DiffReportOptions{
-		Format:      t.Output,
-		MaxHTMLRows: t.MaxHTMLRows,
+		Format:             t.Output,
+		MaxHTMLRows:        t.MaxHTMLRows,
+		MaxHTMLValueLength: t.MaxHTMLValueLength,
 	})
 	if paths.JSON != "" {
 		t.DiffFilePath = paths.JSON

@@ -163,6 +163,11 @@ func SetupCLI(version string) *cli.Command {
 			Usage: "Max rows per node pair in the HTML report (0 = use max_html_rows from config, default 10000)",
 			Value: 0,
 		},
+		&cli.Int64Flag{
+			Name:  "max-html-value-length",
+			Usage: "Max characters of a value in the HTML report (0 = use max_html_value_length from config, default 1024)",
+			Value: 0,
+		},
 		&cli.StringFlag{
 			Name:    "table-filter",
 			Aliases: []string{"F"},
@@ -211,6 +216,11 @@ func SetupCLI(version string) *cli.Command {
 		&cli.Int64Flag{
 			Name:  "max-html-rows",
 			Usage: "Max rows per node pair in the HTML report (0 = use table_diff.max_html_rows from config, default 10000)",
+			Value: 0,
+		},
+		&cli.Int64Flag{
+			Name:  "max-html-value-length",
+			Usage: "Max characters of a value in the HTML report (0 = use max_html_value_length from config, default 1024)",
 			Value: 0,
 		},
 		&cli.BoolFlag{
@@ -442,6 +452,11 @@ func SetupCLI(version string) *cli.Command {
 		&cli.Int64Flag{
 			Name:  "max-html-rows",
 			Usage: "Max rows per node pair in the HTML report (0 = use max_html_rows from config, default 10000)",
+			Value: 0,
+		},
+		&cli.Int64Flag{
+			Name:  "max-html-value-length",
+			Usage: "Max characters of a value in the HTML report (0 = use max_html_value_length from config, default 1024)",
 			Value: 0,
 		},
 		&cli.Float64Flag{
@@ -1072,6 +1087,7 @@ func TableDiffCLI(cmd *cli.Command) (err error) {
 	task.CompareUnitSize = cmd.Int("compare-unit-size")
 	task.Output = strings.ToLower(cmd.String("output"))
 	task.MaxHTMLRows = cmd.Int64("max-html-rows")
+	task.MaxHTMLValueLength = cmd.Int64("max-html-value-length")
 	task.Nodes = cmd.String("nodes")
 	if cmd.Bool("ensure-pgcrypto") {
 		logger.Warn("--ensure-pgcrypto has no effect: table-diff no longer needs pgcrypto")
@@ -1335,6 +1351,7 @@ func MtreeDiffCLI(cmd *cli.Command) error {
 	task.MaxConnections = cmd.Int("max-connections")
 	task.Output = cmd.String("output")
 	task.MaxHTMLRows = cmd.Int64("max-html-rows")
+	task.MaxHTMLValueLength = cmd.Int64("max-html-value-length")
 	task.NoCDC = cmd.Bool("skip-cdc")
 	task.CDCTimeoutSec = cmd.Int("cdc-timeout")
 	task.Until = cmd.String("until")
@@ -1389,18 +1406,28 @@ func TableRerunCLI(cmd *cli.Command) (err error) {
 
 // DiffReportCLI builds the HTML report of a finished diff from its result
 // directory. A limit of 0 is taken from the table_diff section of the config
-// file, and then from the default.
+// file, and then from the defaults.
 func DiffReportCLI(cmd *cli.Command) error {
 	maxRows := cmd.Int64("max-html-rows")
+	maxLen := cmd.Int64("max-html-value-length")
 	if maxRows < 0 {
 		return fmt.Errorf("--max-html-rows must be >= 0")
+	}
+	if maxLen < 0 {
+		return fmt.Errorf("--max-html-value-length must be >= 0")
 	}
 	if cfg := config.Get(); cfg != nil {
 		if cfg.TableDiff.MaxHTMLRows < 0 {
 			return fmt.Errorf("table_diff.max_html_rows in the config must be >= 0, got %d", cfg.TableDiff.MaxHTMLRows)
 		}
+		if cfg.TableDiff.MaxHTMLValueLength < 0 {
+			return fmt.Errorf("table_diff.max_html_value_length in the config must be >= 0, got %d", cfg.TableDiff.MaxHTMLValueLength)
+		}
 		if maxRows == 0 && cfg.TableDiff.MaxHTMLRows > 0 {
 			maxRows = cfg.TableDiff.MaxHTMLRows
+		}
+		if maxLen == 0 && cfg.TableDiff.MaxHTMLValueLength > 0 {
+			maxLen = cfg.TableDiff.MaxHTMLValueLength
 		}
 	}
 	r, err := utils.OpenDiffResult(cmd.String("diff-file"))
@@ -1409,7 +1436,7 @@ func DiffReportCLI(cmd *cli.Command) error {
 	}
 	ctx, stop := signalContext(context.Background())
 	defer stop()
-	path, err := utils.WriteHTMLDiffReport(ctx, r, maxRows, 0)
+	path, err := utils.WriteHTMLDiffReport(ctx, r, maxRows, maxLen)
 	if err != nil {
 		return withStopCause(ctx, err)
 	}

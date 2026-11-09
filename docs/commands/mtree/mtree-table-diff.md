@@ -33,6 +33,7 @@ holding the node's slot, then re-run, if you need a guaranteed-current drain.
 | `--max-connections` | `-M` | Maximum database connections per node (`0` = use `mtree.max_connections`, else derive from `--max-cpu-ratio`) | `0` |
 | `--output` | `-o` | `json` or `html` | `json` |
 | `--max-html-rows` |  | Max rows per node pair in the HTML report (`0` = use `mtree.diff.max_html_rows`, or `10000`) | `0` |
+| `--max-html-value-length` |  | Max characters of a value in the HTML report (`0` = use `mtree.diff.max_html_value_length`, or `1024`) | `0` |
 | `--skip-cdc` | `-U` | Skip CDC processing (only rehash and compare) | `false` |
 | `--cdc-timeout` |  | Seconds to drain CDC before giving up (`0` = use `cdc_processing_timeout` / default) | `0` |
 | `--quiet` | `-q` | Suppress output | `false` |

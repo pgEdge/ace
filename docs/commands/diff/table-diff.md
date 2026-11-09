@@ -21,6 +21,7 @@ This command compares the data in the specified table across nodes in a cluster 
 | `--compare-unit-size <int>` | `-u` | Deprecated: no longer used. ACE accepts it and writes a warning. |
 | `--output <json\|html>` | `-o` | Report format. Default `json`. The result directory and the JSON report are always written; with `html` the HTML report is added. All of them share the same timestamped prefix. |
 | `--max-html-rows <int>` |  | Maximum number of rows for each node pair in the HTML report. Default `0`, which means `table_diff.max_html_rows` from `ace.yaml`, or `10000` when that is not set either. There is no setting for "no limit"; set a large number instead. The JSON report contains every row that the diff collected. When `max_diff_rows` stops the diff before every block is compared, the summary of the report has `diff_row_limit_reached`, and more differences may exist. |
+| `--max-html-value-length <int>` |  | The number of characters of a value that the HTML report shows; a longer value is cut at the right side. Key values are never cut. Default `0`, which means `table_diff.max_html_value_length` from `ace.yaml`, or `1024`. |
 | `--nodes <list>` | `-n` | Comma-separated node list or `all`. Up to three-way diffs are supported. |
 | `--table-filter <WHERE>` | `-F` | Optional SQL `WHERE` clause applied on every node before hashing. |
 | `--against-origin <node>` |  | Limit the diff to rows whose `node_origin` matches this Spock node id or name (useful for failed-node recovery). |

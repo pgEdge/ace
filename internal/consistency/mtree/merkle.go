@@ -118,6 +118,11 @@ type MerkleTreeTask struct {
 	// node pair. 0 means mtree.diff.max_html_rows from the config, and if
 	// that is not set either, utils.DefaultMaxHTMLRows.
 	MaxHTMLRows int64
+	// MaxHTMLValueLength is the number of characters of a value that the
+	// HTML report shows. 0 means mtree.diff.max_html_value_length from the
+	// config, and if that is not set either,
+	// utils.DefaultMaxHTMLValueLength.
+	MaxHTMLValueLength int64
 
 	// KeyMapMaxMemory is the limit, in bytes, of the memory for the keys of
 	// one work item while the diff looks for the differing rows. 0 means
@@ -2425,6 +2430,12 @@ func (m *MerkleTreeTask) DiffMtree() (err error) {
 	if cfg := config.Get(); cfg != nil && cfg.MTree.Diff.MaxHTMLRows < 0 {
 		return fmt.Errorf("mtree.diff.max_html_rows in the config must be >= 0, got %d", cfg.MTree.Diff.MaxHTMLRows)
 	}
+	if m.MaxHTMLValueLength < 0 {
+		return fmt.Errorf("max_html_value_length must be >= 0, got %d", m.MaxHTMLValueLength)
+	}
+	if cfg := config.Get(); cfg != nil && cfg.MTree.Diff.MaxHTMLValueLength < 0 {
+		return fmt.Errorf("mtree.diff.max_html_value_length in the config must be >= 0, got %d", cfg.MTree.Diff.MaxHTMLValueLength)
+	}
 
 	if err = m.UpdateMtree(true); err != nil {
 		// A missing tree already carries a complete, actionable message;
@@ -2493,6 +2504,11 @@ func (m *MerkleTreeTask) DiffMtree() (err error) {
 	if m.MaxHTMLRows == 0 {
 		if cfg := config.Get(); cfg != nil && cfg.MTree.Diff.MaxHTMLRows > 0 {
 			m.MaxHTMLRows = cfg.MTree.Diff.MaxHTMLRows
+		}
+	}
+	if m.MaxHTMLValueLength == 0 {
+		if cfg := config.Get(); cfg != nil && cfg.MTree.Diff.MaxHTMLValueLength > 0 {
+			m.MaxHTMLValueLength = cfg.MTree.Diff.MaxHTMLValueLength
 		}
 	}
 	m.diffRows.Store(0)
@@ -2677,8 +2693,9 @@ func (m *MerkleTreeTask) DiffMtree() (err error) {
 		}
 
 		paths, writeErr := m.result.Finish(m.Ctx, m.resultManifest(), utils.DiffReportOptions{
-			Format:      m.Output,
-			MaxHTMLRows: m.MaxHTMLRows,
+			Format:             m.Output,
+			MaxHTMLRows:        m.MaxHTMLRows,
+			MaxHTMLValueLength: m.MaxHTMLValueLength,
 		})
 		if paths.JSON != "" {
 			m.DiffFilePath = paths.JSON

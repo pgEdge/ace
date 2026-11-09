@@ -64,7 +64,9 @@ All notable changes to ACE will be captured in this document. This project follo
   without a database connection, and can run again with other limits.
   `--output html` of `table-diff` and `mtree table-diff` runs it at the end
   of the diff.
-- The HTML report cuts each value that it shows to 1024 characters, with a
+- **`--max-html-value-length`** (`table_diff.max_html_value_length` and
+  `mtree.diff.max_html_value_length` in `ace.yaml`, default 1024) cuts each
+  value that the HTML report shows to this number of characters, with a
   mark that gives the full length. Key values are never cut.
 - The JSON report has the row hash of each row of each node in the new
   optional field `row_hashes`.
