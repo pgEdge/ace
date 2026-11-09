@@ -136,6 +136,31 @@ type Entry struct {
 // and is returned by Compare.
 type Sink func(entries []Entry) error
 
+// RowFunc changes a differing row of one node before it is written.
+type RowFunc func(row types.OrderedMap) types.OrderedMap
+
+// BlockSink returns a sink that writes the entries to out. row1 and row2
+// change each row of the first and of the second node before it is written.
+func BlockSink(out *utils.DiffBlockWriter, row1, row2 RowFunc) Sink {
+	return func(entries []Entry) error {
+		for _, e := range entries {
+			var err error
+			switch e.Kind {
+			case KindOnly1:
+				err = out.Add(utils.DiffKindNode1Only, row1(e.Row1), nil, e.Hash1[:], nil)
+			case KindOnly2:
+				err = out.Add(utils.DiffKindNode2Only, nil, row2(e.Row2), nil, e.Hash2[:])
+			default:
+				err = out.Add(utils.DiffKindChanged, row1(e.Row1), row2(e.Row2), e.Hash1[:], e.Hash2[:])
+			}
+			if err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+}
+
 // Result counts the rows that differ.
 type Result struct {
 	// Only1 and Only2 are the numbers of rows that exist only on the first

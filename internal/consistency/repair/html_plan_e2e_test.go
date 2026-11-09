@@ -12,6 +12,7 @@
 package repair
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -94,12 +95,12 @@ func runHTMLPlanOnPage(t *testing.T, diff types.DiffOutput, limit int64, page *h
 		t.Skip("node is not installed")
 	}
 	dir := t.TempDir()
-	t.Chdir(dir) // WriteDiffReport writes into the current directory
-
-	jsonPath, htmlPath, err := utils.WriteDiffReport(diff, "public", "t", "html", limit)
+	paths, err := utils.StoreDiffOutput(context.Background(), diff, filepath.Join(dir, "public_t_diffs-20260101000000"), 0,
+		utils.DiffReportOptions{Format: "html", MaxHTMLRows: limit})
 	if err != nil {
-		t.Fatalf("WriteDiffReport: %v", err)
+		t.Fatalf("StoreDiffOutput: %v", err)
 	}
+	jsonPath, htmlPath := paths.JSON, paths.HTML
 	scriptPath := filepath.Join(dir, "plan.js")
 	planPath := filepath.Join(dir, "plan.yaml")
 	if err := os.WriteFile(scriptPath, []byte(planScript), 0o600); err != nil {

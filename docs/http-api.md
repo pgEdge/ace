@@ -72,7 +72,7 @@ Returns the current task status. Status values are: `PENDING`, `RUNNING`, `COMPL
 
 Notes:
 
-- `task_context` is task-specific and may include summaries, counts, or error details.
+- `task_context` is task-specific and may include summaries, counts, or error details. For a diff that found differences it includes `diff_result_dir`, the path of the result directory on the server.
 - Diff and report files are written on the server filesystem; the HTTP API does not expose file download endpoints.
 
 ## Endpoints

@@ -55,7 +55,7 @@ func TestMerkleTreeDiffAfterTruncate(t *testing.T) {
 	require.NoError(t, mtreeTask.DiffMtree())
 
 	pair := env.pairKey()
-	if nodeDiffs, ok := mtreeTask.DiffResult.NodeDiffs[pair]; ok {
+	if nodeDiffs, ok := diffPairs(t, mtreeTask)[pair]; ok {
 		require.Empty(t, extractDiffIDs(nodeDiffs.Rows[env.ServiceN1]),
 			"nodes seeded identically; first diff must be clean")
 		require.Empty(t, extractDiffIDs(nodeDiffs.Rows[env.ServiceN2]),
@@ -73,7 +73,7 @@ func TestMerkleTreeDiffAfterTruncate(t *testing.T) {
 	// CLI's `ace mtree table-diff`. All rows now exist only on n1.
 	require.NoError(t, mtreeTask.DiffMtree())
 
-	nodeDiffs, ok := mtreeTask.DiffResult.NodeDiffs[pair]
+	nodeDiffs, ok := diffPairs(t, mtreeTask)[pair]
 	require.True(t, ok,
 		"diff after TRUNCATE on n2 reported the nodes as identical; "+
 			"the CDC drain dropped the TruncateMessage. Full result: %+v",
@@ -103,9 +103,9 @@ func seedIdenticalTruncateTable(t *testing.T, ctx context.Context, env *testEnv,
 		for _, pool := range env.pools() {
 			_, _ = pool.Exec(ctx, "DROP TABLE IF EXISTS "+safeTable+" CASCADE") // nosemgrep
 		}
-		files, _ := filepath.Glob("*_diffs-*.json")
+		files, _ := filepath.Glob("*_diffs-*")
 		for _, f := range files {
-			os.Remove(f)
+			os.RemoveAll(f)
 		}
 	})
 

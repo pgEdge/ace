@@ -179,10 +179,10 @@ func testTableDiff_NoDifferences(t *testing.T, env *testEnv) {
 		t.Fatalf("ExecuteTask failed: %v", err)
 	}
 
-	if len(tdTask.DiffResult.NodeDiffs) != 0 {
+	if len(diffPairs(t, tdTask)) != 0 {
 		t.Errorf(
 			"Expected no differences, but got %d node pair diffs.",
-			len(tdTask.DiffResult.NodeDiffs),
+			len(diffPairs(t, tdTask)),
 		)
 	}
 
@@ -208,9 +208,9 @@ func testTableDiff_DataOnlyOnNode1(t *testing.T, env *testEnv) {
 
 	t.Cleanup(func() {
 		env.repairTable(t, qualifiedTableName, env.ServiceN1)
-		files, _ := filepath.Glob("*_diffs-*.json")
+		files, _ := filepath.Glob("*_diffs-*")
 		for _, f := range files {
-			os.Remove(f)
+			os.RemoveAll(f)
 		}
 	})
 
@@ -247,7 +247,7 @@ func testTableDiff_DataOnlyOnNode1(t *testing.T, env *testEnv) {
 
 	pairKey := env.pairKey()
 
-	nodeDiffs, ok := tdTask.DiffResult.NodeDiffs[pairKey]
+	nodeDiffs, ok := diffPairs(t, tdTask)[pairKey]
 	if !ok {
 		t.Fatalf(
 			"Expected diffs for pair %s, but none found. Result: %+v",
@@ -300,9 +300,9 @@ func testTableDiff_DataOnlyOnNode2(t *testing.T, env *testEnv) {
 
 	t.Cleanup(func() {
 		env.repairTable(t, qualifiedTableName, env.ServiceN2)
-		files, _ := filepath.Glob("*_diffs-*.json")
+		files, _ := filepath.Glob("*_diffs-*")
 		for _, f := range files {
-			os.Remove(f)
+			os.RemoveAll(f)
 		}
 	})
 
@@ -338,7 +338,7 @@ func testTableDiff_DataOnlyOnNode2(t *testing.T, env *testEnv) {
 
 	pairKey := env.pairKey()
 
-	nodeDiffs, ok := tdTask.DiffResult.NodeDiffs[pairKey]
+	nodeDiffs, ok := diffPairs(t, tdTask)[pairKey]
 	if !ok {
 		t.Fatalf(
 			"Expected diffs for pair %s, but none found. Result: %+v",
@@ -391,9 +391,9 @@ func testTableDiff_ModifiedRows(t *testing.T, env *testEnv) {
 
 	t.Cleanup(func() {
 		env.repairTable(t, qualifiedTableName, env.ServiceN1)
-		files, _ := filepath.Glob("*_diffs-*.json")
+		files, _ := filepath.Glob("*_diffs-*")
 		for _, f := range files {
-			os.Remove(f)
+			os.RemoveAll(f)
 		}
 	})
 
@@ -464,7 +464,7 @@ func testTableDiff_ModifiedRows(t *testing.T, env *testEnv) {
 
 	pairKey := env.pairKey()
 
-	nodeDiffs, ok := tdTask.DiffResult.NodeDiffs[pairKey]
+	nodeDiffs, ok := diffPairs(t, tdTask)[pairKey]
 	if !ok {
 		t.Fatalf(
 			"Expected diffs for pair %s, but none found. Result: %+v",
@@ -511,7 +511,7 @@ func testTableDiff_ModifiedRows(t *testing.T, env *testEnv) {
 		found := false
 		for _, rowN2 := range nodeDiffs.Rows[env.ServiceN2] {
 			if indexVal, ok := rowN2.Get("index"); ok &&
-				indexVal == int32(mod.indexVal) {
+				fmt.Sprint(indexVal) == fmt.Sprint(mod.indexVal) {
 				actualModifiedValue, _ := rowN2.Get(mod.field)
 				if actualModifiedValue != mod.value {
 					t.Errorf(
@@ -585,9 +585,9 @@ func testTableDiff_MixedCaseIdentifiers(t *testing.T, env *testEnv, compositeKey
 				t.Logf("Failed to drop test table %s: %v", qualifiedTableName, err)
 			}
 		}
-		files, _ := filepath.Glob("*_diffs-*.json")
+		files, _ := filepath.Glob("*_diffs-*")
 		for _, f := range files {
-			os.Remove(f)
+			os.RemoveAll(f)
 		}
 	})
 
@@ -647,10 +647,10 @@ func testTableDiff_MixedCaseIdentifiers(t *testing.T, env *testEnv, compositeKey
 		t.Fatalf("ExecuteTask failed for mixed-case table: %v", err)
 	}
 
-	if len(tdTask.DiffResult.NodeDiffs) != 0 {
+	if len(diffPairs(t, tdTask)) != 0 {
 		t.Errorf(
 			"Expected no differences for mixed-case table, but got %d node pair diffs. Result: %+v",
-			len(tdTask.DiffResult.NodeDiffs),
+			len(diffPairs(t, tdTask)),
 			tdTask.DiffResult,
 		)
 	}
@@ -738,9 +738,9 @@ CREATE TABLE IF NOT EXISTS %s.%s (
 				t.Logf("Failed to drop test table %s: %v", qualifiedTableName, err)
 			}
 		}
-		files, _ := filepath.Glob("*_diffs-*.json")
+		files, _ := filepath.Glob("*_diffs-*")
 		for _, f := range files {
-			os.Remove(f)
+			os.RemoveAll(f)
 		}
 	})
 
@@ -842,7 +842,7 @@ CREATE TABLE IF NOT EXISTS %s.%s (
 
 	pairKey := env.pairKey()
 
-	nodeDiffs, ok := tdTask.DiffResult.NodeDiffs[pairKey]
+	nodeDiffs, ok := diffPairs(t, tdTask)[pairKey]
 	if !ok {
 		t.Fatalf(
 			"Expected diffs for pair %s, but none found. Result: %+v",
@@ -881,7 +881,7 @@ CREATE TABLE IF NOT EXISTS %s.%s (
 
 	foundRow2N1Only := false
 	for _, r := range nodeDiffs.Rows[env.ServiceN1] {
-		if id, ok := r.Get("id"); ok && id == int32(2) {
+		if id, ok := r.Get("id"); ok && fmt.Sprint(id) == fmt.Sprint(2) {
 			foundRow2N1Only = true
 			break
 		}
@@ -892,7 +892,7 @@ CREATE TABLE IF NOT EXISTS %s.%s (
 
 	foundRow3N2Only := false
 	for _, r := range nodeDiffs.Rows[env.ServiceN2] {
-		if id, ok := r.Get("id"); ok && id == int32(3) {
+		if id, ok := r.Get("id"); ok && fmt.Sprint(id) == fmt.Sprint(3) {
 			foundRow3N2Only = true
 			break
 		}
@@ -906,14 +906,14 @@ CREATE TABLE IF NOT EXISTS %s.%s (
 	for _, r := range nodeDiffs.Rows[env.ServiceN1] {
 		id, _ := r.Get("id")
 		varchar, _ := r.Get("col_varchar")
-		if id == int32(4) && varchar == "original_varchar_row4" {
+		if fmt.Sprint(id) == fmt.Sprint(4) && varchar == "original_varchar_row4" {
 			foundRow4OriginalN1 = true
 		}
 	}
 	for _, r := range nodeDiffs.Rows[env.ServiceN2] {
 		id, _ := r.Get("id")
 		varchar, _ := r.Get("col_varchar")
-		if id == int32(4) && varchar == "MODIFIED_varchar_row4" {
+		if fmt.Sprint(id) == fmt.Sprint(4) && varchar == "MODIFIED_varchar_row4" {
 			foundRow4ModifiedN2 = true
 		}
 	}
@@ -981,9 +981,9 @@ CREATE TABLE IF NOT EXISTS %s.%s (
 				t.Logf("Failed to drop test table %s: %v", qualifiedTableName, err)
 			}
 		}
-		files, _ := filepath.Glob("*_diffs-*.json")
+		files, _ := filepath.Glob("*_diffs-*")
 		for _, f := range files {
-			os.Remove(f)
+			os.RemoveAll(f)
 		}
 	})
 
@@ -1037,7 +1037,7 @@ CREATE TABLE IF NOT EXISTS %s.%s (
 
 	pairKey := env.pairKey()
 
-	nodeDiffs, ok := tdTask.DiffResult.NodeDiffs[pairKey]
+	nodeDiffs, ok := diffPairs(t, tdTask)[pairKey]
 	if !ok {
 		t.Fatalf("Expected diffs for pair %s, but none found. Result: %+v", pairKey, tdTask.DiffResult)
 	}
@@ -1095,9 +1095,9 @@ func testTableDiff_TableFiltering(t *testing.T, env *testEnv) {
 
 	t.Cleanup(func() {
 		env.repairTable(t, qualifiedTableName, env.ServiceN1)
-		files, _ := filepath.Glob("*_diffs-*.json")
+		files, _ := filepath.Glob("*_diffs-*")
 		for _, f := range files {
-			os.Remove(f)
+			os.RemoveAll(f)
 		}
 	})
 
@@ -1169,7 +1169,7 @@ func testTableDiff_TableFiltering(t *testing.T, env *testEnv) {
 
 	pairKey := env.pairKey()
 
-	nodeDiffs, ok := tdTask.DiffResult.NodeDiffs[pairKey]
+	nodeDiffs, ok := diffPairs(t, tdTask)[pairKey]
 	if !ok {
 		t.Fatalf(
 			"Expected diffs for pair %s, but none found. Result: %+v",
@@ -1215,13 +1215,13 @@ func testTableDiff_TableFiltering(t *testing.T, env *testEnv) {
 		email, _ := row.Get("email")
 		firstName, _ := row.Get("first_name")
 
-		if indexVal == int32(1) && email == "mikhailtal@example.com" {
+		if fmt.Sprint(indexVal) == fmt.Sprint(1) && email == "mikhailtal@example.com" {
 			foundIndex1 = true
 		}
-		if indexVal == int32(2) && email == "emmanuel.lasker@example.com" {
+		if fmt.Sprint(indexVal) == fmt.Sprint(2) && email == "emmanuel.lasker@example.com" {
 			foundIndex2 = true
 		}
-		if indexVal == int32(3) && firstName == "Paul Morphy" {
+		if fmt.Sprint(indexVal) == fmt.Sprint(3) && firstName == "Paul Morphy" {
 			foundIndex3 = true
 		}
 	}
@@ -1296,9 +1296,9 @@ func TestTableDiffMaxDiffRowsAllPairs(t *testing.T) {
 		for _, pool := range pools {
 			_, _ = pool.Exec(ctx, "DROP TABLE IF EXISTS "+safeTable+" CASCADE") // nosemgrep
 		}
-		files, _ := filepath.Glob("*_diffs-*.json")
+		files, _ := filepath.Glob("*_diffs-*")
 		for _, f := range files {
-			os.Remove(f)
+			os.RemoveAll(f)
 		}
 	})
 
@@ -1373,9 +1373,9 @@ func testTableDiff_MaxDiffRowsLimit(t *testing.T, env *testEnv) {
 
 	t.Cleanup(func() {
 		env.repairTable(t, qualifiedTableName, env.ServiceN1)
-		files, _ := filepath.Glob("*_diffs-*.json")
+		files, _ := filepath.Glob("*_diffs-*")
 		for _, f := range files {
-			os.Remove(f)
+			os.RemoveAll(f)
 		}
 	})
 
@@ -1415,7 +1415,7 @@ func testTableDiff_MaxDiffRowsLimit(t *testing.T, env *testEnv) {
 
 	pairKey := env.pairKey()
 
-	if _, ok := tdTask.DiffResult.NodeDiffs[pairKey]; !ok {
+	if _, ok := diffPairs(t, tdTask)[pairKey]; !ok {
 		t.Fatalf("expected diffs for pair %s when enforcing max diff rows", pairKey)
 	}
 
@@ -1478,9 +1478,9 @@ func testTableDiff_WithSpockMetadata(t *testing.T, compositeKey bool) {
 				t.Logf("cleanup: failed to drop table: %v", err)
 			}
 		}
-		files, _ := filepath.Glob("*_diffs-*.json")
+		files, _ := filepath.Glob("*_diffs-*")
 		for _, f := range files {
-			os.Remove(f)
+			os.RemoveAll(f)
 		}
 	})
 
@@ -1541,7 +1541,7 @@ func testTableDiff_WithSpockMetadata(t *testing.T, compositeKey bool) {
 		pairKey = serviceN2 + "/" + serviceN1
 	}
 
-	nodeDiffs, ok := tdTask.DiffResult.NodeDiffs[pairKey]
+	nodeDiffs, ok := diffPairs(t, tdTask)[pairKey]
 	if !ok {
 		t.Fatalf("Expected diffs for pair %s, but none found.", pairKey)
 	}

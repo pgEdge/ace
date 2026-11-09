@@ -161,5 +161,5 @@ func TestTableDiffNoTimeLimits(t *testing.T) {
 	task.RunTimeout = intPtr(0)
 	require.NoError(t, task.RunChecks(false))
 	require.NoError(t, task.ExecuteTask())
-	require.Empty(t, task.DiffResult.NodeDiffs)
+	require.Empty(t, diffPairs(t, task))
 }

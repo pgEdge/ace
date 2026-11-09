@@ -125,8 +125,16 @@ type MerkleTreeTask struct {
 	// value means no limit.
 	KeyMapMaxMemory int64
 
-	DiffResult types.DiffOutput
-	diffMutex  sync.Mutex
+	// DiffResult holds the summary of the diff. The differing rows are not
+	// kept in memory: they go to the result directory, DiffResultDir, and to
+	// the JSON report, DiffFilePath. Both are empty when the diff found no
+	// differences.
+	DiffResult    types.DiffOutput
+	DiffResultDir string
+	DiffFilePath  string
+	diffMutex     sync.Mutex
+	// result writes the differing rows of the current diff.
+	result *utils.DiffResultWriter
 	// diffRows counts the differing rows of all node pairs against
 	// MaxDiffRows; diffLimitHit is set when the count reaches the limit.
 	diffRows     atomic.Int64
@@ -571,13 +579,13 @@ func (m *MerkleTreeTask) processWorkItem(work CompareRangesWorkItem, pool1, pool
 	s2 := keydiff.Side{Name: node2Name, Conn: pool2, ColTypes: refTypes}
 	tbl := keydiff.Table{Schema: m.Schema, Name: m.Table, Key: m.Key, Cols: m.Cols, HashTypes: refTypes}
 	block := keydiff.Block{Where: whereClause, Args: args, ReadFilter: queries.CommitTimestampFilter(m.untilTime)}
-	var entries []keydiff.Entry
+	out := m.result.OpenBlock(nodePairKey, node1Name, node2Name, 0, work.Seq)
 	res, err := keydiff.Compare(m.Ctx, tbl, block, s1, s2, keydiff.Options{
 		MaxMemory: m.keyMapMaxMemory(),
-	}, func(batch []keydiff.Entry) error {
-		entries = append(entries, batch...)
-		return nil
-	})
+	}, keydiff.BlockSink(out, m.entryRow(node1Name), m.entryRow(node2Name)))
+	if cerr := out.Close(); err == nil {
+		err = cerr
+	}
 	if err != nil {
 		var me *keydiff.MemoryLimitError
 		if errors.As(err, &me) {
@@ -588,12 +596,23 @@ func (m *MerkleTreeTask) processWorkItem(work CompareRangesWorkItem, pool1, pool
 	}
 	logger.Debug("[%s vs %s] range %d: %d differing keys (map on %s)",
 		node1Name, node2Name, work.Seq, res.DiffKeys, res.BuildNode)
-	if res.Count() == 0 {
-		return nil
+	if n := res.Count(); n > 0 {
+		m.diffMutex.Lock()
+		m.DiffResult.Summary.DiffRowsCount[nodePairKey] += n
+		m.diffMutex.Unlock()
+		m.countDiffRows(n)
 	}
-	m.appendDiffs(nodePairKey, work, entries)
-	m.countDiffRows(res.Count())
 	return nil
+}
+
+// entryRow returns the function that adds the spock metadata of node to a
+// differing row of that node before the row is written to the block file.
+func (m *MerkleTreeTask) entryRow(node string) keydiff.RowFunc {
+	return func(row types.OrderedMap) types.OrderedMap {
+		rowMap := utils.OrderedMapToMap(row)
+		rowMap["node_origin"] = utils.TranslateNodeOrigin(rowMap["node_origin"], m.NodeOriginNames[node])
+		return utils.MapToOrderedMap(utils.AddSpockMetadata(rowMap), m.Cols)
+	}
 }
 
 // DefaultKeyMapMaxMemoryMB is the default limit, in megabytes, of the memory
@@ -652,51 +671,6 @@ func (m *MerkleTreeTask) loadNodeOriginNames() error {
 		return lastErr
 	}
 	return nil
-}
-
-// appendDiffs adds the differing rows of one work item to the diff result.
-func (m *MerkleTreeTask) appendDiffs(nodePairKey string, work CompareRangesWorkItem, entries []keydiff.Entry) {
-	m.diffMutex.Lock()
-	defer m.diffMutex.Unlock()
-
-	if _, ok := m.DiffResult.NodeDiffs[nodePairKey]; !ok {
-		m.DiffResult.NodeDiffs[nodePairKey] = types.DiffByNodePair{
-			Rows: make(map[string][]types.OrderedMap),
-		}
-	}
-	node1Name := work.Node1["Name"].(string)
-	node2Name := work.Node2["Name"].(string)
-	if _, ok := m.DiffResult.NodeDiffs[nodePairKey].Rows[node1Name]; !ok {
-		m.DiffResult.NodeDiffs[nodePairKey].Rows[node1Name] = []types.OrderedMap{}
-	}
-	if _, ok := m.DiffResult.NodeDiffs[nodePairKey].Rows[node2Name]; !ok {
-		m.DiffResult.NodeDiffs[nodePairKey].Rows[node2Name] = []types.OrderedMap{}
-	}
-
-	for _, e := range entries {
-		switch e.Kind {
-		case keydiff.KindOnly1:
-			m.addRowToDiff(nodePairKey, node1Name, e.Row1)
-		case keydiff.KindOnly2:
-			m.addRowToDiff(nodePairKey, node2Name, e.Row2)
-		default:
-			m.addRowToDiff(nodePairKey, node1Name, e.Row1)
-			m.addRowToDiff(nodePairKey, node2Name, e.Row2)
-		}
-	}
-
-	if m.DiffResult.Summary.DiffRowsCount == nil {
-		m.DiffResult.Summary.DiffRowsCount = make(map[string]int)
-	}
-	m.DiffResult.Summary.DiffRowsCount[nodePairKey] += len(entries)
-}
-
-// addRowToDiff adds one differing row of nodeName to the diff result.
-func (m *MerkleTreeTask) addRowToDiff(nodePairKey, nodeName string, row types.OrderedMap) {
-	rowMap := utils.OrderedMapToMap(row)
-	rowMap["node_origin"] = utils.TranslateNodeOrigin(rowMap["node_origin"], m.NodeOriginNames[nodeName])
-	orderedRow := utils.MapToOrderedMap(utils.AddSpockMetadata(rowMap), m.Cols)
-	m.DiffResult.NodeDiffs[nodePairKey].Rows[nodeName] = append(m.DiffResult.NodeDiffs[nodePairKey].Rows[nodeName], orderedRow)
 }
 
 // pkeyKind classifies a primary-key value that pgx decoded into an untyped
@@ -2525,9 +2499,10 @@ func (m *MerkleTreeTask) DiffMtree() (err error) {
 	m.diffLimitHit.Store(false)
 	m.rangesSkipped.Store(false)
 	m.compareErr = nil
+	m.DiffResultDir = ""
+	m.DiffFilePath = ""
 	m.DiffResult = types.DiffOutput{
 		FormatVersion: types.DiffFormatVersion,
-		NodeDiffs:     make(map[string]types.DiffByNodePair),
 		Summary: types.DiffSummary{
 			Schema:          m.Schema,
 			Table:           m.Table,
@@ -2538,6 +2513,14 @@ func (m *MerkleTreeTask) DiffMtree() (err error) {
 			CDCSkippedNodes: m.CDCSkippedNodes,
 		},
 	}
+	// The differing rows go to disk as soon as they are found. A diff that
+	// fails or stops leaves nothing behind.
+	m.result = utils.NewDiffResultWriter(m.Schema, m.Table, m.Key)
+	defer func() {
+		if err != nil {
+			m.result.Abort()
+		}
+	}()
 
 	for _, pair := range nodePairs {
 		node1 := pair[0]
@@ -2693,16 +2676,22 @@ func (m *MerkleTreeTask) DiffMtree() (err error) {
 			logger.Warn("mtree table-diff stopped after reaching max_diff_rows=%d; additional differences may exist", m.MaxDiffRows)
 		}
 
-		diffPath, _, writeErr := utils.WriteDiffReport(m.DiffResult, m.Schema, m.Table, m.Output, m.MaxHTMLRows)
+		paths, writeErr := m.result.Finish(m.Ctx, m.resultManifest(), utils.DiffReportOptions{
+			Format:      m.Output,
+			MaxHTMLRows: m.MaxHTMLRows,
+		})
+		if paths.JSON != "" {
+			m.DiffFilePath = paths.JSON
+			m.DiffResultDir = paths.Dir
+			resultCtx["diff_file"] = paths.JSON
+			resultCtx["diff_result_dir"] = paths.Dir
+		}
 		if writeErr != nil {
 			return writeErr
 		}
-		if diffPath != "" {
-			resultCtx["diff_file"] = diffPath
-		}
 	}
 
-	resultCtx["mismatched_pairs"] = len(m.DiffResult.NodeDiffs)
+	resultCtx["mismatched_pairs"] = m.DiffResult.Summary.DiffPairs()
 
 	if len(m.CDCSkippedNodes) > 0 {
 		logger.Warn("diff completed in best-effort mode: the CDC drain was skipped for "+
@@ -2714,6 +2703,25 @@ func (m *MerkleTreeTask) DiffMtree() (err error) {
 	}
 
 	return nil
+}
+
+// resultManifest returns the description of the result of the diff. The
+// result writer adds the pairs.
+func (m *MerkleTreeTask) resultManifest() utils.DiffResultManifest {
+	refTypes := m.ColTypes["_ref"]
+	cols := make([]utils.DiffResultColumn, 0, len(m.Cols))
+	for _, c := range m.Cols {
+		cols = append(cols, utils.DiffResultColumn{Name: c, Type: refTypes[c]})
+	}
+	return utils.DiffResultManifest{
+		HashVersion: queries.CurrentHashVersion,
+		Schema:      m.Schema,
+		Table:       m.Table,
+		PrimaryKey:  m.Key,
+		Columns:     cols,
+		Nodes:       m.NodeList,
+		Summary:     m.DiffResult.Summary,
+	}
 }
 
 // refreshStaleLeaves rehashes exactly the given leaf blocks from live table

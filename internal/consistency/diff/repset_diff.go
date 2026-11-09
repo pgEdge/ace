@@ -479,7 +479,7 @@ func RepsetDiff(task *RepsetDiffCmd) (err error) {
 			continue
 		}
 
-		if len(tdTask.DiffResult.NodeDiffs) > 0 {
+		if tdTask.DiffResult.Summary.DiffPairs() > 0 {
 			summary.DifferedTables = append(summary.DifferedTables, tableName)
 		} else {
 			summary.MatchedTables = append(summary.MatchedTables, tableName)

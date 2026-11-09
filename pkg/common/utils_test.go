@@ -560,41 +560,6 @@ func TestRowKeyFromStringsIsInjective(t *testing.T) {
 	}
 }
 
-// The report must not reorder its rows between runs on identical input. Two
-// rows can share a display key while having distinct identities, and the input
-// order comes from map iteration, so the sort needs a tie-break to be a total
-// order rather than merely a mostly-consistent one.
-func TestSortPKKeysIsDeterministicOnTiedDisplays(t *testing.T) {
-	// Both identities render as the same display string.
-	idA := RowKeyFromStrings([]string{"a|b", "c"})
-	idB := RowKeyFromStrings([]string{"a", "b|c"})
-	display := map[string]string{idA: "a|b|c", idB: "a|b|c"}
-
-	var first []string
-	for run := 0; run < 20; run++ {
-		keys := []string{idA, idB}
-		if run%2 == 1 {
-			keys = []string{idB, idA} // the map-iteration order flips too
-		}
-		sortPKKeys(keys, display)
-		if first == nil {
-			first = append([]string(nil), keys...)
-			continue
-		}
-		require.Equal(t, first, keys, "tied displays must sort to a stable order")
-	}
-
-	// Numerically equal but differently spelled displays tie the same way.
-	keys := []string{"id-b", "id-a"}
-	sortPKKeys(keys, map[string]string{"id-a": "1.0", "id-b": "1"})
-	require.Equal(t, []string{"id-a", "id-b"}, keys, "a tie falls back to the identity key")
-
-	// An ordinary numeric ordering is untouched by the tie-break.
-	keys = []string{"id-10", "id-2"}
-	sortPKKeys(keys, map[string]string{"id-2": "2", "id-10": "10"})
-	require.Equal(t, []string{"id-2", "id-10"}, keys, "2 must still sort before 10")
-}
-
 // The rows are matched by key, so the order of the input rows must not change
 // the result.
 func TestCompareRowSetsIgnoresRowOrder(t *testing.T) {

@@ -68,9 +68,9 @@ func TestMtreeUUIDPrimaryKeyDiff(t *testing.T) {
 	// repairs from "the most recent diff file" picks it up and fails with a
 	// table mismatch -- measured against TestMerkleTreeSimplePK.
 	t.Cleanup(func() {
-		files, _ := filepath.Glob("*_diffs-*.json")
+		files, _ := filepath.Glob("*_diffs-*")
 		for _, f := range files {
-			os.Remove(f)
+			os.RemoveAll(f)
 		}
 		files, _ = filepath.Glob("*_diffs-*.html")
 		for _, f := range files {
@@ -122,7 +122,7 @@ func TestMtreeUUIDPrimaryKeyDiff(t *testing.T) {
 	// table-repair reads this report, so the pkey has to be a value Postgres
 	// can parse back, not a printed byte array.
 	found := false
-	for _, pairDiff := range task.DiffResult.NodeDiffs {
+	for _, pairDiff := range diffPairs(t, task) {
 		for _, rows := range pairDiff.Rows {
 			for _, row := range rows {
 				for _, kv := range row {

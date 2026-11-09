@@ -22,6 +22,8 @@ import (
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/pgedge/ace/internal/consistency/diff"
+	"github.com/pgedge/ace/internal/consistency/mtree"
 	"github.com/pgedge/ace/pkg/types"
 	"github.com/stretchr/testify/require"
 )
@@ -66,6 +68,56 @@ func typedKeyTable(t *testing.T, env *testEnv, name, defs, cols string, n1Rows, 
 		require.NoError(t, tx.Commit(ctx))
 	}
 	return qualifiedTable
+}
+
+// diffResultOf reads the JSON report of the last run of a table-diff or
+// mtree table-diff task. A run that found no differences has no report;
+// then the result has no pairs.
+func diffResultOf(t *testing.T, task any) types.DiffOutput {
+	t.Helper()
+	var path string
+	var summary types.DiffSummary
+	switch tk := task.(type) {
+	case *diff.TableDiffTask:
+		path, summary = tk.DiffFilePath, tk.DiffResult.Summary
+	case *mtree.MerkleTreeTask:
+		path, summary = tk.DiffFilePath, tk.DiffResult.Summary
+	default:
+		t.Fatalf("diffResultOf: unsupported task %T", task)
+	}
+	if path == "" {
+		require.Zero(t, summary.DiffPairs(), "the run counted differences but wrote no report")
+		return types.DiffOutput{NodeDiffs: map[string]types.DiffByNodePair{}, Summary: summary}
+	}
+	return readDiffReport(t, path)
+}
+
+// intValue returns a whole number from a value of a diff row: a Go integer
+// or a JSON number.
+func intValue(v any) (int64, bool) {
+	switch x := v.(type) {
+	case int32:
+		return int64(x), true
+	case int64:
+		return x, true
+	case int:
+		return int64(x), true
+	case json.Number:
+		n, err := x.Int64()
+		return n, err == nil
+	case float64:
+		if x == float64(int64(x)) {
+			return int64(x), true
+		}
+	}
+	return 0, false
+}
+
+// diffPairs returns the differing rows of the last run of a task, by node
+// pair, as the JSON report has them.
+func diffPairs(t *testing.T, task any) map[string]types.DiffByNodePair {
+	t.Helper()
+	return diffResultOf(t, task).NodeDiffs
 }
 
 func readDiffReport(t *testing.T, path string) types.DiffOutput {

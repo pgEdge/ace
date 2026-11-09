@@ -106,5 +106,5 @@ func TestMerkleTreeStaleLeafHeals(t *testing.T) {
 
 	// Diff #2 finds nothing to traverse: the phantom is gone.
 	require.NoError(t, task.DiffMtree())
-	require.Empty(t, task.DiffResult.NodeDiffs, "no phantom mismatch on the next diff")
+	require.Empty(t, diffPairs(t, task), "no phantom mismatch on the next diff")
 }

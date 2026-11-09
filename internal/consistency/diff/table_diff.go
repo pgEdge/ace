@@ -128,8 +128,16 @@ type TableDiffTask struct {
 	// that is not set either, utils.DefaultMaxHTMLRows.
 	MaxHTMLRows int64
 
+	// DiffResult holds the summary of the run. The differing rows are not
+	// kept in memory: they go to the result directory, DiffResultDir.
 	DiffResult types.DiffOutput
 	diffMutex  sync.Mutex
+	// DiffResultDir is the result directory of the last run, or empty if
+	// the run found no differences.
+	DiffResultDir string
+
+	// result writes the differing rows of the current run.
+	result *utils.DiffResultWriter
 
 	firstError    error
 	firstErrorMu  sync.Mutex
@@ -1066,6 +1074,7 @@ func (t *TableDiffTask) ExecuteTask() (err error) {
 
 	t.diffRows.Store(0)
 	t.diffLimitHit.Store(false)
+	t.DiffResultDir = ""
 	t.errorRecorded.Store(false)
 	t.firstErrorMu.Lock()
 	t.firstError = nil
@@ -1124,8 +1133,11 @@ func (t *TableDiffTask) ExecuteTask() (err error) {
 			ctx := map[string]any{
 				"diff_summary": t.DiffResult.Summary,
 			}
-			if len(t.DiffResult.NodeDiffs) > 0 {
-				ctx["diff_pairs"] = len(t.DiffResult.NodeDiffs)
+			if n := t.DiffResult.Summary.DiffPairs(); n > 0 {
+				ctx["diff_pairs"] = n
+			}
+			if t.DiffResultDir != "" {
+				ctx["diff_result_dir"] = t.DiffResultDir
 			}
 			if err != nil {
 				ctx["error"] = err.Error()
@@ -1177,6 +1189,7 @@ func (t *TableDiffTask) ExecuteTask() (err error) {
 	if t.Mode == "rerun" {
 		return t.ExecuteRerunTask()
 	}
+	t.DiffFilePath = ""
 
 	if cfg := config.Get(); t.CompareUnitSize > 0 || (cfg != nil && cfg.TableDiff.CompareUnitSize > 0) {
 		warnCompareUnitSize()
@@ -1257,7 +1270,6 @@ func (t *TableDiffTask) ExecuteTask() (err error) {
 
 	t.DiffResult = types.DiffOutput{
 		FormatVersion: types.DiffFormatVersion,
-		NodeDiffs:     make(map[string]types.DiffByNodePair),
 		Summary: types.DiffSummary{
 			Schema:            t.Schema,
 			Table:             t.BaseTable,
@@ -1289,6 +1301,15 @@ func (t *TableDiffTask) ExecuteTask() (err error) {
 			OriginOnly: t.resolvedAgainstOrigin != "",
 		},
 	}
+
+	// The differing rows go to disk as soon as they are found. A run that
+	// fails or stops leaves nothing behind.
+	t.result = utils.NewDiffResultWriter(t.Schema, t.BaseTable, t.Key)
+	defer func() {
+		if err != nil {
+			t.result.Abort()
+		}
+	}()
 
 	// Block boundaries come from the anchor node (the highest row estimate).
 	// The cutter cuts its key space into blocks of at most BlockSize rows
@@ -1501,7 +1522,8 @@ func (t *TableDiffTask) ExecuteTask() (err error) {
 	var mismatchedTasks []mismatchTask
 
 	for _, rangeIdx := range slicer.KeyOrder(blocks) {
-		currentRange := t.rangeFromBlock(blocks[rangeIdx])
+		block := blocks[rangeIdx]
+		currentRange := t.rangeFromBlock(block)
 		for i := 0; i < len(nodeNames); i++ {
 			node1 := nodeNames[i]
 			for j := i + 1; j < len(nodeNames); j++ {
@@ -1523,6 +1545,8 @@ func (t *TableDiffTask) ExecuteTask() (err error) {
 						node1: node1,
 						node2: node2,
 						r:     currentRange,
+						part:  block.Part,
+						seq:   block.Seq,
 						rows1: r1.rows,
 						rows2: r2.rows,
 					})
@@ -1573,15 +1597,34 @@ func (t *TableDiffTask) ExecuteTask() (err error) {
 
 	t.AddPrimaryKeyToDiffSummary()
 
-	jsonPath, _, err := utils.WriteDiffReport(t.DiffResult, t.Schema, t.BaseTable, t.Output, t.MaxHTMLRows)
-	if err != nil {
-		return err
+	paths, err := t.result.Finish(ctx, t.resultManifest(), utils.DiffReportOptions{
+		Format:      t.Output,
+		MaxHTMLRows: t.MaxHTMLRows,
+	})
+	if paths.JSON != "" {
+		t.DiffFilePath = paths.JSON
+		t.DiffResultDir = paths.Dir
 	}
-	if jsonPath != "" {
-		t.DiffFilePath = jsonPath
-	}
+	return err
+}
 
-	return nil
+// resultManifest returns the description of the result of the run. The
+// result writer adds the pairs.
+func (t *TableDiffTask) resultManifest() utils.DiffResultManifest {
+	colTypes := t.hashColTypes()
+	cols := make([]utils.DiffResultColumn, 0, len(t.Cols))
+	for _, c := range t.Cols {
+		cols = append(cols, utils.DiffResultColumn{Name: c, Type: colTypes[c]})
+	}
+	return utils.DiffResultManifest{
+		HashVersion: queries.CurrentHashVersion,
+		Schema:      t.Schema,
+		Table:       t.BaseTable,
+		PrimaryKey:  t.Key,
+		Columns:     cols,
+		Nodes:       t.NodeList,
+		Summary:     t.DiffResult.Summary,
+	}
 }
 
 // runCompares compares each mismatched block in its own goroutine and waits
@@ -1773,10 +1816,13 @@ func warnCompareUnitSize() {
 	})
 }
 
-// mismatchTask is one block whose hashes differ on two nodes.
+// mismatchTask is one block whose hashes differ on two nodes. part and seq
+// are the numbers of the block from the cut: its part and its position in
+// the part.
 type mismatchTask struct {
 	node1, node2 string
 	r            Range
+	part, seq    int
 	rows1, rows2 int64
 }
 
@@ -1904,13 +1950,13 @@ func (t *TableDiffTask) compareMismatch(ctx context.Context, task mismatchTask) 
 		Args:       args,
 		ReadFilter: t.EffectiveFilter,
 	}
-	var entries []keydiff.Entry
+	out := t.result.OpenBlock(pairKey, task.node1, task.node2, task.part, task.seq)
 	res, err := keydiff.Compare(ctx, tbl, block, s1, s2, keydiff.Options{
 		MaxMemory: t.keyMapMaxMemory(),
-	}, func(batch []keydiff.Entry) error {
-		entries = append(entries, batch...)
-		return nil
-	})
+	}, keydiff.BlockSink(out, t.entryRow(task.node1), t.entryRow(task.node2)))
+	if cerr := out.Close(); err == nil {
+		err = cerr
+	}
 	if err != nil {
 		fail(err)
 		return
@@ -1918,52 +1964,20 @@ func (t *TableDiffTask) compareMismatch(ctx context.Context, task mismatchTask) 
 	logger.Debug("[%s vs %s] range %v-%v: %d differing keys (map on %s), %d only on %s, %d only on %s, %d changed",
 		task.node1, task.node2, task.r.Start, task.r.End, res.DiffKeys, res.BuildNode,
 		res.Only1, task.node1, res.Only2, task.node2, res.Changed)
-	t.addDiffRows(pairKey, task.node1, task.node2, entries)
-	t.countDiffRows(res.Count())
+	if n := res.Count(); n > 0 {
+		t.diffMutex.Lock()
+		t.DiffResult.Summary.DiffRowsCount[pairKey] += n
+		t.diffMutex.Unlock()
+		t.countDiffRows(n)
+	}
 }
 
-// addDiffRows adds the differing rows of one block to the diff result.
-func (t *TableDiffTask) addDiffRows(pairKey, node1Name, node2Name string, entries []keydiff.Entry) {
-	if len(entries) == 0 {
-		return
+// entryRow returns the function that adds the spock metadata of node to a
+// differing row of that node before the row is written to the block file.
+func (t *TableDiffTask) entryRow(node string) keydiff.RowFunc {
+	return func(row types.OrderedMap) types.OrderedMap {
+		return utils.MapToOrderedMap(t.withSpockMetadata(utils.OrderedMapToMap(row), node), t.Cols)
 	}
-
-	t.diffMutex.Lock()
-	defer t.diffMutex.Unlock()
-
-	if _, ok := t.DiffResult.NodeDiffs[pairKey]; !ok {
-		t.DiffResult.NodeDiffs[pairKey] = types.DiffByNodePair{
-			Rows: make(map[string][]types.OrderedMap),
-		}
-	}
-	rows := t.DiffResult.NodeDiffs[pairKey].Rows
-	if _, ok := rows[node1Name]; !ok {
-		rows[node1Name] = []types.OrderedMap{}
-	}
-	if _, ok := rows[node2Name]; !ok {
-		rows[node2Name] = []types.OrderedMap{}
-	}
-
-	add := func(node string, row types.OrderedMap) {
-		withMeta := t.withSpockMetadata(utils.OrderedMapToMap(row), node)
-		rows[node] = append(rows[node], utils.MapToOrderedMap(withMeta, t.Cols))
-	}
-	for _, e := range entries {
-		switch e.Kind {
-		case keydiff.KindOnly1:
-			add(node1Name, e.Row1)
-		case keydiff.KindOnly2:
-			add(node2Name, e.Row2)
-		default:
-			add(node1Name, e.Row1)
-			add(node2Name, e.Row2)
-		}
-	}
-
-	if t.DiffResult.Summary.DiffRowsCount == nil {
-		t.DiffResult.Summary.DiffRowsCount = make(map[string]int)
-	}
-	t.DiffResult.Summary.DiffRowsCount[pairKey] += len(entries)
 }
 
 func (t *TableDiffTask) AddPrimaryKeyToDiffSummary() {

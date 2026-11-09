@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
 
 	"github.com/jackc/pgx/v5"
@@ -88,4 +89,22 @@ func TestMtreeNumericPrimaryKeyDiff(t *testing.T) {
 		total += c
 	}
 	require.Equal(t, 2, total, "expected the changed row and the deleted row")
+
+	// The rows of each node: 50.5 on both nodes with different values, 7 on
+	// n1 only.
+	pair, ok := diffPairs(t, task)[env.pairKey()]
+	require.True(t, ok, "no diff for %s", env.pairKey())
+	keys := func(node string) map[string]string {
+		out := map[string]string{}
+		for _, r := range pair.Rows[node] {
+			id, _ := r.Get("id")
+			val, _ := r.Get("val")
+			f, err := strconv.ParseFloat(fmt.Sprint(id), 64)
+			require.NoError(t, err, "key %v", id)
+			out[strconv.FormatFloat(f, 'f', -1, 64)] = fmt.Sprint(val)
+		}
+		return out
+	}
+	require.Equal(t, map[string]string{"50.5": "diverged", "7": "same"}, keys(env.ServiceN1))
+	require.Equal(t, map[string]string{"50.5": "same"}, keys(env.ServiceN2))
 }

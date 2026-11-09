@@ -127,6 +127,9 @@ func (d DiffOutput) CheckFormatVersion() error {
 // and the Node1/Node2 fields here will store rows corresponding to nodeX and nodeY respectively.
 type DiffByNodePair struct {
 	Rows map[string][]OrderedMap `json:"rows"` // Keyed by actual node name e.g. "n1", "n2"
+	// RowHashes holds, for each node, the row hash of each row in Rows, in
+	// the same order, as hex text. A report can leave it out.
+	RowHashes map[string][]string `json:"row_hashes,omitempty"`
 }
 
 // DiffSummary provides metadata about the diff operation.
@@ -186,6 +189,17 @@ type SlicerSummary struct {
 	// the key before them in key order. It is absent when ACE did not read
 	// a sample.
 	SamplePageShare *float64 `json:"sample_page_share,omitempty"`
+}
+
+// DiffPairs returns the number of node pairs that have differing rows.
+func (s DiffSummary) DiffPairs() int {
+	n := 0
+	for _, c := range s.DiffRowsCount {
+		if c > 0 {
+			n++
+		}
+	}
+	return n
 }
 
 type KVPair struct {

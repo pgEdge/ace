@@ -543,27 +543,10 @@ h1 {
     font-weight: 600;
 }
 
-.row-separator td {
-    background: rgba(31, 111, 235, 0.1);
-    color: var(--primary-color);
-    font-weight: 650;
-    text-align: center;
-    padding: 0.85rem;
-    letter-spacing: 0.04em;
-    text-transform: uppercase;
-    border-bottom: 2px solid var(--primary-color);
-    font-size: 0.9rem;
-}
-
-.row-subseparator td {
-    background: rgba(31, 111, 235, 0.05);
-    color: var(--text-primary);
-    font-weight: 600;
-    text-align: center;
-    padding: 0.7rem;
-    letter-spacing: 0.02em;
-    border-bottom: 1px solid var(--border-color);
-    font-size: 0.88rem;
+.value-cut {
+    color: var(--text-secondary);
+    font-style: italic;
+    white-space: nowrap;
 }
 
 .row-divider td {
