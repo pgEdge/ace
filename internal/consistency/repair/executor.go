@@ -48,19 +48,20 @@ type planStaleCheck struct {
 	DiffType      string
 }
 
-func CalculatePlanRepairSets(task *TableRepairTask) (map[string]map[string]map[string]any, map[string]map[string]map[string]any, error) {
+// calculatePlanRepairSets returns the row operations that the repair plan
+// gives for the rows of the diff report.
+func calculatePlanRepairSets(task *TableRepairTask) (*repairSets, error) {
 	if task.RepairPlan == nil {
-		return nil, nil, fmt.Errorf("repair plan is nil")
+		return nil, fmt.Errorf("repair plan is nil")
 	}
 
 	tableKey := fmt.Sprintf("%s.%s", task.Schema, task.Table)
 	tablePlan, ok := task.RepairPlan.Tables[tableKey]
 	if !ok {
-		return nil, nil, fmt.Errorf("repair plan does not contain table %s", tableKey)
+		return nil, fmt.Errorf("repair plan does not contain table %s", tableKey)
 	}
 
-	fullRowsToUpsert := make(map[string]map[string]map[string]any) // nodeName -> pkey -> rowData
-	fullRowsToDelete := make(map[string]map[string]map[string]any) // nodeName -> pkey -> rowData
+	sets := newRepairSets()
 	task.planRuleMatches = make(map[string]map[string]string)
 	task.planStaleChecks = make(map[string]map[string]planStaleCheck)
 
@@ -72,27 +73,27 @@ func CalculatePlanRepairSets(task *TableRepairTask) (map[string]map[string]map[s
 		node1Name, node2Name := nodes[0], nodes[1]
 		diffRows, err := buildPlanDiffRows(task, node1Name, node2Name, diffs)
 		if err != nil {
-			return nil, nil, err
+			return nil, err
 		}
 
 		for _, d := range diffRows {
 			action, ruleName, err := resolvePlanAction(task, tablePlan, d)
 			if err != nil {
-				return nil, nil, err
+				return nil, err
 			}
 			if action == nil {
-				return nil, nil, fmt.Errorf("no action resolved for row %s", d.pkStr)
+				return nil, fmt.Errorf("no action resolved for row %s", d.pkStr)
 			}
 			if err := ensureActionCompatible(d, action); err != nil {
-				return nil, nil, err
+				return nil, err
 			}
-			if err := applyPlanAction(d, action, ruleName, fullRowsToUpsert, fullRowsToDelete, task.planRuleMatches, task.planStaleChecks); err != nil {
-				return nil, nil, err
+			if err := applyPlanAction(d, action, ruleName, sets, task.planRuleMatches, task.planStaleChecks); err != nil {
+				return nil, err
 			}
 		}
 	}
 
-	return fullRowsToUpsert, fullRowsToDelete, nil
+	return sets, nil
 }
 
 func buildPlanDiffRows(task *TableRepairTask, node1Name, node2Name string, diffs types.DiffByNodePair) ([]planDiffRow, error) {
@@ -396,6 +397,10 @@ func allowStaleRepairs(action *planner.RepairPlanAction) bool {
 	return *action.AllowStaleRepairs
 }
 
+// recordPlanStaleCheck records for the row operation of row on nodeName the
+// commit timestamp that the diff saw, so that the repair can skip the row if
+// it changed on the node after the diff. Actions that allow stale repairs
+// record nothing.
 func recordPlanStaleCheck(staleChecks map[string]map[string]planStaleCheck, nodeName, pkStr string, row planDiffRow, action *planner.RepairPlanAction, ruleName string) {
 	if staleChecks == nil || action == nil {
 		return
@@ -431,20 +436,26 @@ func recordPlanStaleCheck(staleChecks map[string]map[string]planStaleCheck, node
 	}
 }
 
-func applyPlanAction(row planDiffRow, action *planner.RepairPlanAction, ruleName string, upserts, deletes map[string]map[string]map[string]any, matches map[string]map[string]string, staleChecks map[string]map[string]planStaleCheck) error {
+// applyPlanAction adds the row operations of action for one diff row to
+// sets. A row goes to a node as an UPDATE if the node had the row at diff
+// time, and as an INSERT if it did not.
+//
+// XXX bidirectional on a row that both nodes have gives each node the row of
+// the other node, so the two rows change places and still differ.
+func applyPlanAction(row planDiffRow, action *planner.RepairPlanAction, ruleName string, sets *repairSets, matches map[string]map[string]string, staleChecks map[string]map[string]planStaleCheck) error {
 	switch action.Type {
 	case planner.RepairActionKeepN1:
 		if row.n1Row == nil {
 			return fmt.Errorf("keep_n1 specified but row missing on %s (pk %s)", row.node1Name, row.pkStr)
 		}
-		addRow(upserts, row.node2Name, row.pkStr, copyMap(row.n1Row))
+		sets.write(row.node2Name, row.pkStr, copyMap(row.n1Row), row.n2Row != nil)
 		recordPlanStaleCheck(staleChecks, row.node2Name, row.pkStr, row, action, ruleName)
 		recordMatch(matches, row.node2Name, row.pkStr, ruleName)
 	case planner.RepairActionKeepN2:
 		if row.n2Row == nil {
 			return fmt.Errorf("keep_n2 specified but row missing on %s (pk %s)", row.node2Name, row.pkStr)
 		}
-		addRow(upserts, row.node1Name, row.pkStr, copyMap(row.n2Row))
+		sets.write(row.node1Name, row.pkStr, copyMap(row.n2Row), row.n1Row != nil)
 		recordPlanStaleCheck(staleChecks, row.node1Name, row.pkStr, row, action, ruleName)
 		recordMatch(matches, row.node1Name, row.pkStr, ruleName)
 	case planner.RepairActionApplyFrom:
@@ -461,7 +472,7 @@ func applyPlanAction(row planDiffRow, action *planner.RepairPlanAction, ruleName
 			if mode == planner.RepairApplyModeInsert && row.n2Row != nil {
 				return nil
 			}
-			addRow(upserts, row.node2Name, row.pkStr, copyMap(row.n1Row))
+			sets.write(row.node2Name, row.pkStr, copyMap(row.n1Row), row.n2Row != nil)
 			recordPlanStaleCheck(staleChecks, row.node2Name, row.pkStr, row, action, ruleName)
 			recordMatch(matches, row.node2Name, row.pkStr, ruleName)
 		case "n2":
@@ -471,7 +482,7 @@ func applyPlanAction(row planDiffRow, action *planner.RepairPlanAction, ruleName
 			if mode == planner.RepairApplyModeInsert && row.n1Row != nil {
 				return nil
 			}
-			addRow(upserts, row.node1Name, row.pkStr, copyMap(row.n2Row))
+			sets.write(row.node1Name, row.pkStr, copyMap(row.n2Row), row.n1Row != nil)
 			recordPlanStaleCheck(staleChecks, row.node1Name, row.pkStr, row, action, ruleName)
 			recordMatch(matches, row.node1Name, row.pkStr, ruleName)
 		default:
@@ -479,12 +490,12 @@ func applyPlanAction(row planDiffRow, action *planner.RepairPlanAction, ruleName
 		}
 	case planner.RepairActionBidirectional:
 		if row.n1Row != nil {
-			addRow(upserts, row.node2Name, row.pkStr, copyMap(row.n1Row))
+			sets.write(row.node2Name, row.pkStr, copyMap(row.n1Row), row.n2Row != nil)
 			recordPlanStaleCheck(staleChecks, row.node2Name, row.pkStr, row, action, ruleName)
 			recordMatch(matches, row.node2Name, row.pkStr, ruleName)
 		}
 		if row.n2Row != nil {
-			addRow(upserts, row.node1Name, row.pkStr, copyMap(row.n2Row))
+			sets.write(row.node1Name, row.pkStr, copyMap(row.n2Row), row.n1Row != nil)
 			recordPlanStaleCheck(staleChecks, row.node1Name, row.pkStr, row, action, ruleName)
 			recordMatch(matches, row.node1Name, row.pkStr, ruleName)
 		}
@@ -493,8 +504,8 @@ func applyPlanAction(row planDiffRow, action *planner.RepairPlanAction, ruleName
 		if err != nil {
 			return err
 		}
-		addRow(upserts, row.node1Name, row.pkStr, copyMap(customRow))
-		addRow(upserts, row.node2Name, row.pkStr, copyMap(customRow))
+		sets.write(row.node1Name, row.pkStr, copyMap(customRow), row.n1Row != nil)
+		sets.write(row.node2Name, row.pkStr, copyMap(customRow), row.n2Row != nil)
 		recordPlanStaleCheck(staleChecks, row.node1Name, row.pkStr, row, action, ruleName)
 		recordPlanStaleCheck(staleChecks, row.node2Name, row.pkStr, row, action, ruleName)
 		recordMatch(matches, row.node1Name, row.pkStr, ruleName)
@@ -503,12 +514,12 @@ func applyPlanAction(row planDiffRow, action *planner.RepairPlanAction, ruleName
 		return nil
 	case planner.RepairActionDelete:
 		if row.n1Row != nil {
-			addRow(deletes, row.node1Name, row.pkStr, row.n1Row)
+			sets.remove(row.node1Name, row.pkStr, row.n1Row)
 			recordPlanStaleCheck(staleChecks, row.node1Name, row.pkStr, row, action, ruleName)
 			recordMatch(matches, row.node1Name, row.pkStr, ruleName)
 		}
 		if row.n2Row != nil {
-			addRow(deletes, row.node2Name, row.pkStr, row.n2Row)
+			sets.remove(row.node2Name, row.pkStr, row.n2Row)
 			recordPlanStaleCheck(staleChecks, row.node2Name, row.pkStr, row, action, ruleName)
 			recordMatch(matches, row.node2Name, row.pkStr, ruleName)
 		}
@@ -516,13 +527,6 @@ func applyPlanAction(row planDiffRow, action *planner.RepairPlanAction, ruleName
 		return fmt.Errorf("action %s not supported in execution", action.Type)
 	}
 	return nil
-}
-
-func addRow(target map[string]map[string]map[string]any, node, pk string, row map[string]any) {
-	if target[node] == nil {
-		target[node] = make(map[string]map[string]any)
-	}
-	target[node][pk] = row
 }
 
 func recordMatch(matches map[string]map[string]string, node, pk, rule string) {
