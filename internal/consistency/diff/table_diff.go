@@ -243,10 +243,10 @@ func (t *TableDiffTask) pairCounter(pairKey string) *atomic.Int64 {
 // failing). The row limit is per pair so one pair's divergence cannot
 // exhaust another pair's budget on clusters with more than two nodes.
 //
-// The cap is best-effort: this gate is checked before diffMutex is taken,
-// so concurrent comparisons for the same pair can each pass it just under
-// the limit, leaving the pair a few rows over max_diff_rows. That is
-// acceptable for a report-size bound.
+// This check runs without diffMutex, so concurrent comparisons for the same
+// pair can each pass it just under the limit. The rows are added to the
+// result under diffMutex, and the counter is checked there again, so the
+// pair never holds more than max_diff_rows rows.
 func (t *TableDiffTask) shouldStopPair(pairKey string) bool {
 	if t.hasError() {
 		return true
@@ -1989,8 +1989,10 @@ func (t *TableDiffTask) addDiffRows(pairKey, node1Name, node2Name string, res ke
 		rows[node] = append(rows[node], utils.MapToOrderedMap(withMeta, t.Cols))
 	}
 
+	// Another block of the same pair can fill the limit while this block is
+	// compared, so check the counter again under the lock.
 	var added int
-	full := false
+	full := t.MaxDiffRows > 0 && t.pairCounter(pairKey).Load() >= t.MaxDiffRows
 	count := func() {
 		added++
 		if t.incrementPairDiffRowsLocked(pairKey, 1) {
