@@ -63,6 +63,16 @@ func TestRepairStopsOnSetupError(t *testing.T) {
 		require.Equal(t, "FAILED", task.TaskStatus)
 		require.Empty(t, task.FailedOps)
 	})
+	t.Run("fix_nulls", func(t *testing.T) {
+		task := nodeFailureTask()
+		task.FixNulls = true
+		task.Cols = []string{"id", "v"}
+		task.RawDiffs.NodeDiffs["n1/n2"].Rows["n1"][1] = types.OrderedMap{{Key: "id", Value: 2}, {Key: "v", Value: nil}}
+		err := task.runFixNulls(time.Now())
+		require.ErrorContains(t, err, "no node info for n1")
+		require.Equal(t, "FAILED", task.TaskStatus)
+		require.Empty(t, task.FailedOps)
+	})
 }
 
 // Only an answer of the server makes a failed statement or COMMIT a failure

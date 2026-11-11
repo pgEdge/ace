@@ -69,6 +69,8 @@ Repair compares the rows of each node pair in the diff file by key and turns eac
 | row only on the target | `DELETE` | skipped | skipped | `INSERT` on the other node |
 | row on both nodes with other values | `UPDATE` of all columns outside the key | `UPDATE` | skipped | skipped |
 
+`--fix-nulls` gives one `UPDATE` for each row that has NULL columns, and it sets only the columns that are still NULL.
+
 - **Each row operation must change exactly one row.** An `INSERT` of a row that appeared on the target after the diff fails with a unique violation; an `UPDATE` or a `DELETE` of a row that is gone changes no row. Both are failures; repair never turns an insert into an update or the other way round.
 - **Commands.** Repair sends the row operations in commands of up to 1000 rows of one kind. Each command is one transaction. If one row of a command fails, the whole command is rolled back: the failed row is reported with its error, and the other rows of the command are reported as rolled back with it. Repair then goes on with the next command and the next node.
 - **Setup errors.** An error that does not come from a row stops repair at once: no connection to a node, missing column types, or a failure in the setup of a command (the client role, spock repair mode, `session_replication_role`, the replication origin), or a connection that breaks while a command runs. Repair returns this error, and the task ends with the status `FAILED`. The commands that were committed before stay committed; the rows that were not tried are not listed as failed rows.
@@ -89,7 +91,7 @@ Run `table-diff` again after a failed repair. The new diff shows only the rows t
 
 ## Fixing null-only drifts (`--fix-nulls`)
 
-Replication hiccups can leave some columns NULL on one node while populated on another. The `--fix-nulls` mode cross-fills those NULLs in both directions using values from the paired node(s); it does **not** require a source-of-truth. Use it when the diff shows only NULL/NOT NULL mismatches and you want to reconcile columns without preferring a single node.
+Replication hiccups can leave some columns NULL on one node while populated on another. The `--fix-nulls` mode cross-fills those NULLs in both directions using values from the paired node(s); it does **not** require a source-of-truth. Use it when the diff shows only NULL/NOT NULL mismatches and you want to reconcile columns without preferring a single node. Each update sets a column only if it is still NULL on the node; if a value appeared there after the diff, the update changes no row and its command is reported as failed.
 
 ## Preserving replication origin (`--preserve-origin`)
 

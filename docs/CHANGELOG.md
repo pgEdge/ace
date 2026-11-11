@@ -42,7 +42,10 @@ All notable changes to ACE will be captured in this document. This project follo
   run lists `would_insert` and `would_update` instead of
   `would_upsert`. In the log of skipped stale rows of a repair plan, the
   operation is `insert` or `update` instead of `upsert`. `--fix-nulls`
-  is not changed yet.
+  works in the same way: one `UPDATE` for each row, which sets only the
+  columns that are still NULL, so a value that appeared after the diff
+  is not overwritten. The log of a failed command names the keys of its
+  rows, not the SQL text and the values of the batch.
 
 - **`max_diff_rows` is one approximate limit for all node pairs of a run.**
   `table-diff` and `mtree table-diff` applied it to each node pair; now the

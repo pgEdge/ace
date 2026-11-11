@@ -21,7 +21,6 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/pgedge/ace/db/queries"
-	utils "github.com/pgedge/ace/pkg/common"
 	"github.com/pgedge/ace/pkg/logger"
 )
 
@@ -30,6 +29,9 @@ const (
 	opInsert = "insert"
 	opUpdate = "update"
 	opDelete = "delete"
+	// opFixNulls sets the columns of a row that are NULL on the node to the
+	// values of the other node.
+	opFixNulls = "update_nulls"
 )
 
 // commandSize is the largest number of row operations in one command. One
@@ -121,92 +123,93 @@ func (s *repairSets) empty() bool {
 	return len(s.nodes()) == 0
 }
 
-// rowStatement returns the SQL text of one row operation of the kind op. The
-// text is the same for all rows of a table, so the server prepares it once
-// for each connection.
-func (t *TableRepairTask) rowStatement(op string) (string, error) {
+// rowStatement returns the SQL text and the parameters of one row operation
+// of the kind op for row. The parameters are, in this order: the key and the
+// columns to set for an update and a NULL fix; all columns for an insert; the
+// key for a delete. For an insert, an update and a delete the text is the same
+// for all rows of a table, so the server prepares it once for each
+// connection. A NULL fix sets only the columns of row outside the key, and
+// only where they are still NULL, so that it never writes over a value that
+// appeared after the diff.
+func (t *TableRepairTask) rowStatement(op string, row map[string]any, colTypes map[string]string) (string, []any, error) {
 	table := pgx.Identifier{t.Schema, t.Table}.Sanitize()
 	isKey := make(map[string]bool, len(t.Key))
-	where := make([]string, len(t.Key))
-	for i, k := range t.Key {
+	for _, k := range t.Key {
 		isKey[k] = true
-		where[i] = fmt.Sprintf("%s = $%d", pgx.Identifier{k}.Sanitize(), i+1)
-	}
-	switch op {
-	case opInsert:
-		cols := make([]string, len(t.Cols))
-		params := make([]string, len(t.Cols))
-		for i, c := range t.Cols {
-			cols[i] = pgx.Identifier{c}.Sanitize()
-			params[i] = fmt.Sprintf("$%d", i+1)
-		}
-		return fmt.Sprintf("INSERT INTO %s (%s) VALUES (%s)", table, strings.Join(cols, ", "), strings.Join(params, ", ")), nil
-	case opUpdate:
-		var set []string
-		n := len(t.Key)
-		for _, c := range t.Cols {
-			if isKey[c] {
-				continue
-			}
-			n++
-			set = append(set, fmt.Sprintf("%s = $%d", pgx.Identifier{c}.Sanitize(), n))
-		}
-		if len(set) == 0 {
-			return "", fmt.Errorf("table %s has no columns outside the primary key to update", table)
-		}
-		return fmt.Sprintf("UPDATE %s SET %s WHERE %s", table, strings.Join(set, ", "), strings.Join(where, " AND ")), nil
-	case opDelete:
-		return fmt.Sprintf("DELETE FROM %s WHERE %s", table, strings.Join(where, " AND ")), nil
-	}
-	return "", fmt.Errorf("unknown row operation %q", op)
-}
-
-// rowArgs returns the parameters of the row statement of the kind op for
-// row: all columns for an insert; the key and then the other columns for an
-// update; the key for a delete.
-func (t *TableRepairTask) rowArgs(op string, row map[string]any, colTypes map[string]string) ([]any, error) {
-	conv := func(col string) (any, error) {
-		val, ok := row[col]
-		if !ok || val == nil {
-			return nil, nil
-		}
-		typ, ok := colTypes[col]
-		if !ok {
-			return nil, fmt.Errorf("no type for column %s on the target node", col)
-		}
-		v, err := utils.ConvertToPgxType(val, typ)
-		if err != nil {
-			return nil, fmt.Errorf("cannot convert the value of column %s to %s: %w", col, typ, err)
-		}
-		return v, nil
 	}
 	var cols []string
 	switch op {
 	case opInsert:
 		cols = t.Cols
 	case opUpdate:
-		isKey := make(map[string]bool, len(t.Key))
 		cols = append(cols, t.Key...)
-		for _, k := range t.Key {
-			isKey[k] = true
-		}
 		for _, c := range t.Cols {
 			if !isKey[c] {
 				cols = append(cols, c)
 			}
 		}
+	case opFixNulls:
+		cols = append(cols, t.Key...)
+		var set []string
+		for c := range row {
+			if !isKey[c] {
+				set = append(set, c)
+			}
+		}
+		sort.Strings(set)
+		cols = append(cols, set...)
 	case opDelete:
 		cols = t.Key
+	default:
+		return "", nil, fmt.Errorf("unknown row operation %q", op)
 	}
+
 	args := make([]any, len(cols))
 	for i, c := range cols {
-		v, err := conv(c)
+		val, ok := row[c]
+		if !ok || val == nil {
+			continue
+		}
+		typ, ok := colTypes[c]
+		if !ok {
+			return "", nil, fmt.Errorf("no type for column %s on the target node", c)
+		}
+		v, err := convertValueForType(val, typ)
 		if err != nil {
-			return nil, err
+			return "", nil, fmt.Errorf("cannot convert the value of column %s to %s: %w", c, typ, err)
 		}
 		args[i] = v
 	}
-	return args, nil
+
+	if op == opInsert {
+		names := make([]string, len(cols))
+		params := make([]string, len(cols))
+		for i, c := range cols {
+			names[i] = pgx.Identifier{c}.Sanitize()
+			params[i] = fmt.Sprintf("$%d", i+1)
+		}
+		return fmt.Sprintf("INSERT INTO %s (%s) VALUES (%s)", table, strings.Join(names, ", "), strings.Join(params, ", ")), args, nil
+	}
+
+	where := make([]string, len(t.Key))
+	for i, k := range t.Key {
+		where[i] = fmt.Sprintf("%s = $%d", pgx.Identifier{k}.Sanitize(), i+1)
+	}
+	if op == opDelete {
+		return fmt.Sprintf("DELETE FROM %s WHERE %s", table, strings.Join(where, " AND ")), args, nil
+	}
+	set := make([]string, 0, len(cols)-len(t.Key))
+	for i, c := range cols[len(t.Key):] {
+		ident := pgx.Identifier{c}.Sanitize()
+		set = append(set, fmt.Sprintf("%s = $%d", ident, len(t.Key)+i+1))
+		if op == opFixNulls {
+			where = append(where, ident+" IS NULL")
+		}
+	}
+	if len(set) == 0 {
+		return "", nil, fmt.Errorf("table %s has no columns outside the primary key to update", table)
+	}
+	return fmt.Sprintf("UPDATE %s SET %s WHERE %s", table, strings.Join(set, ", "), strings.Join(where, " AND ")), args, nil
 }
 
 // keyOf returns the key columns of row.
@@ -239,10 +242,6 @@ func (t *TableRepairTask) applyRows(node, op string, rows map[string]map[string]
 		t.commandSeq = make(map[string]int)
 	}
 
-	sql, err := t.rowStatement(op)
-	if err != nil {
-		return nil, err
-	}
 	pool, ok := t.Pools[node]
 	if !ok || pool == nil {
 		return nil, fmt.Errorf("no connection pool for node %s", node)
@@ -283,7 +282,7 @@ func (t *TableRepairTask) applyRows(node, op string, rows map[string]map[string]
 		}
 		for start := 0; start < len(keys); start += commandSize {
 			batch := keys[start:min(start+commandSize, len(keys))]
-			done, err := t.runCommand(conn, node, op, sql, batch, group, colTypes, bk, useOrigin)
+			done, err := t.runCommand(conn, node, op, batch, group, colTypes, bk, useOrigin)
 			applied = append(applied, done...)
 			if err != nil {
 				return applied, err
@@ -326,7 +325,7 @@ func (t *TableRepairTask) setSessionOrigin(conn *pgxpool.Conn, current *string, 
 // from a row; runCommand returns it, and records no row. If COMMIT gets no
 // answer from the server, the command may or may not be committed: its rows
 // go to InDoubtOps, and runCommand returns an error.
-func (t *TableRepairTask) runCommand(conn *pgxpool.Conn, node, op, sql string, keys []string, rows map[string]map[string]any, colTypes map[string]string, bk originBatchKey, useOrigin bool) ([]map[string]any, error) {
+func (t *TableRepairTask) runCommand(conn *pgxpool.Conn, node, op string, keys []string, rows map[string]map[string]any, colTypes map[string]string, bk originBatchKey, useOrigin bool) ([]map[string]any, error) {
 	t.commandSeq[node]++
 	cmd := t.commandSeq[node]
 	// setupErr wraps an error that does not come from a row; it stops the
@@ -387,7 +386,7 @@ func (t *TableRepairTask) runCommand(conn *pgxpool.Conn, node, op, sql string, k
 
 	b := &pgx.Batch{}
 	for _, pk := range keys {
-		args, err := t.rowArgs(op, batch[pk], colTypes)
+		sql, args, err := t.rowStatement(op, batch[pk], colTypes)
 		if err != nil {
 			fail(keys, pk, err.Error())
 			return nil, nil
