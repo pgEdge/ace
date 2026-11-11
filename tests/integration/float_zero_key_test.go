@@ -14,6 +14,7 @@ package integration
 import (
 	"context"
 	"fmt"
+	"sort"
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -24,18 +25,15 @@ import (
 // primary key that is -0 on n1 and 0 on n2. The server holds -0 = 0, so this
 // is one row, but the two keys print in a different way.
 //
-// The test records what ACE does today:
 //   - table-diff finds two key texts. Each text finds only the row that
 //     prints it, so the report has the row of n1 as a row on n1 only and the
 //     row of n2 as a row on n2 only.
-//   - table-repair matches the rows of the report by key text. The key of the
-//     target is not in the source rows, so repair deletes it, and the key of
-//     the source is not in the target rows, so repair writes it. The delete
-//     runs first and removes the row, as -0 = 0. The upsert then inserts the
-//     source row with its own key. After this the nodes are equal.
-//   - with --upsert-only there is no delete. The upsert finds the target row
-//     through the conflict on the key, changes the other columns and keeps the
-//     key of the target, so the next diff reports the row again.
+//   - table-repair with a source of truth deletes the key of the target and
+//     then inserts the key of the source, so the nodes are equal after one
+//     repair.
+//   - with --upsert-only, --insert-only or --bidirectional there is no delete.
+//     Each insert finds the row of the other key and fails. Repair records the
+//     failed insert, leaves the row as it is, and reports an error.
 func TestFloatZeroKeyDiffAndRepair(t *testing.T) {
 	env := newSpockEnv()
 	ctx := context.Background()
@@ -80,15 +78,23 @@ func TestFloatZeroKeyDiffAndRepair(t *testing.T) {
 	}
 
 	cases := []struct {
-		name       string
-		source     string
-		upsertOnly bool
-		want       []string // rows on both nodes after repair, or on the target
-		equal      bool     // the nodes are equal after repair
+		name   string
+		source string
+		mode   string // "", "upsert_only", "insert_only" or "bidirectional"
+		// failed lists the failed row operations as "node:operation:key".
+		failed []string
+		// want, if set, is the content of both nodes after the repair, which
+		// must succeed.
+		want []string
 	}{
-		{name: "source_n1", source: env.ServiceN1, want: []string{"-0:a", "1:b"}, equal: true},
-		{name: "source_n2", source: env.ServiceN2, want: []string{"1:b", "0:x"}, equal: true},
-		{name: "upsert_only", source: env.ServiceN1, upsertOnly: true, want: []string{"0:a", "1:b"}},
+		{name: "source_n1", source: env.ServiceN1, want: []string{"-0:a", "1:b"}},
+		{name: "source_n2", source: env.ServiceN2, want: []string{"1:b", "0:x"}},
+		{name: "upsert_only", source: env.ServiceN1, mode: "upsert_only",
+			failed: []string{env.ServiceN2 + ":insert:-0"}},
+		{name: "insert_only", source: env.ServiceN1, mode: "insert_only",
+			failed: []string{env.ServiceN2 + ":insert:-0"}},
+		{name: "bidirectional", mode: "bidirectional",
+			failed: []string{env.ServiceN1 + ":insert:0", env.ServiceN2 + ":insert:-0"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -96,22 +102,32 @@ func TestFloatZeroKeyDiffAndRepair(t *testing.T) {
 			diffFile := diff(t, table)
 
 			task := env.newTableRepairTask(tc.source, table, diffFile)
-			task.UpsertOnly = tc.upsertOnly
-			require.NoError(t, task.Run(false))
+			task.UpsertOnly = tc.mode == "upsert_only"
+			task.InsertOnly = tc.mode == "insert_only" || tc.mode == "bidirectional"
+			task.Bidirectional = tc.mode == "bidirectional"
+			err := task.Run(false)
 
-			if tc.equal {
+			if tc.want != nil {
+				require.NoError(t, err)
+				require.Empty(t, task.FailedOps)
 				require.Equal(t, tc.want, read(t, env.N1Pool, table), "n1 after repair")
 				require.Equal(t, tc.want, read(t, env.N2Pool, table), "n2 after repair")
 				env.assertNoTableDiff(t, table)
 				return
 			}
-			require.Equal(t, []string{"-0:a", "1:b"}, read(t, env.N1Pool, table), "n1 after repair")
-			require.Equal(t, tc.want, read(t, env.N2Pool, table), "n2 after repair: v is fixed, the key is not")
 
-			td := env.newTableDiffTask(t, table, nodes)
-			require.NoError(t, td.RunChecks(false))
-			require.NoError(t, td.ExecuteTask())
-			require.Equal(t, 2, td.DiffResult.Summary.DiffRowsCount[env.pairKey()], "the row is still reported")
+			require.Error(t, err)
+			var failed []string
+			for _, f := range task.FailedOps {
+				failed = append(failed, fmt.Sprintf("%s:%s:%v", f.Node, f.Operation, f.Key["k"]))
+				require.Contains(t, f.Reason, "23505", "a unique violation: %s", f.Reason)
+			}
+			sort.Strings(failed)
+			require.Equal(t, tc.failed, failed)
+
+			require.Equal(t, []string{"-0:a", "1:b"}, read(t, env.N1Pool, table), "n1 after repair")
+			require.Equal(t, []string{"1:b", "0:x"}, read(t, env.N2Pool, table), "n2 after repair")
+			diff(t, table)
 		})
 	}
 }

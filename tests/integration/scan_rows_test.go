@@ -230,7 +230,7 @@ tables:
 					ops[op] = true
 				}
 			}
-			require.Equal(t, map[string]bool{"upsert": true, "delete": true}, ops, "stale skip log entries: %v", entries)
+			require.Equal(t, map[string]bool{"update": true, "delete": true}, ops, "stale skip log entries: %v", entries)
 		})
 	}
 }

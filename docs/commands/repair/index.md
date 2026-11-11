@@ -17,7 +17,7 @@ The `table-repair` command fixes data inconsistencies identified by `table-diff`
 - **Dry run mode**: see proposed changes without modifying data.
 - **Report generation**: write a detailed audit of actions taken.
 - **Upsert‑only**: prevent deletions on divergent nodes.
-- **Transaction safety**: changes are atomic; partial failures are rolled back.
+- **Checked row operations**: each differing row is inserted, updated or deleted by one statement that must change exactly one row. Rows are sent in commands of up to 1000 rows of one kind, and each command is one transaction. A command with a failed row is rolled back as a whole, its rows are listed in the report, and repair goes on with the next command. If any row was not applied, the task fails at the end. See [How repair applies the changes](table-repair.md#how-repair-applies-the-changes).
 - **Advanced repair plans**: drive repairs from a versioned YAML/JSON file with per-table rules, overrides, and custom rows. See [Advanced repair](advanced-repair.md) and [Examples](advanced-repair-examples.md).
 
 **Helpful Tips**
