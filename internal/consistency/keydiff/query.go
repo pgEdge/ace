@@ -91,6 +91,17 @@ func (t Table) keyQueryFormats() pgx.QueryResultFormats {
 // Table.ScanChildren the keys are joined with the table instead, so that the
 // planner may read a child without the index once for all keys.
 //
+// The lookup also keeps only the rows whose key prints exactly as the key
+// text: format('%s', ...) gives the output of the type, and the "C"
+// collation compares the bytes. Two key texts that the server holds as
+// equal but prints in a different way, such as -0 and 0 in a float column,
+// therefore never find the same row: each text finds only the row that
+// printed it, and the two rows are reported as rows of one node only.
+// The printed expression must be the same as in the key query, trim_scale()
+// included, or a numeric key never matches its own text. A ::text cast must
+// not replace format(): for bpchar, boolean and inet it is not the output of
+// the type.
+//
 // filter, if not empty, is added to the WHERE clause of the lookup as it is.
 func (t Table) ReadQuery(colTypes map[string]string, filter string) (string, error) {
 	if len(t.Key) == 0 {
@@ -103,7 +114,7 @@ func (t Table) ReadQuery(colTypes map[string]string, filter string) (string, err
 
 	params := make([]string, len(t.Key))
 	keyCols := make([]string, len(t.Key))
-	conds := make([]string, len(t.Key))
+	conds := make([]string, 0, 2*len(t.Key)+1)
 	for i, k := range t.Key {
 		typ, ok := colTypes[k]
 		if !ok || strings.TrimSpace(typ) == "" {
@@ -112,7 +123,11 @@ func (t Table) ReadQuery(colTypes map[string]string, filter string) (string, err
 		alias := fmt.Sprintf("%s%d", keyColAlias, i+1)
 		params[i] = fmt.Sprintf("$%d::text[]", i+1)
 		keyCols[i] = alias
-		conds[i] = fmt.Sprintf("%s = %s.%s::%s", pgx.Identifier{k}.Sanitize(), keysAlias, alias, typ)
+		conds = append(conds, fmt.Sprintf("%s = %s.%s::%s", pgx.Identifier{k}.Sanitize(), keysAlias, alias, typ))
+	}
+	for i, k := range t.Key {
+		conds = append(conds, fmt.Sprintf(`format('%%s', %s) COLLATE "C" = %s.%s%d`,
+			queries.ColExpr("", k, t.HashTypes[k]), keysAlias, keyColAlias, i+1))
 	}
 	if f := strings.TrimSpace(filter); f != "" {
 		conds = append(conds, "("+f+")")

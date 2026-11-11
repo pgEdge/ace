@@ -387,6 +387,7 @@ func TestReadQuery(t *testing.T) {
 		`"id" = _ace_keys._ace_k1::integer AND "name" = _ace_keys._ace_k2::character varying(20)`,
 		"OFFSET 0",
 		`"data"::TEXT AS "data"`,
+		`format('%s', "id") COLLATE "C" = _ace_keys._ace_k1 AND format('%s', "name") COLLATE "C" = _ace_keys._ace_k2`,
 		"AS _ace_row_hash",
 		`FROM "public"."t" AS _ace_t WHERE`,
 	} {
