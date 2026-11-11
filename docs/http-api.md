@@ -149,12 +149,12 @@ Request body:
 | `source_of_truth` | string | no | Required unless using `fix_nulls` or bidirectional insert-only. |
 | `quiet` | bool | no | Suppress output. |
 | `dry_run` | bool | no | Generate plan without applying changes. |
-| `insert_only` | bool | no | Only insert missing rows. |
-| `upsert_only` | bool | no | Only upsert missing/different rows. |
+| `insert_only` | bool | no | Only insert the rows that the target does not have; no updates, no deletes. |
+| `upsert_only` | bool | no | Insert the rows that the target does not have and update the rows that differ; no deletes. |
 | `fire_triggers` | bool | no | Use `session_replication_role=local`. |
 | `generate_report` | bool | no | Write a JSON report. |
 | `fix_nulls` | bool | no | Fill NULLs using peer values. |
-| `bidirectional` | bool | no | Insert-only in both directions. |
+| `bidirectional` | bool | no | Insert on each node the rows that only the other node has. |
 | `preserve_origin` | bool | no | Preserve replication origin node ID and LSN with per-row timestamp accuracy. Default: `false` |
 
 Notes:
@@ -162,6 +162,7 @@ Notes:
 - Recovery-mode is not exposed via HTTP; origin-only diff files will be rejected.
 - The client certificate CN must map to a DB role that can run `SET ROLE` and perform required DML.
 - Preserve-origin maintains microsecond-precision timestamps for each repaired row, ensuring accurate temporal ordering in recovery scenarios.
+- Each row operation must change exactly one row, and a failed row rolls back its command of up to 1000 rows. If any row was not applied, the task status is `FAILED`; the repair report (`generate_report`) lists the failed rows. See [How repair applies the changes](commands/repair/table-repair.md#how-repair-applies-the-changes).
 
 ### POST /api/v1/spock-diff
 

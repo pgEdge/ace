@@ -209,7 +209,7 @@ tables:
 
 	logPath := findNewStaleSkipLog(t, beforeLogs)
 	entries := readStaleSkipEntries(t, logPath)
-	require.True(t, hasStaleSkipEntry(entries, 1, "upsert", "stale_keep_n1_for_pk1"))
+	require.True(t, hasStaleSkipEntry(entries, 1, "update", "stale_keep_n1_for_pk1"))
 	require.True(t, hasStaleSkipEntry(entries, 2001, "delete", "stale_delete_missing_on_n1"))
 }
 

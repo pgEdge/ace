@@ -18,6 +18,31 @@ All notable changes to ACE will be captured in this document. This project follo
   `--concurrency-factor` gives. The `max_connections` field of the HTTP
   API and of scheduled jobs has the same meaning. `mtree` commands keep
   the old meaning of the flag and of `mtree.max_connections`.
+- **`table-repair` applies each difference as a separate, checked row
+  operation.** A row of the source of truth that the target does not
+  have is an `INSERT`, a row that both nodes have is an `UPDATE`, and a
+  row of the target only is a `DELETE`. Before, both inserts and updates
+  were `INSERT ... ON CONFLICT DO UPDATE`, and `--insert-only` and
+  `--bidirectional` used `ON CONFLICT DO NOTHING`. Each row operation
+  must change exactly one row. Repair sends the row operations in
+  commands of up to 1000 rows of one kind; each command runs in its own
+  transaction, and a command with a failed row is rolled back. Repair
+  then goes on with the next command, and at the end it reports the
+  failed rows and fails the task. An error that does not come from a
+  row (a connection, the client role, spock repair mode, the replication
+  origin, a broken connection) stops repair at once with this error. If
+  the answer to `COMMIT` is lost, the rows of that command go to
+  `in_doubt_rows` of the report. Before, one error rolled
+  back all changes on the node. On each node the deletes run first, then
+  the updates, then the inserts. A row that appeared on the target after
+  the diff is no longer overwritten, and a row that was deleted after the
+  diff is no longer inserted again: both are now failed rows. The repair
+  report lists `inserted_rows`, `updated_rows`, `deleted_rows` and
+  `failed_rows` for each node instead of `upserted_rows`, and the dry
+  run lists `would_insert` and `would_update` instead of
+  `would_upsert`. In the log of skipped stale rows of a repair plan, the
+  operation is `insert` or `update` instead of `upsert`. `--fix-nulls`
+  is not changed yet.
 
 - **`max_diff_rows` is one approximate limit for all node pairs of a run.**
   `table-diff` and `mtree table-diff` applied it to each node pair; now the
@@ -186,6 +211,19 @@ All notable changes to ACE will be captured in this document. This project follo
   key.
 
 ### Fixed
+- **A key that two nodes print in a different way was reported as a
+  changed row.** For example, `-0` and `0` in a `float8` key, or
+  `'Alice'` and `'alice'` in a `citext` key: the server holds them as
+  equal, so the read of the rows by key found the same row for both
+  texts. Now a key text finds only the row that prints it, and the diff
+  reports a row on each node only. The insert of the source key fails
+  with a unique violation and is reported as a failed row. With a source
+  of truth, `table-repair` then deletes the key of the target, and a
+  second `table-diff` and `table-repair` insert the key of the source.
+  With `--insert-only`, `--upsert-only` or `--bidirectional` there is no
+  delete, and the rows stay as they were.
+- **`table-repair` reported `COMPLETED` when some nodes failed.** The
+  task status is now `FAILED`, and the command returns an error.
 - **Ctrl-C or SIGTERM during `table-diff`, `table-rerun`, `repset-diff` or
   `schema-diff` killed ACE at once.** ACE did not close its connections and
   left the task in the `RUNNING` state. Now the first signal stops the
