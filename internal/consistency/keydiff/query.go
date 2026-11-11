@@ -26,8 +26,6 @@ const (
 	tableAlias  = "_ace_t"
 	posCol      = "_ace_pos"
 	rowHashCol  = "_ace_row_hash"
-	relCol      = "_ace_rel"
-	tidCol      = "_ace_tid"
 	keyColAlias = "_ace_k"
 )
 
@@ -93,10 +91,6 @@ func (t Table) keyQueryFormats() pgx.QueryResultFormats {
 // Table.ScanChildren the keys are joined with the table instead, so that the
 // planner may read a child without the index once for all keys.
 //
-// Each row also comes with its table OID and its ctid. Two keys that the
-// server holds as equal but prints in a different way find the same row, and
-// these two columns let the reader return such a row only once.
-//
 // filter, if not empty, is added to the WHERE clause of the lookup as it is.
 func (t Table) ReadQuery(colTypes map[string]string, filter string) (string, error) {
 	if len(t.Key) == 0 {
@@ -124,11 +118,9 @@ func (t Table) ReadQuery(colTypes map[string]string, filter string) (string, err
 		conds = append(conds, "("+f+")")
 	}
 
-	sel := make([]string, 0, len(t.Cols)+5)
+	sel := make([]string, 0, len(t.Cols)+3)
 	sel = append(sel,
 		h+" AS "+rowHashCol,
-		tableAlias+".tableoid::bigint AS "+relCol,
-		tableAlias+".ctid::text AS "+tidCol,
 		"pg_xact_commit_timestamp("+tableAlias+".xmin) AS commit_ts",
 		"to_json(pg_xact_commit_timestamp_origin("+tableAlias+".xmin))->>'roident' AS node_origin")
 	for _, c := range t.Cols {

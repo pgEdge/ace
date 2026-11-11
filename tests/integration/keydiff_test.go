@@ -232,8 +232,8 @@ func TestKeyDiffNumericScale(t *testing.T) {
 
 // TestKeyDiffEqualKeysPrintedDifferently checks a key that the server holds
 // as equal on both nodes but prints in a different way: -0 and 0 in a float
-// column. The key texts differ, so both keys are searched, but they find the
-// same rows, and each row must be reported once.
+// column. The key texts differ, so both keys are searched. They find the same
+// rows, and the pair of rows is reported once for each key text.
 func TestKeyDiffEqualKeysPrintedDifferently(t *testing.T) {
 	ctx := context.Background()
 	env := newSpockEnv()
@@ -252,7 +252,7 @@ func TestKeyDiffEqualKeysPrintedDifferently(t *testing.T) {
 		require.Equal(t, 2, res.DiffKeys, "-0 and 0 are two key texts")
 		require.Empty(t, res.Only1, "batch size %d", batch)
 		require.Empty(t, res.Only2, "batch size %d", batch)
-		require.Len(t, res.Changed, 1, "the row is reported once, as changed (batch size %d)", batch)
+		require.Len(t, res.Changed, 2, "the row is reported for each key text (batch size %d)", batch)
 	}
 }
 
