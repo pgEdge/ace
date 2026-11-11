@@ -843,6 +843,10 @@ type nullUpdate struct {
 	sourceRow types.OrderedMap // Source row providing the non-null value (for origin tracking)
 }
 
+// runFixNulls fills, on each node, the columns that are NULL there and not
+// NULL on the other node of a pair. Each such row is one row operation that
+// sets only the columns that are still NULL, so a value that appeared after
+// the diff is never overwritten.
 func (t *TableRepairTask) runFixNulls(startTime time.Time) error {
 	logger.Info("Starting fix-nulls repair for %s on cluster %s", t.QualifiedTableName, t.ClusterName)
 	defer t.closePools()
@@ -861,240 +865,90 @@ func (t *TableRepairTask) runFixNulls(startTime time.Time) error {
 		return nil
 	}
 
-	totalCellsUpdated := make(map[string]int)
-	var repairErrors []string
+	t.FailedOps = nil
+	t.InDoubtOps = nil
+	totalOps := make(map[string]map[string]int)
 
-	for nodeName, updates := range nullUpdates {
+	nodeNames := make([]string, 0, len(nullUpdates))
+	for nodeName := range nullUpdates {
+		nodeNames = append(nodeNames, nodeName)
+	}
+	sort.Strings(nodeNames)
+
+	for _, nodeName := range nodeNames {
+		updates := nullUpdates[nodeName]
 		if len(updates) == 0 {
 			continue
 		}
-
-		pool, ok := t.Pools[nodeName]
-		if !ok || pool == nil {
-			logger.Debug("Connection pool for node %s not found, attempting to connect.", nodeName)
-			var nodeInfo map[string]any
-			for _, ni := range t.ClusterNodes {
-				if name, _ := ni["Name"].(string); name == nodeName {
-					nodeInfo = ni
-					break
-				}
-			}
-
-			if nodeInfo == nil {
-				errStr := fmt.Sprintf("no node info for %s", nodeName)
-				logger.Error("Could not find node info for %s. Skipping repairs for this node.", nodeName)
-				repairErrors = append(repairErrors, errStr)
-				continue
-			}
-
-			pool, err = auth.GetClusterNodeConnection(t.Ctx, nodeInfo, t.connOpts())
-			if err != nil {
-				logger.Error("Failed to connect to node %s: %v. Skipping repairs for this node.", nodeName, err)
-				repairErrors = append(repairErrors, fmt.Sprintf("connection failed for %s: %v", nodeName, err))
-				continue
-			}
-			t.Pools[nodeName] = pool
-			logger.Debug("Successfully connected to node %s and created a new connection pool.", nodeName)
+		if err := t.ensurePool(nodeName); err != nil {
+			return t.finishRepair(startTime, totalOps, []string{err.Error()})
 		}
-
-		tx, err := pool.Begin(t.Ctx)
-		if err != nil {
-			logger.Error("starting transaction on node %s: %v", nodeName, err)
-			repairErrors = append(repairErrors, fmt.Sprintf("tx begin failed for %s: %v", nodeName, err))
-			continue
-		}
-
-		spockRepairModeActive, err := t.setupTransactionMode(tx, nodeName)
-		if err != nil {
-			tx.Rollback(t.Ctx)
-			logger.Error("%v", err)
-			repairErrors = append(repairErrors, err.Error())
-			continue
-		}
-
 		colTypes, _, err := t.getColTypesForNode(nodeName)
 		if err != nil {
-			tx.Rollback(t.Ctx)
-			logger.Error("%s", err.Error())
-			repairErrors = append(repairErrors, err.Error())
-			continue
+			return t.finishRepair(startTime, totalOps, []string{err.Error()})
 		}
 
-		columnSet := make(map[string]struct{})
-		for _, nu := range updates {
-			for col := range nu.columns {
-				columnSet[col] = struct{}{}
-			}
-		}
-		var columns []string
-		for col := range columnSet {
-			columns = append(columns, col)
-		}
-		sort.Strings(columns)
-
-		// Build per-column update lists
-		columnsByRow := make(map[string][]*nullUpdate)
-		for _, col := range columns {
-			for _, nu := range updates {
-				if _, ok := nu.columns[col]; ok {
-					columnsByRow[col] = append(columnsByRow[col], nu)
-				}
-			}
-		}
-
-		// Extract origin info once for all columns
-		var originInfoMap map[string]*rowOriginInfo
+		// One row operation for each row: the key and the columns to fill.
+		rows := make(map[string]map[string]any, len(updates))
+		var origins map[string]*rowOriginInfo
 		if t.PreserveOrigin {
-			originInfoMap = make(map[string]*rowOriginInfo)
-			for _, nu := range updates {
-				if nu.sourceRow != nil {
-					pkeyStr, err := utils.StringifyKey(nu.pkMap, t.Key)
-					if err != nil {
-						pkeyStr, err = utils.StringifyOrderedMapKey(nu.sourceRow, t.Key)
-					}
-					if err == nil {
-						if originInfo := extractOriginInfoFromRow(nu.sourceRow); originInfo != nil {
-							originInfoMap[pkeyStr] = originInfo
-						}
-					}
+			origins = make(map[string]*rowOriginInfo)
+		}
+		for pk, nu := range updates {
+			row := make(map[string]any, len(nu.pkMap)+len(nu.columns))
+			for k, v := range nu.pkMap {
+				row[k] = v
+			}
+			for c, v := range nu.columns {
+				row[c] = v
+			}
+			rows[pk] = row
+			if origins != nil && nu.sourceRow != nil {
+				if oi := extractOriginInfoFromRow(nu.sourceRow); oi != nil {
+					origins[pk] = oi
 				}
 			}
 		}
 
-		nodeCellsUpdated := 0
-		nodeFailed := false
+		applied, err := t.applyRows(nodeName, opFixNulls, rows, colTypes, origins)
+		cells := 0
+		for _, row := range applied {
+			cells += len(row) - len(t.Key)
+		}
+		totalOps[nodeName] = map[string]int{opUpdate: len(applied)}
+		logger.Info("Updated %d column values in %d rows on %s", cells, len(applied), nodeName)
 
-		if t.PreserveOrigin && len(originInfoMap) > 0 {
-			// Commit the initial tx (repair_mode setup) first, then use
-			// per-batch-key transactions for origin preservation.
-			if spockRepairModeActive {
-				if err := t.disableSpockRepairMode(tx, nodeName); err != nil {
-					tx.Rollback(t.Ctx)
-					logger.Error("%v", err)
-					repairErrors = append(repairErrors, err.Error())
-					continue
+		if t.report != nil {
+			appliedUpdates := make(map[string]*nullUpdate, len(applied))
+			for _, row := range applied {
+				if pk, err := utils.StringifyKey(row, t.Key); err == nil {
+					if nu, ok := updates[pk]; ok {
+						appliedUpdates[pk] = nu
+					}
 				}
 			}
-			if err := tx.Commit(t.Ctx); err != nil {
-				logger.Error("committing pre-fixnulls transaction on %s: %v", nodeName, err)
-				repairErrors = append(repairErrors, fmt.Sprintf("commit failed for %s: %v", nodeName, err))
-				continue
-			}
-			spockRepairModeActive = false
-
-			updatedCount, err := t.executePreserveOriginFixNulls(pool, nodeName, columns, columnsByRow, colTypes, originInfoMap)
-			if err != nil {
-				logger.Error("executing preserve-origin fix-nulls on node %s: %v", nodeName, err)
-				repairErrors = append(repairErrors, fmt.Sprintf("preserve-origin fix-nulls failed for %s: %v", nodeName, err))
-				nodeFailed = true
-			}
-			nodeCellsUpdated = updatedCount
-			logger.Info("Updated %d column values on %s (preserve-origin)", updatedCount, nodeName)
-		} else {
-			// Standard path: all updates in the shared transaction
-			for _, col := range columns {
-				colType, ok := colTypes[col]
+			t.populateFixNullsReport(nodeName, appliedUpdates, "updated_rows")
+			failed, doubt := t.failedRowsOf(nodeName), t.inDoubtRowsOf(nodeName)
+			if len(failed) > 0 || len(doubt) > 0 {
+				changes, ok := t.report.Changes[nodeName].(map[string]any)
 				if !ok {
-					nodeFailed = true
-					tx.Rollback(t.Ctx)
-					errStr := fmt.Sprintf("column type for %s not found on node %s", col, nodeName)
-					logger.Error("%s", errStr)
-					repairErrors = append(repairErrors, errStr)
-					break
+					changes = make(map[string]any)
+					t.report.Changes[nodeName] = changes
 				}
-
-				rowsForCol := columnsByRow[col]
-				if len(rowsForCol) == 0 {
-					continue
+				if len(failed) > 0 {
+					changes["failed_rows"] = failed
 				}
-
-				updatedCount, err := t.applyFixNullsUpdates(tx, col, colType, rowsForCol, colTypes, nodeName)
-				if err != nil {
-					nodeFailed = true
-					tx.Rollback(t.Ctx)
-					logger.Error("executing fix-nulls updates for column %s on node %s: %v", col, nodeName, err)
-					repairErrors = append(repairErrors, fmt.Sprintf("fix-nulls updates failed for %s on %s: %v", col, nodeName, err))
-					break
-				}
-				nodeCellsUpdated += updatedCount
-				logger.Info("Updated %d column values for column %s on %s", updatedCount, col, nodeName)
-			}
-
-			if !nodeFailed {
-				if spockRepairModeActive {
-					if err := t.disableSpockRepairMode(tx, nodeName); err != nil {
-						tx.Rollback(t.Ctx)
-						logger.Error("%v", err)
-						repairErrors = append(repairErrors, err.Error())
-						nodeFailed = true
-					}
-				}
-				if !nodeFailed {
-					if err := tx.Commit(t.Ctx); err != nil {
-						logger.Error("committing transaction on %s: %v", nodeName, err)
-						repairErrors = append(repairErrors, fmt.Sprintf("commit failed for %s: %v", nodeName, err))
-						nodeFailed = true
-					}
+				if len(doubt) > 0 {
+					changes["in_doubt_rows"] = doubt
 				}
 			}
 		}
-
-		if nodeFailed {
-			continue
-		}
-		logger.Debug("Fix-nulls completed on %s", nodeName)
-
-		totalCellsUpdated[nodeName] = nodeCellsUpdated
-
-		if t.report != nil && nodeCellsUpdated > 0 {
-			t.populateFixNullsReport(nodeName, updates, "updated_rows")
+		if err != nil {
+			return t.finishRepair(startTime, totalOps, []string{err.Error()})
 		}
 	}
 
-	t.FinishedAt = time.Now()
-	t.TimeTaken = float64(t.FinishedAt.Sub(startTime).Milliseconds())
-	runTimeStr := fmt.Sprintf("%.3fs", t.TimeTaken/1000)
-
-	if len(repairErrors) > 0 {
-		logger.Error("Fix-nulls repair of %s failed in %s with errors: %s", t.QualifiedTableName, runTimeStr, strings.Join(repairErrors, "; "))
-		t.TaskStatus = "FAILED"
-		t.TaskContext = strings.Join(repairErrors, "; ")
-		return fmt.Errorf("fix-nulls repair encountered errors: %s", t.TaskContext)
-	}
-
-	totalCells := 0
-	totalRows := 0
-	var updatedNodes []string
-	for node, count := range totalCellsUpdated {
-		if count > 0 {
-			updatedNodes = append(updatedNodes, node)
-			totalCells += count
-			if updates, ok := nullUpdates[node]; ok {
-				totalRows += len(updates)
-			}
-		}
-	}
-	sort.Strings(updatedNodes)
-
-	if totalCells == 0 {
-		logger.Info("Fix-nulls repair of %s complete in %s. No null differences found.", t.QualifiedTableName, runTimeStr)
-		t.TaskStatus = "COMPLETED"
-		t.TaskContext = "No null repairs needed"
-		return nil
-	}
-
-	logger.Info("Fix-nulls repair of %s complete in %s. Nodes %s updated (%d column values across %d rows).",
-		t.QualifiedTableName,
-		runTimeStr,
-		strings.Join(updatedNodes, ", "),
-		totalCells,
-		totalRows,
-	)
-
-	t.TaskStatus = "COMPLETED"
-	t.TaskContext = fmt.Sprintf("Fix-nulls updated %d column values across %d rows on nodes: %s", totalCells, totalRows, strings.Join(updatedNodes, ", "))
-
-	return nil
+	return t.finishRepair(startTime, totalOps, nil)
 }
 
 func (t *TableRepairTask) buildNullUpdates() (map[string]map[string]*nullUpdate, error) {
@@ -1279,6 +1133,8 @@ func (t *TableRepairTask) getFixNullsDryRunOutput(updates map[string]map[string]
 	return sb.String(), nil
 }
 
+// populateFixNullsReport adds the NULL fixes of nodeName to the repair report
+// under field.
 func (t *TableRepairTask) populateFixNullsReport(nodeName string, nodeUpdates map[string]*nullUpdate, field string) {
 	if t.report == nil || len(nodeUpdates) == 0 {
 		return
@@ -1302,270 +1158,6 @@ func (t *TableRepairTask) populateFixNullsReport(nodeName string, nodeUpdates ma
 		t.report.Changes[nodeName] = make(map[string]any)
 	}
 	t.report.Changes[nodeName].(map[string]any)[field] = rows
-}
-
-// applyFixNullsUpdates executes fix-nulls UPDATE statements in a shared tx.
-// This is the standard (non-preserve-origin) path.
-func (t *TableRepairTask) applyFixNullsUpdates(tx pgx.Tx, column string, columnType string, updates []*nullUpdate, colTypes map[string]string, nodeName string) (int, error) {
-	if len(updates) == 0 {
-		return 0, nil
-	}
-
-	totalUpdated := 0
-	batchSize := 500
-	for i := 0; i < len(updates); i += batchSize {
-		end := i + batchSize
-		if end > len(updates) {
-			end = len(updates)
-		}
-		batch := updates[i:end]
-
-		updateSQL, args, err := t.buildFixNullsBatchSQL(column, columnType, batch, colTypes)
-		if err != nil {
-			return totalUpdated, err
-		}
-
-		tag, err := tx.Exec(t.Ctx, updateSQL, args...)
-		if err != nil {
-			return totalUpdated, fmt.Errorf("error executing fix-nulls batch for column %s: %w", column, err)
-		}
-		totalUpdated += int(tag.RowsAffected())
-	}
-
-	return totalUpdated, nil
-}
-
-// executePreserveOriginFixNulls handles fix-nulls updates with per-batch-key
-// transactions so that pg_replication_origin_xact_setup correctly preserves
-// per-row origin metadata. Each unique (origin, timestamp) combination gets
-// its own transaction.
-// executePreserveOriginFixNulls handles fix-nulls updates with per-batch-key
-// transactions so that pg_replication_origin_xact_setup preserves per-row timestamps.
-// Note: filterStaleRepairs is not called here because fix-nulls only patches individual
-// NULL columns (not full row replacements) and uses []*nullUpdate rather than the
-// map[string]map[string]any format that filterStaleRepairs expects.
-func (t *TableRepairTask) executePreserveOriginFixNulls(pool *pgxpool.Pool, nodeName string, columns []string, columnsByRow map[string][]*nullUpdate, colTypes map[string]string, originInfoMap map[string]*rowOriginInfo) (int, error) {
-	// Group all updates by origin batch key.
-	type colUpdate struct {
-		column     string
-		columnType string
-		updates    []*nullUpdate
-	}
-	batchGroups := make(map[originBatchKey][]colUpdate)
-
-	for _, col := range columns {
-		colType := colTypes[col]
-		var rowsForCol []*nullUpdate
-		for _, nu := range columnsByRow[col] {
-			rowsForCol = append(rowsForCol, nu)
-		}
-		if len(rowsForCol) == 0 {
-			continue
-		}
-
-		// Sub-group this column's updates by origin
-		perOrigin := make(map[originBatchKey][]*nullUpdate)
-		for _, nu := range rowsForCol {
-			pkeyStr, err := utils.StringifyKey(nu.pkMap, t.Key)
-			if err != nil {
-				if nu.sourceRow != nil {
-					pkeyStr, err = utils.StringifyOrderedMapKey(nu.sourceRow, t.Key)
-				}
-			}
-			var bk originBatchKey
-			if err == nil {
-				if oi, ok := originInfoMap[pkeyStr]; ok && oi != nil {
-					bk = makeOriginBatchKey(oi)
-				}
-			}
-			perOrigin[bk] = append(perOrigin[bk], nu)
-		}
-		for bk, updates := range perOrigin {
-			batchGroups[bk] = append(batchGroups[bk], colUpdate{
-				column: col, columnType: colType, updates: updates,
-			})
-		}
-	}
-
-	conn, err := pool.Acquire(t.Ctx)
-	if err != nil {
-		return 0, fmt.Errorf("failed to acquire connection for preserve-origin fix-nulls: %w", err)
-	}
-	defer func() {
-		if resetErr := queries.ResetReplicationOriginSession(t.Ctx, conn); resetErr != nil {
-			logger.Warn("failed to reset replication origin session on connection release: %v", resetErr)
-		}
-		conn.Release()
-	}()
-
-	totalUpdated := 0
-	currentSessionOrigin := ""
-
-	for batchKey, colUpdates := range batchGroups {
-		if len(colUpdates) == 0 {
-			continue
-		}
-
-		// Manage session-level origin
-		if batchKey.nodeOrigin != "" && batchKey.nodeOrigin != currentSessionOrigin {
-			if currentSessionOrigin != "" {
-				if resetErr := queries.ResetReplicationOriginSession(t.Ctx, conn); resetErr != nil {
-					logger.Warn("failed to reset replication origin session before switching origin: %v", resetErr)
-				}
-			}
-			originName := fmt.Sprintf("node_%s", batchKey.nodeOrigin)
-			originID, err := queries.GetReplicationOriginByName(t.Ctx, conn, originName)
-			if err != nil {
-				return totalUpdated, fmt.Errorf("failed to get replication origin '%s': %w", originName, err)
-			}
-			if originID == nil {
-				createdID, createErr := queries.CreateReplicationOrigin(t.Ctx, conn, originName)
-				if createErr != nil {
-					return totalUpdated, fmt.Errorf("failed to create replication origin '%s': %w", originName, createErr)
-				}
-				originID = &createdID
-			}
-			if err := queries.SetupReplicationOriginSession(t.Ctx, conn, originName); err != nil {
-				return totalUpdated, fmt.Errorf("failed to setup origin session for '%s': %w", originName, err)
-			}
-			currentSessionOrigin = batchKey.nodeOrigin
-		} else if batchKey.nodeOrigin == "" && currentSessionOrigin != "" {
-			if resetErr := queries.ResetReplicationOriginSession(t.Ctx, conn); resetErr != nil {
-				logger.Warn("failed to reset replication origin session for empty origin batch: %v", resetErr)
-			}
-			currentSessionOrigin = ""
-		}
-
-		batchTx, err := conn.Begin(t.Ctx)
-		if err != nil {
-			return totalUpdated, fmt.Errorf("failed to begin batch transaction for origin %s: %w", batchKey.nodeOrigin, err)
-		}
-
-		if _, err := t.setupTransactionMode(batchTx, nodeName); err != nil {
-			batchTx.Rollback(t.Ctx)
-			return totalUpdated, fmt.Errorf("failed to setup transaction mode for origin batch: %w", err)
-		}
-
-		commitTS, err := parseBatchKeyTimestamp(batchKey)
-		if err != nil {
-			batchTx.Rollback(t.Ctx)
-			return totalUpdated, fmt.Errorf("failed to parse batch key timestamp: %w", err)
-		}
-
-		lsn, ok, err := t.resolveOriginLSN(batchKey, nodeName, commitTS)
-		if err != nil {
-			batchTx.Rollback(t.Ctx)
-			return totalUpdated, fmt.Errorf("failed to resolve origin LSN: %w", err)
-		}
-		if ok && lsn != nil && commitTS != nil {
-			if err := t.setupReplicationOriginXact(batchTx, lsn, commitTS); err != nil {
-				batchTx.Rollback(t.Ctx)
-				return totalUpdated, fmt.Errorf("failed to setup origin xact: %w", err)
-			}
-		}
-
-		for _, cu := range colUpdates {
-			batchSize := 500
-			for i := 0; i < len(cu.updates); i += batchSize {
-				end := i + batchSize
-				if end > len(cu.updates) {
-					end = len(cu.updates)
-				}
-				updateSQL, args, err := t.buildFixNullsBatchSQL(cu.column, cu.columnType, cu.updates[i:end], colTypes)
-				if err != nil {
-					batchTx.Rollback(t.Ctx)
-					return totalUpdated, err
-				}
-				tag, err := batchTx.Exec(t.Ctx, updateSQL, args...)
-				if err != nil {
-					batchTx.Rollback(t.Ctx)
-					return totalUpdated, fmt.Errorf("error executing fix-nulls batch for column %s: %w", cu.column, err)
-				}
-				totalUpdated += int(tag.RowsAffected())
-			}
-		}
-
-		if err := t.disableSpockRepairMode(batchTx, nodeName); err != nil {
-			batchTx.Rollback(t.Ctx)
-			return totalUpdated, fmt.Errorf("failed to disable repair mode for origin batch: %w", err)
-		}
-
-		if err := batchTx.Commit(t.Ctx); err != nil {
-			return totalUpdated, fmt.Errorf("failed to commit batch transaction for origin %s: %w", batchKey.nodeOrigin, err)
-		}
-	}
-
-	return totalUpdated, nil
-}
-
-func (t *TableRepairTask) buildFixNullsBatchSQL(column string, columnType string, batch []*nullUpdate, colTypes map[string]string) (string, []any, error) {
-	var sb strings.Builder
-	args := make([]any, 0, len(batch)*(len(t.Key)+1))
-	paramIdx := 1
-
-	sb.WriteString("WITH updates(")
-	for i, pkCol := range t.Key {
-		if i > 0 {
-			sb.WriteString(", ")
-		}
-		sb.WriteString(pgx.Identifier{pkCol}.Sanitize())
-	}
-	sb.WriteString(", value) AS (VALUES ")
-
-	for i, nu := range batch {
-		if i > 0 {
-			sb.WriteString(", ")
-		}
-		sb.WriteString("(")
-		for j, pkCol := range t.Key {
-			if j > 0 {
-				sb.WriteString(", ")
-			}
-			pkType, ok := colTypes[pkCol]
-			if !ok {
-				return "", nil, fmt.Errorf("column type for primary key %s not found", pkCol)
-			}
-			convertedPK, err := convertValueForType(nu.pkValues[j], pkType)
-			if err != nil {
-				return "", nil, fmt.Errorf("convert primary key %s value: %w", pkCol, err)
-			}
-			sb.WriteString(fmt.Sprintf("$%d::%s", paramIdx, pkType))
-			args = append(args, convertedPK)
-			paramIdx++
-		}
-		sb.WriteString(", ")
-		convertedVal, err := convertValueForType(nu.columns[column], columnType)
-		if err != nil {
-			return "", nil, fmt.Errorf("convert value for column %s: %w", column, err)
-		}
-		sb.WriteString(fmt.Sprintf("$%d::%s", paramIdx, columnType))
-		args = append(args, convertedVal)
-		paramIdx++
-		sb.WriteString(")")
-	}
-
-	sb.WriteString(") UPDATE ")
-	sb.WriteString(pgx.Identifier{t.Schema}.Sanitize())
-	sb.WriteString(".")
-	sb.WriteString(pgx.Identifier{t.Table}.Sanitize())
-	sb.WriteString(" AS t SET ")
-	sb.WriteString(pgx.Identifier{column}.Sanitize())
-	sb.WriteString(" = updates.value::")
-	sb.WriteString(columnType)
-	sb.WriteString(" FROM updates WHERE ")
-
-	for i, pkCol := range t.Key {
-		if i > 0 {
-			sb.WriteString(" AND ")
-		}
-		ident := pgx.Identifier{pkCol}.Sanitize()
-		sb.WriteString("t.")
-		sb.WriteString(ident)
-		sb.WriteString(" = updates.")
-		sb.WriteString(ident)
-	}
-
-	return sb.String(), args, nil
 }
 
 func convertValueForType(val any, colType string) (any, error) {

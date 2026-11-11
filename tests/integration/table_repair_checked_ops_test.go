@@ -18,8 +18,23 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/require"
 )
+
+// execOnN2 runs sql on n2 in one transaction in repair mode, so that the
+// change is not replicated to n1.
+func execOnN2(t *testing.T, ctx context.Context, env *testEnv, sql string) {
+	t.Helper()
+	tx, err := env.N2Pool.Begin(ctx)
+	require.NoError(t, err)
+	defer func() { _ = tx.Rollback(ctx) }()
+	env.withRepairModeTx(t, ctx, tx, func() {
+		_, err := tx.Exec(ctx, sql) // nosemgrep
+		require.NoError(t, err)
+	})
+	require.NoError(t, tx.Commit(ctx))
+}
 
 // TestTableRepairCheckedOps changes the target after the diff, so that one
 // row operation of each command kind cannot be done as the report says.
@@ -56,6 +71,14 @@ func TestTableRepairCheckedOps(t *testing.T) {
 			want:   []string{"1:a", "3:c", "4:d", "5:e", "6:y"},
 		},
 		{
+			// A constraint that only the target has: the key is right, but
+			// the row cannot be written.
+			name:   "check_constraint",
+			after:  "ALTER TABLE %s ADD CONSTRAINT v_not_e CHECK (v <> 'e') NOT VALID",
+			failed: []string{"insert:1:rolled back", "insert:5:culprit"},
+			want:   []string{"3:c", "4:d"},
+		},
+		{
 			name:   "update_gone",
 			after:  "DELETE FROM %s WHERE id = 3",
 			failed: []string{"update:3:culprit", "update:4:rolled back"},
@@ -68,7 +91,7 @@ func TestTableRepairCheckedOps(t *testing.T) {
 				[]string{"(1, 'a')", "(3, 'c')", "(4, 'd')", "(5, 'e')"},
 				[]string{"(2, 'x')", "(3, 'c2')", "(4, 'd2')", "(6, 'y')"})
 			diffFile := env.runTableDiff(t, table, []string{env.ServiceN1, env.ServiceN2})
-			keydiffExec(t, ctx, env, env.N2Pool, fmt.Sprintf(tc.after, table))
+			execOnN2(t, ctx, env, fmt.Sprintf(tc.after, table))
 
 			task := env.newTableRepairTask(env.ServiceN1, table, diffFile)
 			require.Error(t, task.Run(false))
@@ -114,4 +137,51 @@ func TestTableRepairUniqueValueMoves(t *testing.T) {
 	require.NoError(t, task.Run(false))
 	require.Empty(t, task.FailedOps)
 	env.assertNoTableDiff(t, table)
+}
+
+// TestTableRepairFixNullsChecked checks that a NULL fix changes only a value
+// that is still NULL. A value set on the target after the diff stops the
+// command of that node; the other node is repaired.
+func TestTableRepairFixNullsChecked(t *testing.T) {
+	env := newSpockEnv()
+	ctx := context.Background()
+	table := typedKeyTable(t, env, "ace_checked_fix_nulls", "id int PRIMARY KEY, a text, b text", "id, a, b",
+		[]string{"(1, 'x', NULL)", "(2, 'y', NULL)"},
+		[]string{"(1, NULL, 'p')", "(2, NULL, 'q')"})
+	diffFile := env.runTableDiff(t, table, []string{env.ServiceN1, env.ServiceN2})
+	execOnN2(t, ctx, env, fmt.Sprintf("UPDATE %s SET a = 'new' WHERE id = 1", table))
+
+	task := env.newTableRepairTask("", table, diffFile)
+	task.FixNulls = true
+	require.Error(t, task.Run(false))
+
+	var failed []string
+	for _, f := range task.FailedOps {
+		reason := "culprit"
+		if strings.HasPrefix(f.Reason, "rolled back") {
+			reason = "rolled back"
+		}
+		failed = append(failed, fmt.Sprintf("%s:%s:%v:%s", f.Node, f.Operation, f.Key["id"], reason))
+	}
+	sort.Strings(failed)
+	require.Equal(t, []string{
+		env.ServiceN2 + ":update_nulls:1:culprit",
+		env.ServiceN2 + ":update_nulls:2:rolled back",
+	}, failed, "failed row operations: %+v", task.FailedOps)
+
+	read := func(pool *pgxpool.Pool) []string {
+		rows, err := pool.Query(ctx, "SELECT id::text || ':' || coalesce(a, '-') || ':' || coalesce(b, '-') FROM "+table+" ORDER BY id") // nosemgrep
+		require.NoError(t, err)
+		defer rows.Close()
+		var got []string
+		for rows.Next() {
+			var s string
+			require.NoError(t, rows.Scan(&s))
+			got = append(got, s)
+		}
+		require.NoError(t, rows.Err())
+		return got
+	}
+	require.Equal(t, []string{"1:x:p", "2:y:q"}, read(env.N1Pool), "n1 got the values of b")
+	require.Equal(t, []string{"1:new:p", "2:-:q"}, read(env.N2Pool), "n2 is not changed")
 }
