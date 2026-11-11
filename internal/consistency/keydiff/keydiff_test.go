@@ -388,12 +388,15 @@ func TestReadQuery(t *testing.T) {
 		"OFFSET 0",
 		`"data"::TEXT AS "data"`,
 		"AS _ace_row_hash",
-		"_ace_t.tableoid::bigint AS _ace_rel, _ace_t.ctid::text AS _ace_tid",
 		`FROM "public"."t" AS _ace_t WHERE`,
 	} {
 		if !strings.Contains(q, want) {
 			t.Fatalf("read query %q does not contain %q", q, want)
 		}
+	}
+
+	if strings.Contains(q, "tableoid") || strings.Contains(q, "ctid") {
+		t.Fatalf("read query %q must not read the row location", q)
 	}
 
 	q, err = tbl.ReadQuery(colTypes, `"id" > 0`)
