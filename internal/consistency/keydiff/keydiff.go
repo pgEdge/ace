@@ -461,9 +461,8 @@ type readRow struct {
 
 // readRows reads the full rows for the keys ids on one node. The result is
 // indexed by the position of the key in ids. A key can have no row (the row
-// was deleted) or more than one row (an inheritance tree). Two keys that the
-// server holds as equal but prints in a different way find the same row, and
-// this row is returned for each of them.
+// was deleted, or its key now prints in another way) or more than one row (an
+// inheritance tree).
 func readRows(ctx context.Context, t Table, filter string, s Side, ids []string) ([][]readRow, error) {
 	query, err := t.ReadQuery(s.ColTypes, filter)
 	if err != nil {

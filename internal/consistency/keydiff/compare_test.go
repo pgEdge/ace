@@ -305,23 +305,21 @@ func TestCompareBadKeyRows(t *testing.T) {
 	}
 }
 
-// TestCompareSameRowForTwoKeys checks that one row found through two key
-// texts is reported for each of them: the comparison does not merge such
-// keys.
-func TestCompareSameRowForTwoKeys(t *testing.T) {
-	// "-0" and "0" are two key texts for one row: the server finds the same
-	// row for both, in different batches.
+// TestCompareKeyPrintedDifferently checks a key that the nodes print in a
+// different way, such as -0 and 0: each node finds the row only through its
+// own key text, so the comparison reports a row on each node only.
+func TestCompareKeyPrintedDifferently(t *testing.T) {
 	n1, n2, _ := twoNodes()
 	n1.keys = [][][]byte{keyRaw("-0", 1)}
 	n2.keys = [][][]byte{keyRaw("0", 2)}
-	n1.stored = map[string][]fakeRow{"-0": {{1, "x"}}, "0": {{1, "x"}}}
-	n2.stored = map[string][]fakeRow{"-0": {{2, "x"}}, "0": {{2, "x"}}}
+	n1.stored = map[string][]fakeRow{"-0": {{1, "x"}}}
+	n2.stored = map[string][]fakeRow{"0": {{2, "x"}}}
 	res, err := Compare(context.Background(), fakeTable, Block{Where: "TRUE"}, side(n1, 1, true), side(n2, 1, true), Options{BatchSize: 1}, discard)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if res.DiffKeys != 2 || res.Changed != 2 || res.Only1+res.Only2 != 0 {
-		t.Fatalf("DiffKeys=%d Changed=%d Only1=%d Only2=%d, want two changed rows", res.DiffKeys, res.Changed, res.Only1, res.Only2)
+	if res.DiffKeys != 2 || res.Changed != 0 || res.Only1 != 1 || res.Only2 != 1 {
+		t.Fatalf("DiffKeys=%d Changed=%d Only1=%d Only2=%d, want one row on each node only", res.DiffKeys, res.Changed, res.Only1, res.Only2)
 	}
 }
 

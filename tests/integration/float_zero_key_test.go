@@ -25,9 +25,9 @@ import (
 // is one row, but the two keys print in a different way.
 //
 // The test records what ACE does today:
-//   - table-diff finds two key texts. The row read finds the same pair of rows
-//     for each of them, so the report has the pair twice: two rows on each
-//     node, and a count of 2 for one real row.
+//   - table-diff finds two key texts. Each text finds only the row that
+//     prints it, so the report has the row of n1 as a row on n1 only and the
+//     row of n2 as a row on n2 only.
 //   - table-repair matches the rows of the report by key text. The key of the
 //     target is not in the source rows, so repair deletes it, and the key of
 //     the source is not in the target rows, so repair writes it. The delete
@@ -60,12 +60,12 @@ func TestFloatZeroKeyDiffAndRepair(t *testing.T) {
 		return out
 	}
 
-	// diff runs table-diff and checks that the pair is reported twice.
+	// diff runs table-diff and checks that each node has its row only.
 	diff := func(t *testing.T, table string) string {
 		t.Helper()
 		diffFile := env.runTableDiff(t, table, nodes)
 		report := readDiffReport(t, diffFile)
-		require.Equal(t, 2, report.Summary.DiffRowsCount[env.pairKey()], "one real row, counted for each key text")
+		require.Equal(t, 2, report.Summary.DiffRowsCount[env.pairKey()], "a row on n1 only and a row on n2 only")
 		pair := report.NodeDiffs[env.pairKey()]
 		for node, want := range map[string]string{env.ServiceN1: "-0:a", env.ServiceN2: "0:x"} {
 			var got []string
@@ -74,7 +74,7 @@ func TestFloatZeroKeyDiffAndRepair(t *testing.T) {
 				v, _ := row.Get("v")
 				got = append(got, fmt.Sprintf("%v:%v", k, v))
 			}
-			require.Equal(t, []string{want, want}, got, "diff rows on %s", node)
+			require.Equal(t, []string{want}, got, "diff rows on %s", node)
 		}
 		return diffFile
 	}
@@ -111,7 +111,7 @@ func TestFloatZeroKeyDiffAndRepair(t *testing.T) {
 			td := env.newTableDiffTask(t, table, nodes)
 			require.NoError(t, td.RunChecks(false))
 			require.NoError(t, td.ExecuteTask())
-			require.Equal(t, 2, td.DiffResult.Summary.DiffRowsCount[env.pairKey()], "the row is still reported, twice")
+			require.Equal(t, 2, td.DiffResult.Summary.DiffRowsCount[env.pairKey()], "the row is still reported")
 		})
 	}
 }
