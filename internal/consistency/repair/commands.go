@@ -14,6 +14,7 @@ package repair
 import (
 	"errors"
 	"fmt"
+	"reflect"
 	"sort"
 	"strings"
 
@@ -32,6 +33,9 @@ const (
 	// opFixNulls sets the columns of a row that are NULL on the node to the
 	// values of the other node.
 	opFixNulls = "update_nulls"
+	// opConflict marks a key that got no row operation, because two node
+	// pairs of a repair plan gave different ones.
+	opConflict = "conflict"
 )
 
 // commandSize is the largest number of row operations in one command. One
@@ -50,33 +54,52 @@ type FailedRowOp struct {
 	Key       map[string]any `json:"key"`
 	Reason    string         `json:"reason"`
 	// Command is the number of the command on its node, from 1. The row
-	// operations of one command fail together.
+	// operations of one command fail together. A conflict is not sent to the
+	// node and has the number 0.
 	Command int `json:"command"`
 }
 
 // repairSets holds the row operations of a repair: for each node, the rows to
-// insert, to update and to delete, by key text.
+// insert, to update and to delete, by key text. A key has at most one row
+// operation on a node.
+//
+// With more than two nodes, a repair plan can give one key on one node a row
+// operation from two node pairs. The diffs of the pairs are taken at
+// different times, so the pairs can see the row on the node differently. If
+// the two row operations are not the same, the key gets no row operation on
+// this node: it goes to conflicts, and repair reports it as a failed row.
 type repairSets struct {
 	inserts map[string]map[string]map[string]any
 	updates map[string]map[string]map[string]any
 	deletes map[string]map[string]map[string]any
+
+	conflicts map[string]map[string]rowConflict
+
+	// pair is the node pair whose row operations are added now, and pairs
+	// holds the pair that gave each row operation.
+	pair  string
+	pairs map[string]map[string]string
+}
+
+// rowConflict is a key that has no row operation on a node because two node
+// pairs gave different ones. row is the row of the first row operation.
+type rowConflict struct {
+	row    map[string]any
+	reason string
 }
 
 // newRepairSets returns empty row operation sets.
 func newRepairSets() *repairSets {
 	return &repairSets{
-		inserts: make(map[string]map[string]map[string]any),
-		updates: make(map[string]map[string]map[string]any),
-		deletes: make(map[string]map[string]map[string]any),
+		inserts:   make(map[string]map[string]map[string]any),
+		updates:   make(map[string]map[string]map[string]any),
+		deletes:   make(map[string]map[string]map[string]any),
+		conflicts: make(map[string]map[string]rowConflict),
+		pairs:     make(map[string]map[string]string),
 	}
 }
 
-// addRow sets row as the row of key pk on node in target. A second row for
-// the same node and key replaces the first one.
-//
-// XXX With more than two nodes, a repair plan can give one key on one node
-// a row from two node pairs; the pair that comes last wins, and the order of
-// the pairs is not defined.
+// addRow sets row as the row of key pk on node in target.
 func addRow(target map[string]map[string]map[string]any, node, pk string, row map[string]any) {
 	if target[node] == nil {
 		target[node] = make(map[string]map[string]any)
@@ -88,19 +111,57 @@ func addRow(target map[string]map[string]map[string]any, node, pk string, row ma
 // the row, an INSERT if it does not.
 func (s *repairSets) write(node, pk string, row map[string]any, onNode bool) {
 	if onNode {
-		addRow(s.updates, node, pk, row)
+		s.add(opUpdate, node, pk, row)
 	} else {
-		addRow(s.inserts, node, pk, row)
+		s.add(opInsert, node, pk, row)
 	}
 }
 
 // remove adds a delete of key pk on node; row is the row that the diff saw
 // there.
 func (s *repairSets) remove(node, pk string, row map[string]any) {
-	addRow(s.deletes, node, pk, row)
+	s.add(opDelete, node, pk, row)
 }
 
-// nodes returns the names of the nodes that have row operations, sorted.
+// add adds the row operation op of key pk on node. If the key already has a
+// row operation on node, the new one must be the same: the same kind and,
+// for an insert or an update, the same row. Otherwise the key moves to
+// conflicts and keeps no row operation on node.
+func (s *repairSets) add(op, node, pk string, row map[string]any) {
+	if _, ok := s.conflicts[node][pk]; ok {
+		return
+	}
+	sets := map[string]map[string]map[string]map[string]any{opInsert: s.inserts, opUpdate: s.updates, opDelete: s.deletes}
+	for _, prevOp := range []string{opInsert, opUpdate, opDelete} {
+		prev, ok := sets[prevOp][node][pk]
+		if !ok {
+			continue
+		}
+		if prevOp == op && (op == opDelete || reflect.DeepEqual(prev, row)) {
+			return
+		}
+		delete(sets[prevOp][node], pk)
+		reason := fmt.Sprintf("node pairs %s and %s give different row operations for this key: %s and %s",
+			s.pairs[node][pk], s.pair, prevOp, op)
+		if prevOp == op {
+			reason = fmt.Sprintf("node pairs %s and %s give different rows to %s for this key",
+				s.pairs[node][pk], s.pair, op)
+		}
+		if s.conflicts[node] == nil {
+			s.conflicts[node] = make(map[string]rowConflict)
+		}
+		s.conflicts[node][pk] = rowConflict{row: prev, reason: reason}
+		return
+	}
+	addRow(sets[op], node, pk, row)
+	if s.pairs[node] == nil {
+		s.pairs[node] = make(map[string]string)
+	}
+	s.pairs[node][pk] = s.pair
+}
+
+// nodes returns the names of the nodes that have row operations or
+// conflicts, sorted.
 func (s *repairSets) nodes() []string {
 	seen := make(map[string]struct{})
 	for _, m := range []map[string]map[string]map[string]any{s.inserts, s.updates, s.deletes} {
@@ -108,6 +169,11 @@ func (s *repairSets) nodes() []string {
 			if len(rows) > 0 {
 				seen[node] = struct{}{}
 			}
+		}
+	}
+	for node, keys := range s.conflicts {
+		if len(keys) > 0 {
+			seen[node] = struct{}{}
 		}
 	}
 	out := make([]string, 0, len(seen))
@@ -118,7 +184,7 @@ func (s *repairSets) nodes() []string {
 	return out
 }
 
-// empty reports whether s has no row operations.
+// empty reports whether s has no row operations and no conflicts.
 func (s *repairSets) empty() bool {
 	return len(s.nodes()) == 0
 }
@@ -476,6 +542,31 @@ func (t *TableRepairTask) logFailedCommand(node, op string, keys []string, reaso
 	}
 	logger.Error("table-repair: %s of %d rows on %s failed: %s; keys: %s%s",
 		op, len(keys), node, reason, strings.Join(shown, ", "), more)
+}
+
+// recordConflicts records the conflicts of sets in FailedOps, logs their keys
+// and adds them to the repair report. They are known before any command runs,
+// so the report has them even if a later setup error stops the repair before
+// it reaches their node.
+func (t *TableRepairTask) recordConflicts(sets *repairSets) {
+	nodes := make([]string, 0, len(sets.conflicts))
+	for node := range sets.conflicts {
+		nodes = append(nodes, node)
+	}
+	sort.Strings(nodes)
+	for _, node := range nodes {
+		keys := make([]string, 0, len(sets.conflicts[node]))
+		for pk := range sets.conflicts[node] {
+			keys = append(keys, pk)
+		}
+		sort.Strings(keys)
+		for _, pk := range keys {
+			c := sets.conflicts[node][pk]
+			t.FailedOps = append(t.FailedOps, FailedRowOp{Node: node, Operation: opConflict, Key: t.keyOf(c.row), Reason: c.reason})
+		}
+		t.logFailedCommand(node, opConflict, keys, "node pairs of the repair plan give different row operations")
+		t.reportNodeChanges(node, nil, nil, nil)
+	}
 }
 
 // sortedKeys returns the keys of rows in byte order, so that the commands of

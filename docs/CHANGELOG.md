@@ -45,7 +45,10 @@ All notable changes to ACE will be captured in this document. This project follo
   works in the same way: one `UPDATE` for each row, which sets only the
   columns that are still NULL, so a value that appeared after the diff
   is not overwritten. The log of a failed command names the keys of its
-  rows, not the SQL text and the values of the batch.
+  rows, not the SQL text and the values of the batch. With a repair plan
+  on more than two nodes, a key that two node pairs give different row
+  operations on one node is not changed there; it is reported as a
+  failed row with the operation `conflict`.
 
 - **`max_diff_rows` is one approximate limit for all node pairs of a run.**
   `table-diff` and `mtree table-diff` applied it to each node pair; now the
