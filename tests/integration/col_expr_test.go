@@ -126,7 +126,7 @@ func TestRowFetchMatchesRowHash(t *testing.T) {
 		}
 		hashCols = append(hashCols, col)
 		t.Run(col, func(t *testing.T) {
-			hashExpr := queries.ColExpr("", col, typ)
+			hashExpr := queries.ColExpr("", col)
 			fetchExpr := queries.FetchColExpr("", col, typ)
 			var mismatch []string
 			q := fmt.Sprintf(`SELECT id, ROW(%s)::text, ROW(%s)::text FROM pg_temp.%s
@@ -147,7 +147,7 @@ func TestRowFetchMatchesRowHash(t *testing.T) {
 	}
 
 	t.Run("whole_row", func(t *testing.T) {
-		rowHash, err := queries.RowHashExpr("", hashCols, colTypes)
+		rowHash, err := queries.RowHashExpr("", hashCols)
 		require.NoError(t, err)
 		fetchExprs := make([]string, len(hashCols))
 		for i, col := range hashCols {

@@ -50,6 +50,16 @@ All notable changes to ACE will be captured in this document. This project follo
   operations on one node is not changed there; it is reported as a
   failed row with the operation `conflict`.
 
+- **A `numeric` value with other trailing zeros is a difference.** The
+  row hash no longer wraps a `numeric` column in `trim_scale()`, so `1.5`
+  and `1.50` give different hashes: the server prints them in a different
+  way. A diff report keeps a value with its scale, as the server prints
+  it, and repair writes it so. A `numeric` primary key stored as `1.50` on
+  one node and as `1.5` on the other is two rows, each on one node only.
+  A repair from a source of truth deletes the key of the target and then
+  inserts the key of the source, as for a `float` key `-0` and `0`. The
+  internal Merkle tree hash version is now 5,
+  so the next `mtree update` computes all leaf hashes again.
 - **`max_diff_rows` is one approximate limit for all node pairs of a run.**
   `table-diff` and `mtree table-diff` applied it to each node pair; now the
   differing rows of all pairs count against one limit. A block is compared
@@ -82,6 +92,10 @@ All notable changes to ACE will be captured in this document. This project follo
   task may use, or to `0` to let cutting and hashing use 8. The same
   applies to `--max-connections` in scripts, and to `max_connections` in
   HTTP requests and in scheduled jobs.
+- **Run the diff again before a repair or a rerun.** `table-repair` and
+  `table-rerun` do not read a diff report of an earlier ACE. A table with
+  a `numeric` column can show new differences: values that differ only in
+  their trailing zeros.
 - `compare_unit_size` (`--compare-unit-size` / `-u`, the HTTP API field,
   the scheduler job argument and `table_diff.compare_unit_size` in the
   settings file) is no longer used. ACE still accepts it, ignores it and
@@ -130,12 +144,9 @@ All notable changes to ACE will be captured in this document. This project follo
   If a diff of very wide rows fails with a block timeout after the
   upgrade, raise `table_diff.block_timeout` or set it to `0`.
 - Diff reports have a `format_version` field. `table-repair` and
-  `table-rerun` refuse a report with a version they do not know. A report
-  from an earlier ACE has no such field and is read as version 0.
-- `table-repair` and `table-rerun` read the numeric values of a version 0
-  report in the current form, without trailing zeros. The stale check of a
-  repair plan then finds their keys on the target, and the rerun counts a
-  row that the report holds under two keys once.
+  `table-rerun` refuse a report of another version: a report of a newer
+  ACE, and a report of an earlier ACE, which has no such field. Run the
+  diff again to get a report that they can read.
 - **A number of connections for each node.** The new `max_connections`
   section of `ace.yaml` sets a default and optional values for single
   nodes, named `<cluster>.<node>`:
@@ -189,12 +200,6 @@ All notable changes to ACE will be captured in this document. This project follo
   it, or to `-1` to leave the server's setting in place. A server that does
   not support the setting (before PostgreSQL 14, or on Windows) accepts the
   connection without it.
-- **A numeric value in a diff report has no trailing zeros.** The row fetch
-  now reads a numeric column with `trim_scale()`, as the row hash does, so
-  the report shows `7.5`, not `7.50`. Repair writes this form: a `numeric`
-  column without a fixed scale gets the value without the trailing zeros on
-  the target. A column with a fixed scale, such as `numeric(10,2)`, is not
-  affected.
 - **`table-diff` opens its connections at the start and keeps them.** It
   opens the connections for cutting and hashing to every node before any
   other work, and the pool no longer closes them because of their age or
@@ -262,18 +267,10 @@ All notable changes to ACE will be captured in this document. This project follo
   keys.** With `allow_stale_repairs: false`, repair overwrote such a row
   even when it had changed after the diff. The check now reads the keys in
   the form of the report.
-- **A numeric primary key stored with another scale on two nodes was
-  reported as two rows.** The diff reported the row `1.50` on one node and
-  the row `1.5` on the other as a row missing on each node, so a repair plan
-  applied the rules for missing rows to them, for example a `delete` rule.
-  Now they are one row.
 - **`table-diff` and the mtree commands failed on a column of an enum whose
   name starts with `numeric` or `decimal`.** ACE took such a type for a
   numeric type and wrapped the column in `trim_scale()`, which does not
-  exist for it. Now only `numeric` and `decimal` themselves are numeric
-  types. A column of a domain over numeric whose name starts with these words
-  is not wrapped in `trim_scale()` any more, so a Merkle tree of such a table
-  must be built again.
+  exist for it. ACE no longer wraps any column in `trim_scale()`.
 - **A slow node no longer makes `table-diff` slow on the other nodes.**
   The hash workers of all nodes took tasks from one queue, and a worker
   that waited for a busy node kept its slot, so the tasks of a node with
