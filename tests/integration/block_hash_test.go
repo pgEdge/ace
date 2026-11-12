@@ -29,7 +29,7 @@ import (
 // blockHashes loads rows into a new temporary table and returns the mtree
 // leaf hash and the table-diff block hash of the whole table. Temporary
 // tables keep the test on one node: nothing is replicated.
-func blockHashes(t *testing.T, ctx context.Context, conn *pgxpool.Conn, name, colDefs string, cols []string, colTypes map[string]string, values string) ([]byte, string) {
+func blockHashes(t *testing.T, ctx context.Context, conn *pgxpool.Conn, name, colDefs string, cols []string, values string) ([]byte, string) {
 	t.Helper()
 
 	_, err := conn.Exec(ctx, fmt.Sprintf("CREATE TEMP TABLE %s (id int PRIMARY KEY, %s)", name, colDefs)) // nosemgrep
@@ -41,10 +41,10 @@ func blockHashes(t *testing.T, ctx context.Context, conn *pgxpool.Conn, name, co
 	}
 
 	allCols := append([]string{"id"}, cols...)
-	leaf, err := queries.ComputeLeafHashes(ctx, conn, "pg_temp", name, true, []string{"id"}, nil, nil, allCols, colTypes)
+	leaf, err := queries.ComputeLeafHashes(ctx, conn, "pg_temp", name, true, []string{"id"}, nil, nil, allCols)
 	require.NoError(t, err)
 
-	tdSQL, err := queries.BlockHashSQL("pg_temp", name, []string{"id"}, "TD_BLOCK_HASH", false, false, "", allCols, colTypes)
+	tdSQL, err := queries.BlockHashSQL("pg_temp", name, []string{"id"}, "TD_BLOCK_HASH", false, false, "", allCols)
 	require.NoError(t, err)
 	var (
 		td   string
@@ -53,7 +53,7 @@ func blockHashes(t *testing.T, ctx context.Context, conn *pgxpool.Conn, name, co
 	require.NoError(t, conn.QueryRow(ctx, tdSQL).Scan(&td, &rows)) // nosemgrep
 	requireRowCount(t, ctx, conn, name, rows)
 
-	checkBlockHash(t, ctx, conn, name, allCols, colTypes, leaf, td)
+	checkBlockHash(t, ctx, conn, name, allCols, leaf, td)
 	return leaf, td
 }
 
@@ -68,7 +68,7 @@ func requireRowCount(t *testing.T, ctx context.Context, conn *pgxpool.Conn, name
 
 // checkBlockHash checks the mtree leaf hash and the table-diff block hash of
 // the whole table name against each other and against the row hashes.
-func checkBlockHash(t *testing.T, ctx context.Context, conn *pgxpool.Conn, name string, allCols []string, colTypes map[string]string, leaf []byte, td string) {
+func checkBlockHash(t *testing.T, ctx context.Context, conn *pgxpool.Conn, name string, allCols []string, leaf []byte, td string) {
 	t.Helper()
 
 	// The mtree leaf and the table-diff block must be the same hash.
@@ -77,7 +77,7 @@ func checkBlockHash(t *testing.T, ctx context.Context, conn *pgxpool.Conn, name 
 
 	// The leaf must be built from the row hashes that the mtree diff reads.
 	// Otherwise a leaf can differ while every row hash matches.
-	rowExpr, err := queries.RowHashExpr("", allCols, colTypes)
+	rowExpr, err := queries.RowHashExpr("", allCols)
 	require.NoError(t, err)
 	rows, err := conn.Query(ctx, fmt.Sprintf("SELECT %s FROM pg_temp.%s", rowExpr, name)) // nosemgrep
 	require.NoError(t, err)
@@ -138,9 +138,9 @@ func inheritedBlockHashes(t *testing.T, ctx context.Context, conn *pgxpool.Conn,
 	}
 
 	allCols := []string{"id", "a", "b"}
-	leaf, err := queries.ComputeLeafHashes(ctx, conn, "pg_temp", name, true, []string{"id"}, nil, nil, allCols, nil)
+	leaf, err := queries.ComputeLeafHashes(ctx, conn, "pg_temp", name, true, []string{"id"}, nil, nil, allCols)
 	require.NoError(t, err)
-	tdSQL, err := queries.BlockHashSQL("pg_temp", name, []string{"id"}, "TD_BLOCK_HASH", false, false, "", allCols, nil)
+	tdSQL, err := queries.BlockHashSQL("pg_temp", name, []string{"id"}, "TD_BLOCK_HASH", false, false, "", allCols)
 	require.NoError(t, err)
 	var (
 		td   string
@@ -149,7 +149,7 @@ func inheritedBlockHashes(t *testing.T, ctx context.Context, conn *pgxpool.Conn,
 	require.NoError(t, conn.QueryRow(ctx, tdSQL).Scan(&td, &rows)) // nosemgrep
 	requireRowCount(t, ctx, conn, name, rows)
 
-	checkBlockHash(t, ctx, conn, name, allCols, nil, leaf, td)
+	checkBlockHash(t, ctx, conn, name, allCols, leaf, td)
 	return leaf
 }
 
@@ -186,51 +186,49 @@ func TestBlockHashEncoding(t *testing.T) {
 	}
 	for i, tc := range mustDiffer {
 		t.Run("differ/"+tc.name, func(t *testing.T) {
-			left, _ := blockHashes(t, ctx, conn, fmt.Sprintf("bh_l%d", i), textDefs, textCols, nil, tc.left)
-			right, _ := blockHashes(t, ctx, conn, fmt.Sprintf("bh_r%d", i), textDefs, textCols, nil, tc.right)
+			left, _ := blockHashes(t, ctx, conn, fmt.Sprintf("bh_l%d", i), textDefs, textCols, tc.left)
+			right, _ := blockHashes(t, ctx, conn, fmt.Sprintf("bh_r%d", i), textDefs, textCols, tc.right)
 			require.NotEqual(t, left, right, "different rows must give different block hashes")
 		})
 	}
 
 	t.Run("equal/same_rows", func(t *testing.T) {
 		rows := `(1, 'a', NULL), (2, '', 'b,c'), (3, 'd|e', '"q"')`
-		left, _ := blockHashes(t, ctx, conn, "bh_same_l", textDefs, textCols, nil, rows)
-		right, _ := blockHashes(t, ctx, conn, "bh_same_r", textDefs, textCols, nil, rows)
+		left, _ := blockHashes(t, ctx, conn, "bh_same_l", textDefs, textCols, rows)
+		right, _ := blockHashes(t, ctx, conn, "bh_same_r", textDefs, textCols, rows)
 		require.Equal(t, left, right)
 	})
 
-	t.Run("equal/numeric_trailing_zeros", func(t *testing.T) {
-		// numeric without a fixed scale keeps 1.50 and 1.5 apart on disk;
-		// trim_scale makes them hash the same.
-		colTypes := map[string]string{"id": "integer", "amt": "numeric"}
-		left, _ := blockHashes(t, ctx, conn, "bh_num_l", "amt numeric", []string{"amt"}, colTypes, `(1, 1.50), (2, 7.000)`)
-		right, _ := blockHashes(t, ctx, conn, "bh_num_r", "amt numeric", []string{"amt"}, colTypes, `(1, 1.5), (2, 7)`)
-		require.Equal(t, left, right)
+	t.Run("differ/numeric_trailing_zeros", func(t *testing.T) {
+		// numeric without a fixed scale keeps 1.50 and 1.5 apart on disk, and
+		// the server prints them in a different way, so they are different
+		// values.
+		left, _ := blockHashes(t, ctx, conn, "bh_num_l", "amt numeric", []string{"amt"}, `(1, 1.50), (2, 7.000)`)
+		right, _ := blockHashes(t, ctx, conn, "bh_num_r", "amt numeric", []string{"amt"}, `(1, 1.5), (2, 7)`)
+		require.NotEqual(t, left, right)
 	})
 
 	t.Run("numeric_array", func(t *testing.T) {
-		// trim_scale(numeric[]) does not exist, so an array column must not
-		// be wrapped in it: the hash queries used to fail on every table with
-		// such a column. A scalar numeric column next to it is still trimmed.
+		// A table with a numeric array and a scalar numeric column: a change
+		// of the scale in either column changes the hash.
 		defs := "amts numeric[], amt numeric"
 		cols := []string{"amts", "amt"}
-		colTypes := map[string]string{"id": "integer", "amts": "numeric[]", "amt": "numeric"}
-		base, _ := blockHashes(t, ctx, conn, "bh_arr", defs, cols, colTypes, `(1, '{1.50,2}', 1.50), (2, '{3}', 7.000)`)
-		trimmed, _ := blockHashes(t, ctx, conn, "bh_arr_trim", defs, cols, colTypes, `(1, '{1.50,2}', 1.5), (2, '{3}', 7)`)
-		require.Equal(t, base, trimmed, "trailing zeros of the scalar numeric column must not change the hash")
-		changed, _ := blockHashes(t, ctx, conn, "bh_arr_chg", defs, cols, colTypes, `(1, '{1.50,3}', 1.50), (2, '{3}', 7.000)`)
+		base, _ := blockHashes(t, ctx, conn, "bh_arr", defs, cols, `(1, '{1.50,2}', 1.50), (2, '{3}', 7.000)`)
+		scale, _ := blockHashes(t, ctx, conn, "bh_arr_scale", defs, cols, `(1, '{1.50,2}', 1.5), (2, '{3}', 7)`)
+		require.NotEqual(t, base, scale, "the scale of the scalar numeric column must change the hash")
+		changed, _ := blockHashes(t, ctx, conn, "bh_arr_chg", defs, cols, `(1, '{1.50,3}', 1.50), (2, '{3}', 7.000)`)
 		require.NotEqual(t, base, changed, "a change in an array element must change the hash")
 	})
 
 	t.Run("equal/insert_order", func(t *testing.T) {
 		// The block hash depends on the rows, not on their physical order.
-		left, _ := blockHashes(t, ctx, conn, "bh_ord_l", textDefs, textCols, nil, `(1, 'a', 'x'), (2, 'b', 'y'), (3, 'c', 'z')`)
-		right, _ := blockHashes(t, ctx, conn, "bh_ord_r", textDefs, textCols, nil, `(3, 'c', 'z'), (1, 'a', 'x'), (2, 'b', 'y')`)
+		left, _ := blockHashes(t, ctx, conn, "bh_ord_l", textDefs, textCols, `(1, 'a', 'x'), (2, 'b', 'y'), (3, 'c', 'z')`)
+		right, _ := blockHashes(t, ctx, conn, "bh_ord_r", textDefs, textCols, `(3, 'c', 'z'), (1, 'a', 'x'), (2, 'b', 'y')`)
 		require.Equal(t, left, right)
 	})
 
 	t.Run("empty_block", func(t *testing.T) {
-		leaf, _ := blockHashes(t, ctx, conn, "bh_empty", textDefs, textCols, nil, "")
+		leaf, _ := blockHashes(t, ctx, conn, "bh_empty", textDefs, textCols, "")
 		// A parent node is the XOR of its children, so an empty leaf must be
 		// 32 zero bytes: then it does not change its parent.
 		require.Equal(t, make([]byte, sha256.Size), leaf, "an empty block hashes to 32 zero bytes")
@@ -242,7 +240,7 @@ func TestBlockHashEncoding(t *testing.T) {
 		// words of the row hash. This pins the whole formula, including the
 		// way the bit(256) value is cut into signed words, independently of
 		// multisetHash.
-		leaf, _ := blockHashes(t, ctx, conn, "bh_one", textDefs, textCols, nil, `(1, 'café', NULL)`)
+		leaf, _ := blockHashes(t, ctx, conn, "bh_one", textDefs, textCols, `(1, 'café', NULL)`)
 		row := sha256.Sum256([]byte("(1,café,)"))
 		parts := []string{"1"}
 		for i := 0; i < 4; i++ {
@@ -260,7 +258,7 @@ func TestBlockHashEncoding(t *testing.T) {
 		require.NoError(t, conn.QueryRow(ctx, `
 			SELECT min(i) FILTER (WHERE get_byte(h, 0) >= 128), min(i) FILTER (WHERE get_byte(h, 0) < 128)
 			FROM (SELECT i, sha256(convert_to(ROW(i, 'a', 'b')::text, 'UTF8')) AS h FROM generate_series(1, 64) AS i) s`).Scan(&neg, &pos))
-		blockHashes(t, ctx, conn, "bh_sign", textDefs, textCols, nil, fmt.Sprintf(`(%d, 'a', 'b'), (%d, 'a', 'b')`, neg, pos))
+		blockHashes(t, ctx, conn, "bh_sign", textDefs, textCols, fmt.Sprintf(`(%d, 'a', 'b'), (%d, 'a', 'b')`, neg, pos))
 	})
 
 	// In an inheritance tree the parent's primary key does not cover the
@@ -341,8 +339,8 @@ func TestBlockHashEncoding(t *testing.T) {
 
 		// Every character here exists in LATIN1 and takes two bytes in UTF8.
 		rows := `(1, 'café', 'Größe'), (2, 'Ångström', NULL), (3, '', 'ÿ,"ü"')`
-		utf8Hash, _ := blockHashes(t, ctx, conn, "bh_enc", textDefs, textCols, nil, rows)
-		latinHash, _ := blockHashes(t, ctx, latinConn, "bh_enc", textDefs, textCols, nil, rows)
+		utf8Hash, _ := blockHashes(t, ctx, conn, "bh_enc", textDefs, textCols, rows)
+		latinHash, _ := blockHashes(t, ctx, latinConn, "bh_enc", textDefs, textCols, rows)
 		require.Equal(t, utf8Hash, latinHash, "the block hash must not depend on the database encoding")
 	})
 
@@ -358,10 +356,10 @@ func TestBlockHashEncoding(t *testing.T) {
 			vals[i] = fmt.Sprint(i)
 		}
 		rows := "(1, " + strings.Join(vals, ", ") + ")"
-		left, _ := blockHashes(t, ctx, conn, "bh_wide_l", strings.Join(defs, ", "), cols, nil, rows)
+		left, _ := blockHashes(t, ctx, conn, "bh_wide_l", strings.Join(defs, ", "), cols, rows)
 		vals[n-1] = "-1"
 		changed := "(1, " + strings.Join(vals, ", ") + ")"
-		right, _ := blockHashes(t, ctx, conn, "bh_wide_r", strings.Join(defs, ", "), cols, nil, changed)
+		right, _ := blockHashes(t, ctx, conn, "bh_wide_r", strings.Join(defs, ", "), cols, changed)
 		require.NotEqual(t, left, right, "a change in the last column must change the hash")
 	})
 }

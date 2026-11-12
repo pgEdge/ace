@@ -55,7 +55,7 @@ func keydiffTable(t *testing.T, ctx context.Context, env *testEnv, table string)
 	require.NoError(t, err)
 	cast2, err := queries.GetCastTypes(ctx, env.N2Pool, testSchema, table)
 	require.NoError(t, err)
-	return keydiff.Table{Schema: testSchema, Name: table, Key: key, Cols: cols, HashTypes: types1},
+	return keydiff.Table{Schema: testSchema, Name: table, Key: key, Cols: cols},
 		keydiff.Side{Name: env.ServiceN1, Conn: env.N1Pool, ColTypes: types1, CastTypes: cast1},
 		keydiff.Side{Name: env.ServiceN2, Conn: env.N2Pool, ColTypes: types2, CastTypes: cast2}
 }
@@ -214,7 +214,8 @@ func TestKeyDiffKeyTypes(t *testing.T) {
 }
 
 // TestKeyDiffNumericScale checks that a numeric key stored as 1.50 on one
-// node and 1.5 on the other is one row.
+// node and 1.5 on the other is two rows, each on one node only: the server
+// prints the two keys in a different way.
 func TestKeyDiffNumericScale(t *testing.T) {
 	ctx := context.Background()
 	env := newSpockEnv()
@@ -224,16 +225,14 @@ func TestKeyDiffNumericScale(t *testing.T) {
 	for _, pool := range env.pools() {
 		keydiffExec(t, ctx, env, pool, fmt.Sprintf("CREATE TABLE %s (k numeric PRIMARY KEY, v text)", ident))
 	}
-	keydiffExec(t, ctx, env, env.N1Pool, fmt.Sprintf("INSERT INTO %s VALUES (1.50, 'a'), (2.50, 'b')", ident))
-	keydiffExec(t, ctx, env, env.N2Pool, fmt.Sprintf("INSERT INTO %s VALUES (1.5, 'a'), (2.5, 'b2')", ident))
+	keydiffExec(t, ctx, env, env.N1Pool, fmt.Sprintf("INSERT INTO %s VALUES (1.50, 'a'), (2.50, 'b'), (3, 'c')", ident))
+	keydiffExec(t, ctx, env, env.N2Pool, fmt.Sprintf("INSERT INTO %s VALUES (1.5, 'a'), (2.5, 'b2'), (3, 'c')", ident))
 
 	res, err := keydiffCompare(t, ctx, env, table, keydiff.Options{})
 	require.NoError(t, err)
-	require.Empty(t, res.Only1)
-	require.Empty(t, res.Only2)
-	require.Len(t, res.Changed, 1)
-	v1, _ := res.Changed[0].Row1.Get("v")
-	require.Equal(t, "b", v1)
+	require.Equal(t, []string{"1.50", "2.50"}, columnValues(t, res.Only1, "k"))
+	require.Equal(t, []string{"1.5", "2.5"}, columnValues(t, res.Only2, "k"))
+	require.Empty(t, res.Changed)
 }
 
 // TestKeyDiffEqualKeysPrintedDifferently checks a key that the server holds
@@ -592,7 +591,7 @@ func TestKeyDiffReadUsesIndex(t *testing.T) {
 			require.NoError(t, err)
 			key, err := queries.GetPrimaryKey(ctx, env.N1Pool, testSchema, table)
 			require.NoError(t, err)
-			tbl := keydiff.Table{Schema: testSchema, Name: table, Key: key, Cols: cols, HashTypes: types1,
+			tbl := keydiff.Table{Schema: testSchema, Name: table, Key: key, Cols: cols,
 				ScanChildren: tc.scanChildren}
 			cast1, err := queries.GetCastTypes(ctx, env.N1Pool, testSchema, table)
 			require.NoError(t, err)
