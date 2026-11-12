@@ -172,3 +172,104 @@ func TestRowStatement(t *testing.T) {
 	_, _, err = task.rowStatement(opUpdate, map[string]any{"id": float64(1)}, colTypes)
 	require.Error(t, err)
 }
+
+func TestRepairSetsOneOperationPerKey(t *testing.T) {
+	a := map[string]any{"id": 1, "v": "a"}
+	b := map[string]any{"id": 1, "v": "b"}
+
+	tests := []struct {
+		name         string
+		add          func(s *repairSets)
+		wantInsert   bool
+		wantUpdate   bool
+		wantDelete   bool
+		wantConflict string
+	}{
+		{
+			name: "same update from two pairs",
+			add: func(s *repairSets) {
+				s.pair = "n1/n2"
+				s.write("n2", "1", a, true)
+				s.pair = "n2/n3"
+				s.write("n2", "1", map[string]any{"id": 1, "v": "a"}, true)
+			},
+			wantUpdate: true,
+		},
+		{
+			name: "deletes with other rows",
+			add: func(s *repairSets) {
+				s.pair = "n1/n2"
+				s.remove("n2", "1", a)
+				s.pair = "n2/n3"
+				s.remove("n2", "1", b)
+			},
+			wantDelete: true,
+		},
+		{
+			name: "update and insert",
+			add: func(s *repairSets) {
+				s.pair = "n1/n2"
+				s.write("n2", "1", a, true)
+				s.pair = "n2/n3"
+				s.write("n2", "1", a, false)
+			},
+			wantConflict: "node pairs n1/n2 and n2/n3 give different row operations for this key: update and insert",
+		},
+		{
+			name: "updates with other rows",
+			add: func(s *repairSets) {
+				s.pair = "n1/n2"
+				s.write("n2", "1", a, true)
+				s.pair = "n2/n3"
+				s.write("n2", "1", b, true)
+			},
+			wantConflict: "node pairs n1/n2 and n2/n3 give different rows to update for this key",
+		},
+		{
+			name: "delete and insert, then a third pair",
+			add: func(s *repairSets) {
+				s.pair = "n1/n2"
+				s.remove("n2", "1", a)
+				s.pair = "n2/n3"
+				s.write("n2", "1", b, false)
+				s.pair = "n2/n4"
+				s.write("n2", "1", b, false)
+			},
+			wantConflict: "node pairs n1/n2 and n2/n3 give different row operations for this key: delete and insert",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newRepairSets()
+			tc.add(s)
+			_, ins := s.inserts["n2"]["1"]
+			_, upd := s.updates["n2"]["1"]
+			_, del := s.deletes["n2"]["1"]
+			require.Equal(t, tc.wantInsert, ins, "insert")
+			require.Equal(t, tc.wantUpdate, upd, "update")
+			require.Equal(t, tc.wantDelete, del, "delete")
+			c, ok := s.conflicts["n2"]["1"]
+			require.Equal(t, tc.wantConflict != "", ok, "conflict")
+			require.Equal(t, tc.wantConflict, c.reason)
+			require.Equal(t, []string{"n2"}, s.nodes())
+		})
+	}
+
+	task := &TableRepairTask{}
+	task.Key = []string{"id"}
+	s := newRepairSets()
+	s.pair = "n1/n2"
+	s.write("n2", "1", a, true)
+	s.pair = "n2/n3"
+	s.write("n2", "1", a, false)
+	task.report = &RepairReport{Changes: map[string]any{}}
+	task.recordConflicts(s)
+	want := []FailedRowOp{{
+		Node:      "n2",
+		Operation: opConflict,
+		Key:       map[string]any{"id": 1},
+		Reason:    "node pairs n1/n2 and n2/n3 give different row operations for this key: update and insert",
+	}}
+	require.Equal(t, want, task.FailedOps)
+	require.Equal(t, want, task.report.Changes["n2"].(map[string]any)["failed_rows"])
+}

@@ -1211,6 +1211,7 @@ func (t *TableRepairTask) runUnidirectionalRepair(startTime time.Time) error {
 			logger.Info("%d rows exist only on %s; deletes are skipped", len(rows), node)
 		}
 	}
+	t.recordConflicts(sets)
 
 	totalOps := make(map[string]map[string]int) // node -> operation -> applied rows
 
@@ -1901,9 +1902,17 @@ func getDryRunOutput(task *TableRepairTask) (string, error) {
 		for _, nodeName := range nodeNames {
 			inserts, updates, deletes := sets.inserts[nodeName], sets.updates[nodeName], sets.deletes[nodeName]
 			skipped := skippedDeletes[nodeName]
+			conflicts := sets.conflicts[nodeName]
 
 			if task.report != nil {
 				nodeChanges := make(map[string]any)
+				if len(conflicts) > 0 {
+					var list []map[string]any
+					for _, pk := range slices.Sorted(maps.Keys(conflicts)) {
+						list = append(list, map[string]any{"key": task.keyOf(conflicts[pk].row), "reason": conflicts[pk].reason})
+					}
+					nodeChanges["conflicts"] = list
+				}
 				if len(inserts) > 0 {
 					nodeChanges["would_insert"] = rowList(inserts)
 				}
@@ -1926,6 +1935,9 @@ func getDryRunOutput(task *TableRepairTask) (string, error) {
 				nodeName, len(inserts), len(updates), len(deletes)))
 			if len(skipped) > 0 {
 				sb.WriteString(fmt.Sprintf("    Additionally, %d rows exist on %s that are not on %s (deletes skipped).\n", len(skipped), nodeName, task.SourceOfTruth))
+			}
+			if len(conflicts) > 0 {
+				sb.WriteString(fmt.Sprintf("    %d keys get different row operations from different node pairs and would not be repaired.\n", len(conflicts)))
 			}
 			if task.RepairPlan != nil && len(task.planRuleMatches[nodeName]) > 0 {
 				ruleCounts := make(map[string]int)
