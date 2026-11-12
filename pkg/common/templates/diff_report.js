@@ -360,7 +360,9 @@
 
     // collectRows turns the shown rows (diff.rows, written by the Go code)
     // into plan entries. A row's pk is a list of JSON literals copied from the
-    // diff file; they go into the YAML as they are and are never turned into
+    // diff file, each a JSON string with the text of the key. They go into the
+    // YAML as they are, as double-quoted scalars, and table-repair reads the
+    // text of each scalar as the key text. They are never turned into
     // JavaScript numbers, which would lose digits of a bigint and turn a text
     // key such as "007" into the number 7.
     function collectRows(diff, targetKeys, rowDefault, planDefault) {
@@ -425,10 +427,11 @@
     }
 
     // integerRangeMatchers turns whole-number literals into ranges over runs of
-    // consecutive numbers, and one equals list for the rest. BigInt keeps
-    // bigint keys exact.
+    // consecutive numbers, and one equals list for the rest. A literal is a
+    // JSON string with the text of the key, or a JSON number. BigInt reads the
+    // text itself, so bigint keys stay exact.
     function integerRangeMatchers(values) {
-        const nums = values.map(v => BigInt(v)).sort(compareBigInt);
+        const nums = values.map(v => BigInt(v.startsWith('"') ? JSON.parse(v) : v)).sort(compareBigInt);
         const matchers = [];
         const singles = [];
         let start = nums[0];

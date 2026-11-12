@@ -120,14 +120,14 @@ curl --cert client.crt --key client.key --cacert ca.crt \
 
 ### POST /api/v1/table-rerun
 
-Re-runs a diff from an existing diff file.
+Re-runs a diff from an existing diff result.
 
 Request body:
 
 | Field | Type | Required | Notes |
 | --- | --- | --- | --- |
 | `cluster` | string | no | Defaults to `default_cluster`. |
-| `diff_file` | string | yes | Path on the server filesystem. |
+| `diff_file` | string | yes | Path of the diff result directory, or of the JSON report next to it, on the server filesystem. |
 | `dbname` | string | no | Overrides DB name from config. |
 | `nodes` | array[string] | no | Defaults to `"all"`. |
 | `quiet` | bool | no | Suppress output. |

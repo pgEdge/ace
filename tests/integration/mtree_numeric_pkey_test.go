@@ -16,7 +16,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strconv"
 	"testing"
 
 	"github.com/jackc/pgx/v5"
@@ -92,17 +91,69 @@ func TestMtreeNumericPrimaryKeyDiff(t *testing.T) {
 	// n1 only.
 	pair, ok := diffPairs(t, task)[env.pairKey()]
 	require.True(t, ok, "no diff for %s", env.pairKey())
+	// The keys are compared as the server prints them, with their scale.
 	keys := func(node string) map[string]string {
 		out := map[string]string{}
 		for _, r := range pair.Rows[node] {
 			id, _ := r.Get("id")
 			val, _ := r.Get("val")
-			f, err := strconv.ParseFloat(fmt.Sprint(id), 64)
-			require.NoError(t, err, "key %v", id)
-			out[strconv.FormatFloat(f, 'f', -1, 64)] = fmt.Sprint(val)
+			out[fmt.Sprint(id)] = fmt.Sprint(val)
 		}
 		return out
 	}
-	require.Equal(t, map[string]string{"50.5": "diverged", "7": "same"}, keys(env.ServiceN1))
-	require.Equal(t, map[string]string{"50.5": "same"}, keys(env.ServiceN2))
+	require.Equal(t, map[string]string{"50.50": "diverged", "7.00": "same"}, keys(env.ServiceN1))
+	require.Equal(t, map[string]string{"50.50": "same"}, keys(env.ServiceN2))
+}
+
+// TestMtreeNumericKeyScale checks a numeric primary key that n1 stores as
+// 1.50 and n2 as 1.5. The server holds them as equal, but prints them in a
+// different way, so mtree table-diff reports two rows: 1.50 on n1 only and
+// 1.5 on n2 only.
+func TestMtreeNumericKeyScale(t *testing.T) {
+	ctx := context.Background()
+	env := newSpockEnv()
+
+	safe := pgx.Identifier{testSchema, "mtree_numeric_key_scale"}.Sanitize()
+	qualified := testSchema + ".mtree_numeric_key_scale"
+	rows := map[*pgxpool.Pool]string{
+		env.N1Pool: "(1.50, 'a'), (2, 'same')",
+		env.N2Pool: "(1.5, 'a'), (2, 'same')",
+	}
+	for pool, values := range rows {
+		_, err := pool.Exec(ctx, "CREATE TABLE "+safe+" (id numeric PRIMARY KEY, val text)") // nosemgrep
+		require.NoError(t, err)
+		t.Cleanup(func() {
+			if _, err := pool.Exec(ctx, "DROP TABLE IF EXISTS "+safe+" CASCADE"); err != nil { // nosemgrep
+				t.Errorf("drop table: %v", err)
+			}
+		})
+		_, err = pool.Exec(ctx, "INSERT INTO "+safe+" VALUES "+values) // nosemgrep
+		require.NoError(t, err)
+	}
+
+	task := env.newMerkleTreeTask(t, qualified, []string{env.ServiceN1, env.ServiceN2})
+	task.BlockSize = 1000
+	task.OverrideBlockSize = true
+	require.NoError(t, task.RunChecks(false))
+	require.NoError(t, task.MtreeInit())
+	t.Cleanup(func() {
+		if err := task.MtreeTeardown(); err != nil {
+			t.Errorf("mtree teardown: %v", err)
+		}
+	})
+	require.NoError(t, task.BuildMtree())
+	require.NoError(t, task.DiffMtree())
+
+	pair, ok := diffPairs(t, task)[env.pairKey()]
+	require.True(t, ok, "no diff for %s", env.pairKey())
+	keys := func(node string) []string {
+		var out []string
+		for _, r := range pair.Rows[node] {
+			id, _ := r.Get("id")
+			out = append(out, fmt.Sprint(id))
+		}
+		return out
+	}
+	require.Equal(t, []string{"1.50"}, keys(env.ServiceN1))
+	require.Equal(t, []string{"1.5"}, keys(env.ServiceN2))
 }

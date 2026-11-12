@@ -29,6 +29,11 @@ const (
 	keyColAlias = "_ace_k"
 )
 
+// readServiceCols is the number of the columns before the columns of the
+// table in the row read: the key position, the row hash, the commit
+// timestamp and the origin.
+const readServiceCols = 4
+
 func (t Table) qualifiedName() string {
 	return pgx.Identifier{t.Schema}.Sanitize() + "." + pgx.Identifier{t.Name}.Sanitize()
 }
@@ -77,9 +82,27 @@ func (t Table) keyQueryFormats() pgx.QueryResultFormats {
 	return f
 }
 
+// readFormats asks for the service columns of the row read in the binary
+// format and for the columns of the table in the text format. The text
+// format gives the output of the type of each column, which ACE keeps as it
+// is.
+func (t Table) readFormats() pgx.QueryResultFormats {
+	f := make(pgx.QueryResultFormats, readServiceCols+len(t.Cols))
+	for i := range f {
+		f[i] = pgx.TextFormatCode
+		if i < readServiceCols {
+			f[i] = pgx.BinaryFormatCode
+		}
+	}
+	return f
+}
+
 // ReadQuery returns the query that reads the full rows for a list of keys.
 // Its parameters are one text[] for each key column, all of the same length:
-// element i of each array is the text of key i.
+// element i of each array is the text of key i. The result has the position
+// of the key, the row hash, the commit timestamp and the origin of the row,
+// and then every column of the table as it is: the row read asks for the
+// columns in the text format, so a value is the output of its type.
 //
 // Each key is cast back to the type of the column on this node, without the
 // type modifier (castTypes), and looked up in a LATERAL subquery. A cast to
@@ -105,7 +128,7 @@ func (t Table) keyQueryFormats() pgx.QueryResultFormats {
 // bpchar, boolean and inet it is not the output of the type.
 //
 // filter, if not empty, is added to the WHERE clause of the lookup as it is.
-func (t Table) ReadQuery(colTypes, castTypes map[string]string, filter string) (string, error) {
+func (t Table) ReadQuery(castTypes map[string]string, filter string) (string, error) {
 	if len(t.Key) == 0 {
 		return "", fmt.Errorf("table %s has no primary key", t.qualifiedName())
 	}
@@ -141,7 +164,7 @@ func (t Table) ReadQuery(colTypes, castTypes map[string]string, filter string) (
 		"pg_xact_commit_timestamp("+tableAlias+".xmin) AS commit_ts",
 		"to_json(pg_xact_commit_timestamp_origin("+tableAlias+".xmin))->>'roident' AS node_origin")
 	for _, c := range t.Cols {
-		sel = append(sel, queries.SelectColExpr("", c, colTypes[c]))
+		sel = append(sel, queries.ColExpr("", c))
 	}
 
 	if t.ScanChildren {

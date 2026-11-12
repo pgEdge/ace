@@ -183,18 +183,36 @@ func TestDiffResultPairNodeOrder(t *testing.T) {
 	w.Abort()
 }
 
-// A key that is not a whole number in any entry clears the integer key flag.
+// The integer key flag needs a whole number in every entry, as a JSON
+// number or as text, and a key column of an integer type.
 func TestDiffResultIntegerKey(t *testing.T) {
-	w := newTestWriter(t)
-	addTestBlock(t, w, "n1/n2", "n1", "n2", 0, 0, func(b *DiffBlockWriter) {
-		require.NoError(t, b.Add(DiffKindNode1Only, testRow(1, "a"), nil, testHash(1), nil))
-		require.NoError(t, b.Add(DiffKindNode2Only, nil, types.OrderedMap{{Key: "id", Value: "007"}, {Key: "v", Value: "b"}}, nil, testHash(2)))
-	})
-	paths, err := w.Finish(context.Background(), testManifest(), DiffReportOptions{})
-	require.NoError(t, err)
-	r, err := OpenDiffResult(paths.Dir)
-	require.NoError(t, err)
-	require.False(t, r.Manifest.IntegerKey)
+	for _, tc := range []struct {
+		name    string
+		key     any
+		keyType string
+		want    bool
+	}{
+		{"number", 2, "integer", true},
+		{"text_of_digits", "-2", "bigint", true},
+		{"not_whole", "2.5", "integer", false},
+		{"text_column", "2", "text", false},
+		{"no_type", "2", "", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w := newTestWriter(t)
+			addTestBlock(t, w, "n1/n2", "n1", "n2", 0, 0, func(b *DiffBlockWriter) {
+				require.NoError(t, b.Add(DiffKindNode1Only, testRow(1, "a"), nil, testHash(1), nil))
+				require.NoError(t, b.Add(DiffKindNode2Only, nil, types.OrderedMap{{Key: "id", Value: tc.key}, {Key: "v", Value: "b"}}, nil, testHash(2)))
+			})
+			m := testManifest()
+			m.Columns[0].Type = tc.keyType
+			paths, err := w.Finish(context.Background(), m, DiffReportOptions{})
+			require.NoError(t, err)
+			r, err := OpenDiffResult(paths.Dir)
+			require.NoError(t, err)
+			require.Equal(t, tc.want, r.Manifest.IntegerKey)
+		})
+	}
 }
 
 // A directory without a manifest is not a result.

@@ -197,7 +197,15 @@ func (s *repairSets) empty() bool {
 // connection. A NULL fix sets only the columns of row outside the key, and
 // only where they are still NULL, so that it never writes over a value that
 // appeared after the diff.
-func (t *TableRepairTask) rowStatement(op string, row map[string]any, colTypes map[string]string) (string, []any, error) {
+//
+// Every value is sent as text, the output of its type on the node of the
+// diff, and the server reads it with the input function of the type:
+// $n::text::type. castTypes gives the type without the type modifier; the
+// column then applies its modifier when it gets the value, as for any
+// assigned value: a text too long for varchar(n) is an error, not a text cut
+// to fit. A key is found by the same rule as in the diff: the key of the row
+// must be equal to the key text and print as the key text, byte for byte.
+func (t *TableRepairTask) rowStatement(op string, row map[string]any, castTypes map[string]string) (string, []any, error) {
 	table := pgx.Identifier{t.Schema, t.Table}.Sanitize()
 	isKey := make(map[string]bool, len(t.Key))
 	for _, k := range t.Key {
@@ -231,35 +239,34 @@ func (t *TableRepairTask) rowStatement(op string, row map[string]any, colTypes m
 	}
 
 	args := make([]any, len(cols))
+	params := make([]string, len(cols))
 	for i, c := range cols {
-		val, ok := row[c]
-		if !ok || val == nil {
-			continue
-		}
-		typ, ok := colTypes[c]
-		if !ok {
+		typ, ok := castTypes[c]
+		if !ok || typ == "" {
 			return "", nil, fmt.Errorf("no type for column %s on the target node", c)
 		}
-		v, err := convertValueForType(val, typ)
-		if err != nil {
-			return "", nil, fmt.Errorf("cannot convert the value of column %s to %s: %w", c, typ, err)
+		params[i] = fmt.Sprintf("$%d::text::%s", i+1, typ)
+		if text, ok := valueText(row[c]); ok {
+			args[i] = text
 		}
-		args[i] = v
 	}
 
 	if op == opInsert {
 		names := make([]string, len(cols))
-		params := make([]string, len(cols))
 		for i, c := range cols {
 			names[i] = pgx.Identifier{c}.Sanitize()
-			params[i] = fmt.Sprintf("$%d", i+1)
 		}
 		return fmt.Sprintf("INSERT INTO %s (%s) VALUES (%s)", table, strings.Join(names, ", "), strings.Join(params, ", ")), args, nil
 	}
 
-	where := make([]string, len(t.Key))
+	where := make([]string, 0, 2*len(t.Key))
 	for i, k := range t.Key {
-		where[i] = fmt.Sprintf("%s = $%d", pgx.Identifier{k}.Sanitize(), i+1)
+		if args[i] == nil {
+			return "", nil, fmt.Errorf("primary key column %s is NULL", k)
+		}
+		ident := pgx.Identifier{k}.Sanitize()
+		where = append(where, fmt.Sprintf("%s = %s", ident, params[i]),
+			fmt.Sprintf(`format('%%s', %s) COLLATE "C" = $%d`, queries.ColExpr("", k), i+1))
 	}
 	if op == opDelete {
 		return fmt.Sprintf("DELETE FROM %s WHERE %s", table, strings.Join(where, " AND ")), args, nil
@@ -267,7 +274,7 @@ func (t *TableRepairTask) rowStatement(op string, row map[string]any, colTypes m
 	set := make([]string, 0, len(cols)-len(t.Key))
 	for i, c := range cols[len(t.Key):] {
 		ident := pgx.Identifier{c}.Sanitize()
-		set = append(set, fmt.Sprintf("%s = $%d", ident, len(t.Key)+i+1))
+		set = append(set, fmt.Sprintf("%s = %s", ident, params[len(t.Key)+i]))
 		if op == opFixNulls {
 			where = append(where, ident+" IS NULL")
 		}
