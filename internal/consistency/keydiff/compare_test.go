@@ -125,8 +125,7 @@ func (n *fakeNode) Query(ctx context.Context, sql string, args ...any) (pgx.Rows
 
 func keyRaw(k string, b byte) [][]byte { return [][]byte{[]byte(k), hash8(b)} }
 
-var fakeTable = Table{Schema: "public", Name: "t", Key: []string{"id"}, Cols: []string{"id", "v"},
-	HashTypes: map[string]string{"id": "text", "v": "text"}}
+var fakeTable = Table{Schema: "public", Name: "t", Key: []string{"id"}, Cols: []string{"id", "v"}}
 var fakeTypes = map[string]string{"id": "text", "v": "text"}
 
 func twoNodes() (*fakeNode, *fakeNode, *[]string) {

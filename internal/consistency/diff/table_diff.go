@@ -467,7 +467,7 @@ func (t *TableDiffTask) getBlockHashSQL(hasLower, hasUpper bool) (string, error)
 		return sql, nil
 	}
 
-	query, err := queries.BlockHashSQL(t.Schema, t.Table, t.Key, "TD_BLOCK_HASH" /* mode */, hasLower, hasUpper, t.EffectiveFilter, t.Cols, t.hashColTypes())
+	query, err := queries.BlockHashSQL(t.Schema, t.Table, t.Key, "TD_BLOCK_HASH" /* mode */, hasLower, hasUpper, t.EffectiveFilter, t.Cols)
 	if err != nil {
 		return "", err
 	}
@@ -531,11 +531,11 @@ func (t *TableDiffTask) nodeTypes(nodeName string, byNode map[string]map[string]
 	return nil, fmt.Errorf("could not find %s for node %s using key %s", what, nodeName, typesKey)
 }
 
-// hashColTypes returns the column types that the row hash uses. The schemas
-// of the nodes were checked to match, so the types of any node are right,
-// but the choice must be the same for every hash of the run: it is the node
-// whose key comes first.
-func (t *TableDiffTask) hashColTypes() map[string]string {
+// refColTypes returns the column types of one node, for the manifest of the
+// result. The schemas of the nodes were checked to match, so the types of
+// any node are right, but the choice must be the same in every run: it is
+// the node whose key comes first.
+func (t *TableDiffTask) refColTypes() map[string]string {
 	keys := make([]string, 0, len(t.ColTypes))
 	for k := range t.ColTypes {
 		keys = append(keys, k)
@@ -1655,7 +1655,7 @@ func (t *TableDiffTask) ExecuteTask() (err error) {
 // resultManifest returns the description of the result of the run. The
 // result writer adds the pairs.
 func (t *TableDiffTask) resultManifest() utils.DiffResultManifest {
-	colTypes := t.hashColTypes()
+	colTypes := t.refColTypes()
 	cols := make([]utils.DiffResultColumn, 0, len(t.Cols))
 	for _, c := range t.Cols {
 		cols = append(cols, utils.DiffResultColumn{Name: c, Type: colTypes[c]})
@@ -1991,8 +1991,7 @@ func (t *TableDiffTask) compareMismatch(ctx context.Context, task mismatchTask) 
 	s1.KeyWidth = t.keyWidths[task.node1]
 	s2.KeyWidth = t.keyWidths[task.node2]
 
-	tbl := keydiff.Table{Schema: t.Schema, Name: t.Table, Key: t.Key, Cols: t.Cols, HashTypes: t.hashColTypes(),
-		ScanChildren: t.scanChildren}
+	tbl := keydiff.Table{Schema: t.Schema, Name: t.Table, Key: t.Key, Cols: t.Cols, ScanChildren: t.scanChildren}
 	block := keydiff.Block{
 		Where:      queries.BlockWhereClause(t.Key, hasLower, hasUpper, t.EffectiveFilter),
 		Args:       args,

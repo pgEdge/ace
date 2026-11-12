@@ -50,10 +50,6 @@ type Table struct {
 	Key []string
 	// Cols is the list of all columns, in the order of the diff report.
 	Cols []string
-	// HashTypes are the column types (format_type) used by the row hash. They
-	// must be the same for both nodes and the same as for the block hash, or
-	// equal rows get different hashes.
-	HashTypes map[string]string
 	// ScanChildren tells that the table has inheritance children that the
 	// primary key index of the parent does not cover. The row read then lets
 	// the planner join the list of keys with the table in one pass, instead

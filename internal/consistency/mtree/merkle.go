@@ -103,8 +103,8 @@ type MerkleTreeTask struct {
 	untilTime *time.Time
 
 	// refColTypes are the column types (format_type) of refNode, the first
-	// node that the checks read. The row and leaf hashes use them on every
-	// node. ColTypes holds the types of each node by node name.
+	// node that the checks read. The manifest of a diff result lists them.
+	// ColTypes holds the types of each node by node name.
 	refColTypes map[string]string
 	refNode     string
 	// castTypes holds the cast types of each node by node name: the types
@@ -585,17 +585,15 @@ func (m *MerkleTreeTask) processWorkItem(work CompareRangesWorkItem, pool1, pool
 
 	node1Name, _ := work.Node1["Name"].(string)
 	node2Name, _ := work.Node2["Name"].(string)
-	// The row read of each node uses the column types of that node, for the
-	// key casts and the select list; the checks of the task have made sure
-	// that the key types are the same on every node. The row hash uses the types
-	// of the reference node on both nodes, so that equal rows get equal
-	// hashes. The leaves have no row counts, so the first node is the build
-	// side, and the memory limit is checked only while the keys are read.
-	// mtree refuses inheritance parents, so there are no children to scan.
-	refTypes := m.refColTypes
+	// The row read of each node uses the types of that node, for the key
+	// casts and the select list; the checks of the task have made sure that
+	// the key types are the same on every node. The leaves have no row
+	// counts, so the first node is the build side, and the memory limit is
+	// checked only while the keys are read. mtree refuses inheritance
+	// parents, so there are no children to scan.
 	s1 := keydiff.Side{Name: node1Name, Conn: pool1, ColTypes: m.nodeColTypes(node1Name), CastTypes: m.nodeCastTypes(node1Name)}
 	s2 := keydiff.Side{Name: node2Name, Conn: pool2, ColTypes: m.nodeColTypes(node2Name), CastTypes: m.nodeCastTypes(node2Name)}
-	tbl := keydiff.Table{Schema: m.Schema, Name: m.Table, Key: m.Key, Cols: m.Cols, HashTypes: refTypes}
+	tbl := keydiff.Table{Schema: m.Schema, Name: m.Table, Key: m.Key, Cols: m.Cols}
 	block := keydiff.Block{Where: whereClause, Args: args, ReadFilter: queries.CommitTimestampFilter(m.untilTime)}
 	out := m.result.OpenBlock(nodePairKey, node1Name, node2Name, 0, work.Seq)
 	res, err := keydiff.Compare(m.Ctx, tbl, block, s1, s2, keydiff.Options{
@@ -3395,7 +3393,7 @@ func (lh *leafHashers) work(name string, pool *pgxpool.Pool, cur *slicer.Cursor)
 		if !ok {
 			return
 		}
-		h, err := queries.ComputeLeafHashes(lh.ctx, pool, m.Schema, m.Table, m.SimplePrimaryKey, m.Key, b.Start, b.End, m.Cols, m.refColTypes)
+		h, err := queries.ComputeLeafHashes(lh.ctx, pool, m.Schema, m.Table, m.SimplePrimaryKey, m.Key, b.Start, b.End, m.Cols)
 		if err != nil {
 			lh.fail(fmt.Errorf("failed to compute leaf hash for block %v-%v on node %s: %w", b.Start, b.End, name, err))
 			return

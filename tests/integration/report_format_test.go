@@ -129,28 +129,9 @@ func readDiffReport(t *testing.T, path string) types.DiffOutput {
 	return out
 }
 
-// rewriteAsVersion0 writes a copy of a diff report as an earlier ACE wrote
-// it: edit is applied, and the format_version field is removed. It returns
-// the path of the copy.
-func rewriteAsVersion0(t *testing.T, diffFile string, edit func(*types.DiffOutput)) string {
-	t.Helper()
-	data, err := os.ReadFile(rewriteReport(t, diffFile, edit))
-	require.NoError(t, err)
-	var raw map[string]json.RawMessage
-	require.NoError(t, json.Unmarshal(data, &raw))
-	require.Contains(t, raw, "format_version")
-	delete(raw, "format_version")
-	data, err = json.Marshal(raw)
-	require.NoError(t, err)
-	out := filepath.Join(t.TempDir(), "v0_"+filepath.Base(diffFile))
-	require.NoError(t, os.WriteFile(out, data, 0o600))
-	require.Equal(t, 0, readDiffReport(t, out).FormatVersion)
-	return out
-}
-
 // TestDiffReportFormatVersionChecked checks that table-diff writes the
 // report format version, and that repair and rerun refuse a report written
-// in a format this build does not know.
+// in another format: by a newer ACE, or by an older one.
 func TestDiffReportFormatVersionChecked(t *testing.T) {
 	env := newSpockEnv()
 	qualifiedTable := typedKeyTable(t, env, "ace_format_version", "id int PRIMARY KEY, v text", "id, v",
@@ -181,12 +162,26 @@ func TestDiffReportFormatVersionChecked(t *testing.T) {
 	err = rerunTask.ExecuteRerunTask()
 	require.ErrorContains(t, err, "unsupported diff report format version")
 
-	// A report without the field was written before the field existed. It
-	// is version 0 and must still be accepted.
-	delete(raw, "format_version")
-	old, err := json.Marshal(raw)
-	require.NoError(t, err)
-	oldFile := filepath.Join(t.TempDir(), "old_diffs.json")
-	require.NoError(t, os.WriteFile(oldFile, old, 0o600))
-	require.NoError(t, env.newTableRepairTask(env.ServiceN1, qualifiedTable, oldFile).ValidateAndPrepare())
+	// A report without the field was written before the field existed, and
+	// version 1 kept a numeric value without its trailing zeros. The keys
+	// of both do not match the rows read now, so the diff must run again.
+	for _, version := range []int{0, 1} {
+		if version == 0 {
+			delete(raw, "format_version")
+		} else {
+			raw["format_version"] = version
+		}
+		old, err := json.Marshal(raw)
+		require.NoError(t, err)
+		oldFile := filepath.Join(t.TempDir(), fmt.Sprintf("v%d_diffs.json", version))
+		require.NoError(t, os.WriteFile(oldFile, old, 0o600))
+
+		err = env.newTableRepairTask(env.ServiceN1, qualifiedTable, oldFile).ValidateAndPrepare()
+		require.ErrorContains(t, err, "run the diff again", "repair of a version %d report", version)
+
+		rerunTask := env.newTableDiffTask(t, qualifiedTable, nodes)
+		rerunTask.DiffFilePath = oldFile
+		err = rerunTask.ExecuteRerunTask()
+		require.ErrorContains(t, err, "run the diff again", "rerun of a version %d report", version)
+	}
 }

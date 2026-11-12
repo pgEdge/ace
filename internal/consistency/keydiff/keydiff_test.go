@@ -341,17 +341,16 @@ func TestCheckEstimate(t *testing.T) {
 // result formats.
 func TestKeyQuery(t *testing.T) {
 	tbl := Table{
-		Schema:    "public",
-		Name:      "t",
-		Key:       []string{"id", "amount"},
-		Cols:      []string{"id", "amount", "note"},
-		HashTypes: map[string]string{"id": "integer", "amount": "numeric(10,2)", "note": "text"},
+		Schema: "public",
+		Name:   "t",
+		Key:    []string{"id", "amount"},
+		Cols:   []string{"id", "amount", "note"},
 	}
 	q, err := tbl.keyQuery(`"id" >= $1`)
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{`SELECT "id", trim_scale("amount"), substring(`, `FROM 1 FOR 8)`, `FROM "public"."t" WHERE "id" >= $1`} {
+	for _, want := range []string{`SELECT "id", "amount", substring(`, `FROM 1 FOR 8)`, `FROM "public"."t" WHERE "id" >= $1`} {
 		if !strings.Contains(q, want) {
 			t.Fatalf("key query %q does not contain %q", q, want)
 		}
@@ -370,11 +369,10 @@ func TestKeyQuery(t *testing.T) {
 // children, and the error for a key column without a type.
 func TestReadQuery(t *testing.T) {
 	tbl := Table{
-		Schema:    "public",
-		Name:      "t",
-		Key:       []string{"id", "name"},
-		Cols:      []string{"id", "name", "data"},
-		HashTypes: map[string]string{"id": "integer", "name": "text", "data": "jsonb"},
+		Schema: "public",
+		Name:   "t",
+		Key:    []string{"id", "name"},
+		Cols:   []string{"id", "name", "data"},
 	}
 	colTypes := map[string]string{"id": "integer", "name": "character varying(20)", "data": "jsonb"}
 	castTypes := map[string]string{"id": "integer", "name": "character varying", "data": "jsonb"}

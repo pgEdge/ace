@@ -13,11 +13,8 @@ package integration
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
-	"os"
 	"sort"
-	"strings"
 	"testing"
 
 	"github.com/jackc/pgx/v5"
@@ -26,21 +23,17 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestNumericScaleInMismatchedBlock checks that a numeric value with other
-// trailing zeros is not a difference, also when its block differs because of
-// another row.
-//
-// The block hash ignores trailing zeros (trim_scale), so a block where only
-// the scale differs is never fetched. Here one more row of the block really
-// differs, so ACE fetches every row of the block and compares them one by
-// one. That comparison must use the same rule as the hash, or the rows that
-// differ only in scale are reported too.
-func TestNumericScaleInMismatchedBlock(t *testing.T) {
+// TestNumericScaleIsADifference checks that a numeric value with other
+// trailing zeros on each node is a difference. The values are equal for the
+// server (3000.00 = 3000.0), but the server prints them in a different way,
+// and ACE compares the text of the values. Both table-diff and mtree must
+// report every such row, and keep the value of each node as it is.
+func TestNumericScaleIsADifference(t *testing.T) {
 	env := newSpockEnv()
-	testNumericScaleInMismatchedBlock(t, env)
+	testNumericScaleIsADifference(t, env)
 }
 
-func testNumericScaleInMismatchedBlock(t *testing.T, env *testEnv) {
+func testNumericScaleIsADifference(t *testing.T, env *testEnv) {
 	ctx := context.Background()
 	table := "ace_numeric_scale_block_test"
 	qualifiedTable := fmt.Sprintf("%s.%s", testSchema, table)
@@ -62,19 +55,20 @@ func testNumericScaleInMismatchedBlock(t *testing.T, env *testEnv) {
 		}
 	})
 
-	// Rows 1-5 differ only in the scale of amount. Row 6 has a real
-	// difference in label. All rows are in one block.
+	// Rows 1-5 differ only in the scale of amount, row 6 only in the scale of
+	// an element of amounts. Row 7 is the same on both nodes.
 	rows := []struct {
 		id           int
 		n1Amt, n2Amt string
-		n1Lbl, n2Lbl string
+		n1Arr, n2Arr string
 	}{
-		{1, "3000.00", "3000.0", "a", "a"},
-		{2, "1234.5600", "1234.56", "b", "b"},
-		{3, "100.10", "100.1", "c", "c"},
-		{4, "42", "42.000", "d", "d"},
-		{5, "0.00", "0.0", "e", "e"},
-		{6, "7.50", "7.50", "f", "changed"},
+		{1, "3000.00", "3000.0", "{1.50,2}", "{1.50,2}"},
+		{2, "1234.5600", "1234.56", "{1.50,2}", "{1.50,2}"},
+		{3, "100.10", "100.1", "{1.50,2}", "{1.50,2}"},
+		{4, "42", "42.000", "{1.50,2}", "{1.50,2}"},
+		{5, "0.00", "0.0", "{1.50,2}", "{1.50,2}"},
+		{6, "7.50", "7.50", "{1.50,2}", "{1.5,2}"},
+		{7, "7.50", "7.50", "{1.50,2}", "{1.50,2}"},
 	}
 	for _, pool := range env.pools() {
 		tx, err := pool.Begin(ctx)
@@ -82,34 +76,32 @@ func testNumericScaleInMismatchedBlock(t *testing.T, env *testEnv) {
 		defer func(tx pgx.Tx) { _ = tx.Rollback(ctx) }(tx)
 		env.withRepairModeTx(t, ctx, tx, func() {
 			for _, r := range rows {
-				amt, lbl := r.n1Amt, r.n1Lbl
+				amt, arr := r.n1Amt, r.n1Arr
 				if pool == env.N2Pool {
-					amt, lbl = r.n2Amt, r.n2Lbl
+					amt, arr = r.n2Amt, r.n2Arr
 				}
-				// The array is the same on both nodes: trim_scale does not
-				// apply to arrays, so it must not change the result either.
-				sql := fmt.Sprintf("INSERT INTO %s VALUES ($1, %s, '{1.50,2}', $2)", qualifiedTable, amt) // nosemgrep
-				_, err := tx.Exec(ctx, sql, r.id, lbl)
+				sql := fmt.Sprintf("INSERT INTO %s VALUES ($1, %s, '%s', 'same')", qualifiedTable, amt, arr) // nosemgrep
+				_, err := tx.Exec(ctx, sql, r.id)
 				require.NoError(t, err)
 			}
 		})
 		require.NoError(t, tx.Commit(ctx))
 	}
 
-	var n1Text, n2Text string
-	require.NoError(t, env.N1Pool.QueryRow(ctx, "SELECT amount::text FROM "+qualifiedTable+" WHERE id = 1").Scan(&n1Text)) // nosemgrep
-	require.NoError(t, env.N2Pool.QueryRow(ctx, "SELECT amount::text FROM "+qualifiedTable+" WHERE id = 1").Scan(&n2Text)) // nosemgrep
-	require.NotEqual(t, n1Text, n2Text, "precondition: the nodes must store different scales")
-
 	nodes := []string{env.ServiceN1, env.ServiceN2}
 	pairKey := env.pairKey()
+	check := func(t *testing.T, res types.DiffOutput) {
+		t.Helper()
+		requireOnlyDiffIDs(t, res, pairKey, env.ServiceN1, env.ServiceN2, "1", "2", "3", "4", "5", "6")
+		require.Equal(t, "3000.00", diffAmount(t, res, pairKey, env.ServiceN1, "1"))
+		require.Equal(t, "3000.0", diffAmount(t, res, pairKey, env.ServiceN2, "1"))
+	}
 
 	t.Run("table-diff", func(t *testing.T) {
 		task := env.newTableDiffTask(t, qualifiedTable, nodes)
 		require.NoError(t, task.RunChecks(false))
 		require.NoError(t, task.ExecuteTask())
-		requireOnlyDiffIDs(t, diffResultOf(t, task), pairKey, env.ServiceN1, env.ServiceN2, "6")
-		requireDiffAmount(t, diffResultOf(t, task), pairKey, "7.5")
+		check(t, diffResultOf(t, task))
 	})
 
 	t.Run("mtree", func(t *testing.T) {
@@ -121,18 +113,18 @@ func testNumericScaleInMismatchedBlock(t *testing.T, env *testEnv) {
 		require.NoError(t, task.BuildMtree())
 		task.NoCDC = true
 		require.NoError(t, task.DiffMtree())
-		requireOnlyDiffIDs(t, diffResultOf(t, task), pairKey, env.ServiceN1, env.ServiceN2, "6")
-		requireDiffAmount(t, diffResultOf(t, task), pairKey, "7.5")
+		check(t, diffResultOf(t, task))
 	})
 }
 
 // TestNumericKeyRepair checks a numeric primary key without a fixed scale.
 // The same key can be stored as 1.50 on one node and as 1.5 on the other.
-// For the server these are one key (1.50 = 1.5), so ACE must match them as
-// one row: a diff must not report them as a row missing on each side, and
-// repair must find the row on the target by the key from the diff report.
-// Otherwise repair inserts the key it thinks is missing, hits the existing
-// row, and then deletes it as an extra row.
+// The server holds them as equal, but prints them in a different way, so
+// table-diff reports two rows: 1.50 on one node only and 1.5 on the other
+// node only.
+//
+// Repair from n1 deletes 1.5 on n2 first and then inserts 1.50, so one
+// repair makes the nodes equal, with the keys as n1 prints them.
 func TestNumericKeyRepair(t *testing.T) {
 	env := newSpockEnv()
 	testNumericKeyRepair(t, env)
@@ -144,8 +136,6 @@ func testNumericKeyRepair(t *testing.T, env *testEnv) {
 		defs    string
 		cols    string
 		n1, n2  []string
-		wantN1  int // diff rows on n1
-		wantN2  int // diff rows on n2
 		checkSQ string
 	}{
 		{
@@ -157,9 +147,7 @@ func testNumericKeyRepair(t *testing.T, env *testEnv) {
 			// 4.10: only on n1. 5.00: only on n2.
 			n1:      []string{"(1.50, 'a')", "(2.000, 'b')", "(3, 'c')", "(4.10, 'd')"},
 			n2:      []string{"(1.5, 'a')", "(2.0, 'changed')", "(3, 'c')", "(5.00, 'extra')"},
-			wantN1:  2, // 2 (modified), 4.1 (n1 only)
-			wantN2:  2, // 2 (modified), 5 (n2 only)
-			checkSQ: "SELECT trim_scale(id)::text || ':' || v FROM %s ORDER BY id",
+			checkSQ: "SELECT id::text || ':' || v FROM %s ORDER BY id",
 		},
 		{
 			name:    "composite",
@@ -167,9 +155,7 @@ func testNumericKeyRepair(t *testing.T, env *testEnv) {
 			cols:    "id, tag, v",
 			n1:      []string{"(1.50, 'x', 'a')", "(2.000, 'x', 'b')", "(3, 'x', 'c')", "(4.10, 'x', 'd')"},
 			n2:      []string{"(1.5, 'x', 'a')", "(2.0, 'x', 'changed')", "(3, 'x', 'c')", "(5.00, 'x', 'extra')"},
-			wantN1:  2,
-			wantN2:  2,
-			checkSQ: "SELECT trim_scale(id)::text || ':' || tag || ':' || v FROM %s ORDER BY id, tag",
+			checkSQ: "SELECT id::text || ':' || tag || ':' || v FROM %s ORDER BY id, tag",
 		},
 	}
 
@@ -177,52 +163,29 @@ func testNumericKeyRepair(t *testing.T, env *testEnv) {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := context.Background()
 			table := "ace_numeric_key_" + tc.name
-			qualifiedTable := fmt.Sprintf("%s.%s", testSchema, table)
+			qualifiedTable := typedKeyTable(t, env, table, tc.defs, tc.cols, tc.n1, tc.n2)
+			nodes := []string{env.ServiceN1, env.ServiceN2}
 
-			for _, pool := range env.pools() {
-				_, err := pool.Exec(ctx, fmt.Sprintf("CREATE TABLE %s (%s)", qualifiedTable, tc.defs)) // nosemgrep
-				require.NoError(t, err)
-				if env.HasSpock {
-					_, err = pool.Exec(ctx, "SELECT spock.repset_add_table('default', $1)", qualifiedTable)
-					require.NoError(t, err)
+			diffFile := env.runTableDiff(t, qualifiedTable, nodes)
+			pair := readDiffReport(t, diffFile).NodeDiffs[env.pairKey()]
+			ids := func(node string) []string {
+				var out []string
+				for _, row := range pair.Rows[node] {
+					id, ok := row.Get("id")
+					require.True(t, ok)
+					out = append(out, fmt.Sprint(id))
 				}
+				sort.Strings(out)
+				return out
 			}
-			t.Cleanup(func() {
-				for _, pool := range env.pools() {
-					if env.HasSpock {
-						_, _ = pool.Exec(context.Background(), "SELECT spock.repset_remove_table('default', $1)", qualifiedTable)
-					}
-					_, _ = pool.Exec(context.Background(), "DROP TABLE IF EXISTS "+qualifiedTable+" CASCADE") // nosemgrep
-				}
-			})
+			require.Equal(t, []string{"1.50", "2.000", "4.10"}, ids(env.ServiceN1))
+			require.Equal(t, []string{"1.5", "2.0", "5.00"}, ids(env.ServiceN2))
 
-			for _, side := range []struct {
-				pool *pgxpool.Pool
-				rows []string
-			}{{env.N1Pool, tc.n1}, {env.N2Pool, tc.n2}} {
-				tx, err := side.pool.Begin(ctx)
-				require.NoError(t, err)
-				env.withRepairModeTx(t, ctx, tx, func() {
-					_, err := tx.Exec(ctx, fmt.Sprintf("INSERT INTO %s (%s) VALUES %s", qualifiedTable, tc.cols, strings.Join(side.rows, ", "))) // nosemgrep
-					require.NoError(t, err)
-				})
-				require.NoError(t, tx.Commit(ctx))
-			}
-
-			diffFile := env.runTableDiff(t, qualifiedTable, []string{env.ServiceN1, env.ServiceN2})
-			data, err := os.ReadFile(diffFile)
-			require.NoError(t, err)
-			var out types.DiffOutput
-			require.NoError(t, json.Unmarshal(data, &out))
-			pair := out.NodeDiffs[env.pairKey()]
-			require.Len(t, pair.Rows[env.ServiceN1], tc.wantN1, "diff rows on n1: %v", pair.Rows[env.ServiceN1])
-			require.Len(t, pair.Rows[env.ServiceN2], tc.wantN2, "diff rows on n2: %v", pair.Rows[env.ServiceN2])
-
-			env.repairTable(t, qualifiedTable, env.ServiceN1)
+			task := env.newTableRepairTask(env.ServiceN1, qualifiedTable, diffFile)
+			require.NoError(t, task.Run(false))
+			require.Empty(t, task.FailedOps)
 			env.assertNoTableDiff(t, qualifiedTable)
 
-			// n2 must now hold the rows of n1, up to the scale of the key.
-			// In particular row 1 must still be there: it was never different.
 			read := func(pool *pgxpool.Pool) []string {
 				rows, err := pool.Query(ctx, fmt.Sprintf(tc.checkSQ, qualifiedTable)) // nosemgrep
 				require.NoError(t, err)
@@ -261,23 +224,23 @@ func requireOnlyDiffIDs(t *testing.T, res types.DiffOutput, pairKey, n1, n2 stri
 	}
 }
 
-// requireDiffAmount checks the text of the amount column of every diff row of
-// the pair. The report keeps a numeric value without trailing zeros, as the
-// row hash compares it.
-func requireDiffAmount(t *testing.T, res types.DiffOutput, pairKey, want string) {
+// diffAmount returns the text of the amount column of the diff row with the
+// given id on node.
+func diffAmount(t *testing.T, res types.DiffOutput, pairKey, node, id string) string {
 	t.Helper()
-	for node, rows := range res.NodeDiffs[pairKey].Rows {
-		for _, row := range rows {
+	for _, row := range res.NodeDiffs[pairKey].Rows[node] {
+		if v, _ := row.Get("id"); fmt.Sprint(v) == id {
 			amt, ok := row.Get("amount")
 			require.True(t, ok, "diff row on %s has no amount: %v", node, row)
-			require.Equal(t, want, fmt.Sprint(amt), "amount of the diff row on %s", node)
+			return fmt.Sprint(amt)
 		}
 	}
+	t.Fatalf("no diff row with id %s on %s", id, node)
+	return ""
 }
 
 // TestNumericNamedEnum runs table-diff on a table with a column of an enum
-// whose name starts with "numeric". The enum is not a numeric type and has no
-// trim_scale(), so the column must be read as it is.
+// whose name starts with "numeric". The column must be read as it is.
 func TestNumericNamedEnum(t *testing.T) {
 	ctx := context.Background()
 	env := newSpockEnv()

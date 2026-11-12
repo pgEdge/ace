@@ -13,6 +13,7 @@ package types
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -20,33 +21,33 @@ import (
 func TestDiffOutputCheckFormatVersion(t *testing.T) {
 	tests := []struct {
 		version int
-		ok      bool
+		want    string // part of the error, or "" for no error
 	}{
-		{0, true}, // written before the field existed
-		{1, true},
-		{DiffFormatVersion, true},
-		{DiffFormatVersion + 1, false},
-		{-1, false},
+		{0, "run the diff again"}, // written before the field existed
+		{1, "run the diff again"},
+		{-1, "run the diff again"},
+		{DiffFormatVersion, ""},
+		{DiffFormatVersion + 1, "unsupported diff report format version"},
 	}
 	for _, tt := range tests {
 		err := DiffOutput{FormatVersion: tt.version}.CheckFormatVersion()
-		if tt.ok && err != nil {
+		if tt.want == "" && err != nil {
 			t.Errorf("version %d: unexpected error %v", tt.version, err)
 		}
-		if !tt.ok && (err == nil || !strings.Contains(err.Error(), "unsupported diff report format version")) {
-			t.Errorf("version %d: want an unsupported-version error, got %v", tt.version, err)
+		if tt.want != "" && (err == nil || !strings.Contains(err.Error(), tt.want)) {
+			t.Errorf("version %d: want an error with %q, got %v", tt.version, tt.want, err)
 		}
 	}
 }
 
-// The field is always written, and a report without it reads as version 0,
-// which CheckFormatVersion accepts.
+// The field is always written. A report without it reads as version 0, which
+// CheckFormatVersion refuses.
 func TestDiffOutputFormatVersionJSON(t *testing.T) {
 	b, err := json.Marshal(DiffOutput{FormatVersion: DiffFormatVersion})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(b), `"format_version":1`) {
+	if !strings.Contains(string(b), fmt.Sprintf(`"format_version":%d`, DiffFormatVersion)) {
 		t.Errorf("marshalled report %s has no format_version", b)
 	}
 
@@ -57,7 +58,7 @@ func TestDiffOutputFormatVersionJSON(t *testing.T) {
 	if old.FormatVersion != 0 {
 		t.Errorf("a report without the field read as version %d, want 0", old.FormatVersion)
 	}
-	if err := old.CheckFormatVersion(); err != nil {
-		t.Errorf("a report without the field must be accepted: %v", err)
+	if err := old.CheckFormatVersion(); err == nil {
+		t.Error("a report without the field must be refused")
 	}
 }

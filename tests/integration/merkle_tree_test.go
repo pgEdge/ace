@@ -1255,15 +1255,15 @@ func testMerkleTreeTeardown(t *testing.T, env *testEnv, tableName string) {
 	}
 }
 
-// TestMerkleTreeNumericScaleInvariance verifies that mathematically equal
-// numeric values with different PostgreSQL scales (e.g., 3000.00 vs 3000.0)
-// produce identical merkle tree hashes and are NOT reported as differences.
-func TestMerkleTreeNumericScaleInvariance(t *testing.T) {
+// TestMerkleTreeNumericScale checks that numeric values that are equal but
+// have different scales (3000.00 and 3000.0) are reported as differences:
+// the server prints them in a different way.
+func TestMerkleTreeNumericScale(t *testing.T) {
 	env := newSpockEnv()
-	testMerkleTreeNumericScaleInvariance(t, env)
+	testMerkleTreeNumericScale(t, env)
 }
 
-func testMerkleTreeNumericScaleInvariance(t *testing.T, env *testEnv) {
+func testMerkleTreeNumericScale(t *testing.T, env *testEnv) {
 	ctx := context.Background()
 	numericTable := "ace_numeric_scale_test"
 	qualifiedTable := fmt.Sprintf("%s.%s", testSchema, numericTable)
@@ -1353,23 +1353,17 @@ func testMerkleTreeNumericScaleInvariance(t *testing.T, env *testEnv) {
 	err = mtreeTask.DiffMtree()
 	require.NoError(t, err, "DiffMtree should succeed")
 
-	// The key assertion: there should be ZERO differences because trim_scale
-	// normalizes numeric values before hashing.
+	// Every row has another scale on each node, so every row is a changed
+	// row.
 	pairKey := env.ServiceN1 + "/" + env.ServiceN2
 	if strings.Compare(env.ServiceN1, env.ServiceN2) > 0 {
 		pairKey = env.ServiceN2 + "/" + env.ServiceN1
 	}
-
-	if nodeDiffs, ok := diffPairs(t, mtreeTask)[pairKey]; ok {
-		n1Rows := len(nodeDiffs.Rows[env.ServiceN1])
-		n2Rows := len(nodeDiffs.Rows[env.ServiceN2])
-		require.Equal(t, 0, n1Rows, "Expected 0 diff rows on %s, got %d (numeric scale should not cause diffs)", env.ServiceN1, n1Rows)
-		require.Equal(t, 0, n2Rows, "Expected 0 diff rows on %s, got %d (numeric scale should not cause diffs)", env.ServiceN2, n2Rows)
-	}
-	// If pairKey is not in NodeDiffs at all, that means zero diffs — which is correct.
-
-	diffCount := mtreeTask.DiffResult.Summary.DiffRowsCount[pairKey]
-	require.Equal(t, 0, diffCount, "Expected 0 total diff rows, got %d (numeric scale differences should be normalized)", diffCount)
+	nodeDiffs, ok := diffPairs(t, mtreeTask)[pairKey]
+	require.True(t, ok, "the numeric scale must give differences")
+	require.Len(t, nodeDiffs.Rows[env.ServiceN1], len(rows))
+	require.Len(t, nodeDiffs.Rows[env.ServiceN2], len(rows))
+	require.Equal(t, len(rows), mtreeTask.DiffResult.Summary.DiffRowsCount[pairKey])
 }
 
 func schemaExists(t *testing.T, ctx context.Context, pool *pgxpool.Pool, schemaName string) bool {

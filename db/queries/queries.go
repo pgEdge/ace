@@ -42,7 +42,9 @@ import (
 //	   column could give a different hash for an equal row.
 //	4: multiset hash of the sha256 hashes of the rows (see BlockHashAggExpr).
 //	   The first leaf has no lower bound (see FirstBlockPosition).
-const CurrentHashVersion = 4
+//	5: no trim_scale() on numeric columns: 1.5 and 1.50 give different
+//	   hashes, as the server prints them in a different way.
+const CurrentHashVersion = 5
 
 // rowHashBitsCol is the column of the inner block hash query that holds the
 // row hash as bit(256).
@@ -512,58 +514,18 @@ func InsertBlockRangesBatchComposite(ctx context.Context, db DBQuerier, mtreeTab
 	return nil
 }
 
-// isNumericType reports whether a column of this type (format_type output)
-// is wrapped in trim_scale(). The type must be numeric or decimal itself, with
-// or without a typmod: a type whose name only starts with these words, such
-// as an enum, has no trim_scale(). Arrays are not wrapped either:
-// trim_scale(numeric[]) does not exist.
-func isNumericType(colType string) bool {
-	lower := strings.ToLower(strings.TrimSpace(colType))
-	if strings.HasSuffix(lower, "[]") {
-		return false
-	}
-	if i := strings.IndexByte(lower, '('); i >= 0 {
-		lower = strings.TrimSpace(lower[:i])
-	}
-	return lower == "numeric" || lower == "decimal"
-}
-
-// NumericColumns returns the set of the columns that are wrapped in
-// trim_scale(), by the column types of a table (format_type output). It
-// returns nil when there are no column types.
-func NumericColumns(colTypes map[string]string) map[string]bool {
-	if len(colTypes) == 0 {
-		return nil
-	}
-	cols := make(map[string]bool)
-	for col, colType := range colTypes {
-		if isNumericType(colType) {
-			cols[col] = true
-		}
-	}
-	return cols
-}
-
 // ColExpr returns the SQL expression that stands for one column wherever ACE
-// reads its value: in the row hash and in the row fetch. The hash and the
-// fetch must take a column in the same form. Otherwise two rows could hash
-// the same and still be reported as different when their block is fetched
-// for another reason, or the reverse.
-//
-// A scalar numeric or decimal column is wrapped in trim_scale(), so 1.50 and
-// 1.5 are the same value. An array is not, because trim_scale(numeric[])
-// does not exist.
+// reads its value: in the row hash, in the key text and in the row fetch.
+// The column is taken as it is, so its text is the output of its type, and
+// two values are equal only if the server prints them in the same way: 1.5
+// and 1.50 are different values of a numeric column.
 //
 // col is the column name, not quoted. tableAlias may be empty; the column is
-// then not qualified. colType is pg_catalog.format_type output; an empty type
-// gives the plain column.
-func ColExpr(tableAlias, col, colType string) string {
+// then not qualified.
+func ColExpr(tableAlias, col string) string {
 	ref := pgx.Identifier{col}.Sanitize()
 	if tableAlias != "" {
 		ref = tableAlias + "." + ref
-	}
-	if isNumericType(colType) {
-		ref = fmt.Sprintf("trim_scale(%s)", ref)
 	}
 	return ref
 }
@@ -582,7 +544,7 @@ func ColExpr(tableAlias, col, colType string) string {
 //
 // col is the column name, not quoted. tableAlias may be empty.
 func FetchColExpr(tableAlias, col, colType string) string {
-	expr := ColExpr(tableAlias, col, colType)
+	expr := ColExpr(tableAlias, col)
 	if NeedsTextCast(colType) {
 		expr += "::TEXT"
 	}
@@ -596,7 +558,7 @@ func FetchColExpr(tableAlias, col, colType string) string {
 // that diff reports do not depend on the engine and stay repairable.
 func SelectColExpr(tableAlias, col, colType string) string {
 	expr := FetchColExpr(tableAlias, col, colType)
-	if expr == ColExpr(tableAlias, col, "") {
+	if expr == ColExpr(tableAlias, col) {
 		return expr
 	}
 	return expr + " AS " + pgx.Identifier{col}.Sanitize()
@@ -653,23 +615,22 @@ func IsKnownScalarType(colType string) bool {
 // The row is encoded as ROW(col1, col2, ...)::text, each column in the form
 // that the row fetch also uses. This text is unambiguous: a NULL prints as
 // nothing, an empty string as "", and a value with a comma, a quote, a
-// parenthesis, a backslash or a space is quoted. Numeric and decimal columns
-// are wrapped in trim_scale(), so 1.50 and 1.5 give the same hash.
+// parenthesis, a backslash or a space is quoted.
 //
 // The text is converted to UTF8 before it is hashed, so nodes with different
 // database encodings give the same hash for the same row. sha256 works on
 // bytes, so the hash does not depend on the byte order of the server.
 //
 // tableAlias may be empty; the column names are then not qualified. allCols
-// must not be empty: the whole-row value would be another encoding, without
-// trim_scale() and in the physical column order.
-func RowHashExpr(tableAlias string, allCols []string, colTypes map[string]string) (string, error) {
+// must not be empty: the whole-row value would list the columns in the
+// physical order, not in the order of allCols.
+func RowHashExpr(tableAlias string, allCols []string) (string, error) {
 	if len(allCols) == 0 {
 		return "", fmt.Errorf("row hash needs at least one column")
 	}
 	exprs := make([]string, len(allCols))
 	for i, col := range allCols {
-		exprs[i] = ColExpr(tableAlias, col, colTypes[col])
+		exprs[i] = ColExpr(tableAlias, col)
 	}
 	// ROW() is not a function call, so the limit of 100 arguments does not
 	// apply to it.
@@ -690,7 +651,7 @@ func RowHashExpr(tableAlias string, allCols []string, colTypes map[string]string
 // values are the query parameters, the lower bound first. A composite key is
 // compared as a row. filter, if not empty, is added to the WHERE clause as
 // it is; the caller must make sure it is safe.
-func BlockHashSQL(schema, table string, primaryKeyCols []string, mode string, includeLower, includeUpper bool, filter string, allCols []string, colTypes map[string]string) (string, error) {
+func BlockHashSQL(schema, table string, primaryKeyCols []string, mode string, includeLower, includeUpper bool, filter string, allCols []string) (string, error) {
 	if len(primaryKeyCols) == 0 {
 		return "", fmt.Errorf("primaryKeyCols cannot be empty")
 	}
@@ -726,7 +687,7 @@ func BlockHashSQL(schema, table string, primaryKeyCols []string, mode string, in
 		return "", fmt.Errorf("invalid mode: %s", mode)
 	}
 
-	rowHash, err := RowHashExpr(tableAlias, allCols, colTypes)
+	rowHash, err := RowHashExpr(tableAlias, allCols)
 	if err != nil {
 		return "", err
 	}
@@ -1993,11 +1954,11 @@ func UpdateMetadata(ctx context.Context, db DBQuerier, schema, table string, tot
 	return nil
 }
 
-func ComputeLeafHashes(ctx context.Context, db DBQuerier, schema, table string, _ bool, key []string, start []any, end []any, allCols []string, colTypes map[string]string) ([]byte, error) {
+func ComputeLeafHashes(ctx context.Context, db DBQuerier, schema, table string, _ bool, key []string, start []any, end []any, allCols []string) ([]byte, error) {
 	hasLower := !AllNil(start)
 	hasUpper := !AllNil(end)
 
-	sql, err := BlockHashSQL(schema, table, key, "MTREE_LEAF_HASH", hasLower, hasUpper, "", allCols, colTypes)
+	sql, err := BlockHashSQL(schema, table, key, "MTREE_LEAF_HASH", hasLower, hasUpper, "", allCols)
 	if err != nil {
 		return nil, err
 	}
