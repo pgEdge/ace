@@ -129,9 +129,38 @@ func readDiffReport(t *testing.T, path string) types.DiffOutput {
 	return out
 }
 
+// copyDiffResult copies the result directory of diffFile and the JSON report
+// next to it into a new directory, applies edit to the manifest of the copy,
+// and returns the path of the copied JSON report.
+func copyDiffResult(t *testing.T, diffFile string, edit func(manifest map[string]any)) string {
+	t.Helper()
+	srcDir := strings.TrimSuffix(diffFile, filepath.Ext(diffFile))
+	dstDir := filepath.Join(t.TempDir(), filepath.Base(srcDir))
+	require.NoError(t, os.CopyFS(dstDir, os.DirFS(srcDir)))
+	data, err := os.ReadFile(diffFile)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(dstDir+".json", data, 0o600))
+
+	path := filepath.Join(dstDir, "manifest.json")
+	data, err = os.ReadFile(path)
+	require.NoError(t, err)
+	// UseNumber keeps large integers such as max_diff_rows exact.
+	var manifest map[string]any
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.UseNumber()
+	require.NoError(t, dec.Decode(&manifest))
+	edit(manifest)
+	data, err = json.Marshal(manifest)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(path, data, 0o600))
+	return dstDir + ".json"
+}
+
 // TestDiffReportFormatVersionChecked checks that table-diff writes the
 // report format version, and that repair and rerun refuse a report written
-// in another format: by a newer ACE, or by an older one.
+// in another format: by a newer ACE, or by an older one. Repair reads the
+// row format version of the result directory, rerun the format version of
+// the JSON report.
 func TestDiffReportFormatVersionChecked(t *testing.T) {
 	env := newSpockEnv()
 	qualifiedTable := typedKeyTable(t, env, "ace_format_version", "id int PRIMARY KEY, v text", "id, v",
@@ -147,41 +176,36 @@ func TestDiffReportFormatVersionChecked(t *testing.T) {
 	dec.UseNumber()
 	require.NoError(t, dec.Decode(&raw))
 	require.Equal(t, json.Number(fmt.Sprint(types.DiffFormatVersion)), raw["format_version"])
-	raw["format_version"] = types.DiffFormatVersion + 1
-	future, err := json.Marshal(raw)
-	require.NoError(t, err)
-	futureFile := filepath.Join(t.TempDir(), "future_diffs.json")
-	require.NoError(t, os.WriteFile(futureFile, future, 0o600))
-
-	repairTask := env.newTableRepairTask(env.ServiceN1, qualifiedTable, futureFile)
-	err = repairTask.ValidateAndPrepare()
-	require.ErrorContains(t, err, "unsupported diff report format version")
-
-	rerunTask := env.newTableDiffTask(t, qualifiedTable, nodes)
-	rerunTask.DiffFilePath = futureFile
-	err = rerunTask.ExecuteRerunTask()
-	require.ErrorContains(t, err, "unsupported diff report format version")
 
 	// A report without the field was written before the field existed, and
 	// version 1 kept a numeric value without its trailing zeros. The keys
 	// of both do not match the rows read now, so the diff must run again.
-	for _, version := range []int{0, 1} {
-		if version == 0 {
+	for _, tc := range []struct {
+		version int
+		want    string
+	}{
+		{types.DiffFormatVersion + 1, "unsupported diff report format version"},
+		{1, "run the diff again"},
+		{0, "run the diff again"},
+	} {
+		result := copyDiffResult(t, diffFile, func(m map[string]any) {
+			m["row_format_version"] = tc.version
+		})
+		err = env.newTableRepairTask(env.ServiceN1, qualifiedTable, result).ValidateAndPrepare()
+		require.ErrorContains(t, err, tc.want, "repair of version %d", tc.version)
+
+		if tc.version == 0 {
 			delete(raw, "format_version")
 		} else {
-			raw["format_version"] = version
+			raw["format_version"] = tc.version
 		}
-		old, err := json.Marshal(raw)
+		report, err := json.Marshal(raw)
 		require.NoError(t, err)
-		oldFile := filepath.Join(t.TempDir(), fmt.Sprintf("v%d_diffs.json", version))
-		require.NoError(t, os.WriteFile(oldFile, old, 0o600))
-
-		err = env.newTableRepairTask(env.ServiceN1, qualifiedTable, oldFile).ValidateAndPrepare()
-		require.ErrorContains(t, err, "run the diff again", "repair of a version %d report", version)
-
+		reportFile := filepath.Join(t.TempDir(), fmt.Sprintf("v%d_diffs.json", tc.version))
+		require.NoError(t, os.WriteFile(reportFile, report, 0o600))
 		rerunTask := env.newTableDiffTask(t, qualifiedTable, nodes)
-		rerunTask.DiffFilePath = oldFile
+		rerunTask.DiffFilePath = reportFile
 		err = rerunTask.ExecuteRerunTask()
-		require.ErrorContains(t, err, "run the diff again", "rerun of a version %d report", version)
+		require.ErrorContains(t, err, tc.want, "rerun of version %d", tc.version)
 	}
 }

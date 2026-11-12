@@ -50,6 +50,16 @@ All notable changes to ACE will be captured in this document. This project follo
   operations on one node is not changed there; it is reported as a
   failed row with the operation `conflict`.
 
+- **`table-repair` reads the diff result directory.** `--diff-file`, and
+  `diff_file` of the HTTP API, take the result directory or the JSON
+  report next to it, as `diff-report` does. Repair reads the entries from
+  the block files of the directory. An entry says whether a row is on
+  both nodes or on one node only, so repair no longer matches the rows of
+  the two nodes by key. A change made by hand in the JSON report has no
+  effect, and a JSON report without its directory cannot be repaired: run
+  the diff again. A result with more than one entry for a key of a node
+  pair, as a diff of an inheritance tree can give, is refused: repair
+  cannot tell such rows apart.
 - **A `numeric` value with other trailing zeros is a difference.** The
   row hash no longer wraps a `numeric` column in `trim_scale()`, so `1.5`
   and `1.50` give different hashes: the server prints them in a different
