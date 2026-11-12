@@ -41,23 +41,20 @@ func keydiffExec(t *testing.T, ctx context.Context, env *testEnv, pool *pgxpool.
 }
 
 // keydiffTable reads the columns and the key of the table on n1, and returns
-// the sides of n1 and n2 with the column types and the cast types of each
-// node.
+// the sides of n1 and n2 with the cast types of each node.
 func keydiffTable(t *testing.T, ctx context.Context, env *testEnv, table string) (keydiff.Table, keydiff.Side, keydiff.Side) {
 	t.Helper()
-	cols, types1, err := queries.GetColumns(ctx, env.N1Pool, testSchema, table)
+	cols, _, err := queries.GetColumns(ctx, env.N1Pool, testSchema, table)
 	require.NoError(t, err)
 	key, err := queries.GetPrimaryKey(ctx, env.N1Pool, testSchema, table)
-	require.NoError(t, err)
-	types2, err := queries.GetColumnTypes(ctx, env.N2Pool, testSchema, table)
 	require.NoError(t, err)
 	cast1, err := queries.GetCastTypes(ctx, env.N1Pool, testSchema, table)
 	require.NoError(t, err)
 	cast2, err := queries.GetCastTypes(ctx, env.N2Pool, testSchema, table)
 	require.NoError(t, err)
 	return keydiff.Table{Schema: testSchema, Name: table, Key: key, Cols: cols},
-		keydiff.Side{Name: env.ServiceN1, Conn: env.N1Pool, ColTypes: types1, CastTypes: cast1},
-		keydiff.Side{Name: env.ServiceN2, Conn: env.N2Pool, ColTypes: types2, CastTypes: cast2}
+		keydiff.Side{Name: env.ServiceN1, Conn: env.N1Pool, CastTypes: cast1},
+		keydiff.Side{Name: env.ServiceN2, Conn: env.N2Pool, CastTypes: cast2}
 }
 
 // keydiffChanged is a changed row that a comparison found.
@@ -587,7 +584,7 @@ func TestKeyDiffReadUsesIndex(t *testing.T) {
 			keydiffExec(t, ctx, env, env.N1Pool, sqls...)
 
 			// The table exists on n1 only.
-			cols, types1, err := queries.GetColumns(ctx, env.N1Pool, testSchema, table)
+			cols, _, err := queries.GetColumns(ctx, env.N1Pool, testSchema, table)
 			require.NoError(t, err)
 			key, err := queries.GetPrimaryKey(ctx, env.N1Pool, testSchema, table)
 			require.NoError(t, err)
@@ -595,7 +592,7 @@ func TestKeyDiffReadUsesIndex(t *testing.T) {
 				ScanChildren: tc.scanChildren}
 			cast1, err := queries.GetCastTypes(ctx, env.N1Pool, testSchema, table)
 			require.NoError(t, err)
-			q, err := tbl.ReadQuery(types1, cast1, "")
+			q, err := tbl.ReadQuery(cast1, "")
 			require.NoError(t, err)
 
 			ids := make([]string, keys)

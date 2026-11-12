@@ -91,15 +91,19 @@ type DiffResultManifest struct {
 	Nodes       []string           `json:"nodes"`
 	// Pairs lists the pairs that have entries, sorted by name.
 	Pairs []DiffResultPair `json:"pairs"`
-	// IntegerKey is true when the primary key is one column and the key of
-	// every entry is a whole number.
+	// IntegerKey is true when the primary key is one column of an integer
+	// type and the key of every entry is a whole number. A range of such
+	// keys holds only whole numbers, so the HTML report can turn a run of
+	// keys into a range.
 	IntegerKey bool              `json:"integer_key"`
 	Summary    types.DiffSummary `json:"summary"`
 }
 
 // DiffEntryLine is one line of a block file: one differing row of a pair.
 // Row1 and Hash1 are set for an entry on node 1, Row2 and Hash2 for an entry
-// on node 2. The rows hold the same values as the rows of the JSON report.
+// on node 2. The rows hold the same values as the rows of the JSON report:
+// each column of the table as the text that the output function of its type
+// gives, as a JSON string, or null.
 type DiffEntryLine struct {
 	Kind  string          `json:"kind"`
 	Hash1 string          `json:"hash1,omitempty"`
@@ -326,17 +330,40 @@ func (b *DiffBlockWriter) Add(kind string, row1, row2 types.OrderedMap, hash1, h
 	return nil
 }
 
-var integerLiteralRe = regexp.MustCompile(`^-?[0-9]+$`)
+// integerLiteralRe matches a whole number as the server prints a value of
+// an integer type: no plus sign and no leading zeros. "007" is a text key.
+var integerLiteralRe = regexp.MustCompile(`^(0|-?[1-9][0-9]*)$`)
 
 // isIntegerKey tells whether the value of the key column of row is a whole
-// number in its JSON form.
+// number: as text, or as a JSON number.
 func isIntegerKey(row types.OrderedMap, key string) bool {
 	v, ok := row.Get(key)
 	if !ok {
 		return false
 	}
+	if s, ok := v.(string); ok {
+		return integerLiteralRe.MatchString(s)
+	}
 	data, err := json.Marshal(v)
 	return err == nil && integerLiteralRe.Match(data)
+}
+
+// integerKeyType tells whether the key column of a result can be an integer
+// key: its type is an integer type, or the manifest has no type for it. The
+// keys of a text column can all be digits, and then a range of them would
+// also hold "10" between "1" and "2".
+func integerKeyType(cols []DiffResultColumn, key string) bool {
+	for _, c := range cols {
+		if c.Name != key {
+			continue
+		}
+		switch c.Type {
+		case "", "smallint", "integer", "bigint":
+			return true
+		}
+		return false
+	}
+	return true
 }
 
 func writeJSONString(buf *bytes.Buffer, s string) {
@@ -438,7 +465,7 @@ func (w *DiffResultWriter) Finish(ctx context.Context, m DiffResultManifest, o D
 	tmp := w.tmp
 	m.FormatVersion = DiffResultFormatVersion
 	m.RowFormatVersion = types.DiffFormatVersion
-	m.IntegerKey = w.intKey && w.keyLen == 1
+	m.IntegerKey = w.intKey && w.keyLen == 1 && integerKeyType(m.Columns, w.key)
 	m.Pairs = m.Pairs[:0]
 	for _, p := range w.pairs {
 		if p.Total() > 0 {

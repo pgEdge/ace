@@ -30,7 +30,6 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pglogrepl"
 	"github.com/jackc/pgx/v5"
-	pgxv5type "github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/pgedge/ace/db/queries"
 	planner "github.com/pgedge/ace/internal/consistency/repair/plan"
@@ -89,6 +88,14 @@ type TableRepairTask struct {
 	// diff is the diff result that the repair works on.
 	diff   *diffInput
 	report *RepairReport
+
+	// castTypes holds, by the same host:port key as ColTypes, the types that
+	// a text value of each column is cast to: the type of the column without
+	// its type modifier.
+	castTypes map[string]map[string]string
+	// compareValues, if set, decides the comparisons of a repair plan
+	// instead of a query on a node.
+	compareValues func(node string, cmps []textComparison) ([]bool, error)
 
 	planRuleMatches map[string]map[string]string // populated when using repair plans
 	planStaleChecks map[string]map[string]planStaleCheck
@@ -480,6 +487,10 @@ func (t *TableRepairTask) ValidateAndPrepare() error {
 				return fmt.Errorf("failed to get columns for %s.%s on node %s: %w", t.Schema, t.Table, nodeName, err)
 			}
 			t.Cols = cols
+			castTypes, err := queries.GetCastTypes(t.Ctx, connPool, t.Schema, t.Table)
+			if err != nil {
+				return fmt.Errorf("failed to get cast types for %s.%s on node %s: %w", t.Schema, t.Table, nodeName, err)
+			}
 
 			pKey, err := queries.GetPrimaryKey(t.Ctx, connPool, t.Schema, t.Table)
 			if err != nil {
@@ -510,6 +521,10 @@ func (t *TableRepairTask) ValidateAndPrepare() error {
 				t.ColTypes = make(map[string]map[string]string)
 			}
 			t.ColTypes[fmt.Sprintf("%s:%s", publicIP, port)] = colTypes
+			if t.castTypes == nil {
+				t.castTypes = make(map[string]map[string]string)
+			}
+			t.castTypes[fmt.Sprintf("%s:%s", publicIP, port)] = castTypes
 
 			if refColTypes == nil {
 				refColTypes = colTypes
@@ -863,7 +878,7 @@ func (t *TableRepairTask) runFixNulls(startTime time.Time) error {
 		if err := t.ensurePool(nodeName); err != nil {
 			return t.finishRepair(startTime, totalOps, []string{err.Error()})
 		}
-		colTypes, _, err := t.getColTypesForNode(nodeName)
+		colTypes, err := t.castTypesOf(nodeName)
 		if err != nil {
 			return t.finishRepair(startTime, totalOps, []string{err.Error()})
 		}
@@ -1101,38 +1116,48 @@ func (t *TableRepairTask) populateFixNullsReport(nodeName string, nodeUpdates ma
 	t.report.Changes[nodeName].(map[string]any)[field] = rows
 }
 
-func convertValueForType(val any, colType string) (any, error) {
-	if val == nil {
-		return nil, nil
-	}
-
-	if tVal, ok := val.(time.Time); ok {
-		// For "timestamp without time zone" columns, wrap in pgxv5type.Timestamp
-		// so pgx sends the value as "timestamp" instead of "timestamptz". This prevents
-		// PostgreSQL from applying a session-timezone conversion.
-		lower := strings.ToLower(colType)
-		if lower == "timestamp without time zone" || (strings.HasPrefix(lower, "timestamp") && !strings.Contains(lower, "with time zone")) {
-			return pgxv5type.Timestamp{Time: tVal, Valid: true}, nil
-		}
-		return tVal, nil
-	}
-
-	return utils.ConvertToPgxType(val, colType)
-}
-
-// getColTypesForNode returns the column types of the table on nodeName and
-// the host:port key of the node.
-func (t *TableRepairTask) getColTypesForNode(nodeName string) (map[string]string, string, error) {
+// castTypesOf returns the cast types of the columns of the table on
+// nodeName: the types that a row operation casts a text value to.
+func (t *TableRepairTask) castTypesOf(nodeName string) (map[string]string, error) {
 	for hostPort, mappedName := range t.HostMap {
 		if mappedName == nodeName {
-			if colTypes, ok := t.ColTypes[hostPort]; ok {
-				return colTypes, hostPort, nil
+			if types, ok := t.castTypes[hostPort]; ok {
+				return types, nil
 			}
-			return nil, hostPort, fmt.Errorf("column types for target node '%s' (key: %s) not found", nodeName, hostPort)
+			return nil, fmt.Errorf("cast types for node '%s' (key: %s) not found", nodeName, hostPort)
 		}
 	}
+	return nil, fmt.Errorf("could not find host:port key for node %s to get cast types", nodeName)
+}
 
-	return nil, "", fmt.Errorf("could not find host:port key for target node %s to get col types", nodeName)
+// newComparer returns the comparer of the values of a repair plan for the
+// rows of the node pair p. It compares on the first node of the pair that
+// repair could connect to, with the types of that node; the checks of the
+// task have made sure that the types are the same on every node. A pair
+// without such a node gets a comparer that fails only when a rule needs a
+// comparison, so a plan without comparisons still runs.
+func (t *TableRepairTask) newComparer(p *diffPair) *comparer {
+	node := ""
+	var types map[string]string
+	for _, n := range []string{p.node1, p.node2} {
+		if t.compareValues == nil && t.Pools[n] == nil {
+			continue
+		}
+		if nt, err := t.castTypesOf(n); err == nil {
+			node, types = n, nt
+			break
+		}
+	}
+	run := func(cmps []textComparison) ([]bool, error) {
+		if node == "" {
+			return nil, fmt.Errorf("cannot compare the values of %s: no connection to %s or %s", p.name, p.node1, p.node2)
+		}
+		if t.compareValues != nil {
+			return t.compareValues(node, cmps)
+		}
+		return runComparisons(t.Ctx, t.Pools[node], cmps)
+	}
+	return newComparer(types, run)
 }
 
 // runUnidirectionalRepair applies on each node the row operations of the
@@ -1161,7 +1186,7 @@ func (t *TableRepairTask) runUnidirectionalRepair(startTime time.Time) error {
 		if err := t.ensurePool(nodeName); err != nil {
 			return t.finishRepair(startTime, totalOps, []string{err.Error()})
 		}
-		colTypes, _, err := t.getColTypesForNode(nodeName)
+		colTypes, err := t.castTypesOf(nodeName)
 		if err != nil {
 			return t.finishRepair(startTime, totalOps, []string{err.Error()})
 		}
@@ -1398,19 +1423,9 @@ func (t *TableRepairTask) performBirectionalInserts(nodeName string, inserts map
 		return nil, fmt.Errorf("no connection pool for node %s", nodeName)
 	}
 
-	targetNodeHostPortKey := ""
-	for hostPort, mappedName := range t.HostMap {
-		if mappedName == nodeName {
-			targetNodeHostPortKey = hostPort
-			break
-		}
-	}
-	if targetNodeHostPortKey == "" {
-		return nil, fmt.Errorf("could not find host:port key for target node %s", nodeName)
-	}
-	targetNodeColTypes, ok := t.ColTypes[targetNodeHostPortKey]
-	if !ok {
-		return nil, fmt.Errorf("column types for target node '%s' (key: %s) not found", nodeName, targetNodeHostPortKey)
+	targetNodeColTypes, err := t.castTypesOf(nodeName)
+	if err != nil {
+		return nil, err
 	}
 
 	// Extract origin information from source rows for bidirectional repair

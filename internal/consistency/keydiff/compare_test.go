@@ -13,6 +13,7 @@ package keydiff
 
 import (
 	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"strings"
@@ -22,15 +23,13 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 )
 
-// fakeRows is a pgx.Rows over fixed rows. For the key query it serves
-// RawValues; for the row read it serves Values. Scan fails, so that a test
-// fails if the row read does not use the common way to read a row. It
-// records whether the context of its query was cancelled when Close was
-// called.
+// fakeRows is a pgx.Rows over fixed rows. It serves RawValues only: Values
+// and Scan fail, so that a test fails if a query converts a value to a Go
+// type. It records whether the context of its query was cancelled when Close
+// was called.
 type fakeRows struct {
 	ctx              context.Context
 	raw              [][][]byte
-	vals             [][]any
 	fields           []pgconn.FieldDescription
 	i                int
 	closed           bool
@@ -50,14 +49,7 @@ func (r *fakeRows) CommandTag() pgconn.CommandTag                { return pgconn
 func (r *fakeRows) FieldDescriptions() []pgconn.FieldDescription { return r.fields }
 func (r *fakeRows) Conn() *pgx.Conn                              { return nil }
 
-// n returns the number of rows: raw rows for the key query, values for the
-// row read.
-func (r *fakeRows) n() int {
-	if r.raw != nil {
-		return len(r.raw)
-	}
-	return len(r.vals)
-}
+func (r *fakeRows) n() int { return len(r.raw) }
 
 // Next moves to the next row and closes the rows after the last one, as pgx
 // does.
@@ -69,10 +61,12 @@ func (r *fakeRows) Next() bool {
 	r.i++
 	return true
 }
-func (r *fakeRows) RawValues() [][]byte    { return r.raw[r.i-1] }
-func (r *fakeRows) Values() ([]any, error) { return r.vals[r.i-1], nil }
+func (r *fakeRows) RawValues() [][]byte { return r.raw[r.i-1] }
+func (r *fakeRows) Values() ([]any, error) {
+	return nil, fmt.Errorf("fakeRows: Values is not supported, use RawValues")
+}
 func (r *fakeRows) Scan(dest ...any) error {
-	return fmt.Errorf("fakeRows: Scan is not supported, use Values")
+	return fmt.Errorf("fakeRows: Scan is not supported, use RawValues")
 }
 
 // fakeNode answers the key query with keys and the row read with one row for
@@ -102,13 +96,18 @@ func hash8(b byte) []byte {
 func (n *fakeNode) Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error) {
 	if strings.HasPrefix(sql, "SELECT _ace_keys.") {
 		*n.log = append(*n.log, n.name+":read")
-		texts := args[0].([]string)
-		r := &fakeRows{ctx: ctx, fields: []pgconn.FieldDescription{
+		if _, ok := args[0].(pgx.QueryResultFormats); !ok {
+			return nil, fmt.Errorf("the row read must ask for its result formats")
+		}
+		texts := args[1].([]string)
+		r := &fakeRows{ctx: ctx, raw: [][][]byte{}, fields: []pgconn.FieldDescription{
 			{Name: posCol}, {Name: rowHashCol},
 			{Name: "commit_ts"}, {Name: "node_origin"}, {Name: "id"}, {Name: "v"}}}
 		for i, k := range texts {
 			for _, fr := range n.stored[k] {
-				r.vals = append(r.vals, []any{int64(i + 1), hash8(fr.hash), nil, nil, k, fr.v})
+				pos := make([]byte, 8)
+				binary.BigEndian.PutUint64(pos, uint64(i+1))
+				r.raw = append(r.raw, [][]byte{pos, hash8(fr.hash), nil, nil, []byte(k), []byte(fr.v)})
 			}
 		}
 		n.opened = append(n.opened, r)
@@ -136,7 +135,7 @@ func twoNodes() (*fakeNode, *fakeNode, *[]string) {
 }
 
 func side(n *fakeNode, rows int64, known bool) Side {
-	return Side{Name: n.name, Conn: n, ColTypes: fakeTypes, CastTypes: fakeTypes, Rows: rows, RowsKnown: known}
+	return Side{Name: n.name, Conn: n, CastTypes: fakeTypes, Rows: rows, RowsKnown: known}
 }
 
 // collected holds the entries that a comparison gave to its sink.

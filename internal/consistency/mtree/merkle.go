@@ -585,14 +585,14 @@ func (m *MerkleTreeTask) processWorkItem(work CompareRangesWorkItem, pool1, pool
 
 	node1Name, _ := work.Node1["Name"].(string)
 	node2Name, _ := work.Node2["Name"].(string)
-	// The row read of each node uses the types of that node, for the key
-	// casts and the select list; the checks of the task have made sure that
-	// the key types are the same on every node. The leaves have no row
+	// The row read of each node casts the key texts to the types of that
+	// node; the checks of the task have made sure that the key types are the
+	// same on every node. The leaves have no row
 	// counts, so the first node is the build side, and the memory limit is
 	// checked only while the keys are read. mtree refuses inheritance
 	// parents, so there are no children to scan.
-	s1 := keydiff.Side{Name: node1Name, Conn: pool1, ColTypes: m.nodeColTypes(node1Name), CastTypes: m.nodeCastTypes(node1Name)}
-	s2 := keydiff.Side{Name: node2Name, Conn: pool2, ColTypes: m.nodeColTypes(node2Name), CastTypes: m.nodeCastTypes(node2Name)}
+	s1 := keydiff.Side{Name: node1Name, Conn: pool1, CastTypes: m.nodeCastTypes(node1Name)}
+	s2 := keydiff.Side{Name: node2Name, Conn: pool2, CastTypes: m.nodeCastTypes(node2Name)}
 	tbl := keydiff.Table{Schema: m.Schema, Name: m.Table, Key: m.Key, Cols: m.Cols}
 	block := keydiff.Block{Where: whereClause, Args: args, ReadFilter: queries.CommitTimestampFilter(m.untilTime)}
 	out := m.result.OpenBlock(nodePairKey, node1Name, node2Name, 0, work.Seq)
@@ -619,16 +619,6 @@ func (m *MerkleTreeTask) processWorkItem(work CompareRangesWorkItem, pool1, pool
 		m.countDiffRows(n)
 	}
 	return nil
-}
-
-// nodeColTypes returns the column types (format_type) of node, as the checks
-// of the task read them, or the types of the reference node if the checks
-// did not read that node.
-func (m *MerkleTreeTask) nodeColTypes(node string) map[string]string {
-	if t, ok := m.ColTypes[node]; ok {
-		return t
-	}
-	return m.refColTypes
 }
 
 // nodeCastTypes returns the cast types of node, or
@@ -2595,6 +2585,9 @@ func (m *MerkleTreeTask) DiffMtree() (err error) {
 			StartTime:       time.Now().Format(time.RFC3339),
 			DiffRowsCount:   make(map[string]int),
 			CDCSkippedNodes: m.CDCSkippedNodes,
+			// The rows that the diff reads, so that a rerun reads the same.
+			EffectiveFilter: queries.CommitTimestampFilter(m.untilTime),
+			Until:           strings.TrimSpace(m.Until),
 		},
 	}
 	// The differing rows go to disk as soon as they are found. A diff that

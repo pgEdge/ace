@@ -136,6 +136,15 @@ func runHTMLPlanOnPage(t *testing.T, diff types.DiffOutput, limit int64, page *h
 	if task.diff, err = readDiffResult(jsonPath); err != nil {
 		t.Fatal(err)
 	}
+	// A plan of integer keys has pk_in ranges, which the server compares;
+	// here Go does.
+	task.compareValues = func(_ string, cmps []textComparison) ([]bool, error) { return goCompare(cmps) }
+	task.HostMap = map[string]string{}
+	task.castTypes = map[string]map[string]string{}
+	for node := range task.diff.nodes() {
+		task.HostMap[node+":5432"] = node
+		task.castTypes[node+":5432"] = map[string]string{"id": "bigint", "v": "text"}
+	}
 
 	sets, err := calculatePlanRepairSets(task)
 	if err != nil {
@@ -182,6 +191,38 @@ func twoNodeDiff() types.DiffOutput {
 		NodeDiffs: map[string]types.DiffByNodePair{"n1/n2": {Rows: map[string][]types.OrderedMap{"n1": a, "n2": b}}},
 		Summary: types.DiffSummary{Schema: "public", Table: "t", Nodes: []string{"n1", "n2"},
 			PrimaryKey: []string{"id"}, DiffRowsCount: map[string]int{"n1/n2": 53}},
+	}
+}
+
+// A diff holds every value as text, so an integer key is the text of the
+// number. The page must still turn a run of such keys into a range, and the
+// plan must match the rows: the range is compared as integers, so 10 is not
+// between 1 and 2.
+func TestHTMLPlanIntegerKeysAsText(t *testing.T) {
+	text := types.DiffOutput{}
+	src := twoNodeDiff()
+	text.Summary = src.Summary
+	text.NodeDiffs = map[string]types.DiffByNodePair{}
+	for pair, d := range src.NodeDiffs {
+		rows := map[string][]types.OrderedMap{}
+		for node, list := range d.Rows {
+			for _, r := range list {
+				id, _ := r.Get("id")
+				v, _ := r.Get("v")
+				rows[node] = append(rows[node], e2eRow(fmt.Sprint(id), fmt.Sprint(v)))
+			}
+		}
+		text.NodeDiffs[pair] = types.DiffByNodePair{Rows: rows}
+	}
+	got, plan, err := runHTMLPlan(t, text, 25)
+	if err != nil {
+		t.Fatalf("plan does not resolve: %v\n%s", err, plan)
+	}
+	if !strings.Contains(plan, "range:") {
+		t.Errorf("integer keys as text must give ranges:\n%s", plan)
+	}
+	if want := idRange(1, 25); fmt.Sprint(got["n2"]) != fmt.Sprint(want) || len(got["n1"]) != 0 {
+		t.Errorf("upserts: got %v, want n2=%v and nothing on n1\n%s", got, want, plan)
 	}
 }
 

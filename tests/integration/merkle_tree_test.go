@@ -169,6 +169,9 @@ func TestMerkleTreeUntilFilter(t *testing.T) {
 	taskWithUntil.BlockSize = 1000
 	require.NoError(t, taskWithUntil.RunChecks(false))
 	require.NoError(t, taskWithUntil.DiffMtree())
+	// The summary keeps the filter of the run, for a rerun of its result.
+	require.Contains(t, taskWithUntil.DiffResult.Summary.EffectiveFilter, "pg_xact_commit_timestamp")
+	require.Equal(t, taskWithUntil.Until, taskWithUntil.DiffResult.Summary.Until)
 
 	totalWithUntil := 0
 	for _, count := range taskWithUntil.DiffResult.Summary.DiffRowsCount {

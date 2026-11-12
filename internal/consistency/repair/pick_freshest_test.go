@@ -17,6 +17,19 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// pickSide runs pick_freshest for row with the comparisons decided in Go.
+func pickSide(t *testing.T, key, tie string, row planDiffRow) string {
+	t.Helper()
+	cmp := newComparer(map[string]string{"updated_at": "timestamp with time zone"}, goCompare)
+	for _, c := range freshestComparisons(key, row) {
+		require.NoError(t, cmp.add(c))
+	}
+	require.NoError(t, cmp.flush())
+	side, err := freshestSide(key, tie, row, cmp)
+	require.NoError(t, err)
+	return side
+}
+
 // commit_ts is carried in the spock metadata map (_spock_metadata_), which the
 // executor keeps in n1Meta/n2Meta while stripping it from n1Row/n2Row. These
 // tests ensure pick_freshest's freshestSide resolves the key from metadata too,
@@ -33,7 +46,7 @@ func TestFreshestSide_CommitTsFromMeta(t *testing.T) {
 			n1Meta: map[string]any{"commit_ts": older},
 			n2Meta: map[string]any{"commit_ts": newer},
 		}
-		require.Equal(t, "n2", freshestSide("commit_ts", "n1", row))
+		require.Equal(t, "n2", pickSide(t, "commit_ts", "n1", row))
 	})
 
 	t.Run("n1 newer", func(t *testing.T) {
@@ -43,7 +56,7 @@ func TestFreshestSide_CommitTsFromMeta(t *testing.T) {
 			n1Meta: map[string]any{"commit_ts": newer},
 			n2Meta: map[string]any{"commit_ts": older},
 		}
-		require.Equal(t, "n1", freshestSide("commit_ts", "n2", row))
+		require.Equal(t, "n1", pickSide(t, "commit_ts", "n2", row))
 	})
 }
 
@@ -58,7 +71,7 @@ func TestFreshestSide_CommitTsNullHandling(t *testing.T) {
 			n1Meta: map[string]any{},
 			n2Meta: map[string]any{"commit_ts": ts},
 		}
-		require.Equal(t, "n2", freshestSide("commit_ts", "n1", row))
+		require.Equal(t, "n2", pickSide(t, "commit_ts", "n1", row))
 	})
 
 	t.Run("only n1 has commit_ts -> n1", func(t *testing.T) {
@@ -66,7 +79,7 @@ func TestFreshestSide_CommitTsNullHandling(t *testing.T) {
 			n1Meta: map[string]any{"commit_ts": ts},
 			n2Meta: map[string]any{},
 		}
-		require.Equal(t, "n1", freshestSide("commit_ts", "n2", row))
+		require.Equal(t, "n1", pickSide(t, "commit_ts", "n2", row))
 	})
 
 	t.Run("neither has commit_ts -> tie", func(t *testing.T) {
@@ -74,7 +87,7 @@ func TestFreshestSide_CommitTsNullHandling(t *testing.T) {
 			n1Meta: map[string]any{},
 			n2Meta: map[string]any{},
 		}
-		require.Equal(t, "n2", freshestSide("commit_ts", "n2", row))
+		require.Equal(t, "n2", pickSide(t, "commit_ts", "n2", row))
 	})
 }
 
@@ -85,5 +98,5 @@ func TestFreshestSide_AppColumnFromRow(t *testing.T) {
 		n1Row: map[string]any{"updated_at": "2026-01-15T12:00:00-08:00"},
 		n2Row: map[string]any{"updated_at": "2026-01-15T13:00:00-08:00"},
 	}
-	require.Equal(t, "n2", freshestSide("updated_at", "n1", row))
+	require.Equal(t, "n2", pickSide(t, "updated_at", "n1", row))
 }

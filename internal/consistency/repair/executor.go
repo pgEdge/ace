@@ -15,9 +15,9 @@ import (
 	"fmt"
 	"reflect"
 	"strings"
-	"time"
 
 	"github.com/pgedge/ace/internal/consistency/repair/plan"
+	"github.com/pgedge/ace/internal/consistency/repair/plan/parser"
 	utils "github.com/pgedge/ace/pkg/common"
 	"github.com/pgedge/ace/pkg/types"
 )
@@ -71,9 +71,26 @@ func calculatePlanRepairSets(task *TableRepairTask) (*repairSets, error) {
 		if err != nil {
 			return nil, err
 		}
+		cmp := task.newComparer(p)
 
+		// The rules compare values on the server: all comparisons that the
+		// rules can need for the rows of the pair are computed first.
 		for _, d := range diffRows {
-			action, ruleName, err := resolvePlanAction(task, tablePlan, d)
+			if err := addRuleComparisons(task, tablePlan, d, cmp); err != nil {
+				return nil, err
+			}
+		}
+		if err := cmp.flush(); err != nil {
+			return nil, err
+		}
+
+		type resolved struct {
+			action   *planner.RepairPlanAction
+			ruleName string
+		}
+		actions := make([]resolved, len(diffRows))
+		for i, d := range diffRows {
+			action, ruleName, err := resolvePlanAction(task, tablePlan, d, cmp)
 			if err != nil {
 				return nil, err
 			}
@@ -83,7 +100,17 @@ func calculatePlanRepairSets(task *TableRepairTask) (*repairSets, error) {
 			if err := ensureActionCompatible(d, action); err != nil {
 				return nil, err
 			}
-			if err := applyPlanAction(d, action, ruleName, sets, task.planRuleMatches, task.planStaleChecks); err != nil {
+			if err := addFreshestComparisons(action, d, cmp); err != nil {
+				return nil, err
+			}
+			actions[i] = resolved{action, ruleName}
+		}
+		if err := cmp.flush(); err != nil {
+			return nil, err
+		}
+
+		for i, d := range diffRows {
+			if err := applyPlanAction(d, actions[i].action, actions[i].ruleName, sets, task.planRuleMatches, task.planStaleChecks, cmp); err != nil {
 				return nil, err
 			}
 		}
@@ -165,7 +192,35 @@ func computeChangedColumns(n1, n2 map[string]any) []string {
 	return changed
 }
 
-func resolvePlanAction(task *TableRepairTask, tablePlan planner.RepairTablePlan, row planDiffRow) (*planner.RepairPlanAction, string, error) {
+// addRuleComparisons queues the comparisons that the rules of tablePlan can
+// need for row: the pk_in ranges and the comparisons of the when
+// expressions.
+func addRuleComparisons(task *TableRepairTask, tablePlan planner.RepairTablePlan, row planDiffRow, cmp *comparer) error {
+	for _, rule := range tablePlan.Rules {
+		for _, c := range rangeComparisons(rule.PKIn, row.pkMap, task.Key, task.SimplePrimaryKey) {
+			if err := cmp.add(c); err != nil {
+				return err
+			}
+		}
+		if w := rule.CompiledWhen(); w != nil {
+			for _, c := range w.Comparisons(rowValues(row)) {
+				if err := cmp.add(c); err != nil {
+					return err
+				}
+			}
+		}
+	}
+	return nil
+}
+
+// rowValues returns the value provider of a when expression for row.
+func rowValues(row planDiffRow) parser.ValueProvider {
+	return func(source, column string) parser.Value {
+		return lookupValue(source, column, row)
+	}
+}
+
+func resolvePlanAction(task *TableRepairTask, tablePlan planner.RepairTablePlan, row planDiffRow, cmp *comparer) (*planner.RepairPlanAction, string, error) {
 	// Row overrides
 	for idx, override := range tablePlan.RowOverrides {
 		if pkMatchesOverride(task.Key, row.pkMap, override.PK) {
@@ -182,7 +237,11 @@ func resolvePlanAction(task *TableRepairTask, tablePlan planner.RepairTablePlan,
 
 	// Rules in order
 	for idx, rule := range tablePlan.Rules {
-		if !matchPKIn(rule.PKIn, row.pkMap, task.Key, task.SimplePrimaryKey) {
+		matched, err := matchPKIn(rule.PKIn, row.pkMap, task.Key, task.SimplePrimaryKey, cmp)
+		if err != nil {
+			return nil, "", err
+		}
+		if !matched {
 			continue
 		}
 		if len(rule.DiffTypes) > 0 && !containsString(rule.DiffTypes, row.diffType) {
@@ -192,9 +251,7 @@ func resolvePlanAction(task *TableRepairTask, tablePlan planner.RepairTablePlan,
 			continue
 		}
 		if rule.CompiledWhen() != nil {
-			ok, err := rule.CompiledWhen().Eval(func(source, column string) (any, bool) {
-				return lookupValue(source, column, row)
-			})
+			ok, err := rule.CompiledWhen().Eval(rowValues(row), cmp.compare)
 			if err != nil {
 				return nil, "", err
 			}
@@ -228,88 +285,88 @@ func resolvePlanAction(task *TableRepairTask, tablePlan planner.RepairTablePlan,
 	return nil, "", fmt.Errorf("no default action configured in repair plan")
 }
 
-func pkMatchesOverride(pkOrder []string, rowPk map[string]any, overridePk map[string]any) bool {
+// pkMatchesOverride reports whether the key of a row is the key of an
+// override: the text of every key column is the same, byte for byte.
+func pkMatchesOverride(pkOrder []string, rowPk map[string]any, overridePk map[string]planner.PlanValue) bool {
 	if len(overridePk) != len(pkOrder) {
 		return false
 	}
-
-	equal := func(a, b any) bool {
-		if cmp, ok := utils.CompareNumeric(a, b); ok {
-			return cmp == 0
-		}
-		return reflect.DeepEqual(a, b)
-	}
-
 	for _, col := range pkOrder {
-		if !equal(rowPk[col], overridePk[col]) {
+		ov, ok := overridePk[col]
+		if !ok || !ov.Valid {
+			return false
+		}
+		text, ok := valueText(rowPk[col])
+		if !ok || text != ov.Text {
 			return false
 		}
 	}
 	return true
 }
 
-func matchPKIn(matchers []planner.RepairPKMatcher, rowPk map[string]any, pkOrder []string, simple bool) bool {
+// matchPKIn reports whether the key of a row matches one of the matchers. An
+// equals key matches when its text is the key text, byte for byte. A range
+// of a one-column key matches when from <= key <= to with the type of the
+// key column; the comparer must have computed these comparisons before.
+func matchPKIn(matchers []planner.RepairPKMatcher, rowPk map[string]any, pkOrder []string, simple bool, cmp *comparer) (bool, error) {
 	if len(matchers) == 0 {
-		return true
+		return true, nil
 	}
-
-	equal := func(a, b any) bool {
-		if cmp, ok := utils.CompareNumeric(a, b); ok {
-			return cmp == 0
-		}
-		return reflect.DeepEqual(a, b)
-	}
-
 	for _, m := range matchers {
-		if simple {
-			val := rowPk[pkOrder[0]]
-			for _, eq := range m.Equals {
-				if equal(eq, val) {
-					return true
+		for _, eq := range m.Equals {
+			if simple == eq.List || len(eq.Values) != len(pkOrder) {
+				continue
+			}
+			all := true
+			for i, col := range pkOrder {
+				text, ok := valueText(rowPk[col])
+				if !ok || !eq.Values[i].Valid || text != eq.Values[i].Text {
+					all = false
+					break
 				}
 			}
-			if m.Range != nil {
-				if compareRange(val, m.Range.From, m.Range.To) {
-					return true
-				}
+			if all {
+				return true, nil
 			}
-		} else {
-			// Composite PK: support equals with tuple order
-			for _, eq := range m.Equals {
-				tuple, ok := eq.([]any)
-				if !ok || len(tuple) != len(pkOrder) {
-					continue
+		}
+		if simple && m.Range != nil {
+			in := true
+			for _, c := range rangeComparisons([]planner.RepairPKMatcher{m}, rowPk, pkOrder, simple) {
+				ok, err := cmp.compare(c)
+				if err != nil {
+					return false, err
 				}
-				all := true
-				for i, col := range pkOrder {
-					if !equal(rowPk[col], tuple[i]) {
-						all = false
-						break
-					}
-				}
-				if all {
-					return true
-				}
+				in = in && ok
+			}
+			if in {
+				return true, nil
 			}
 		}
 	}
-	return false
+	return false, nil
 }
 
-func compareRange(val, from, to any) bool {
-	cmpFrom, okFrom := utils.CompareNumeric(val, from)
-	cmpTo, okTo := utils.CompareNumeric(val, to)
-	if okFrom && okTo {
-		return cmpFrom >= 0 && cmpTo <= 0
+// rangeComparisons returns the comparisons from <= key and key <= to of the
+// ranges of matchers, for a one-column key.
+func rangeComparisons(matchers []planner.RepairPKMatcher, rowPk map[string]any, pkOrder []string, simple bool) []parser.Comparison {
+	if !simple || len(pkOrder) != 1 {
+		return nil
 	}
-
-	ls, lsok := val.(string)
-	fs, fsok := from.(string)
-	ts, tsok := to.(string)
-	if lsok && fsok && tsok {
-		return ls >= fs && ls <= ts
+	col := pkOrder[0]
+	key, ok := valueText(rowPk[col])
+	if !ok {
+		return nil
 	}
-	return false
+	var out []parser.Comparison
+	for _, m := range matchers {
+		if m.Range == nil || m.Range.From == nil || m.Range.To == nil {
+			continue
+		}
+		out = append(out,
+			parser.Comparison{Op: "<=", Left: m.Range.From.Text, Right: key, RightColumn: col},
+			parser.Comparison{Op: "<=", Left: key, LeftColumn: col, Right: m.Range.To.Text})
+	}
+	return out
 }
 
 func columnsIntersect(a, b []string) bool {
@@ -386,7 +443,7 @@ func recordPlanStaleCheck(staleChecks map[string]map[string]planStaleCheck, node
 // applyPlanAction adds the row operations of action for one diff row to
 // sets. A row goes to a node as an UPDATE if the node had the row at diff
 // time, and as an INSERT if it did not.
-func applyPlanAction(row planDiffRow, action *planner.RepairPlanAction, ruleName string, sets *repairSets, matches map[string]map[string]string, staleChecks map[string]map[string]planStaleCheck) error {
+func applyPlanAction(row planDiffRow, action *planner.RepairPlanAction, ruleName string, sets *repairSets, matches map[string]map[string]string, staleChecks map[string]map[string]planStaleCheck, cmp *comparer) error {
 	switch action.Type {
 	case planner.RepairActionKeepN1:
 		if row.n1Row == nil {
@@ -447,7 +504,7 @@ func applyPlanAction(row planDiffRow, action *planner.RepairPlanAction, ruleName
 			return fmt.Errorf("bidirectional needs a row on one node only (pk %s)", row.pkStr)
 		}
 	case planner.RepairActionCustom:
-		customRow, err := buildCustomRow(action, row)
+		customRow, err := buildCustomRow(action, row, cmp)
 		if err != nil {
 			return err
 		}
@@ -510,42 +567,46 @@ func extractSpockMeta(row map[string]any) map[string]any {
 	return meta
 }
 
-func lookupValue(source, column string, row planDiffRow) (any, bool) {
+// lookupValue returns the value of a column of the row of source ("n1" or
+// "n2"): a column of the table, or a column of the spock metadata of the
+// row. A column that the row does not have is NULL.
+func lookupValue(source, column string, row planDiffRow) parser.Value {
+	var data, meta map[string]any
 	switch source {
 	case "n1":
-		if row.n1Row != nil {
-			if v, ok := row.n1Row[column]; ok {
-				return v, true
-			}
-		}
-		if row.n1Meta != nil {
-			if v, ok := row.n1Meta[column]; ok {
-				return v, true
-			}
-		}
+		data, meta = row.n1Row, row.n1Meta
 	case "n2":
-		if row.n2Row != nil {
-			if v, ok := row.n2Row[column]; ok {
-				return v, true
-			}
-		}
-		if row.n2Meta != nil {
-			if v, ok := row.n2Meta[column]; ok {
-				return v, true
-			}
-		}
+		data, meta = row.n2Row, row.n2Meta
+	default:
+		return parser.Value{Null: true}
 	}
-	return nil, false
+	v, ok := data[column]
+	if !ok {
+		v = meta[column]
+	}
+	text, ok := valueText(v)
+	if !ok {
+		return parser.Value{Null: true}
+	}
+	return parser.Value{Text: text}
 }
 
+// lookupTemplate returns the value of a template {{n1.col}} or {{n2.col}},
+// and false if inner is not such a template.
 func lookupTemplate(inner string, row planDiffRow) (any, bool) {
 	parts := strings.Split(inner, ".")
 	if len(parts) != 2 {
 		return nil, false
 	}
 	source := strings.ToLower(strings.TrimSpace(parts[0]))
-	col := strings.TrimSpace(parts[1])
-	return lookupValue(source, col, row)
+	if source != "n1" && source != "n2" {
+		return nil, false
+	}
+	v := lookupValue(source, strings.TrimSpace(parts[1]), row)
+	if v.Null {
+		return nil, true
+	}
+	return v.Text, true
 }
 
 func validateActionCompatibility(action *planner.RepairPlanAction, row planDiffRow) error {
@@ -583,7 +644,11 @@ func validateActionCompatibility(action *planner.RepairPlanAction, row planDiffR
 	return nil
 }
 
-func buildCustomRow(action *planner.RepairPlanAction, row planDiffRow) (map[string]any, error) {
+// buildCustomRow returns the row that a custom action writes: the values of
+// custom_row, then the columns that coalesce_priority and pick_freshest
+// fill, then the key of the row. A value of custom_row is its text, NULL, or
+// the value of a template {{n1.col}} or {{n2.col}}.
+func buildCustomRow(action *planner.RepairPlanAction, row planDiffRow, cmp *comparer) (map[string]any, error) {
 	if action.CustomRow == nil && action.CustomHelpers == nil {
 		return nil, fmt.Errorf("custom action missing custom_row or helpers (pk %s)", row.pkStr)
 	}
@@ -602,21 +667,16 @@ func buildCustomRow(action *planner.RepairPlanAction, row planDiffRow) (map[stri
 				continue
 			}
 			for _, src := range action.CustomHelpers.CoalescePriority {
+				var data map[string]any
 				switch src {
 				case "n1":
-					if row.n1Row != nil {
-						if val, ok := row.n1Row[col]; ok && val != nil {
-							result[col] = val
-							break
-						}
-					}
+					data = row.n1Row
 				case "n2":
-					if row.n2Row != nil {
-						if val, ok := row.n2Row[col]; ok && val != nil {
-							result[col] = val
-							break
-						}
-					}
+					data = row.n2Row
+				}
+				if val, ok := data[col]; ok && val != nil {
+					result[col] = val
+					break
 				}
 			}
 		}
@@ -625,7 +685,10 @@ func buildCustomRow(action *planner.RepairPlanAction, row planDiffRow) (map[stri
 	// pick_freshest helper backfills remaining columns from the chosen side.
 	if action.CustomHelpers != nil && action.CustomHelpers.PickFreshest != nil {
 		pick := action.CustomHelpers.PickFreshest
-		winner := freshestSide(pick.Key, pick.Tie, row)
+		winner, err := freshestSide(pick.Key, pick.Tie, row, cmp)
+		if err != nil {
+			return nil, err
+		}
 		var source map[string]any
 		switch winner {
 		case "n1":
@@ -633,11 +696,9 @@ func buildCustomRow(action *planner.RepairPlanAction, row planDiffRow) (map[stri
 		case "n2":
 			source = row.n2Row
 		}
-		if source != nil {
-			for col, val := range source {
-				if _, exists := result[col]; !exists {
-					result[col] = val
-				}
+		for col, val := range source {
+			if _, exists := result[col]; !exists {
+				result[col] = val
 			}
 		}
 	}
@@ -652,19 +713,20 @@ func buildCustomRow(action *planner.RepairPlanAction, row planDiffRow) (map[stri
 	return result, nil
 }
 
-func substituteValue(val any, row planDiffRow) any {
-	s, ok := val.(string)
-	if !ok {
-		return val
+// substituteValue returns the value of one column of custom_row: NULL, the
+// value of a template, or the text of the plan.
+func substituteValue(v planner.PlanValue, row planDiffRow) any {
+	if !v.Valid {
+		return nil
 	}
-	str := strings.TrimSpace(s)
+	str := strings.TrimSpace(v.Text)
 	if strings.HasPrefix(str, "{{") && strings.HasSuffix(str, "}}") {
 		inner := strings.TrimSpace(strings.TrimSuffix(strings.TrimPrefix(str, "{{"), "}}"))
 		if val, ok := lookupTemplate(inner, row); ok {
 			return val
 		}
 	}
-	return val
+	return v.Text
 }
 
 func unionKeys(maps ...map[string]any) map[string]struct{} {
@@ -677,61 +739,68 @@ func unionKeys(maps ...map[string]any) map[string]struct{} {
 	return out
 }
 
-func freshestSide(key string, tie string, row planDiffRow) string {
-	// Resolve the key via lookupValue so it works for both ordinary data
-	// columns (in n1Row/n2Row) and spock metadata like commit_ts, which the
-	// executor strips from the row and keeps in n1Meta/n2Meta.
-	k1, _ := lookupValue("n1", key, row)
-	k2, _ := lookupValue("n2", key, row)
-	n1Ok := k1 != nil
-	n2Ok := k2 != nil
-	if !n1Ok && n2Ok {
-		return "n2"
+// freshestComparisons returns the comparisons that pick_freshest needs for
+// row: whether the key value of n1 is greater, and whether it is less, than
+// the one of n2. With a NULL side no comparison is needed.
+func freshestComparisons(key string, row planDiffRow) []parser.Comparison {
+	k1 := lookupValue("n1", key, row)
+	k2 := lookupValue("n2", key, row)
+	if k1.Null || k2.Null {
+		return nil
 	}
-	if n1Ok && !n2Ok {
-		return "n1"
+	return []parser.Comparison{
+		{Op: ">", Left: k1.Text, LeftColumn: key, Right: k2.Text, RightColumn: key},
+		{Op: "<", Left: k1.Text, LeftColumn: key, Right: k2.Text, RightColumn: key},
 	}
-	if !n1Ok && !n2Ok {
-		return strings.TrimSpace(strings.ToLower(tie))
-	}
+}
 
-	if cmp, ok := utils.CompareNumeric(k1, k2); ok {
-		if cmp > 0 {
-			return "n1"
-		} else if cmp < 0 {
-			return "n2"
-		}
-		return strings.TrimSpace(strings.ToLower(tie))
+// addFreshestComparisons queues the comparisons of pick_freshest, if action
+// has it.
+func addFreshestComparisons(action *planner.RepairPlanAction, row planDiffRow, cmp *comparer) error {
+	if action.Type != planner.RepairActionCustom || action.CustomHelpers == nil || action.CustomHelpers.PickFreshest == nil {
+		return nil
 	}
-
-	if s1, ok := k1.(string); ok {
-		if s2, ok2 := k2.(string); ok2 {
-			if s1 > s2 {
-				return "n1"
-			} else if s2 > s1 {
-				return "n2"
-			}
-			return strings.TrimSpace(strings.ToLower(tie))
+	for _, c := range freshestComparisons(action.CustomHelpers.PickFreshest.Key, row) {
+		if err := cmp.add(c); err != nil {
+			return err
 		}
 	}
+	return nil
+}
 
-	// Try parsing timestamps if values are strings
-	if s1, ok := k1.(string); ok {
-		if s2, ok2 := k2.(string); ok2 {
-			if t1, err1 := time.Parse(time.RFC3339, s1); err1 == nil {
-				if t2, err2 := time.Parse(time.RFC3339, s2); err2 == nil {
-					if t1.After(t2) {
-						return "n1"
-					} else if t2.After(t1) {
-						return "n2"
-					}
-					return strings.TrimSpace(strings.ToLower(tie))
-				}
-			}
-		}
+// freshestSide returns the side whose value of the key column is greater, with
+// the type of the column. The key can be a column of the table, such as an
+// application timestamp, or commit_ts of the spock metadata. A side with a
+// value wins over a side with NULL; with two NULLs or two equal values the
+// tie side wins.
+func freshestSide(key string, tie string, row planDiffRow, cmp *comparer) (string, error) {
+	tie = strings.TrimSpace(strings.ToLower(tie))
+	k1 := lookupValue("n1", key, row)
+	k2 := lookupValue("n2", key, row)
+	switch {
+	case k1.Null && k2.Null:
+		return tie, nil
+	case k1.Null:
+		return "n2", nil
+	case k2.Null:
+		return "n1", nil
 	}
-
-	return strings.TrimSpace(strings.ToLower(tie))
+	cs := freshestComparisons(key, row)
+	gt, err := cmp.compare(cs[0])
+	if err != nil {
+		return "", err
+	}
+	if gt {
+		return "n1", nil
+	}
+	lt, err := cmp.compare(cs[1])
+	if err != nil {
+		return "", err
+	}
+	if lt {
+		return "n2", nil
+	}
+	return tie, nil
 }
 
 func ensureActionCompatible(row planDiffRow, action *planner.RepairPlanAction) error {
