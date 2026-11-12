@@ -25,10 +25,9 @@ import (
 )
 
 // TestMtreeNumericPrimaryKeyDiff checks that mtree table-diff finds a changed
-// row and a deleted row in a table with a numeric primary key, where n1 keeps
-// the keys with trailing zeros and n2 without them. The rows of a mismatched
-// block are matched by the text of the key, so the type of the key does not
-// matter.
+// row and a deleted row in a table with a numeric primary key whose keys have
+// trailing zeros. The rows of a mismatched block are matched by the text of
+// the key, so the type of the key does not matter.
 //
 // The test uses one block: the order of numeric block bounds in Go is a
 // separate, known limit, and with one block there is nothing to order.
@@ -60,12 +59,11 @@ func TestMtreeNumericPrimaryKeyDiff(t *testing.T) {
 		}
 	})
 
-	// n1 stores the keys with two digits after the point, n2 without the
-	// trailing zero: 0.50 and 0.5 are one key.
-	_, err := env.N1Pool.Exec(ctx, "INSERT INTO "+safe+" SELECT round(g / 2.0, 2), 'same' FROM generate_series(1, 200) g") // nosemgrep
-	require.NoError(t, err)
-	_, err = env.N2Pool.Exec(ctx, "INSERT INTO "+safe+" SELECT trim_scale(round(g / 2.0, 2)), 'same' FROM generate_series(1, 200) g") // nosemgrep
-	require.NoError(t, err)
+	// Both nodes store the keys with two digits after the point: 0.50, 1.00.
+	for _, pool := range pools {
+		_, err := pool.Exec(ctx, "INSERT INTO "+safe+" SELECT round(g / 2.0, 2), 'same' FROM generate_series(1, 200) g") // nosemgrep
+		require.NoError(t, err)
+	}
 
 	task := env.newMerkleTreeTask(t, qualified, []string{env.ServiceN1, env.ServiceN2})
 	task.BlockSize = 1000

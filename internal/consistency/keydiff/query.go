@@ -36,7 +36,7 @@ func (t Table) qualifiedName() string {
 // rowHashExpr is the first rowHashSize bytes of the row hash of the block
 // hash.
 func (t Table) rowHashExpr() (string, error) {
-	h, err := queries.RowHashExpr("", t.Cols, t.HashTypes)
+	h, err := queries.RowHashExpr("", t.Cols)
 	if err != nil {
 		return "", err
 	}
@@ -44,9 +44,8 @@ func (t Table) rowHashExpr() (string, error) {
 }
 
 // keyQuery returns the query that lists, for every row of the block, the text
-// of each key column and the row hash. A numeric key column goes through
-// trim_scale(), as in the row hash, so that 1.50 and 1.5 give the same text.
-// The query has no ORDER BY: the client does not need any order.
+// of each key column and the row hash. The query has no ORDER BY: the client
+// does not need any order.
 func (t Table) keyQuery(where string) (string, error) {
 	if len(t.Key) == 0 {
 		return "", fmt.Errorf("table %s has no primary key", t.qualifiedName())
@@ -57,7 +56,7 @@ func (t Table) keyQuery(where string) (string, error) {
 	}
 	exprs := make([]string, 0, len(t.Key)+1)
 	for _, k := range t.Key {
-		exprs = append(exprs, queries.ColExpr("", k, t.HashTypes[k]))
+		exprs = append(exprs, queries.ColExpr("", k))
 	}
 	exprs = append(exprs, h)
 	if strings.TrimSpace(where) == "" {
@@ -101,10 +100,9 @@ func (t Table) keyQueryFormats() pgx.QueryResultFormats {
 // equal but prints in a different way, such as -0 and 0 in a float column,
 // therefore never find the same row: each text finds only the row that
 // printed it, and the two rows are reported as rows of one node only.
-// The printed expression must be the same as in the key query, trim_scale()
-// included, or a numeric key never matches its own text. A ::text cast must
-// not replace format(): for bpchar, boolean and inet it is not the output of
-// the type.
+// The printed expression must be the same as in the key query, or a key
+// never matches its own text. A ::text cast must not replace format(): for
+// bpchar, boolean and inet it is not the output of the type.
 //
 // filter, if not empty, is added to the WHERE clause of the lookup as it is.
 func (t Table) ReadQuery(colTypes, castTypes map[string]string, filter string) (string, error) {
@@ -131,7 +129,7 @@ func (t Table) ReadQuery(colTypes, castTypes map[string]string, filter string) (
 	}
 	for i, k := range t.Key {
 		conds = append(conds, fmt.Sprintf(`format('%%s', %s) COLLATE "C" = %s.%s%d`,
-			queries.ColExpr("", k, t.HashTypes[k]), keysAlias, keyColAlias, i+1))
+			queries.ColExpr("", k), keysAlias, keyColAlias, i+1))
 	}
 	if f := strings.TrimSpace(filter); f != "" {
 		conds = append(conds, "("+f+")")

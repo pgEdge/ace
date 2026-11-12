@@ -389,9 +389,9 @@ That conversion loses information in three ways, and ACE has hit all three:
   which is why this shows up as quietly missing rows rather than as an error.
 - **Identity.** Postgres can treat two values as equal where Go sees two
   different ones. In `numeric`, `1.5` and `1.50` are the same value for the
-  database, but the driver returns two different `(digits, exponent)` pairs. Row
-  hashing already handles this, because it casts through `trim_scale(...)::text`.
-  Bounds do not go through that cast.
+  database, but the driver returns two different `(digits, exponent)` pairs.
+  Row hashing compares the text of the values, so for it these are two
+  different values in any case. Bounds are compared as values, not as text.
 
 So a Merkle tree only works over a primary key whose values ACE can sort and
 rebuild correctly outside the database:
