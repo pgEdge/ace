@@ -40,9 +40,10 @@ func keydiffExec(t *testing.T, ctx context.Context, env *testEnv, pool *pgxpool.
 	})
 }
 
-// keydiffTable reads the columns, the key and the column types of the table
-// on both nodes.
-func keydiffTable(t *testing.T, ctx context.Context, env *testEnv, table string) (keydiff.Table, map[string]string, map[string]string) {
+// keydiffTable reads the columns and the key of the table on n1, and returns
+// the sides of n1 and n2 with the column types and the cast types of each
+// node.
+func keydiffTable(t *testing.T, ctx context.Context, env *testEnv, table string) (keydiff.Table, keydiff.Side, keydiff.Side) {
 	t.Helper()
 	cols, types1, err := queries.GetColumns(ctx, env.N1Pool, testSchema, table)
 	require.NoError(t, err)
@@ -50,7 +51,13 @@ func keydiffTable(t *testing.T, ctx context.Context, env *testEnv, table string)
 	require.NoError(t, err)
 	types2, err := queries.GetColumnTypes(ctx, env.N2Pool, testSchema, table)
 	require.NoError(t, err)
-	return keydiff.Table{Schema: testSchema, Name: table, Key: key, Cols: cols, HashTypes: types1}, types1, types2
+	cast1, err := queries.GetCastTypes(ctx, env.N1Pool, testSchema, table)
+	require.NoError(t, err)
+	cast2, err := queries.GetCastTypes(ctx, env.N2Pool, testSchema, table)
+	require.NoError(t, err)
+	return keydiff.Table{Schema: testSchema, Name: table, Key: key, Cols: cols, HashTypes: types1},
+		keydiff.Side{Name: env.ServiceN1, Conn: env.N1Pool, ColTypes: types1, CastTypes: cast1},
+		keydiff.Side{Name: env.ServiceN2, Conn: env.N2Pool, ColTypes: types2, CastTypes: cast2}
 }
 
 // keydiffChanged is a changed row that a comparison found.
@@ -94,10 +101,9 @@ func compareRows(ctx context.Context, tbl keydiff.Table, block keydiff.Block, s1
 
 func keydiffCompare(t *testing.T, ctx context.Context, env *testEnv, table string, o keydiff.Options) (keydiffRows, error) {
 	t.Helper()
-	tbl, types1, types2 := keydiffTable(t, ctx, env, table)
+	tbl, s1, s2 := keydiffTable(t, ctx, env, table)
 	return compareRows(ctx, tbl, keydiff.Block{Where: "TRUE"},
-		keydiff.Side{Name: env.ServiceN1, Conn: env.N1Pool, ColTypes: types1},
-		keydiff.Side{Name: env.ServiceN2, Conn: env.N2Pool, ColTypes: types2},
+		s1, s2,
 		o)
 }
 
@@ -274,11 +280,10 @@ func TestKeyDiffCompositeKey(t *testing.T) {
 		fmt.Sprintf("DELETE FROM %s WHERE a = 30 AND b = 'k1'", ident),
 		fmt.Sprintf("UPDATE %s SET v = 'outside' WHERE a = 90", ident))
 
-	tbl, types1, types2 := keydiffTable(t, ctx, env, table)
+	tbl, s1, s2 := keydiffTable(t, ctx, env, table)
 	block := keydiff.Block{Where: "ROW(a, b) >= ROW($1, $2) AND ROW(a, b) < ROW($3, $4)", Args: []any{10, "k0", 50, "k0"}}
 	res, err := compareRows(ctx, tbl, block,
-		keydiff.Side{Name: env.ServiceN1, Conn: env.N1Pool, ColTypes: types1},
-		keydiff.Side{Name: env.ServiceN2, Conn: env.N2Pool, ColTypes: types2},
+		s1, s2,
 		keydiff.Options{})
 	require.NoError(t, err)
 	require.Len(t, res.Changed, 1)
@@ -301,9 +306,9 @@ func TestKeyDiffBuildSide(t *testing.T) {
 	keydiffExec(t, ctx, env, env.N1Pool, fmt.Sprintf("INSERT INTO %s SELECT g, 'v' FROM generate_series(1, 100) g", ident))
 	keydiffExec(t, ctx, env, env.N2Pool, fmt.Sprintf("INSERT INTO %s SELECT g, 'v' FROM generate_series(1, 90) g", ident))
 
-	tbl, types1, types2 := keydiffTable(t, ctx, env, table)
-	s1 := keydiff.Side{Name: env.ServiceN1, Conn: env.N1Pool, ColTypes: types1, Rows: 100, RowsKnown: true}
-	s2 := keydiff.Side{Name: env.ServiceN2, Conn: env.N2Pool, ColTypes: types2, Rows: 90, RowsKnown: true}
+	tbl, s1, s2 := keydiffTable(t, ctx, env, table)
+	s1.Rows, s1.RowsKnown = 100, true
+	s2.Rows, s2.RowsKnown = 90, true
 	res, err := compareRows(ctx, tbl, keydiff.Block{Where: "TRUE"}, s1, s2, keydiff.Options{})
 	require.NoError(t, err)
 	require.Equal(t, env.ServiceN2, res.BuildNode)
@@ -335,13 +340,12 @@ func TestKeyDiffInheritance(t *testing.T) {
 	}
 	keydiffExec(t, ctx, env, env.N2Pool, fmt.Sprintf("DELETE FROM ONLY %s WHERE id = 1", cIdent))
 
-	tbl, types1, types2 := keydiffTable(t, ctx, env, parent)
+	tbl, s1, s2 := keydiffTable(t, ctx, env, parent)
 	for _, scan := range []bool{false, true} {
 		for _, batch := range []int{0, 1, 2} {
 			tbl.ScanChildren = scan
 			res, err := compareRows(ctx, tbl, keydiff.Block{Where: "TRUE"},
-				keydiff.Side{Name: env.ServiceN1, Conn: env.N1Pool, ColTypes: types1},
-				keydiff.Side{Name: env.ServiceN2, Conn: env.N2Pool, ColTypes: types2},
+				s1, s2,
 				keydiff.Options{BatchSize: batch})
 			require.NoError(t, err)
 			require.Equal(t, []string{"c1"}, columnValues(t, res.Only1, "v"), "scan %v, batch %d", scan, batch)
@@ -367,16 +371,54 @@ func TestKeyDiffReadFilter(t *testing.T) {
 	}
 	keydiffExec(t, ctx, env, env.N2Pool, fmt.Sprintf("UPDATE %s SET status = 'closed' WHERE id = 7", ident))
 
-	tbl, types1, types2 := keydiffTable(t, ctx, env, table)
+	tbl, s1, s2 := keydiffTable(t, ctx, env, table)
 	filter := `"status" = 'open'`
 	res, err := compareRows(ctx, tbl, keydiff.Block{Where: filter, ReadFilter: filter},
-		keydiff.Side{Name: env.ServiceN1, Conn: env.N1Pool, ColTypes: types1},
-		keydiff.Side{Name: env.ServiceN2, Conn: env.N2Pool, ColTypes: types2},
+		s1, s2,
 		keydiff.Options{})
 	require.NoError(t, err)
 	require.Equal(t, []string{"v7"}, columnValues(t, res.Only1, "v"))
 	require.Empty(t, res.Only2)
 	require.Empty(t, res.Changed, "without the filter in the row read, row 7 would be a changed row")
+}
+
+// TestKeyDiffKeyOfAnotherTypmod checks the row read when a key column has a
+// smaller type modifier on n2 than on n1. A key of n1 that does not fit the
+// type of n2 must find no row there: a cast to numeric(5,2) would fail on
+// 12345.67, and a cast to varchar(3) would cut 'abcd' to the key of another
+// row.
+func TestKeyDiffKeyOfAnotherTypmod(t *testing.T) {
+	ctx := context.Background()
+	env := newSpockEnv()
+	for _, tc := range []struct {
+		name  string
+		typ1  string
+		typ2  string
+		same  string
+		only1 string
+	}{
+		{"numeric", "numeric(7,2)", "numeric(5,2)", "1.50", "12345.67"},
+		{"varchar", "varchar(10)", "varchar(3)", "abc", "abcd"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			table := "keydiff_typmod_" + tc.name
+			ident := pgx.Identifier{testSchema, table}.Sanitize()
+			dropOnBoth(t, ctx, env, "TABLE IF EXISTS "+ident)
+			keydiffExec(t, ctx, env, env.N1Pool,
+				fmt.Sprintf("CREATE TABLE %s (k %s PRIMARY KEY, v text)", ident, tc.typ1),
+				fmt.Sprintf("INSERT INTO %s VALUES ('%s', 'same'), ('%s', 'n1')", ident, tc.same, tc.only1))
+			keydiffExec(t, ctx, env, env.N2Pool,
+				fmt.Sprintf("CREATE TABLE %s (k %s PRIMARY KEY, v text)", ident, tc.typ2),
+				fmt.Sprintf("INSERT INTO %s VALUES ('%s', 'same')", ident, tc.same))
+
+			tbl, s1, s2 := keydiffTable(t, ctx, env, table)
+			res, err := compareRows(ctx, tbl, keydiff.Block{Where: "TRUE"}, s1, s2, keydiff.Options{})
+			require.NoError(t, err)
+			require.Equal(t, []string{"n1"}, columnValues(t, res.Only1, "v"))
+			require.Empty(t, res.Only2)
+			require.Empty(t, res.Changed)
+		})
+	}
 }
 
 // TestKeyDiffMemoryLimit checks the memory limit before and during the
@@ -398,15 +440,15 @@ func TestKeyDiffMemoryLimit(t *testing.T) {
 	}
 	keydiffExec(t, ctx, env, env.N2Pool, fmt.Sprintf("UPDATE %s SET v = -v WHERE v = 1", ident))
 
-	tbl, types1, types2 := keydiffTable(t, ctx, env, table)
+	tbl, s1, s2 := keydiffTable(t, ctx, env, table)
 	o := keydiff.Options{MaxMemory: 1 << 20}
 
 	// Before the build: from the row count and the statistics.
 	width, err := keydiff.KeyWidth(ctx, env.N1Pool, testSchema, table, tbl.Key)
 	require.NoError(t, err)
 	require.Greater(t, width, int64(0))
-	s1 := keydiff.Side{Name: env.ServiceN1, Conn: env.N1Pool, ColTypes: types1, Rows: 1000, RowsKnown: true, KeyWidth: width}
-	s2 := keydiff.Side{Name: env.ServiceN2, Conn: env.N2Pool, ColTypes: types2, Rows: 1000, RowsKnown: true, KeyWidth: width}
+	s1.Rows, s1.RowsKnown, s1.KeyWidth = 1000, true, width
+	s2.Rows, s2.RowsKnown, s2.KeyWidth = 1000, true, width
 	_, err = compareRows(ctx, tbl, keydiff.Block{Where: "TRUE"}, s1, s2, o)
 	var me *keydiff.MemoryLimitError
 	require.True(t, errors.As(err, &me), "got %v", err)
@@ -552,7 +594,9 @@ func TestKeyDiffReadUsesIndex(t *testing.T) {
 			require.NoError(t, err)
 			tbl := keydiff.Table{Schema: testSchema, Name: table, Key: key, Cols: cols, HashTypes: types1,
 				ScanChildren: tc.scanChildren}
-			q, err := tbl.ReadQuery(types1, "")
+			cast1, err := queries.GetCastTypes(ctx, env.N1Pool, testSchema, table)
+			require.NoError(t, err)
+			q, err := tbl.ReadQuery(types1, cast1, "")
 			require.NoError(t, err)
 
 			ids := make([]string, keys)

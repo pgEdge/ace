@@ -374,10 +374,10 @@ func TestNodeColTypes(t *testing.T) {
 	m := &MerkleTreeTask{}
 	m.ColTypes = map[string]map[string]string{}
 	key := []string{"id"}
-	if err := m.addNodeColTypes("n1", map[string]string{"id": "integer", "v": "text"}, key); err != nil {
+	if err := m.addNodeColTypes("n1", map[string]string{"id": "integer", "v": "text"}, nil, key); err != nil {
 		t.Fatal(err)
 	}
-	if err := m.addNodeColTypes("n2", map[string]string{"id": "integer", "v": "jsonb"}, key); err != nil {
+	if err := m.addNodeColTypes("n2", map[string]string{"id": "integer", "v": "jsonb"}, nil, key); err != nil {
 		t.Fatal(err)
 	}
 	if got := m.nodeColTypes("n2")["v"]; got != "jsonb" {
@@ -394,11 +394,11 @@ func TestNodeNameDoesNotReplaceReferenceTypes(t *testing.T) {
 	m := &MerkleTreeTask{}
 	m.ColTypes = map[string]map[string]string{}
 	key := []string{"id"}
-	if err := m.addNodeColTypes("n1", map[string]string{"id": "integer", "v": "text"}, key); err != nil {
+	if err := m.addNodeColTypes("n1", map[string]string{"id": "integer", "v": "text"}, nil, key); err != nil {
 		t.Fatal(err)
 	}
 	for _, name := range []string{"_ref", "ref", ""} {
-		err := m.addNodeColTypes(name, map[string]string{"id": "bigint", "v": "text"}, key)
+		err := m.addNodeColTypes(name, map[string]string{"id": "bigint", "v": "text"}, nil, key)
 		if err == nil || !strings.Contains(err.Error(), "primary key column") {
 			t.Errorf("node %q with another key type: got %v, want a key type error", name, err)
 		}
