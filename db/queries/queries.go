@@ -894,6 +894,48 @@ func GetColumnTypes(ctx context.Context, db DBQuerier, schema, table string) (ma
 	return types, nil
 }
 
+// GetCastTypes returns, for each column of schema.table, the type that ACE
+// casts a text value of the column to when it sends the value to the server:
+// the type of the column without its type modifier, or, for a domain, the
+// base type of the domain without a modifier.
+//
+// A cast to a type with a modifier can change a value without an error:
+// 'abcd'::varchar(3) is 'abc' and 12.345::numeric(5,2) is 12.35. A key cast
+// in this way can find another row. Without the modifier the value stays as
+// it is, and the comparison with the column is exact. A domain has the
+// modifier of its base type, so it is cast to the base type.
+//
+// The type is printed by format_type with the modifier -1, not NULL: for
+// character and bit, NULL gives "character" and "bit", which mean
+// character(1) and bit(1), while -1 gives bpchar and "bit" with no length.
+func GetCastTypes(ctx context.Context, db DBQuerier, schema, table string) (map[string]string, error) {
+	sql, err := RenderSQL(SQLTemplates.GetCastTypes, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to render GetCastTypes SQL: %w", err)
+	}
+	rows, err := db.Query(ctx, sql, schema, table)
+	if err != nil {
+		return nil, fmt.Errorf("query to get cast types failed for %s.%s: %w", schema, table, err)
+	}
+	defer rows.Close()
+
+	types := make(map[string]string)
+	for rows.Next() {
+		var col, typ string
+		if err := rows.Scan(&col, &typ); err != nil {
+			return nil, fmt.Errorf("failed to scan cast type: %w", err)
+		}
+		types[col] = typ
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("error iterating over cast types: %w", err)
+	}
+	if len(types) == 0 {
+		return nil, fmt.Errorf("could not fetch cast types for %s.%s", schema, table)
+	}
+	return types, nil
+}
+
 // TODO: add Spock privilege checks.
 func CheckUserPrivileges(ctx context.Context, db DBQuerier, username, schema, table string) (*types.UserPrivileges, error) {
 	sql, err := RenderSQL(SQLTemplates.CheckUserPrivileges, nil)

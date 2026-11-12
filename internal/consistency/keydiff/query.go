@@ -82,10 +82,14 @@ func (t Table) keyQueryFormats() pgx.QueryResultFormats {
 // Its parameters are one text[] for each key column, all of the same length:
 // element i of each array is the text of key i.
 //
-// Each key is cast back to the type of the column on this node and looked up
-// in a LATERAL subquery. OFFSET 0 stops the planner from turning the
-// subquery into a join, so the plan is a nested loop with one lookup for each
-// key, however many keys there are. The lookup has an equality on every
+// Each key is cast back to the type of the column on this node, without the
+// type modifier (castTypes), and looked up in a LATERAL subquery. A cast to
+// a type with a modifier could round or cut the key text of the other node,
+// for example when the column is varchar(10) there and varchar(5) here, and
+// then the lookup would find a row with another key or fail with an error.
+// OFFSET 0 stops the planner from turning the subquery into a join, so the
+// plan is a nested loop with one lookup for each key, however many keys
+// there are. The lookup has an equality on every
 // primary key column, so the planner reads it from the primary key index,
 // unless the table is so small that a scan of it costs less. With
 // Table.ScanChildren the keys are joined with the table instead, so that the
@@ -103,7 +107,7 @@ func (t Table) keyQueryFormats() pgx.QueryResultFormats {
 // the type.
 //
 // filter, if not empty, is added to the WHERE clause of the lookup as it is.
-func (t Table) ReadQuery(colTypes map[string]string, filter string) (string, error) {
+func (t Table) ReadQuery(colTypes, castTypes map[string]string, filter string) (string, error) {
 	if len(t.Key) == 0 {
 		return "", fmt.Errorf("table %s has no primary key", t.qualifiedName())
 	}
@@ -116,9 +120,9 @@ func (t Table) ReadQuery(colTypes map[string]string, filter string) (string, err
 	keyCols := make([]string, len(t.Key))
 	conds := make([]string, 0, 2*len(t.Key)+1)
 	for i, k := range t.Key {
-		typ, ok := colTypes[k]
+		typ, ok := castTypes[k]
 		if !ok || strings.TrimSpace(typ) == "" {
-			return "", fmt.Errorf("no type for key column %s of %s", k, t.qualifiedName())
+			return "", fmt.Errorf("no cast type for key column %s of %s", k, t.qualifiedName())
 		}
 		alias := fmt.Sprintf("%s%d", keyColAlias, i+1)
 		params[i] = fmt.Sprintf("$%d::text[]", i+1)

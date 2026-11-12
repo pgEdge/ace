@@ -28,6 +28,7 @@ type Templates struct {
 	EstimateRowCount     *template.Template
 	GetPrimaryKey        *template.Template
 	GetColumns           *template.Template
+	GetCastTypes         *template.Template
 	CheckUserPrivileges  *template.Template
 	SpockNodeAndSubInfo  *template.Template
 	SpockRepSetInfo      *template.Template
@@ -410,6 +411,31 @@ var SQLTemplates = Templates{
 			AND NOT a.attisdropped
 		ORDER BY
 			a.attnum;
+	`)),
+	// GetCastTypes follows a domain down to its base type, through any
+	// number of domains, and prints the last type with the modifier -1.
+	GetCastTypes: template.Must(template.New("getCastTypes").Parse(`
+		WITH RECURSIVE b(attnum, attname, typ, depth) AS (
+			SELECT a.attnum, a.attname, a.atttypid, 0
+			FROM
+				pg_catalog.pg_attribute a
+				JOIN pg_catalog.pg_class c ON a.attrelid = c.oid
+				JOIN pg_catalog.pg_namespace n ON c.relnamespace = n.oid
+			WHERE
+				n.nspname = $1
+				AND c.relname = $2
+				AND a.attnum > 0
+				AND NOT a.attisdropped
+			UNION ALL
+			SELECT b.attnum, b.attname, t.typbasetype, b.depth + 1
+			FROM b JOIN pg_catalog.pg_type t ON t.oid = b.typ
+			WHERE t.typtype = 'd'
+		)
+		SELECT DISTINCT ON (attnum)
+			attname,
+			pg_catalog.format_type(typ, -1)
+		FROM b
+		ORDER BY attnum, depth DESC;
 	`)),
 	CheckUserPrivileges: template.Must(template.New("checkUserPrivileges").Parse(`
 		WITH params AS (

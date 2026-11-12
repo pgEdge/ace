@@ -68,8 +68,11 @@ type Side struct {
 	// Conn must not be nil.
 	Conn Querier
 	// ColTypes are the column types (format_type) on this node. The row read
-	// casts the key texts to them and uses them for its select list.
+	// uses them for its select list.
 	ColTypes map[string]string
+	// CastTypes are the types of the columns on this node without their
+	// type modifiers. The row read casts the key texts to them.
+	CastTypes map[string]string
 	// Rows is the number of rows of the block on this node, from the block
 	// hash. It is used only if RowsKnown is true.
 	Rows      int64
@@ -464,7 +467,7 @@ type readRow struct {
 // was deleted, or its key now prints in another way) or more than one row (an
 // inheritance tree).
 func readRows(ctx context.Context, t Table, filter string, s Side, ids []string) ([][]readRow, error) {
-	query, err := t.ReadQuery(s.ColTypes, filter)
+	query, err := t.ReadQuery(s.ColTypes, s.CastTypes, filter)
 	if err != nil {
 		return nil, err
 	}

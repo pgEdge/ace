@@ -172,6 +172,11 @@ type TableDiffTask struct {
 	keyWidths    map[string]int64
 	scanChildren bool
 
+	// castTypes holds, by the same host:port key as ColTypes, the types
+	// that a text value of each column is cast to: the type of the column
+	// without its type modifier.
+	castTypes map[string]map[string]string
+
 	resolvedAgainstOrigin string
 	untilTime             *time.Time
 
@@ -490,7 +495,19 @@ func NewTableDiffTask() *TableDiffTask {
 
 // nodeColTypes returns the column types of the table on nodeName.
 func (t *TableDiffTask) nodeColTypes(nodeName string) (map[string]string, error) {
-	var colTypesKey string
+	return t.nodeTypes(nodeName, t.ColTypes, "column types")
+}
+
+// nodeCastTypes returns the cast types of the columns of the table on
+// nodeName.
+func (t *TableDiffTask) nodeCastTypes(nodeName string) (map[string]string, error) {
+	return t.nodeTypes(nodeName, t.castTypes, "cast types")
+}
+
+// nodeTypes returns the types of nodeName in byNode, which is keyed by
+// host:port. what names the types in the error.
+func (t *TableDiffTask) nodeTypes(nodeName string, byNode map[string]map[string]string, what string) (map[string]string, error) {
+	var typesKey string
 	for _, nodeInfo := range t.ClusterNodes {
 		if name, ok := nodeInfo["Name"].(string); ok && name == nodeName {
 			publicIP, _ := nodeInfo["PublicIP"].(string)
@@ -504,14 +521,14 @@ func (t *TableDiffTask) nodeColTypes(nodeName string) (map[string]string, error)
 			default:
 				portStr = "5432"
 			}
-			colTypesKey = fmt.Sprintf("%s:%s", publicIP, portStr)
-			if colTypes := t.ColTypes[colTypesKey]; colTypes != nil {
-				return colTypes, nil
+			typesKey = fmt.Sprintf("%s:%s", publicIP, portStr)
+			if types := byNode[typesKey]; types != nil {
+				return types, nil
 			}
 			break
 		}
 	}
-	return nil, fmt.Errorf("could not find column types for node %s using key %s", nodeName, colTypesKey)
+	return nil, fmt.Errorf("could not find %s for node %s using key %s", what, nodeName, typesKey)
 }
 
 // hashColTypes returns the column types that the row hash uses. The schemas
@@ -764,6 +781,10 @@ func (t *TableDiffTask) RunChecks(skipValidation bool) (err error) {
 			if len(currCols) == 0 {
 				return fmt.Errorf("table '%s.%s' has no columns on %s", schema, table, hostname)
 			}
+			castTypes, err := queries.GetCastTypes(t.Ctx, conn, schema, table)
+			if err != nil {
+				return fmt.Errorf("failed to get cast types for table %s.%s on node %s: %w", schema, table, hostname, err)
+			}
 
 			currKey, err := queries.GetPrimaryKey(t.Ctx, conn, schema, table)
 			if err != nil {
@@ -793,6 +814,10 @@ func (t *TableDiffTask) RunChecks(skipValidation bool) (err error) {
 				t.ColTypes = make(map[string]map[string]string)
 			}
 			t.ColTypes[colTypesKey] = colTypes
+			if t.castTypes == nil {
+				t.castTypes = make(map[string]map[string]string)
+			}
+			t.castTypes[colTypesKey] = castTypes
 
 			hostMap[hostIP+":"+port] = hostname
 
@@ -1940,6 +1965,10 @@ func (t *TableDiffTask) compareMismatch(ctx context.Context, task mismatchTask) 
 		if err != nil {
 			return keydiff.Side{}, err
 		}
+		castTypes, err := t.nodeCastTypes(node)
+		if err != nil {
+			return keydiff.Side{}, err
+		}
 		pool, ok := t.Pools[node]
 		if !ok {
 			return keydiff.Side{}, fmt.Errorf("no pool for node %s", node)
@@ -1947,7 +1976,7 @@ func (t *TableDiffTask) compareMismatch(ctx context.Context, task mismatchTask) 
 		// Every query of the comparison is one operation on the block, so
 		// the block timeout limits each of them.
 		conn := &blockQuerier{t: t, pool: pool}
-		return keydiff.Side{Name: node, Conn: conn, ColTypes: colTypes, Rows: rows, RowsKnown: true}, nil
+		return keydiff.Side{Name: node, Conn: conn, ColTypes: colTypes, CastTypes: castTypes, Rows: rows, RowsKnown: true}, nil
 	}
 	s1, err := side(task.node1, task.rows1)
 	if err != nil {

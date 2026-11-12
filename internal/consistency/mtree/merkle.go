@@ -107,6 +107,11 @@ type MerkleTreeTask struct {
 	// node. ColTypes holds the types of each node by node name.
 	refColTypes map[string]string
 	refNode     string
+	// castTypes holds the cast types of each node by node name: the types
+	// of the columns without their type modifiers. refCastTypes are those of
+	// refNode.
+	castTypes    map[string]map[string]string
+	refCastTypes map[string]string
 
 	TaskStore     *taskstore.Store
 	TaskStorePath string
@@ -588,8 +593,8 @@ func (m *MerkleTreeTask) processWorkItem(work CompareRangesWorkItem, pool1, pool
 	// side, and the memory limit is checked only while the keys are read.
 	// mtree refuses inheritance parents, so there are no children to scan.
 	refTypes := m.refColTypes
-	s1 := keydiff.Side{Name: node1Name, Conn: pool1, ColTypes: m.nodeColTypes(node1Name)}
-	s2 := keydiff.Side{Name: node2Name, Conn: pool2, ColTypes: m.nodeColTypes(node2Name)}
+	s1 := keydiff.Side{Name: node1Name, Conn: pool1, ColTypes: m.nodeColTypes(node1Name), CastTypes: m.nodeCastTypes(node1Name)}
+	s2 := keydiff.Side{Name: node2Name, Conn: pool2, ColTypes: m.nodeColTypes(node2Name), CastTypes: m.nodeCastTypes(node2Name)}
 	tbl := keydiff.Table{Schema: m.Schema, Name: m.Table, Key: m.Key, Cols: m.Cols, HashTypes: refTypes}
 	block := keydiff.Block{Where: whereClause, Args: args, ReadFilter: queries.CommitTimestampFilter(m.untilTime)}
 	out := m.result.OpenBlock(nodePairKey, node1Name, node2Name, 0, work.Seq)
@@ -626,6 +631,15 @@ func (m *MerkleTreeTask) nodeColTypes(node string) map[string]string {
 		return t
 	}
 	return m.refColTypes
+}
+
+// nodeCastTypes returns the cast types of node, or
+// those of the reference node if the checks did not read that node.
+func (m *MerkleTreeTask) nodeCastTypes(node string) map[string]string {
+	if t, ok := m.castTypes[node]; ok {
+		return t
+	}
+	return m.refCastTypes
 }
 
 // entryRow returns the function that adds the spock metadata of node to a
@@ -1383,9 +1397,9 @@ func (m *MerkleTreeTask) Validate() error {
 
 // keyTypesMatch returns an error if a primary key column has another type
 // (format_type) on node than on refNode. The key gives the bounds of the
-// blocks of the tree, and a row is found by its key cast to the key type,
-// so a key of one node must mean the same value on every node: a cast to a
-// shorter varchar, for example, cuts the key and the row is not found.
+// blocks of the tree, so a key of one node must mean the same value on every
+// node: a bound cast to a shorter varchar, for example, is cut, and the block
+// covers other rows on that node.
 func keyTypesMatch(key []string, refTypes, types map[string]string, refNode, node string) error {
 	for _, col := range key {
 		if refTypes[col] != types[col] {
@@ -1397,15 +1411,20 @@ func keyTypesMatch(key []string, refTypes, types map[string]string, refNode, nod
 	return nil
 }
 
-// addNodeColTypes keeps the column types of node. The first node is the
-// reference node. It returns an error if a key column of node has another
-// type than on the reference node.
-func (m *MerkleTreeTask) addNodeColTypes(node string, colTypes map[string]string, key []string) error {
+// addNodeColTypes keeps the column types and the cast types of node. The
+// first node is the reference node. It returns an error if a key column of
+// node has another type than on the reference node.
+func (m *MerkleTreeTask) addNodeColTypes(node string, colTypes, castTypes map[string]string, key []string) error {
 	if m.refColTypes == nil {
 		m.refColTypes = colTypes
+		m.refCastTypes = castTypes
 		m.refNode = node
 	}
 	m.ColTypes[node] = colTypes
+	if m.castTypes == nil {
+		m.castTypes = make(map[string]map[string]string)
+	}
+	m.castTypes[node] = castTypes
 	return keyTypesMatch(key, m.refColTypes, colTypes, m.refNode, node)
 }
 
@@ -1458,6 +1477,10 @@ func (m *MerkleTreeTask) RunChecks(skipValidation bool) error {
 		if err != nil {
 			return fmt.Errorf("failed to get columns on node %s: %w", nodeInfo["Name"], err)
 		}
+		castTypes, err := queries.GetCastTypes(m.Ctx, tx, m.Schema, m.Table)
+		if err != nil {
+			return fmt.Errorf("failed to get cast types on node %s: %w", nodeInfo["Name"], err)
+		}
 		currentKeySlice, err := queries.GetPrimaryKey(m.Ctx, tx, m.Schema, m.Table)
 		if err != nil {
 			return fmt.Errorf("failed to get primary key on node %s: %w", nodeInfo["Name"], err)
@@ -1482,7 +1505,7 @@ func (m *MerkleTreeTask) RunChecks(skipValidation bool) error {
 		if strings.Join(currentColsSlice, ",") != strings.Join(localCols, ",") || strings.Join(currentKeySlice, ",") != strings.Join(localKey, ",") {
 			return fmt.Errorf("table schemas or primary keys do not match between nodes")
 		}
-		if err := m.addNodeColTypes(nodeName, colTypes, localKey); err != nil {
+		if err := m.addNodeColTypes(nodeName, colTypes, castTypes, localKey); err != nil {
 			return fmt.Errorf("'%s': %w", m.QualifiedTableName, err)
 		}
 	}

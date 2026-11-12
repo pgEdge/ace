@@ -137,7 +137,7 @@ func twoNodes() (*fakeNode, *fakeNode, *[]string) {
 }
 
 func side(n *fakeNode, rows int64, known bool) Side {
-	return Side{Name: n.name, Conn: n, ColTypes: fakeTypes, Rows: rows, RowsKnown: known}
+	return Side{Name: n.name, Conn: n, ColTypes: fakeTypes, CastTypes: fakeTypes, Rows: rows, RowsKnown: known}
 }
 
 // collected holds the entries that a comparison gave to its sink.

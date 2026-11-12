@@ -365,7 +365,7 @@ func TestKeyQuery(t *testing.T) {
 }
 
 // TestReadQuery checks the row read: one lookup per key with the key texts
-// cast to the column types, the text cast of a jsonb column, the row hash and
+// cast to the cast types, which have no type modifier, the text cast of a jsonb column, the row hash and
 // the row address, the filter, the plain join for a table with inheritance
 // children, and the error for a key column without a type.
 func TestReadQuery(t *testing.T) {
@@ -377,14 +377,15 @@ func TestReadQuery(t *testing.T) {
 		HashTypes: map[string]string{"id": "integer", "name": "text", "data": "jsonb"},
 	}
 	colTypes := map[string]string{"id": "integer", "name": "character varying(20)", "data": "jsonb"}
-	q, err := tbl.ReadQuery(colTypes, "")
+	castTypes := map[string]string{"id": "integer", "name": "character varying", "data": "jsonb"}
+	q, err := tbl.ReadQuery(colTypes, castTypes, "")
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, want := range []string{
 		"unnest($1::text[], $2::text[]) WITH ORDINALITY AS _ace_keys(_ace_k1, _ace_k2, _ace_pos)",
 		"CROSS JOIN LATERAL (",
-		`"id" = _ace_keys._ace_k1::integer AND "name" = _ace_keys._ace_k2::character varying(20)`,
+		`"id" = _ace_keys._ace_k1::integer AND "name" = _ace_keys._ace_k2::character varying AND`,
 		"OFFSET 0",
 		`"data"::TEXT AS "data"`,
 		`format('%s', "id") COLLATE "C" = _ace_keys._ace_k1 AND format('%s', "name") COLLATE "C" = _ace_keys._ace_k2`,
@@ -400,7 +401,7 @@ func TestReadQuery(t *testing.T) {
 		t.Fatalf("read query %q must not read the row location", q)
 	}
 
-	q, err = tbl.ReadQuery(colTypes, `"id" > 0`)
+	q, err = tbl.ReadQuery(colTypes, castTypes, `"id" > 0`)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -409,7 +410,7 @@ func TestReadQuery(t *testing.T) {
 	}
 
 	tbl.ScanChildren = true
-	q, err = tbl.ReadQuery(colTypes, "")
+	q, err = tbl.ReadQuery(colTypes, castTypes, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -419,8 +420,8 @@ func TestReadQuery(t *testing.T) {
 	}
 	tbl.ScanChildren = false
 
-	if _, err := tbl.ReadQuery(map[string]string{"id": "integer"}, ""); err == nil {
-		t.Fatal("a key column without a type must give an error")
+	if _, err := tbl.ReadQuery(colTypes, map[string]string{"id": "integer"}, ""); err == nil {
+		t.Fatal("a key column without a cast type must give an error")
 	}
 }
 
