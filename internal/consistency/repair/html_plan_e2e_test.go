@@ -126,16 +126,14 @@ func runHTMLPlanOnPage(t *testing.T, diff types.DiffOutput, limit int64, page *h
 	if err != nil {
 		t.Fatalf("plan does not load: %v\n%s", err, planText)
 	}
-	raw, err := os.ReadFile(jsonPath)
-	if err != nil {
-		t.Fatal(err)
-	}
 	task := &TableRepairTask{}
 	task.Schema, task.Table = "public", "t"
 	task.Key = []string{"id"}
 	task.SimplePrimaryKey = true
 	task.RepairPlan = plan
-	if err := json.Unmarshal(raw, &task.RawDiffs); err != nil {
+	// Repair reads the result directory; the JSON report next to it names
+	// the same result.
+	if task.diff, err = readDiffResult(jsonPath); err != nil {
 		t.Fatal(err)
 	}
 
