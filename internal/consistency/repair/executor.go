@@ -71,6 +71,7 @@ func calculatePlanRepairSets(task *TableRepairTask) (*repairSets, error) {
 			continue
 		}
 		node1Name, node2Name := nodes[0], nodes[1]
+		sets.pair = pairKey
 		diffRows, err := buildPlanDiffRows(task, node1Name, node2Name, diffs)
 		if err != nil {
 			return nil, err
