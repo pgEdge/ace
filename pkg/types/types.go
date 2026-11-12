@@ -112,17 +112,23 @@ type DiffOutput struct {
 }
 
 // CheckFormatVersion returns an error if this build cannot use the report:
-// it was written by another ACE with another format. The keys of an older
-// report do not match the keys of the rows that ACE reads now, so the diff
-// must run again.
+// it was written by another ACE with another format.
 func (d DiffOutput) CheckFormatVersion() error {
-	if d.FormatVersion > DiffFormatVersion {
+	return CheckFormatVersion(d.FormatVersion)
+}
+
+// CheckFormatVersion returns an error if this build cannot use rows of the
+// format version, the version of a diff report or the row format version of
+// a diff result. The keys of an older version do not match the keys of the
+// rows that ACE reads now, so the diff must run again.
+func CheckFormatVersion(version int) error {
+	if version > DiffFormatVersion {
 		return fmt.Errorf("unsupported diff report format version %d: this ACE reads version %d",
-			d.FormatVersion, DiffFormatVersion)
+			version, DiffFormatVersion)
 	}
-	if d.FormatVersion < DiffFormatVersion {
+	if version < DiffFormatVersion {
 		return fmt.Errorf("the diff report has format version %d, written by an older ACE; this ACE reads version %d, run the diff again",
-			d.FormatVersion, DiffFormatVersion)
+			version, DiffFormatVersion)
 	}
 	return nil
 }

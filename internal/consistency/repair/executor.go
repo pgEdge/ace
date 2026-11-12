@@ -65,14 +65,9 @@ func calculatePlanRepairSets(task *TableRepairTask) (*repairSets, error) {
 	task.planRuleMatches = make(map[string]map[string]string)
 	task.planStaleChecks = make(map[string]map[string]planStaleCheck)
 
-	for pairKey, diffs := range task.RawDiffs.NodeDiffs {
-		nodes := strings.Split(pairKey, "/")
-		if len(nodes) != 2 {
-			continue
-		}
-		node1Name, node2Name := nodes[0], nodes[1]
-		sets.pair = pairKey
-		diffRows, err := buildPlanDiffRows(task, node1Name, node2Name, diffs)
+	for _, p := range task.diff.pairs {
+		sets.pair = p.name
+		diffRows, err := buildPlanDiffRows(task, p)
 		if err != nil {
 			return nil, err
 		}
@@ -97,92 +92,43 @@ func calculatePlanRepairSets(task *TableRepairTask) (*repairSets, error) {
 	return sets, nil
 }
 
-func buildPlanDiffRows(task *TableRepairTask, node1Name, node2Name string, diffs types.DiffByNodePair) ([]planDiffRow, error) {
-	node1Rows := diffs.Rows[node1Name]
-	node2Rows := diffs.Rows[node2Name]
-
-	node1RowsByPKey := make(map[string]map[string]any)
-	node1PkMaps := make(map[string]map[string]any)
-	node1MetaByPKey := make(map[string]map[string]any)
-	for _, row := range node1Rows {
-		pkeyStr, err := utils.StringifyOrderedMapKey(row, task.Key)
-		if err != nil {
-			return nil, fmt.Errorf("error stringifying pkey for row on %s: %w", node1Name, err)
-		}
-		raw := utils.OrderedMapToMap(row)
-		meta := extractSpockMeta(raw)
-		cleanRow := utils.StripSpockMetadata(raw)
-		node1RowsByPKey[pkeyStr] = cleanRow
-		node1MetaByPKey[pkeyStr] = meta
-		pkMap, err := extractPkMap(task.Key, cleanRow)
-		if err != nil {
-			return nil, fmt.Errorf("node %s row %s: %w", node1Name, pkeyStr, err)
-		}
-		node1PkMaps[pkeyStr] = pkMap
-	}
-
-	node2RowsByPKey := make(map[string]map[string]any)
-	node2PkMaps := make(map[string]map[string]any)
-	node2MetaByPKey := make(map[string]map[string]any)
-	for _, row := range node2Rows {
-		pkeyStr, err := utils.StringifyOrderedMapKey(row, task.Key)
-		if err != nil {
-			return nil, fmt.Errorf("error stringifying pkey for row on %s: %w", node2Name, err)
-		}
-		raw := utils.OrderedMapToMap(row)
-		meta := extractSpockMeta(raw)
-		cleanRow := utils.StripSpockMetadata(raw)
-		node2RowsByPKey[pkeyStr] = cleanRow
-		node2MetaByPKey[pkeyStr] = meta
-		pkMap, err := extractPkMap(task.Key, cleanRow)
-		if err != nil {
-			return nil, fmt.Errorf("node %s row %s: %w", node2Name, pkeyStr, err)
-		}
-		node2PkMaps[pkeyStr] = pkMap
-	}
-
-	seen := make(map[string]struct{})
-	var diffRows []planDiffRow
-
-	for pkStr, row := range node1RowsByPKey {
-		diffRows = append(diffRows, planDiffRow{
-			pkStr:     pkStr,
-			pkMap:     node1PkMaps[pkStr],
-			node1Name: node1Name,
-			node2Name: node2Name,
-			n1Row:     row,
-			n2Row:     node2RowsByPKey[pkStr],
-			n1Meta:    node1MetaByPKey[pkStr],
-			n2Meta:    node2MetaByPKey[pkStr],
-			diffType: func() string {
-				if _, ok := node2RowsByPKey[pkStr]; ok {
-					return "row_mismatch"
+// buildPlanDiffRows returns a plan row for each entry of the pair. The kind
+// of the entry gives the diff type.
+func buildPlanDiffRows(task *TableRepairTask, p *diffPair) ([]planDiffRow, error) {
+	diffRows := make([]planDiffRow, 0, len(p.entries))
+	for _, e := range p.entries {
+		d := planDiffRow{pkStr: e.key, node1Name: p.node1, node2Name: p.node2}
+		for _, side := range []struct {
+			node string
+			raw  types.OrderedMap
+			row  *map[string]any
+			meta *map[string]any
+		}{{p.node1, e.row1, &d.n1Row, &d.n1Meta}, {p.node2, e.row2, &d.n2Row, &d.n2Meta}} {
+			if side.raw == nil {
+				continue
+			}
+			raw := utils.OrderedMapToMap(side.raw)
+			*side.meta = extractSpockMeta(raw)
+			*side.row = utils.StripSpockMetadata(raw)
+			if d.pkMap == nil {
+				pkMap, err := extractPkMap(task.Key, *side.row)
+				if err != nil {
+					return nil, fmt.Errorf("node %s row %s: %w", side.node, e.key, err)
 				}
-				return "missing_on_n2"
-			}(),
-			columnsChanged: computeChangedColumns(row, node2RowsByPKey[pkStr]),
-		})
-		seen[pkStr] = struct{}{}
-	}
-
-	for pkStr, row := range node2RowsByPKey {
-		if _, ok := seen[pkStr]; ok {
-			continue
+				d.pkMap = pkMap
+			}
 		}
-		diffRows = append(diffRows, planDiffRow{
-			pkStr:          pkStr,
-			pkMap:          node2PkMaps[pkStr],
-			node1Name:      node1Name,
-			node2Name:      node2Name,
-			n1Row:          node1RowsByPKey[pkStr],
-			n2Row:          row,
-			n1Meta:         node1MetaByPKey[pkStr],
-			n2Meta:         node2MetaByPKey[pkStr],
-			diffType:       "missing_on_n1",
-			columnsChanged: computeChangedColumns(node1RowsByPKey[pkStr], row),
-		})
+		switch {
+		case d.n1Row == nil:
+			d.diffType = "missing_on_n1"
+		case d.n2Row == nil:
+			d.diffType = "missing_on_n2"
+		default:
+			d.diffType = "row_mismatch"
+		}
+		d.columnsChanged = computeChangedColumns(d.n1Row, d.n2Row)
+		diffRows = append(diffRows, d)
 	}
-
 	return diffRows, nil
 }
 
