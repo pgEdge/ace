@@ -50,6 +50,40 @@ All notable changes to ACE will be captured in this document. This project follo
   operations on one node is not changed there; it is reported as a
   failed row with the operation `conflict`.
 
+- **Every value of a diff is the text that the server prints for it.**
+  `table-diff` and `mtree table-diff` read the rows that differ in the
+  text format of the protocol, and keep each value as the output of its
+  type. Every value of the table in the JSON report and in the block
+  files is a JSON string, or `null` for a NULL; a NULL and an empty
+  string stay different. Scripts that read numbers or booleans from the
+  report must parse the strings. The report format version is 3.
+  `table-repair` sends each value as this text and the server reads it
+  with the type of the column, without the type modifier, so a value is
+  never converted to a Go type and back: `numeric` `NaN` and
+  `Infinity`, `-0`, timestamps and dates with `infinity`, `bytea`,
+  arrays, ranges and the types of extensions reach the target as the
+  source printed them. A key finds a row only when the row prints its
+  key as this text. `--fix-nulls` fills a NULL with the text of the
+  other node.
+- **A repair plan gives keys as the server prints them.** The keys of
+  `pk_in.equals` and `row_overrides` and the values of `custom_row` are
+  the text of the YAML scalars: `1.50`, `007` and `true` are not
+  converted. A key matches a row when the texts are equal, byte for
+  byte. A `pk_in` range, the comparisons of `when` and `pick_freshest`
+  are computed on a node with the type of the column, so `<` on a
+  timestamp or a `numeric` column compares timestamps or numbers. A
+  `when` comparison of two literals is refused. The HTML report writes
+  the key text into the plans that it builds.
+- **`table-rerun` reads and writes a diff result directory.** It reads
+  the keys from the result directory of the diff, reads the rows of
+  these keys again by key text, compares them by row hash, and writes a
+  new result directory with the JSON report next to it, named as a
+  `table-diff` result. Before, it wrote a JSON file named
+  `<schema>_<table>_rerun-diffs-<timestamp>.json`. The rows are read with
+  the filter of the diff from its manifest (`--table-filter`,
+  `--against-origin`, `--until`); before, the rerun read them without it,
+  so a row outside the filter on one node turned into a changed row.
+  `mtree table-diff` now writes its `--until` filter into the summary.
 - **`table-repair` reads the diff result directory.** `--diff-file`, and
   `diff_file` of the HTTP API, take the result directory or the JSON
   report next to it, as `diff-report` does. Repair reads the entries from
@@ -240,6 +274,10 @@ All notable changes to ACE will be captured in this document. This project follo
   key.
 
 ### Fixed
+- **`coalesce_priority` of a repair plan took the value of the last node.**
+  With `coalesce_priority: [n1, n2]`, a column that was not NULL on both
+  nodes got the value of `n2`. Now the first node in the list that has a
+  value gives it.
 - **A key that two nodes print in a different way was reported as a
   changed row.** For example, `-0` and `0` in a `float8` key, or
   `'Alice'` and `'alice'` in a `citext` key: the server holds them as

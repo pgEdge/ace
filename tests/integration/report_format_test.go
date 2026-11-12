@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -92,10 +93,13 @@ func diffResultOf(t *testing.T, task any) types.DiffOutput {
 	return readDiffReport(t, path)
 }
 
-// intValue returns a whole number from a value of a diff row: a Go integer
-// or a JSON number.
+// intValue returns a whole number from a value of a diff row: the text of
+// an integer, as a diff writes it, a Go integer or a JSON number.
 func intValue(v any) (int64, bool) {
 	switch x := v.(type) {
+	case string:
+		n, err := strconv.ParseInt(x, 10, 64)
+		return n, err == nil
 	case int32:
 		return int64(x), true
 	case int64:
@@ -157,54 +161,36 @@ func copyDiffResult(t *testing.T, diffFile string, edit func(manifest map[string
 }
 
 // TestDiffReportFormatVersionChecked checks that table-diff writes the
-// report format version, and that repair and rerun refuse a report written
-// in another format: by a newer ACE, or by an older one. Repair reads the
-// row format version of the result directory, rerun the format version of
-// the JSON report.
+// format version, and that repair and rerun refuse a result written in
+// another row format: by a newer ACE, or by an older one.
 func TestDiffReportFormatVersionChecked(t *testing.T) {
 	env := newSpockEnv()
 	qualifiedTable := typedKeyTable(t, env, "ace_format_version", "id int PRIMARY KEY, v text", "id, v",
 		[]string{"(1, 'a')"}, []string{"(1, 'b')"})
 	nodes := []string{env.ServiceN1, env.ServiceN2}
 	diffFile := env.runTableDiff(t, qualifiedTable, nodes)
+	require.Equal(t, types.DiffFormatVersion, readDiffReport(t, diffFile).FormatVersion)
 
-	// UseNumber keeps large integers such as max_diff_rows exact.
-	var raw map[string]any
-	data, err := os.ReadFile(diffFile)
-	require.NoError(t, err)
-	dec := json.NewDecoder(bytes.NewReader(data))
-	dec.UseNumber()
-	require.NoError(t, dec.Decode(&raw))
-	require.Equal(t, json.Number(fmt.Sprint(types.DiffFormatVersion)), raw["format_version"])
-
-	// A report without the field was written before the field existed, and
-	// version 1 kept a numeric value without its trailing zeros. The keys
-	// of both do not match the rows read now, so the diff must run again.
+	// Versions 0 and 1 held Go values without the trailing zeros of a
+	// numeric, version 2 Go values: their keys do not match the rows read
+	// now, so the diff must run again.
 	for _, tc := range []struct {
 		version int
 		want    string
 	}{
 		{types.DiffFormatVersion + 1, "unsupported diff report format version"},
+		{2, "run the diff again"},
 		{1, "run the diff again"},
 		{0, "run the diff again"},
 	} {
 		result := copyDiffResult(t, diffFile, func(m map[string]any) {
 			m["row_format_version"] = tc.version
 		})
-		err = env.newTableRepairTask(env.ServiceN1, qualifiedTable, result).ValidateAndPrepare()
+		err := env.newTableRepairTask(env.ServiceN1, qualifiedTable, result).ValidateAndPrepare()
 		require.ErrorContains(t, err, tc.want, "repair of version %d", tc.version)
 
-		if tc.version == 0 {
-			delete(raw, "format_version")
-		} else {
-			raw["format_version"] = tc.version
-		}
-		report, err := json.Marshal(raw)
-		require.NoError(t, err)
-		reportFile := filepath.Join(t.TempDir(), fmt.Sprintf("v%d_diffs.json", tc.version))
-		require.NoError(t, os.WriteFile(reportFile, report, 0o600))
 		rerunTask := env.newTableDiffTask(t, qualifiedTable, nodes)
-		rerunTask.DiffFilePath = reportFile
+		rerunTask.DiffFilePath = result
 		err = rerunTask.ExecuteRerunTask()
 		require.ErrorContains(t, err, tc.want, "rerun of version %d", tc.version)
 	}

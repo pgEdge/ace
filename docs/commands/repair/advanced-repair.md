@@ -8,6 +8,14 @@
 - Per table: `default_action`, ordered `rules`, and `row_overrides`.  
 - Precedence: `row_overrides` (exact PK) > first matching `rule` > `table.default_action` > global `default_action`. Rules must declare at least one selector to avoid match‑all accidents.
 
+### Values and keys
+
+A value in a plan is the text of a YAML scalar, as the file writes it: `1.50`, `007` and `true` stay `1.50`, `007` and `true`. `null`, `~` or no value is NULL; a quoted `"null"` is the text `null`. The rows of a diff hold every value as the text that the server prints for it, so:
+
+- A key in `pk_in.equals` or `row_overrides` matches a row when its text is the key text of the row, byte for byte. Write the key as the server prints it: `1.50` does not match the key `1.5` of a `numeric` column, and a timestamp key must be written in the form of the diff, such as `"2026-01-02 03:04:05+00"`. Quote a key that YAML could read in another way.
+- A range in `pk_in`, the comparisons of `when` and `pick_freshest` are computed on a node with the type of the column: ACE sends both texts to the server, and the server reads them with the input function of the type, for example `SELECT $1::timestamptz < $2::timestamptz`. So `n1.amount < 10` compares numbers, and `n1.updated_at > '2026-01-01'` compares timestamps. A comparison needs a column on at least one side. `IS NULL` and a comparison with `NULL` are decided without the server.
+- A value of `custom_row` is sent as text, and the server reads it with the type of its column.
+
 ### Selectors
 - `pk_in`: list of PK values, and/or ranges (`from`/`to`) for simple PKs; composite PKs use ordered tuples.  
 - `diff_type`: one or more of `row_mismatch`, `missing_on_n1`, `missing_on_n2`, `deleted_on_n1`, `deleted_on_n2`.  
@@ -19,8 +27,10 @@
 - `apply_from` with `from: n1|n2` and `mode: replace|upsert|insert` (default `replace`). `insert` is only valid on missing rows.  
 - `bidirectional`: copy a row that only one node has to the other node, as `--bidirectional` does. It is refused on `row_mismatch`: to make two different rows equal, choose a winner with `keep_n1`, `keep_n2`, `apply_from` or `custom`.  
 - `custom`: provide `custom_row` (with optional `{{n1.col}}` / `{{n2.col}}` templating) and/or helpers:  
+  - A template is a whole value that starts with `{{` and ends with `}}`; spaces around it are ignored. Any other value is written as text, as it is: a value with `{{` but no closing `}}`, such as `"{{n1.email"`, and a value with a template inside other text, such as `"id {{n1.id}}"`. There is no substitution inside text, so a value can hold literal braces with no escape.  
+  - A template gives the value of the column on that node, or NULL if the value is NULL. Inside the braces it must be `n1.column` or `n2.column`. A template of another form, or one that names a column the table does not have, or a node on which the row is missing, makes table-repair refuse the plan before any write. table-repair checks a template only when it resolves it for a diff row, that is, in the action that a row of this diff selects. A template in a rule or an override that no row selects is not checked, so a run without errors, a dry run too, does not show that every template of the plan is valid. A YAML `null` writes NULL. A column that `custom_row` sets, even to NULL, is not filled by the helpers.  
   - `helpers.coalesce_priority: [n1, n2]` fills remaining columns from the first non‑NULL source.  
-  - `helpers.pick_freshest: { key: updated_at, tie: n1|n2 }` fills remaining columns from the fresher side (numeric, string, or RFC3339 timestamps).  
+  - `helpers.pick_freshest: { key: updated_at, tie: n1|n2 }` fills remaining columns from the side with the greater value of `key`, compared with the type of the column (or of `commit_ts`). If the row exists on one node only, that node wins. With rows on both nodes, a side with a value wins over a side with NULL; on equal values or two NULLs the `tie` side wins. `tie` is required.  
 - `skip`: do nothing.  
 - `delete`: remove the row (from the side(s) where it exists).
 - Action option: `allow_stale_repairs` (default `true`) set to `false` to skip repairs when the current row on the target node has a newer commit timestamp than the diff snapshot. Skipped rows are logged to `reports/<YYYY-MM-DD>/stale_repair_skips_<HHMMSS.mmm>.json`.

@@ -18,10 +18,10 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
-	"strings"
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/pgedge/ace/pkg/types"
 	"github.com/stretchr/testify/require"
@@ -50,11 +50,9 @@ func reportRows(t *testing.T, out types.DiffOutput, pairKey, node string) []stri
 	return lines
 }
 
-// TestTableDiffRerunKeepsRows runs table-diff, then a rerun of its report
+// TestTableDiffRerunKeepsRows runs table-diff, then a rerun of its result
 // with nothing changed in between. Every difference is still there, so the
-// rerun report must hold the same rows with the same values. The rerun reads
-// the rows with its own query, and they must have the same form as in the
-// diff report, or the rerun loses them or reports other values.
+// rerun result must hold the same rows with the same values.
 func TestTableDiffRerunKeepsRows(t *testing.T) {
 	env := newSpockEnv()
 	qualifiedTable := typedKeyTable(t, env, "ace_rerun_typed",
@@ -78,24 +76,12 @@ func TestTableDiffRerunKeepsRows(t *testing.T) {
 	require.Equal(t, types.DiffFormatVersion, original.FormatVersion, "table-diff must write the report format version")
 	require.Equal(t, 3, original.Summary.DiffRowsCount[pairKey])
 
-	rerunGlob := strings.ReplaceAll(qualifiedTable, ".", "_") + "_rerun-diffs-*.json"
-	removeRerunFiles := func() {
-		files, _ := filepath.Glob(rerunGlob)
-		for _, f := range files {
-			_ = os.Remove(f)
-		}
-	}
-	removeRerunFiles()
-	t.Cleanup(removeRerunFiles)
-
 	task := env.newTableDiffTask(t, qualifiedTable, nodes)
 	task.DiffFilePath = diffFile
 	require.NoError(t, task.ExecuteRerunTask())
-
-	files, err := filepath.Glob(rerunGlob)
-	require.NoError(t, err)
-	require.Len(t, files, 1, "the rerun must write a report: every difference is still there")
-	rerun := readDiffReport(t, files[0])
+	require.NotEmpty(t, task.DiffFilePath, "the rerun must write a result: every difference is still there")
+	require.NotEqual(t, diffFile, task.DiffFilePath)
+	rerun := readDiffReport(t, task.DiffFilePath)
 	require.Equal(t, types.DiffFormatVersion, rerun.FormatVersion, "rerun must write the report format version")
 	require.Equal(t, original.Summary.DiffRowsCount[pairKey], rerun.Summary.DiffRowsCount[pairKey])
 	for _, node := range nodes {
@@ -238,24 +224,11 @@ func TestTableDiffRerunRowGoneOnBothNodes(t *testing.T) {
 		require.NoError(t, tx.Commit(ctx))
 	}
 
-	rerunGlob := strings.ReplaceAll(qualifiedTable, ".", "_") + "_rerun-diffs-*.json"
-	removeRerunFiles := func() {
-		files, _ := filepath.Glob(rerunGlob)
-		for _, f := range files {
-			_ = os.Remove(f)
-		}
-	}
-	removeRerunFiles()
-	t.Cleanup(removeRerunFiles)
-
 	task := env.newTableDiffTask(t, qualifiedTable, nodes)
 	task.DiffFilePath = diffFile
 	require.NoError(t, task.ExecuteRerunTask())
-
-	files, err := filepath.Glob(rerunGlob)
-	require.NoError(t, err)
-	require.Len(t, files, 1, "the rerun must write a report: row 2 still differs")
-	rerun := readDiffReport(t, files[0])
+	require.NotEmpty(t, task.DiffFilePath, "the rerun must write a result: row 2 still differs")
+	rerun := readDiffReport(t, task.DiffFilePath)
 	require.Equal(t, 1, rerun.Summary.DiffRowsCount[pairKey], "only row 2 still differs")
 	for _, node := range nodes {
 		rows := rerun.NodeDiffs[pairKey].Rows[node]
@@ -266,83 +239,124 @@ func TestTableDiffRerunRowGoneOnBothNodes(t *testing.T) {
 	}
 }
 
-// TestTableDiffRerunMatchesRowsByPosition runs a rerun of a report whose key
-// has another printed form than the key read from the nodes: "1.5" in the
-// report and "1.50" read now. The database finds the row by the key, so the
-// rerun must find it too.
-func TestTableDiffRerunMatchesRowsByPosition(t *testing.T) {
+// TestTableDiffRerunKeepsTheFilter runs a rerun of a diff with a table
+// filter. Row 1 passes the filter on n1 only, so the diff reports it on n1
+// only; row 2 passes it on both nodes with other values. The rerun must read
+// the rows with the filter of the diff, which it takes from the manifest:
+// without it, row 1 on n2 would be found, and row 1 would turn into a
+// changed row, which a repair would then write as an update of a row
+// outside the filter.
+func TestTableDiffRerunKeepsTheFilter(t *testing.T) {
 	env := newSpockEnv()
-	qualifiedTable := typedKeyTable(t, env, "ace_rerun_key_form", "id numeric PRIMARY KEY, v text", "id, v",
-		[]string{"(1.50, 'a')"}, []string{"(1.50, 'b')"})
+	qualifiedTable := typedKeyTable(t, env, "ace_rerun_filter", "id int PRIMARY KEY, active boolean, v text", "id, active, v",
+		[]string{"(1, true, 'a')", "(2, true, 'b')", "(3, false, 'c')"},
+		[]string{"(1, false, 'a')", "(2, true, 'x')", "(3, false, 'y')"})
+	nodes := []string{env.ServiceN1, env.ServiceN2}
+	pairKey := env.pairKey()
+
+	diffTask := env.newTableDiffTask(t, qualifiedTable, nodes)
+	diffTask.TableFilter = "active = true"
+	require.NoError(t, diffTask.RunChecks(false))
+	require.NoError(t, diffTask.ExecuteTask())
+	require.NotEmpty(t, diffTask.DiffFilePath)
+
+	ids := func(report types.DiffOutput, node string) []string {
+		var out []string
+		for _, row := range report.NodeDiffs[pairKey].Rows[node] {
+			id, ok := row.Get("id")
+			require.True(t, ok)
+			out = append(out, fmt.Sprint(id))
+		}
+		sort.Strings(out)
+		return out
+	}
+	original := readDiffReport(t, diffTask.DiffFilePath)
+	require.Equal(t, []string{"1", "2"}, ids(original, env.ServiceN1))
+	require.Equal(t, []string{"2"}, ids(original, env.ServiceN2))
+
+	// The rerun task has no filter of its own.
+	task := env.newTableDiffTask(t, qualifiedTable, nodes)
+	task.DiffFilePath = diffTask.DiffFilePath
+	require.NoError(t, task.ExecuteRerunTask())
+	require.NotEmpty(t, task.DiffFilePath)
+	rerun := readDiffReport(t, task.DiffFilePath)
+	require.Equal(t, []string{"1", "2"}, ids(rerun, env.ServiceN1))
+	require.Equal(t, []string{"2"}, ids(rerun, env.ServiceN2), "row 1 of n2 is outside the filter")
+	require.Equal(t, original.Summary.EffectiveFilter, rerun.Summary.EffectiveFilter)
+}
+
+// TestTableDiffRerunInheritedKey runs a rerun of a diff of an inheritance
+// tree whose parent and child both have a row with the key 1, different on
+// each node. The diff gives two entries of the key. The rerun must read the
+// key once and give the same two entries, and a rerun of its result must
+// give them again, not twice as many.
+func TestTableDiffRerunInheritedKey(t *testing.T) {
+	ctx := context.Background()
+	env := newSpockEnv()
+	parent := pgx.Identifier{testSchema, "ace_rerun_inh_parent"}.Sanitize()
+	child := pgx.Identifier{testSchema, "ace_rerun_inh_child"}.Sanitize()
+	dropOnBoth(t, ctx, env, "TABLE IF EXISTS "+parent)
+	for _, pool := range env.pools() {
+		keydiffExec(t, ctx, env, pool,
+			fmt.Sprintf("CREATE TABLE %s (id int PRIMARY KEY, v text)", parent),
+			fmt.Sprintf("CREATE TABLE %s () INHERITS (%s)", child, parent))
+	}
+	keydiffExec(t, ctx, env, env.N1Pool,
+		fmt.Sprintf("INSERT INTO %s VALUES (1, 'a'), (2, 'same')", parent),
+		fmt.Sprintf("INSERT INTO %s VALUES (1, 'b')", child))
+	keydiffExec(t, ctx, env, env.N2Pool,
+		fmt.Sprintf("INSERT INTO %s VALUES (1, 'A'), (2, 'same')", parent),
+		fmt.Sprintf("INSERT INTO %s VALUES (1, 'B')", child))
+
+	qualifiedTable := testSchema + ".ace_rerun_inh_parent"
 	nodes := []string{env.ServiceN1, env.ServiceN2}
 	pairKey := env.pairKey()
 	diffFile := env.runTableDiff(t, qualifiedTable, nodes)
+	require.Equal(t, 2, readDiffReport(t, diffFile).Summary.DiffRowsCount[pairKey])
 
-	keyFormFile := rewriteReport(t, diffFile, func(r *types.DiffOutput) {
-		require.Equal(t, 2, setColumnValues(r, "id", map[string]string{"1.50": "1.5"}))
-	})
-
-	rerunGlob := strings.ReplaceAll(qualifiedTable, ".", "_") + "_rerun-diffs-*.json"
-	removeRerunFiles := func() {
-		files, _ := filepath.Glob(rerunGlob)
-		for _, f := range files {
-			_ = os.Remove(f)
+	for run := 1; run <= 2; run++ {
+		task := env.newTableDiffTask(t, qualifiedTable, nodes)
+		task.DiffFilePath = diffFile
+		require.NoError(t, task.ExecuteRerunTask())
+		require.NotEmpty(t, task.DiffFilePath, "rerun %d must find the differences", run)
+		report := readDiffReport(t, task.DiffFilePath)
+		require.Equal(t, 2, report.Summary.DiffRowsCount[pairKey], "rerun %d", run)
+		for _, node := range nodes {
+			require.Len(t, report.NodeDiffs[pairKey].Rows[node], 2, "rows of %s after rerun %d", node, run)
 		}
+		diffFile = task.DiffFilePath
 	}
-	removeRerunFiles()
-	t.Cleanup(removeRerunFiles)
+}
+
+// TestTableDiffRerunKeyText runs a rerun of a numeric key stored as 1.50 on
+// n1 and as 1.5 on n2. The diff reports two rows, each on one node only, and
+// the rerun reads each row again by its key text, so it reports the same
+// two rows: the key text 1.5 does not find the row 1.50.
+func TestTableDiffRerunKeyText(t *testing.T) {
+	env := newSpockEnv()
+	qualifiedTable := typedKeyTable(t, env, "ace_rerun_key_text", "id numeric PRIMARY KEY, v text", "id, v",
+		[]string{"(1.50, 'a')", "(2, 'b')"}, []string{"(1.5, 'a')", "(2, 'x')"})
+	nodes := []string{env.ServiceN1, env.ServiceN2}
+	pairKey := env.pairKey()
+	diffFile := env.runTableDiff(t, qualifiedTable, nodes)
+	require.Equal(t, 3, readDiffReport(t, diffFile).Summary.DiffRowsCount[pairKey])
 
 	task := env.newTableDiffTask(t, qualifiedTable, nodes)
-	task.DiffFilePath = keyFormFile
+	task.DiffFilePath = diffFile
 	require.NoError(t, task.ExecuteRerunTask())
-
-	files, err := filepath.Glob(rerunGlob)
-	require.NoError(t, err)
-	require.Len(t, files, 1, "the rerun must write a report: the difference is still there")
-	rerun := readDiffReport(t, files[0])
-	require.Equal(t, 1, rerun.Summary.DiffRowsCount[pairKey])
-	for _, node := range nodes {
-		rows := rerun.NodeDiffs[pairKey].Rows[node]
-		require.Len(t, rows, 1, "rows of %s in the rerun report", node)
-		id, ok := rows[0].Get("id")
-		require.True(t, ok)
-		require.Equal(t, "1.50", fmt.Sprint(id))
-	}
-}
-
-// rewriteReport writes a copy of a diff report with edit applied to it and
-// returns the path of the copy.
-func rewriteReport(t *testing.T, diffFile string, edit func(*types.DiffOutput)) string {
-	t.Helper()
-	report := readDiffReport(t, diffFile)
-	edit(&report)
-	data, err := json.MarshalIndent(report, "", "  ")
-	require.NoError(t, err)
-	out := filepath.Join(t.TempDir(), "edited_"+filepath.Base(diffFile))
-	require.NoError(t, os.WriteFile(out, data, 0o600))
-	return out
-}
-
-// setColumnValues changes the value of column col in the rows of every node
-// of the report, from each old value in values to its new value. It returns
-// the number of values it changed.
-func setColumnValues(report *types.DiffOutput, col string, values map[string]string) int {
-	changed := 0
-	for _, pair := range report.NodeDiffs {
-		for _, rows := range pair.Rows {
-			for _, row := range rows {
-				for i, kv := range row {
-					old, ok := kv.Value.(string)
-					if kv.Key != col || !ok {
-						continue
-					}
-					if v, found := values[old]; found {
-						row[i].Value = v
-						changed++
-					}
-				}
-			}
+	require.NotEmpty(t, task.DiffFilePath, "the rerun must write a result: the differences are still there")
+	rerun := readDiffReport(t, task.DiffFilePath)
+	require.Equal(t, 3, rerun.Summary.DiffRowsCount[pairKey])
+	ids := func(node string) []string {
+		var out []string
+		for _, row := range rerun.NodeDiffs[pairKey].Rows[node] {
+			id, ok := row.Get("id")
+			require.True(t, ok)
+			out = append(out, fmt.Sprint(id))
 		}
+		sort.Strings(out)
+		return out
 	}
-	return changed
+	require.Equal(t, []string{"1.50", "2"}, ids(env.ServiceN1))
+	require.Equal(t, []string{"1.5", "2"}, ids(env.ServiceN2))
 }

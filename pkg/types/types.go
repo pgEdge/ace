@@ -100,7 +100,10 @@ type DerivedFields struct {
 //	2: a numeric value keeps its scale ("7.50"), as the server prints it.
 //	   The row hash has no trim_scale() either, so 7.5 and 7.50 are
 //	   different values.
-const DiffFormatVersion = 2
+//	3: every value of a column of the table is the text that the output
+//	   function of its type gives, as a JSON string, or null for NULL. The
+//	   client does not convert a value to a Go type and back.
+const DiffFormatVersion = 3
 
 // DiffOutput holds the structured diff data.
 type DiffOutput struct {
