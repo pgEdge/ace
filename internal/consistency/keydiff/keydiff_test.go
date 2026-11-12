@@ -363,10 +363,13 @@ func TestKeyQuery(t *testing.T) {
 	}
 }
 
-// TestReadQuery checks the row read: one lookup per key with the key texts
-// cast to the cast types, which have no type modifier, the text cast of a jsonb column, the row hash and
-// the row address, the filter, the plain join for a table with inheritance
-// children, and the error for a key column without a type.
+// TestReadQuery checks the row read: one lookup per key, with each key
+// column as a parameter of the cast type, which has no type modifier, never
+// through a cast from text, and the key of the row printed as the key value;
+// every column as it is, the
+// row hash, no row address, the filter, the plain join for a table with
+// inheritance children, and the errors for a key column without a type and
+// for a bad number of keys.
 func TestReadQuery(t *testing.T) {
 	tbl := Table{
 		Schema: "public",
@@ -374,19 +377,21 @@ func TestReadQuery(t *testing.T) {
 		Key:    []string{"id", "name"},
 		Cols:   []string{"id", "name", "data"},
 	}
-	colTypes := map[string]string{"id": "integer", "name": "character varying(20)", "data": "jsonb"}
 	castTypes := map[string]string{"id": "integer", "name": "character varying", "data": "jsonb"}
-	q, err := tbl.ReadQuery(colTypes, castTypes, "")
+	q, err := tbl.ReadQuery(castTypes, "", 2)
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, want := range []string{
-		"unnest($1::text[], $2::text[]) WITH ORDINALITY AS _ace_keys(_ace_k1, _ace_k2, _ace_pos)",
+		"SELECT _ace_keys._ace_pos::bigint, _ace_row.* FROM (VALUES " +
+			"(1, $1::integer, $2::character varying), (2, $3::integer, $4::character varying)) " +
+			"AS _ace_keys(_ace_pos, _ace_k1, _ace_k2)",
 		"CROSS JOIN LATERAL (",
-		`"id" = _ace_keys._ace_k1::integer AND "name" = _ace_keys._ace_k2::character varying AND`,
+		`"id" = _ace_keys._ace_k1 AND "name" = _ace_keys._ace_k2 AND`,
 		"OFFSET 0",
-		`"data"::TEXT AS "data"`,
-		`format('%s', "id") COLLATE "C" = _ace_keys._ace_k1 AND format('%s', "name") COLLATE "C" = _ace_keys._ace_k2`,
+		`AS node_origin, "id", "name", "data" FROM`,
+		`format('%s', "id") COLLATE "C" = format('%s', _ace_keys._ace_k1) AND ` +
+			`format('%s', "name") COLLATE "C" = format('%s', _ace_keys._ace_k2)`,
 		"AS _ace_row_hash",
 		`FROM "public"."t" AS _ace_t WHERE`,
 	} {
@@ -398,8 +403,11 @@ func TestReadQuery(t *testing.T) {
 	if strings.Contains(q, "tableoid") || strings.Contains(q, "ctid") {
 		t.Fatalf("read query %q must not read the row location", q)
 	}
+	if strings.Contains(q, "::text[]") || strings.Contains(q, "_ace_k1::") {
+		t.Fatalf("read query %q must not cast a key from text", q)
+	}
 
-	q, err = tbl.ReadQuery(colTypes, castTypes, `"id" > 0`)
+	q, err = tbl.ReadQuery(castTypes, `"id" > 0`, 1)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -408,18 +416,26 @@ func TestReadQuery(t *testing.T) {
 	}
 
 	tbl.ScanChildren = true
-	q, err = tbl.ReadQuery(colTypes, castTypes, "")
+	q, err = tbl.ReadQuery(castTypes, "", 1)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if strings.Contains(q, "LATERAL") || strings.Contains(q, "OFFSET 0") ||
-		!strings.Contains(q, `JOIN "public"."t" AS _ace_t ON "id" = _ace_keys._ace_k1::integer`) {
+		!strings.Contains(q, `JOIN "public"."t" AS _ace_t ON "id" = _ace_keys._ace_k1`) {
 		t.Fatalf("read query with children is not a plain join: %q", q)
 	}
 	tbl.ScanChildren = false
 
-	if _, err := tbl.ReadQuery(colTypes, map[string]string{"id": "integer"}, ""); err == nil {
+	if _, err := tbl.ReadQuery(map[string]string{"id": "integer"}, "", 1); err == nil {
 		t.Fatal("a key column without a cast type must give an error")
+	}
+	for _, n := range []int{0, maxReadKeys(2) + 1} {
+		if _, err := tbl.ReadQuery(castTypes, "", n); err == nil {
+			t.Fatalf("a row read of %d keys must give an error", n)
+		}
+	}
+	if m := maxReadKeys(2); 2*m > 65535 || 2*(m+1) <= 65535 {
+		t.Fatalf("maxReadKeys(2) = %d does not fill the parameter limit", m)
 	}
 }
 

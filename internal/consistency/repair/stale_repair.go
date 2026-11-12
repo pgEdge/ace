@@ -17,10 +17,12 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/pgedge/ace/db/queries"
 	utils "github.com/pgedge/ace/pkg/common"
 	"github.com/pgedge/ace/pkg/logger"
@@ -128,189 +130,94 @@ func (t *TableRepairTask) filterStaleRepairs(ctx context.Context, tx pgx.Tx, nod
 	return nil
 }
 
-func fetchCommitTimestamps(ctx context.Context, tx pgx.Tx, task *TableRepairTask, nodeName string, colTypes map[string]string, rows map[string]map[string]any) (map[string]time.Time, error) {
+// fetchCommitTimestamps reads the current commit timestamp of the rows on a
+// node, by row key. A row is found by its key, as in the diff: the key of the
+// row must be equal to the key value and both must print the same, byte for
+// byte. A row that is gone, or whose commit timestamp is not known, has no
+// entry in the result.
+//
+// The keys are a VALUES list. Each key column of each key is the key text in
+// a parameter written as $n::type, which the server reads with the input
+// function of the type. A cast from text (k::type over a text[]) must not be
+// used: a type can have its own cast from text, which takes the place of the
+// input function.
+func fetchCommitTimestamps(ctx context.Context, tx pgx.Tx, task *TableRepairTask, nodeName string, castTypes map[string]string, rows map[string]map[string]any) (map[string]time.Time, error) {
 	results := make(map[string]time.Time)
 	if len(rows) == 0 {
 		return results, nil
 	}
-
-	// The key columns are selected by their type, so that a key read here has
-	// the form of the key in the diff report. Without the type a numeric key
-	// would be read with its trailing zeros, would not match the report, and the
-	// check would be skipped for the row with no message. So a missing type is
-	// an error.
-	if colTypes == nil {
-		return nil, fmt.Errorf("stale check on %s: no column types", nodeName)
-	}
-	for _, col := range task.Key {
-		if colTypes[col] == "" {
+	n := len(task.Key)
+	types := make([]string, n)
+	keyCols := make([]string, 0, n)
+	conds := make([]string, 0, 2*n)
+	for i, col := range task.Key {
+		typ := castTypes[col]
+		if typ == "" {
 			return nil, fmt.Errorf("stale check on %s: no type for primary key column %s", nodeName, col)
 		}
+		types[i] = typ
+		keyCols = append(keyCols, fmt.Sprintf("k%d", i+1))
+		ident := pgx.Identifier{col}.Sanitize()
+		conds = append(conds,
+			fmt.Sprintf("t.%s = k.k%d", ident, i+1),
+			fmt.Sprintf(`format('%%s', %s) COLLATE "C" = format('%%s', k.k%d)`, queries.ColExpr("t", col), i+1))
 	}
 
-	tableIdent := pgx.Identifier{task.Schema, task.Table}.Sanitize()
-	batchSize := 1000
-
-	if task.SimplePrimaryKey {
-		pkCol := task.Key[0]
-		pkIdent := pgx.Identifier{pkCol}.Sanitize()
-		pkType := colTypes[pkCol]
-
-		keys := make([]any, 0, len(rows))
-		for _, row := range rows {
-			val, ok := row[pkCol]
-			if !ok {
-				return nil, fmt.Errorf("primary key column %s not found in row data", pkCol)
-			}
-			converted, err := convertValueForType(val, pkType)
-			if err != nil {
-				return nil, fmt.Errorf("convert primary key %s value: %w", pkCol, err)
-			}
-			keys = append(keys, converted)
-		}
-
-		for i := 0; i < len(keys); i += batchSize {
-			end := i + batchSize
-			if end > len(keys) {
-				end = len(keys)
-			}
-			batchKeys := keys[i:end]
-
-			var sb strings.Builder
-			args := make([]any, 0, len(batchKeys))
-			paramIdx := 1
-			sb.WriteString("SELECT ")
-			sb.WriteString(queries.SelectColExpr("", pkCol, pkType))
-			sb.WriteString(", pg_xact_commit_timestamp(xmin) FROM ")
-			sb.WriteString(tableIdent)
-			sb.WriteString(" WHERE ")
-			sb.WriteString(pkIdent)
-			sb.WriteString(" IN (")
-			for j, key := range batchKeys {
-				if j > 0 {
-					sb.WriteString(", ")
+	pks := make([]string, 0, len(rows))
+	for pk := range rows {
+		pks = append(pks, pk)
+	}
+	sort.Strings(pks)
+	// Each key column of each key is a parameter, and a query can have at
+	// most 65535.
+	batchSize := min(1000, 65535/max(n, 1))
+	for start := 0; start < len(pks); start += batchSize {
+		batch := pks[start:min(start+batchSize, len(pks))]
+		args := make([]any, 0, n*len(batch))
+		vals := make([]string, len(batch))
+		for j, pk := range batch {
+			var v strings.Builder
+			fmt.Fprintf(&v, "(%d", j+1)
+			for i, col := range task.Key {
+				text, ok := valueText(rows[pk][col])
+				if !ok {
+					return nil, fmt.Errorf("stale check on %s: primary key column %s of row %s is NULL", nodeName, col, pk)
 				}
-				sb.WriteString(fmt.Sprintf("$%d", paramIdx))
-				args = append(args, key)
-				paramIdx++
+				args = append(args, text)
+				fmt.Fprintf(&v, ", $%d::%s", len(args), types[i])
 			}
-			sb.WriteString(")")
-
-			rows, err := tx.Query(ctx, sb.String(), args...) // nosemgrep
-			if err != nil {
-				return nil, fmt.Errorf("query current commit timestamp on %s: %w", nodeName, err)
-			}
-			if err := collectCommitTimestamps(rows, task.Key, results); err != nil {
-				return nil, err
-			}
+			v.WriteString(")")
+			vals[j] = v.String()
 		}
-
-		return results, nil
-	}
-
-	colIdents := make([]string, len(task.Key))
-	selectKey := make([]string, len(task.Key))
-	for i, col := range task.Key {
-		colIdents[i] = pgx.Identifier{col}.Sanitize()
-		selectKey[i] = queries.SelectColExpr("", col, colTypes[col])
-	}
-	pkSQL := strings.Join(colIdents, ", ")
-
-	keys := make([][]any, 0, len(rows))
-	for _, row := range rows {
-		tuple := make([]any, len(task.Key))
-		for i, col := range task.Key {
-			val, ok := row[col]
-			if !ok {
-				return nil, fmt.Errorf("composite primary key column %s not found in row data", col)
-			}
-			converted, err := convertValueForType(val, colTypes[col])
-			if err != nil {
-				return nil, fmt.Errorf("convert primary key %s value: %w", col, err)
-			}
-			tuple[i] = converted
-		}
-		keys = append(keys, tuple)
-	}
-
-	for i := 0; i < len(keys); i += batchSize {
-		end := i + batchSize
-		if end > len(keys) {
-			end = len(keys)
-		}
-		batchKeys := keys[i:end]
-
-		var sb strings.Builder
-		args := make([]any, 0, len(batchKeys)*len(task.Key))
-		paramIdx := 1
-		sb.WriteString("SELECT ")
-		sb.WriteString(strings.Join(selectKey, ", "))
-		sb.WriteString(", pg_xact_commit_timestamp(xmin) FROM ")
-		sb.WriteString(tableIdent)
-		sb.WriteString(" WHERE (")
-		sb.WriteString(pkSQL)
-		sb.WriteString(") IN (")
-		for j, key := range batchKeys {
-			if j > 0 {
-				sb.WriteString(", ")
-			}
-			sb.WriteString("(")
-			for k, val := range key {
-				if k > 0 {
-					sb.WriteString(", ")
-				}
-				sb.WriteString(fmt.Sprintf("$%d", paramIdx))
-				args = append(args, val)
-				paramIdx++
-			}
-			sb.WriteString(")")
-		}
-		sb.WriteString(")")
-
-		rows, err := tx.Query(ctx, sb.String(), args...) // nosemgrep
+		query := fmt.Sprintf("SELECT k.pos::bigint, pg_xact_commit_timestamp(t.xmin) "+
+			"FROM (VALUES %s) AS k(pos, %s) JOIN %s AS t ON %s",
+			strings.Join(vals, ", "), strings.Join(keyCols, ", "),
+			pgx.Identifier{task.Schema, task.Table}.Sanitize(), strings.Join(conds, " AND "))
+		res, err := tx.Query(ctx, query, args...) // nosemgrep
 		if err != nil {
 			return nil, fmt.Errorf("query current commit timestamp on %s: %w", nodeName, err)
 		}
-		if err := collectCommitTimestamps(rows, task.Key, results); err != nil {
-			return nil, err
+		for res.Next() {
+			var pos int64
+			var ts pgtype.Timestamptz
+			if err := res.Scan(&pos, &ts); err != nil {
+				res.Close()
+				return nil, fmt.Errorf("read commit timestamp result: %w", err)
+			}
+			if pos < 1 || pos > int64(len(batch)) {
+				res.Close()
+				return nil, fmt.Errorf("commit timestamp result has a bad key position %d", pos)
+			}
+			if ts.Valid && ts.InfinityModifier == pgtype.Finite {
+				results[batch[pos-1]] = ts.Time
+			}
+		}
+		res.Close()
+		if err := res.Err(); err != nil {
+			return nil, fmt.Errorf("iterate commit timestamp results: %w", err)
 		}
 	}
-
 	return results, nil
-}
-
-// collectCommitTimestamps reads rows of the key columns followed by the
-// commit timestamp, and adds them to results by row key. The key columns
-// are selected and read in the form of the diff report, so that the key of a
-// row here is the key of the same row in the report. A key in another form
-// would not match, and the stale check would be skipped for that row with no
-// message.
-func collectCommitTimestamps(rows pgx.Rows, key []string, results map[string]time.Time) error {
-	defer rows.Close()
-	for rows.Next() {
-		row, err := utils.ScanRow(rows)
-		if err != nil {
-			return fmt.Errorf("read commit timestamp result: %w", err)
-		}
-		if len(row) != len(key)+1 {
-			return fmt.Errorf("unexpected commit timestamp result size: %d", len(row))
-		}
-		pkStr, err := utils.StringifyOrderedMapKey(row[:len(key)], key)
-		if err != nil {
-			return fmt.Errorf("stringify primary key: %w", err)
-		}
-		commitTS, err := parseCommitTimestamp(row[len(key)].Value)
-		if err != nil {
-			return err
-		}
-		if commitTS != nil {
-			results[pkStr] = *commitTS
-		}
-	}
-	if err := rows.Err(); err != nil {
-		return fmt.Errorf("iterate commit timestamp results: %w", err)
-	}
-	return nil
 }
 
 func parseCommitTimestamp(raw any) (*time.Time, error) {

@@ -494,11 +494,6 @@ func NewTableDiffTask() *TableDiffTask {
 	}
 }
 
-// nodeColTypes returns the column types of the table on nodeName.
-func (t *TableDiffTask) nodeColTypes(nodeName string) (map[string]string, error) {
-	return t.nodeTypes(nodeName, t.ColTypes, "column types")
-}
-
 // nodeCastTypes returns the cast types of the columns of the table on
 // nodeName.
 func (t *TableDiffTask) nodeCastTypes(nodeName string) (map[string]string, error) {
@@ -1942,10 +1937,6 @@ func (t *TableDiffTask) compareMismatch(ctx context.Context, task mismatchTask) 
 	}
 
 	side := func(node string, rows int64) (keydiff.Side, error) {
-		colTypes, err := t.nodeColTypes(node)
-		if err != nil {
-			return keydiff.Side{}, err
-		}
 		castTypes, err := t.nodeCastTypes(node)
 		if err != nil {
 			return keydiff.Side{}, err
@@ -1957,7 +1948,7 @@ func (t *TableDiffTask) compareMismatch(ctx context.Context, task mismatchTask) 
 		// Every query of the comparison is one operation on the block, so
 		// the block timeout limits each of them.
 		conn := &blockQuerier{t: t, pool: pool}
-		return keydiff.Side{Name: node, Conn: conn, ColTypes: colTypes, CastTypes: castTypes, Rows: rows, RowsKnown: true}, nil
+		return keydiff.Side{Name: node, Conn: conn, CastTypes: castTypes, Rows: rows, RowsKnown: true}, nil
 	}
 	s1, err := side(task.node1, task.rows1)
 	if err != nil {
