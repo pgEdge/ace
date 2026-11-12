@@ -367,12 +367,10 @@ func TestHTMLPlanKeysWithYAMLLineBreaks(t *testing.T) {
 	}
 }
 
-// Keys of the kinds NormalizeScannedValue puts in a diff file: timestamps
+// Keys that a tool can put in a diff result as Go values: timestamps
 // (time.Time, written as RFC 3339 text), numerics (text), bytea (base64 text)
-// and UUIDs (text). The plan must copy the diff file's text exactly, as
-// quoted strings, so table-repair compares string with string. An unquoted
-// timestamp or number in the YAML would be read as another type and match
-// nothing.
+// and UUIDs (text). The plan must copy the text of the result exactly, as
+// quoted strings, so that table-repair compares the same texts.
 func TestHTMLPlanNormalizedKeyTypes(t *testing.T) {
 	india := time.FixedZone("IST", 5*3600+30*60)
 	cases := []struct {
