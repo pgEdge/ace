@@ -12,7 +12,6 @@
 package integration
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -22,7 +21,6 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/pgedge/ace/db/queries"
 	"github.com/pgedge/ace/internal/consistency/diff"
-	"github.com/pgedge/ace/pkg/logger"
 	"github.com/pgedge/ace/pkg/taskstore"
 	"github.com/pgedge/ace/pkg/types"
 	"github.com/stretchr/testify/assert"
@@ -291,25 +289,6 @@ func TestRepsetDiffSkipsUnreadableTables(t *testing.T) {
 	skipped := extractBetween(summary, "table(s) were skipped:", "table(s)")
 	assert.Contains(t, skipped,
 		fmt.Sprintf("%s.hidden (no SELECT privilege on %s)", catalogPrivsSchema, serviceN1))
-}
-
-// captureLog runs fn with the logger writing to a pipe and returns what it
-// logged.
-func captureLog(t *testing.T, fn func()) string {
-	t.Helper()
-	r, w, err := os.Pipe()
-	require.NoError(t, err)
-	logger.SetOutput(w)
-	defer logger.SetOutput(os.Stderr)
-
-	fn()
-
-	require.NoError(t, w.Close())
-	var buf bytes.Buffer
-	_, err = buf.ReadFrom(r)
-	require.NoError(t, err)
-	t.Logf("Captured log output:\n%s", buf.String())
-	return buf.String()
 }
 
 // writeRoleClusterConfig copies the test cluster config with user and

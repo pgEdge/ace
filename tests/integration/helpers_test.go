@@ -12,6 +12,7 @@
 package integration
 
 import (
+	"bytes"
 	"context"
 	"encoding/csv"
 	"fmt"
@@ -26,6 +27,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/pgedge/ace/internal/consistency/mtree"
 	"github.com/pgedge/ace/internal/consistency/repair"
+	"github.com/pgedge/ace/pkg/logger"
 	"github.com/stretchr/testify/require"
 )
 
@@ -285,6 +287,70 @@ func newTestMerkleTreeTask(t *testing.T, qualifiedTableName string, nodes []stri
 func repairTable(t *testing.T, qualifiedTableName, sourceOfTruthNode string) {
 	t.Helper()
 	newSpockEnv().repairTable(t, qualifiedTableName, sourceOfTruthNode)
+}
+
+// outputCapture collects what is written to the write end of a pipe. A
+// goroutine reads the pipe while the test writes, so a writer never blocks on
+// a full pipe.
+type outputCapture struct {
+	w      *os.File
+	r      *os.File
+	buf    bytes.Buffer
+	done   chan error
+	text   string
+	closed bool
+}
+
+// newOutputCapture starts a capture. The caller points an output at w and
+// calls stop to get the text. A capture that is not stopped is stopped in
+// the cleanup of the test, so the pipe and the goroutine do not outlive it.
+func newOutputCapture(t testing.TB) *outputCapture {
+	t.Helper()
+	r, w, err := os.Pipe()
+	require.NoError(t, err)
+	c := &outputCapture{w: w, r: r, done: make(chan error, 1)}
+	go func() {
+		_, err := io.Copy(&c.buf, r)
+		c.done <- err
+	}()
+	t.Cleanup(func() { c.stop(t) })
+	return c
+}
+
+// stop closes the write end, waits until the reader has read everything and
+// returns the text. The caller must point the output away from w first.
+func (c *outputCapture) stop(t testing.TB) string {
+	t.Helper()
+	if c.closed {
+		return c.text
+	}
+	c.closed = true
+	if err := c.w.Close(); err != nil {
+		t.Errorf("close the write end of the capture pipe: %v", err)
+	}
+	if err := <-c.done; err != nil {
+		t.Errorf("read the capture pipe: %v", err)
+	}
+	if err := c.r.Close(); err != nil {
+		t.Errorf("close the read end of the capture pipe: %v", err)
+	}
+	c.text = c.buf.String()
+	return c.text
+}
+
+// captureLog runs fn with the logger writing to a pipe and returns what it
+// logged.
+func captureLog(t *testing.T, fn func()) string {
+	t.Helper()
+	c := newOutputCapture(t)
+	func() {
+		logger.SetOutput(c.w)
+		defer logger.SetOutput(os.Stderr)
+		fn()
+	}()
+	out := c.stop(t)
+	t.Logf("Captured log output:\n%s", out)
+	return out
 }
 
 // getCommitTimestamp retrieves the commit timestamp for a specific row
