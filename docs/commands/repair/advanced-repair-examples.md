@@ -46,18 +46,19 @@ tables:
           mode: upsert
 ```
 
-## 3) Bidirectional convergence for mismatches only
+## 3) Bidirectional copy of missing rows
 
-Copy rows both ways when they differ; leave single-sided misses untouched:
+Copy each row that only one node has to the other node; leave mismatched rows untouched:
 ```yaml
 tables:
   public.features:
     default_action: { type: skip }
     rules:
-      - name: converge_mismatches
-        diff_type: [row_mismatch]
+      - name: copy_missing_rows
+        diff_type: [missing_on_n1, missing_on_n2]
         action: { type: bidirectional }
 ```
+`bidirectional` is refused on `row_mismatch`. To make mismatched rows equal, choose a winner, as in examples 5 and 5b.
 
 ## 4) Coalesce (fix-nulls style) with helpers
 

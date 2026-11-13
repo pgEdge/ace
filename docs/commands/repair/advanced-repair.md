@@ -17,7 +17,7 @@
 ### Actions (verbs)
 - `keep_n1`, `keep_n2`: copy that side.  
 - `apply_from` with `from: n1|n2` and `mode: replace|upsert|insert` (default `replace`). `insert` is only valid on missing rows.  
-- `bidirectional`: copy both ways (only meaningful on mismatches/missing rows).  
+- `bidirectional`: copy a row that only one node has to the other node, as `--bidirectional` does. It is refused on `row_mismatch`: to make two different rows equal, choose a winner with `keep_n1`, `keep_n2`, `apply_from` or `custom`.  
 - `custom`: provide `custom_row` (with optional `{{n1.col}}` / `{{n2.col}}` templating) and/or helpers:  
   - `helpers.coalesce_priority: [n1, n2]` fills remaining columns from the first non‑NULL source.  
   - `helpers.pick_freshest: { key: updated_at, tie: n1|n2 }` fills remaining columns from the fresher side (numeric, string, or RFC3339 timestamps).  
@@ -28,7 +28,7 @@
 
 ### Compatibility checks (fail fast)
 - `keep_n1`/`apply_from n1` require a row on n1; `keep_n2`/`apply_from n2` require a row on n2.  
-- `apply_from mode: insert` is invalid on `row_mismatch`.  
+- `apply_from mode: insert` and `bidirectional` are invalid on `row_mismatch`.  
 - `diff_type` is validated; incompatible action/diff combos are rejected at parse time and at execution.  
 - `custom` requires `custom_row` or `helpers`.
 
