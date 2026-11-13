@@ -48,7 +48,7 @@ func slicingDiffWithConns(t *testing.T, qualified, method string, conns int) (in
 	if task.DiffFilePath == "" {
 		return 0, summary
 	}
-	t.Cleanup(func() { os.Remove(task.DiffFilePath) })
+	t.Cleanup(func() { removeFile(t, task.DiffFilePath) })
 
 	data, err := os.ReadFile(task.DiffFilePath)
 	require.NoError(t, err)

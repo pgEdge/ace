@@ -17,6 +17,7 @@ import (
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -65,7 +66,7 @@ func runMtreeUpdateConflictCase(t *testing.T, tableName string, ids []int, diver
 	}
 	t.Cleanup(func() {
 		for _, pool := range []*pgxpool.Pool{pgCluster.Node1Pool, pgCluster.Node2Pool} {
-			pool.Exec(ctx, fmt.Sprintf("DROP TABLE IF EXISTS %s CASCADE", qualifiedTable)) // nosemgrep
+			execOK(t, ctx, pool, fmt.Sprintf("DROP TABLE IF EXISTS %s CASCADE", qualifiedTable)) // nosemgrep
 		}
 	})
 
@@ -75,7 +76,7 @@ func runMtreeUpdateConflictCase(t *testing.T, tableName string, ids []int, diver
 		t.Helper()
 		tx, err := pool.Begin(ctx)
 		require.NoError(t, err)
-		defer tx.Rollback(ctx) // safe to call even after Commit() in pgx
+		defer rollback(t, ctx, tx)
 		_, err = tx.Exec(ctx, "SELECT spock.repair_mode(true)")
 		require.NoError(t, err)
 		for _, id := range ids {
@@ -107,7 +108,7 @@ func runMtreeUpdateConflictCase(t *testing.T, tableName string, ids []int, diver
 	mtreeTask.OverrideBlockSize = true
 	require.NoError(t, mtreeTask.RunChecks(false))
 	require.NoError(t, mtreeTask.MtreeInit())
-	t.Cleanup(func() { _ = mtreeTask.MtreeTeardown() })
+	t.Cleanup(func() { assert.NoError(t, mtreeTask.MtreeTeardown()) })
 	require.NoError(t, mtreeTask.BuildMtree())
 
 	diffTask := newTestMerkleTreeTask(t, qualifiedTable, nodes)

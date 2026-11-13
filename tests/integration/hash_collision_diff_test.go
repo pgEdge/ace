@@ -13,8 +13,6 @@ package integration
 
 import (
 	"context"
-	"os"
-	"path/filepath"
 	"testing"
 
 	"github.com/jackc/pgx/v5"
@@ -35,12 +33,9 @@ func createCollisionTable(t *testing.T, ctx context.Context, env *testEnv, table
 	ident := pgx.Identifier{testSchema, table}.Sanitize()
 	t.Cleanup(func() {
 		for _, pool := range env.pools() {
-			_, _ = pool.Exec(ctx, "DROP TABLE IF EXISTS "+ident) // nosemgrep
+			execOK(t, ctx, pool, "DROP TABLE IF EXISTS "+ident) // nosemgrep
 		}
-		files, _ := filepath.Glob("*_diffs-*")
-		for _, f := range files {
-			os.RemoveAll(f)
-		}
+		removeGlob(t, "*_diffs-*")
 	})
 	for _, pool := range env.pools() {
 		_, err := pool.Exec(ctx, "CREATE TABLE IF NOT EXISTS "+ident+" (id int PRIMARY KEY, a text, b text)") // nosemgrep
@@ -136,7 +131,7 @@ func TestMerkleTreeFindsRowsThatCollidedInTheOldEncoding(t *testing.T) {
 	require.NoError(t, task.MtreeInit())
 	t.Cleanup(func() {
 		if err := task.MtreeTeardown(); err != nil {
-			t.Logf("MtreeTeardown cleanup: %v", err)
+			t.Errorf("MtreeTeardown cleanup: %v", err)
 		}
 	})
 	require.NoError(t, task.BuildMtree())

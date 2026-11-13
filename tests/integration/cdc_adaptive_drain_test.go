@@ -69,13 +69,13 @@ func TestAdaptiveDrainEscalation(t *testing.T) {
 		for _, tbl := range tables {
 			if task := tasks[tbl.name]; task != nil {
 				if err := task.MtreeTeardown(); err != nil {
-					t.Logf("cleanup: MtreeTeardown(%s) failed: %v", tbl.name, err)
+					t.Errorf("cleanup: MtreeTeardown(%s) failed: %v", tbl.name, err)
 				}
 			}
 			for _, pool := range []*pgxpool.Pool{env.N1Pool, env.N2Pool} {
 				ident := pgx.Identifier{testSchema, tbl.name}.Sanitize()
 				if _, err := pool.Exec(context.Background(), fmt.Sprintf(`DROP TABLE IF EXISTS %s CASCADE`, ident)); err != nil { // nosemgrep
-					t.Logf("cleanup: drop %s failed: %v", tbl.name, err)
+					t.Errorf("cleanup: drop %s failed: %v", tbl.name, err)
 				}
 			}
 		}

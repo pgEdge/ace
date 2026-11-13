@@ -17,9 +17,9 @@ import (
 	"sort"
 	"testing"
 
-	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/pgedge/ace/pkg/types"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -51,7 +51,7 @@ func testNumericScaleIsADifference(t *testing.T, env *testEnv) {
 	}
 	t.Cleanup(func() {
 		for _, pool := range env.pools() {
-			_, _ = pool.Exec(context.Background(), "DROP TABLE IF EXISTS "+qualifiedTable) // nosemgrep
+			execOK(t, context.Background(), pool, "DROP TABLE IF EXISTS "+qualifiedTable) // nosemgrep
 		}
 	})
 
@@ -73,7 +73,7 @@ func testNumericScaleIsADifference(t *testing.T, env *testEnv) {
 	for _, pool := range env.pools() {
 		tx, err := pool.Begin(ctx)
 		require.NoError(t, err)
-		defer func(tx pgx.Tx) { _ = tx.Rollback(ctx) }(tx)
+		defer rollback(t, ctx, tx)
 		env.withRepairModeTx(t, ctx, tx, func() {
 			for _, r := range rows {
 				amt, arr := r.n1Amt, r.n1Arr
@@ -109,7 +109,7 @@ func testNumericScaleIsADifference(t *testing.T, env *testEnv) {
 		task.BlockSize = 1000
 		require.NoError(t, task.RunChecks(false))
 		require.NoError(t, task.MtreeInit())
-		t.Cleanup(func() { task.MtreeTeardown() })
+		t.Cleanup(func() { assert.NoError(t, task.MtreeTeardown()) })
 		require.NoError(t, task.BuildMtree())
 		task.NoCDC = true
 		require.NoError(t, task.DiffMtree())
@@ -252,7 +252,7 @@ func TestNumericNamedEnum(t *testing.T) {
 	// Cleanups run in reverse order: the type is dropped after the table.
 	t.Cleanup(func() {
 		for _, pool := range env.pools() {
-			_, _ = pool.Exec(context.Background(), "DROP TYPE IF EXISTS "+enumType) // nosemgrep
+			execOK(t, context.Background(), pool, "DROP TYPE IF EXISTS "+enumType) // nosemgrep
 		}
 	})
 	qualifiedTable := typedKeyTable(t, env, "ace_numeric_enum", "id int PRIMARY KEY, level "+enumType, "id, level",

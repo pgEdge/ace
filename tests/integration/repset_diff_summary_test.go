@@ -16,7 +16,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"path/filepath"
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -57,15 +56,11 @@ func TestRepsetDiff_UniDirectional(t *testing.T) {
 	require.NoError(t, err)
 
 	t.Cleanup(func() {
-		pgCluster.Node1Pool.Exec(ctx,
-			fmt.Sprintf(`SELECT spock.repset_remove_table('%s', '%s');`, repsetName, qualifiedTableName))
+		repsetRemoveTable(t, ctx, pgCluster.Node1Pool, repsetName, qualifiedTableName)
 		for _, pool := range []*pgxpool.Pool{pgCluster.Node1Pool, pgCluster.Node2Pool} {
-			pool.Exec(ctx, fmt.Sprintf(`DROP TABLE IF EXISTS %s CASCADE`, qualifiedTableName))
+			execOK(t, ctx, pool, fmt.Sprintf(`DROP TABLE IF EXISTS %s CASCADE`, qualifiedTableName))
 		}
-		files, _ := filepath.Glob(fmt.Sprintf("%s_%s_diffs-*.json", testSchema, tableName))
-		for _, f := range files {
-			os.Remove(f)
-		}
+		removeGlob(t, fmt.Sprintf("%s_%s_diffs-*.json", testSchema, tableName))
 	})
 
 	// Capture logger output.
@@ -77,9 +72,10 @@ func TestRepsetDiff_UniDirectional(t *testing.T) {
 	task := newTestRepsetDiffTask(repsetName)
 	diffErr := diff.RepsetDiff(task)
 
-	w.Close()
+	require.NoError(t, w.Close())
 	var buf bytes.Buffer
-	buf.ReadFrom(r)
+	_, err = buf.ReadFrom(r)
+	require.NoError(t, err)
 	logOutput := buf.String()
 	t.Logf("Captured log output:\n%s", logOutput)
 
@@ -148,9 +144,8 @@ func TestRepsetDiff_Summary(t *testing.T) {
 	}
 	t.Cleanup(func() {
 		for _, pool := range []*pgxpool.Pool{pgCluster.Node1Pool, pgCluster.Node2Pool} {
-			pool.Exec(ctx, fmt.Sprintf(
-				`SELECT spock.repset_remove_table('%s', '%s');`, repsetName, noPKQualified))
-			pool.Exec(ctx, fmt.Sprintf(`DROP TABLE IF EXISTS %s CASCADE`, noPKQualified))
+			repsetRemoveTable(t, ctx, pool, repsetName, noPKQualified)
+			execOK(t, ctx, pool, fmt.Sprintf(`DROP TABLE IF EXISTS %s CASCADE`, noPKQualified))
 		}
 	})
 
@@ -165,9 +160,10 @@ func TestRepsetDiff_Summary(t *testing.T) {
 
 	diffErr := diff.RepsetDiff(task)
 
-	w.Close()
+	require.NoError(t, w.Close())
 	var buf bytes.Buffer
-	buf.ReadFrom(r)
+	_, err = buf.ReadFrom(r)
+	require.NoError(t, err)
 	logOutput := buf.String()
 	t.Logf("Captured log output:\n%s", logOutput)
 
@@ -218,15 +214,16 @@ func TestSchemaDiff_SkippedTableNamesInSummary(t *testing.T) {
 	task := newTestSchemaDiffTask(testSchema, nodes)
 	task.SkipTables = skipTableName
 
-	err = task.SchemaTableDiff()
+	diffErr := task.SchemaTableDiff()
 
-	w.Close()
+	require.NoError(t, w.Close())
 	var buf bytes.Buffer
-	buf.ReadFrom(r)
+	_, err = buf.ReadFrom(r)
+	require.NoError(t, err)
 	logOutput := buf.String()
 	t.Logf("Captured log output:\n%s", logOutput)
 
-	require.NoError(t, err)
+	require.NoError(t, diffErr)
 
 	// The skipped table name should appear in the summary, not just a count.
 	assert.Contains(t, logOutput, "table(s) were skipped:")

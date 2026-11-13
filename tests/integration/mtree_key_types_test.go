@@ -17,6 +17,7 @@ import (
 	"testing"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -61,7 +62,7 @@ func TestMtreeNonKeyTypesMayDiffer(t *testing.T) {
 	task := env.newMerkleTreeTask(t, qualified, []string{env.ServiceN1, env.ServiceN2})
 	require.NoError(t, task.RunChecks(false))
 	require.NoError(t, task.MtreeInit())
-	t.Cleanup(func() { _ = task.MtreeTeardown() })
+	t.Cleanup(func() { assert.NoError(t, task.MtreeTeardown()) })
 	require.NoError(t, task.BuildMtree())
 
 	keydiffExec(t, ctx, env, env.N2Pool, fmt.Sprintf("UPDATE %s SET v = 'changed' WHERE id = 42", ident))

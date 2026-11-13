@@ -160,7 +160,7 @@ func slicingDiffSummary(t *testing.T, qualified string, filter string) (int, int
 	if task.DiffFilePath == "" {
 		return 0, rowsChecked
 	}
-	t.Cleanup(func() { os.Remove(task.DiffFilePath) })
+	t.Cleanup(func() { removeFile(t, task.DiffFilePath) })
 
 	data, err := os.ReadFile(task.DiffFilePath)
 	require.NoError(t, err)
@@ -346,7 +346,7 @@ func TestBuildMtreeBlockSlicing(t *testing.T) {
 	require.NoError(t, task.MtreeInit())
 	t.Cleanup(func() {
 		if err := task.MtreeTeardown(); err != nil {
-			t.Logf("Warning: MtreeTeardown failed during cleanup: %v", err)
+			t.Errorf("MtreeTeardown failed during cleanup: %v", err)
 		}
 		for _, p := range pools {
 			slicingExec(t, ctx, p, "DROP TABLE IF EXISTS "+ident)
