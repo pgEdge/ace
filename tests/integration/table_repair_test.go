@@ -16,7 +16,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"log"
 	"os"
 	"path/filepath"
@@ -77,30 +76,22 @@ func assertNoTableDiff(t *testing.T, qualifiedTableName string) {
 // captureOutput executes a function while capturing its stdout and stderr.
 func captureOutput(t *testing.T, task func()) string {
 	t.Helper()
-	oldStdout := os.Stdout
-	oldStderr := os.Stderr
-	r, w, err := os.Pipe()
-	require.NoError(t, err)
-	os.Stdout = w
-	os.Stderr = w
-
-	// Redirect package logger to capture WARN logs
-	pkgLogger.SetOutput(w)
-
-	task()
-
-	err = w.Close()
-	require.NoError(t, err)
-	os.Stdout = oldStdout
-	os.Stderr = oldStderr
-
-	// Restore package logger
-	pkgLogger.SetOutput(oldStderr)
-
-	var buf bytes.Buffer
-	_, err = io.Copy(&buf, r)
-	require.NoError(t, err)
-	return buf.String()
+	c := newOutputCapture(t)
+	func() {
+		oldStdout := os.Stdout
+		oldStderr := os.Stderr
+		os.Stdout = c.w
+		os.Stderr = c.w
+		// The package logger prints the WARN logs.
+		pkgLogger.SetOutput(c.w)
+		defer func() {
+			os.Stdout = oldStdout
+			os.Stderr = oldStderr
+			pkgLogger.SetOutput(oldStderr)
+		}()
+		task()
+	}()
+	return c.stop(t)
 }
 
 // getTableCounts returns the row counts for a table on both nodes.

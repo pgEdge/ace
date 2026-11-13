@@ -16,7 +16,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"strings"
 	"testing"
@@ -364,18 +363,14 @@ func TestSchemaDiffStructure_SkipTablesExcludesMissingTableFromReport(t *testing
 // check what --output=json actually produced.
 func captureStdout(t *testing.T, fn func()) string {
 	t.Helper()
-	r, w, err := os.Pipe()
-	require.NoError(t, err)
-	orig := os.Stdout
-	os.Stdout = w
-
-	fn()
-
-	require.NoError(t, w.Close())
-	os.Stdout = orig
-	out, err := io.ReadAll(r)
-	require.NoError(t, err)
-	return string(out)
+	c := newOutputCapture(t)
+	func() {
+		orig := os.Stdout
+		os.Stdout = c.w
+		defer func() { os.Stdout = orig }()
+		fn()
+	}()
+	return c.stop(t)
 }
 
 // TestSchemaDiffStructure_JSONOutput checks --output=json end-to-end: it
