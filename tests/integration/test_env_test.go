@@ -16,9 +16,7 @@ import (
 	"fmt"
 	"log"
 	"math"
-	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -327,36 +325,27 @@ func (e *testEnv) assertNoTableDiff(t *testing.T, qualifiedTableName string) {
 	assert.Empty(t, diffPairs(t, tdTask), "Expected no differences after repair, but diffs were found")
 }
 
-// repairTable finds the latest diff file and runs a repair.
+// repairTable runs a new table-diff of n1 and n2 and, if the nodes differ,
+// repairs the table from this diff. A diff file left by an earlier step may
+// not match the tables any more, and repair fails on each row that it cannot
+// apply as the report says.
 func (e *testEnv) repairTable(t *testing.T, qualifiedTableName, sourceOfTruthNode string) {
 	t.Helper()
-	files, err := filepath.Glob("*_diffs-*.json")
-	if err != nil {
-		t.Fatalf("Failed to find diff files: %v", err)
+	removeTestDiffResults()
+	tdTask := e.newTableDiffTask(t, qualifiedTableName, []string{e.ServiceN1, e.ServiceN2})
+	if err := tdTask.RunChecks(false); err != nil {
+		t.Fatalf("repairTable: table-diff validation failed: %v", err)
 	}
-	if len(files) == 0 {
-		log.Println("No diff file found to repair from, skipping repair.")
+	if err := tdTask.ExecuteTask(); err != nil {
+		t.Fatalf("repairTable: table-diff failed: %v", err)
+	}
+	if tdTask.DiffFilePath == "" {
+		log.Println("No differences, skipping repair.")
 		return
 	}
+	log.Printf("Using diff file for repair: %s", tdTask.DiffFilePath)
 
-	sort.Slice(files, func(i, j int) bool {
-		fi, errI := os.Stat(files[i])
-		if errI != nil {
-			t.Logf("Warning: could not stat file %s: %v", files[i], errI)
-			return false
-		}
-		fj, errJ := os.Stat(files[j])
-		if errJ != nil {
-			t.Logf("Warning: could not stat file %s: %v", files[j], errJ)
-			return false
-		}
-		return fi.ModTime().After(fj.ModTime())
-	})
-
-	latestDiffFile := files[0]
-	log.Printf("Using latest diff file for repair: %s", latestDiffFile)
-
-	repairTask := e.newTableRepairTask(sourceOfTruthNode, qualifiedTableName, latestDiffFile)
+	repairTask := e.newTableRepairTask(sourceOfTruthNode, qualifiedTableName, tdTask.DiffFilePath)
 	time.Sleep(2 * time.Second)
 	if err := repairTask.Run(false); err != nil {
 		t.Fatalf("Failed to repair table: %v", err)

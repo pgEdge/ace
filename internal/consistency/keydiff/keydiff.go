@@ -224,17 +224,15 @@ func Compare(ctx context.Context, t Table, b Block, s1, s2 Side, o Options, sink
 		return res, nil
 	}
 
-	seen1 := make(map[string]struct{})
-	seen2 := make(map[string]struct{})
 	var entries []Entry
 	for start := 0; start < len(ids); start += o.BatchSize {
 		end := min(start+o.BatchSize, len(ids))
 		batch := ids[start:end]
-		rows1, err := readRows(ctx, t, b.ReadFilter, s1, batch, seen1)
+		rows1, err := readRows(ctx, t, b.ReadFilter, s1, batch)
 		if err != nil {
 			return Result{}, err
 		}
-		rows2, err := readRows(ctx, t, b.ReadFilter, s2, batch, seen2)
+		rows2, err := readRows(ctx, t, b.ReadFilter, s2, batch)
 		if err != nil {
 			return Result{}, err
 		}
@@ -463,10 +461,9 @@ type readRow struct {
 
 // readRows reads the full rows for the keys ids on one node. The result is
 // indexed by the position of the key in ids. A key can have no row (the row
-// was deleted) or more than one row (an inheritance tree). seen holds the
-// rows (table OID and ctid) already returned for other keys of the same
-// comparison; such a row is not returned again.
-func readRows(ctx context.Context, t Table, filter string, s Side, ids []string, seen map[string]struct{}) ([][]readRow, error) {
+// was deleted, or its key now prints in another way) or more than one row (an
+// inheritance tree).
+func readRows(ctx context.Context, t Table, filter string, s Side, ids []string) ([][]readRow, error) {
 	query, err := t.ReadQuery(s.ColTypes, filter)
 	if err != nil {
 		return nil, err
@@ -496,7 +493,7 @@ func readRows(ctx context.Context, t Table, filter string, s Side, ids []string,
 	}
 	defer rows.Close()
 
-	const first = 4 // position, row hash, table OID, ctid
+	const first = 2 // position, row hash
 	out := make([][]readRow, len(ids))
 	for rows.Next() {
 		// The row is read in the same form as every other row read for a
@@ -516,11 +513,6 @@ func readRows(ctx context.Context, t Table, filter string, s Side, ids []string,
 		if !ok || len(hb) != rowHashSize {
 			return nil, fmt.Errorf("row read by key on node %s returned a bad row hash", s.Name)
 		}
-		where := fmt.Sprintf("%v/%v", row[2].Value, row[3].Value)
-		if _, dup := seen[where]; dup {
-			continue
-		}
-		seen[where] = struct{}{}
 		var r readRow
 		copy(r.hash[:], hb)
 		// A copy, so that the service columns are not kept with the row.

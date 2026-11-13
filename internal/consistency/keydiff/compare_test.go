@@ -87,7 +87,6 @@ type fakeNode struct {
 
 type fakeRow struct {
 	hash byte
-	tid  string
 	v    string
 }
 
@@ -105,11 +104,11 @@ func (n *fakeNode) Query(ctx context.Context, sql string, args ...any) (pgx.Rows
 		*n.log = append(*n.log, n.name+":read")
 		texts := args[0].([]string)
 		r := &fakeRows{ctx: ctx, fields: []pgconn.FieldDescription{
-			{Name: posCol}, {Name: rowHashCol}, {Name: relCol}, {Name: tidCol},
+			{Name: posCol}, {Name: rowHashCol},
 			{Name: "commit_ts"}, {Name: "node_origin"}, {Name: "id"}, {Name: "v"}}}
 		for i, k := range texts {
 			for _, fr := range n.stored[k] {
-				r.vals = append(r.vals, []any{int64(i + 1), hash8(fr.hash), int64(1), fr.tid, nil, nil, k, fr.v})
+				r.vals = append(r.vals, []any{int64(i + 1), hash8(fr.hash), nil, nil, k, fr.v})
 			}
 		}
 		n.opened = append(n.opened, r)
@@ -179,8 +178,8 @@ func TestCompareBuildSideAndResult(t *testing.T) {
 	// n1: a, b (changed), c (only n1); n2: a, b, d (only n2)
 	n1.keys = [][][]byte{keyRaw("a", 1), keyRaw("b", 2), keyRaw("c", 3)}
 	n2.keys = [][][]byte{keyRaw("a", 1), keyRaw("b", 9), keyRaw("d", 4)}
-	n1.stored = map[string][]fakeRow{"b": {{2, "(0,2)", "b1"}}, "c": {{3, "(0,3)", "c1"}}}
-	n2.stored = map[string][]fakeRow{"b": {{9, "(0,2)", "b2"}}, "d": {{4, "(0,4)", "d2"}}}
+	n1.stored = map[string][]fakeRow{"b": {{2, "b1"}}, "c": {{3, "c1"}}}
+	n2.stored = map[string][]fakeRow{"b": {{9, "b2"}}, "d": {{4, "d2"}}}
 
 	// n2 has fewer rows, so its keys go into the map: its key query is first.
 	var got collected
@@ -234,7 +233,7 @@ func TestCompareBuildSideAndResult(t *testing.T) {
 func TestCompareEmptyBuildSideIsNotQueried(t *testing.T) {
 	n1, n2, log := twoNodes()
 	n1.keys = [][][]byte{keyRaw("a", 1)}
-	n1.stored = map[string][]fakeRow{"a": {{1, "(0,1)", "a"}}}
+	n1.stored = map[string][]fakeRow{"a": {{1, "a"}}}
 	var got collected
 	res, err := Compare(context.Background(), fakeTable, Block{Where: "TRUE"}, side(n1, 1, true), side(n2, 0, true), Options{}, got.sink())
 	if err != nil {
@@ -306,22 +305,21 @@ func TestCompareBadKeyRows(t *testing.T) {
 	}
 }
 
-// TestCompareSameRowForTwoKeys checks that one row found through two key
-// texts in different batches is reported once, as a changed row.
-func TestCompareSameRowForTwoKeys(t *testing.T) {
-	// "-0" and "0" are two key texts for one row: the server finds the same
-	// row (same ctid) for both, in different batches.
+// TestCompareKeyPrintedDifferently checks a key that the nodes print in a
+// different way, such as -0 and 0: each node finds the row only through its
+// own key text, so the comparison reports a row on each node only.
+func TestCompareKeyPrintedDifferently(t *testing.T) {
 	n1, n2, _ := twoNodes()
 	n1.keys = [][][]byte{keyRaw("-0", 1)}
 	n2.keys = [][][]byte{keyRaw("0", 2)}
-	n1.stored = map[string][]fakeRow{"-0": {{1, "(0,1)", "x"}}, "0": {{1, "(0,1)", "x"}}}
-	n2.stored = map[string][]fakeRow{"-0": {{2, "(0,1)", "x"}}, "0": {{2, "(0,1)", "x"}}}
+	n1.stored = map[string][]fakeRow{"-0": {{1, "x"}}}
+	n2.stored = map[string][]fakeRow{"0": {{2, "x"}}}
 	res, err := Compare(context.Background(), fakeTable, Block{Where: "TRUE"}, side(n1, 1, true), side(n2, 1, true), Options{BatchSize: 1}, discard)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if res.DiffKeys != 2 || res.Changed != 1 || res.Only1+res.Only2 != 0 {
-		t.Fatalf("DiffKeys=%d Changed=%d Only1=%d Only2=%d, want one changed row", res.DiffKeys, res.Changed, res.Only1, res.Only2)
+	if res.DiffKeys != 2 || res.Changed != 0 || res.Only1 != 1 || res.Only2 != 1 {
+		t.Fatalf("DiffKeys=%d Changed=%d Only1=%d Only2=%d, want one row on each node only", res.DiffKeys, res.Changed, res.Only1, res.Only2)
 	}
 }
 
@@ -330,7 +328,7 @@ func TestCompareSameRowForTwoKeys(t *testing.T) {
 func TestCompareSinkError(t *testing.T) {
 	n1, n2, log := twoNodes()
 	n1.keys = [][][]byte{keyRaw("a", 1), keyRaw("b", 2)}
-	n1.stored = map[string][]fakeRow{"a": {{1, "(0,1)", "a"}}, "b": {{2, "(0,2)", "b"}}}
+	n1.stored = map[string][]fakeRow{"a": {{1, "a"}}, "b": {{2, "b"}}}
 	stop := errors.New("disk full")
 	calls := 0
 	_, err := Compare(context.Background(), fakeTable, Block{Where: "TRUE"}, side(n1, 2, true), side(n2, 0, true), Options{BatchSize: 1},

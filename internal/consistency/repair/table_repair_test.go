@@ -12,11 +12,13 @@
 package repair
 
 import (
-	"strings"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
 	pgxv5type "github.com/jackc/pgx/v5/pgtype"
+	"github.com/pgedge/ace/internal/consistency/repair/plan"
 	"github.com/stretchr/testify/require"
 )
 
@@ -89,80 +91,6 @@ func TestConvertValueForType_Nil(t *testing.T) {
 	require.Nil(t, val)
 }
 
-func TestBuildFixNullsBatchSQL_TimestampType(t *testing.T) {
-	// Verify that buildFixNullsBatchSQL generates valid SQL for timestamp
-	// columns and that values are properly converted.
-	task := &TableRepairTask{}
-	task.Schema = "public"
-	task.Table = "test_table"
-	task.Key = []string{"id"}
-
-	colTypes := map[string]string{
-		"id":     "integer",
-		"ts_col": "timestamp without time zone",
-	}
-
-	batch := []*nullUpdate{
-		{
-			pkValues: []any{float64(1)},
-			columns:  map[string]any{"ts_col": "2024-06-15T10:30:00Z"},
-		},
-	}
-
-	sql, args, err := task.buildFixNullsBatchSQL("ts_col", "timestamp without time zone", batch, colTypes)
-	require.NoError(t, err)
-
-	// The SQL should contain the correct type cast
-	require.True(t, strings.Contains(sql, "::timestamp without time zone"),
-		"expected SQL to contain '::timestamp without time zone', got: %s", sql)
-
-	// The args should contain the converted values
-	require.Len(t, args, 2) // 1 PK + 1 value
-
-	// The timestamp value should be pgxv5type.Timestamp, not time.Time
-	pgTS, ok := args[1].(pgxv5type.Timestamp)
-	require.True(t, ok, "expected timestamp arg to be pgxv5type.Timestamp, got %T", args[1])
-	require.True(t, pgTS.Valid)
-
-	expected := time.Date(2024, 6, 15, 10, 30, 0, 0, time.UTC)
-	require.True(t, pgTS.Time.Equal(expected))
-}
-
-func TestBuildFixNullsBatchSQL_TimestamptzType(t *testing.T) {
-	// Verify that timestamptz columns use time.Time (not pgxv5type.Timestamp).
-	task := &TableRepairTask{}
-	task.Schema = "public"
-	task.Table = "test_table"
-	task.Key = []string{"id"}
-
-	colTypes := map[string]string{
-		"id":      "integer",
-		"tstz_col": "timestamp with time zone",
-	}
-
-	batch := []*nullUpdate{
-		{
-			pkValues: []any{float64(1)},
-			columns:  map[string]any{"tstz_col": "2024-06-15T10:30:00Z"},
-		},
-	}
-
-	sql, args, err := task.buildFixNullsBatchSQL("tstz_col", "timestamp with time zone", batch, colTypes)
-	require.NoError(t, err)
-
-	require.True(t, strings.Contains(sql, "::timestamp with time zone"),
-		"expected SQL to contain '::timestamp with time zone', got: %s", sql)
-
-	require.Len(t, args, 2)
-
-	// The timestamptz value should be a plain time.Time
-	tv, ok := args[1].(time.Time)
-	require.True(t, ok, "expected timestamptz arg to be time.Time, got %T", args[1])
-
-	expected := time.Date(2024, 6, 15, 10, 30, 0, 0, time.UTC)
-	require.True(t, tv.Equal(expected))
-}
-
 func TestConvertValueForType_StringTime(t *testing.T) {
 	// Values from diff JSON for "time without time zone" columns should be
 	// parsed into pgxv5type.Time via ConvertToPgxType.
@@ -187,70 +115,214 @@ func TestConvertValueForType_StringTimetz(t *testing.T) {
 	require.Equal(t, "10:30:00-05:00", s)
 }
 
-func TestBuildFixNullsBatchSQL_TimeType(t *testing.T) {
-	// Verify that buildFixNullsBatchSQL generates valid SQL for time columns
-	// and that values are properly converted to pgxv5type.Time.
+// TestRowStatement checks the SQL text and the parameters of each kind of row
+// operation, and the conversion of time values for a NULL fix.
+func TestRowStatement(t *testing.T) {
 	task := &TableRepairTask{}
 	task.Schema = "public"
 	task.Table = "test_table"
 	task.Key = []string{"id"}
-
+	task.Cols = []string{"id", "a", "ts_col", "time_col", "timetz_col"}
 	colTypes := map[string]string{
-		"id":       "integer",
-		"time_col": "time without time zone",
+		"id":         "integer",
+		"a":          "text",
+		"ts_col":     "timestamp without time zone",
+		"time_col":   "time without time zone",
+		"timetz_col": "time with time zone",
 	}
+	row := map[string]any{"id": float64(1), "a": "x", "ts_col": "2024-06-15T10:30:00Z",
+		"time_col": "14:30:00.000000", "timetz_col": "14:30:00-05:00"}
 
-	batch := []*nullUpdate{
-		{
-			pkValues: []any{float64(1)},
-			columns:  map[string]any{"time_col": "14:30:00.000000"},
-		},
-	}
-
-	sql, args, err := task.buildFixNullsBatchSQL("time_col", "time without time zone", batch, colTypes)
+	sql, args, err := task.rowStatement(opInsert, row, colTypes)
 	require.NoError(t, err)
+	require.Equal(t, `INSERT INTO "public"."test_table" ("id", "a", "ts_col", "time_col", "timetz_col") VALUES ($1, $2, $3, $4, $5)`, sql)
+	require.Len(t, args, 5)
 
-	require.True(t, strings.Contains(sql, "::time without time zone"),
-		"expected SQL to contain '::time without time zone', got: %s", sql)
+	sql, args, err = task.rowStatement(opUpdate, row, colTypes)
+	require.NoError(t, err)
+	require.Equal(t, `UPDATE "public"."test_table" SET "a" = $2, "ts_col" = $3, "time_col" = $4, "timetz_col" = $5 WHERE "id" = $1`, sql)
+	require.Len(t, args, 5)
 
-	require.Len(t, args, 2) // 1 PK + 1 value
+	sql, args, err = task.rowStatement(opDelete, row, colTypes)
+	require.NoError(t, err)
+	require.Equal(t, `DELETE FROM "public"."test_table" WHERE "id" = $1`, sql)
+	require.Len(t, args, 1)
+
+	// A NULL fix sets only the columns given in the row, and only where they
+	// are still NULL.
+	fix := map[string]any{"id": float64(1), "ts_col": "2024-06-15T10:30:00Z",
+		"time_col": "14:30:00.000000", "timetz_col": "14:30:00-05:00"}
+	sql, args, err = task.rowStatement(opFixNulls, fix, colTypes)
+	require.NoError(t, err)
+	require.Equal(t, `UPDATE "public"."test_table" SET "time_col" = $2, "timetz_col" = $3, "ts_col" = $4 `+
+		`WHERE "id" = $1 AND "time_col" IS NULL AND "timetz_col" IS NULL AND "ts_col" IS NULL`, sql)
+	require.Len(t, args, 4)
 
 	tv, ok := args[1].(pgxv5type.Time)
 	require.True(t, ok, "expected time arg to be pgxv5type.Time, got %T", args[1])
-	require.True(t, tv.Valid)
+	require.Equal(t, int64(14*3_600_000_000+30*60_000_000), tv.Microseconds)
 
-	expectedUsec := int64(14*3_600_000_000 + 30*60_000_000)
-	require.Equal(t, expectedUsec, tv.Microseconds)
+	s, ok := args[2].(string)
+	require.True(t, ok, "expected timetz arg to be string, got %T", args[2])
+	require.Equal(t, "14:30:00-05:00", s)
+
+	pgTS, ok := args[3].(pgxv5type.Timestamp)
+	require.True(t, ok, "expected timestamp arg to be pgxv5type.Timestamp, got %T", args[3])
+	require.True(t, pgTS.Time.Equal(time.Date(2024, 6, 15, 10, 30, 0, 0, time.UTC)))
+
+	// A table with only key columns has nothing to update.
+	task.Cols = []string{"id"}
+	_, _, err = task.rowStatement(opUpdate, map[string]any{"id": float64(1)}, colTypes)
+	require.Error(t, err)
 }
 
-func TestBuildFixNullsBatchSQL_TimetzType(t *testing.T) {
-	// Verify that timetz columns pass through as strings.
-	task := &TableRepairTask{}
-	task.Schema = "public"
-	task.Table = "test_table"
-	task.Key = []string{"id"}
+func TestRepairSetsOneOperationPerKey(t *testing.T) {
+	a := map[string]any{"id": 1, "v": "a"}
+	b := map[string]any{"id": 1, "v": "b"}
 
-	colTypes := map[string]string{
-		"id":         "integer",
-		"timetz_col": "time with time zone",
-	}
-
-	batch := []*nullUpdate{
+	tests := []struct {
+		name         string
+		add          func(s *repairSets)
+		wantInsert   bool
+		wantUpdate   bool
+		wantDelete   bool
+		wantConflict string
+	}{
 		{
-			pkValues: []any{float64(1)},
-			columns:  map[string]any{"timetz_col": "14:30:00-05:00"},
+			name: "same update from two pairs",
+			add: func(s *repairSets) {
+				s.pair = "n1/n2"
+				s.write("n2", "1", a, true)
+				s.pair = "n2/n3"
+				s.write("n2", "1", map[string]any{"id": 1, "v": "a"}, true)
+			},
+			wantUpdate: true,
+		},
+		{
+			name: "deletes with other rows",
+			add: func(s *repairSets) {
+				s.pair = "n1/n2"
+				s.remove("n2", "1", a)
+				s.pair = "n2/n3"
+				s.remove("n2", "1", b)
+			},
+			wantDelete: true,
+		},
+		{
+			name: "update and insert",
+			add: func(s *repairSets) {
+				s.pair = "n1/n2"
+				s.write("n2", "1", a, true)
+				s.pair = "n2/n3"
+				s.write("n2", "1", a, false)
+			},
+			wantConflict: "node pairs n1/n2 and n2/n3 give different row operations for this key: update and insert",
+		},
+		{
+			name: "updates with other rows",
+			add: func(s *repairSets) {
+				s.pair = "n1/n2"
+				s.write("n2", "1", a, true)
+				s.pair = "n2/n3"
+				s.write("n2", "1", b, true)
+			},
+			wantConflict: "node pairs n1/n2 and n2/n3 give different rows to update for this key",
+		},
+		{
+			name: "delete and insert, then a third pair",
+			add: func(s *repairSets) {
+				s.pair = "n1/n2"
+				s.remove("n2", "1", a)
+				s.pair = "n2/n3"
+				s.write("n2", "1", b, false)
+				s.pair = "n2/n4"
+				s.write("n2", "1", b, false)
+			},
+			wantConflict: "node pairs n1/n2 and n2/n3 give different row operations for this key: delete and insert",
 		},
 	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newRepairSets()
+			tc.add(s)
+			_, ins := s.inserts["n2"]["1"]
+			_, upd := s.updates["n2"]["1"]
+			_, del := s.deletes["n2"]["1"]
+			require.Equal(t, tc.wantInsert, ins, "insert")
+			require.Equal(t, tc.wantUpdate, upd, "update")
+			require.Equal(t, tc.wantDelete, del, "delete")
+			c, ok := s.conflicts["n2"]["1"]
+			require.Equal(t, tc.wantConflict != "", ok, "conflict")
+			require.Equal(t, tc.wantConflict, c.reason)
+			require.Equal(t, []string{"n2"}, s.nodes())
+		})
+	}
 
-	sql, args, err := task.buildFixNullsBatchSQL("timetz_col", "time with time zone", batch, colTypes)
-	require.NoError(t, err)
+	task := &TableRepairTask{}
+	task.Key = []string{"id"}
+	s := newRepairSets()
+	s.pair = "n1/n2"
+	s.write("n2", "1", a, true)
+	s.pair = "n2/n3"
+	s.write("n2", "1", a, false)
+	task.report = &RepairReport{Changes: map[string]any{}}
+	task.recordConflicts(s)
+	want := []FailedRowOp{{
+		Node:      "n2",
+		Operation: opConflict,
+		Key:       map[string]any{"id": 1},
+		Reason:    "node pairs n1/n2 and n2/n3 give different row operations for this key: update and insert",
+	}}
+	require.Equal(t, want, task.FailedOps)
+	require.Equal(t, want, task.report.Changes["n2"].(map[string]any)["failed_rows"])
+}
 
-	require.True(t, strings.Contains(sql, "::time with time zone"),
-		"expected SQL to contain '::time with time zone', got: %s", sql)
+// TestPlanBidirectional checks that the bidirectional action of a plan
+// inserts a row that one node has on the other node, and refuses a row that
+// both nodes have.
+func TestPlanBidirectional(t *testing.T) {
+	a := map[string]any{"id": 1, "v": "a"}
+	b := map[string]any{"id": 1, "v": "b"}
+	action := &planner.RepairPlanAction{Type: planner.RepairActionBidirectional}
 
-	require.Len(t, args, 2)
+	mismatch := planDiffRow{pkStr: "1", node1Name: "n1", node2Name: "n2", n1Row: a, n2Row: b, diffType: "row_mismatch"}
+	require.Error(t, validateActionCompatibility(action, mismatch))
+	require.Error(t, ensureActionCompatible(mismatch, action))
+	require.Error(t, applyPlanAction(mismatch, action, "r", newRepairSets(), nil, nil))
 
-	s, ok := args[1].(string)
-	require.True(t, ok, "expected timetz arg to be string, got %T", args[1])
-	require.Equal(t, "14:30:00-05:00", s)
+	tests := []struct {
+		row    planDiffRow
+		target string
+		want   map[string]any
+	}{
+		{planDiffRow{pkStr: "1", node1Name: "n1", node2Name: "n2", n1Row: a, diffType: "missing_on_n2"}, "n2", a},
+		{planDiffRow{pkStr: "1", node1Name: "n1", node2Name: "n2", n2Row: b, diffType: "missing_on_n1"}, "n1", b},
+	}
+	for _, tc := range tests {
+		t.Run(tc.row.diffType, func(t *testing.T) {
+			require.NoError(t, validateActionCompatibility(action, tc.row))
+			require.NoError(t, ensureActionCompatible(tc.row, action))
+			s := newRepairSets()
+			require.NoError(t, applyPlanAction(tc.row, action, "r", s, nil, nil))
+			require.Equal(t, map[string]map[string]map[string]any{tc.target: {"1": tc.want}}, s.inserts)
+			require.Empty(t, s.updates)
+			require.Empty(t, s.deletes)
+		})
+	}
+}
+
+// TestPlanBidirectionalOnMismatchRefused checks that a plan with a
+// bidirectional rule for row_mismatch is refused when it is read.
+func TestPlanBidirectionalOnMismatchRefused(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "plan.yaml")
+	require.NoError(t, os.WriteFile(path, []byte(`version: 1
+tables:
+  public.t:
+    rules:
+      - name: swap
+        diff_type: [row_mismatch]
+        action: { type: bidirectional }
+`), 0o600))
+	_, err := planner.LoadRepairPlanFile(path)
+	require.ErrorContains(t, err, "bidirectional incompatible with diff_type row_mismatch")
 }

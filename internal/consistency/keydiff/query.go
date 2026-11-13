@@ -26,8 +26,6 @@ const (
 	tableAlias  = "_ace_t"
 	posCol      = "_ace_pos"
 	rowHashCol  = "_ace_row_hash"
-	relCol      = "_ace_rel"
-	tidCol      = "_ace_tid"
 	keyColAlias = "_ace_k"
 )
 
@@ -93,9 +91,16 @@ func (t Table) keyQueryFormats() pgx.QueryResultFormats {
 // Table.ScanChildren the keys are joined with the table instead, so that the
 // planner may read a child without the index once for all keys.
 //
-// Each row also comes with its table OID and its ctid. Two keys that the
-// server holds as equal but prints in a different way find the same row, and
-// these two columns let the reader return such a row only once.
+// The lookup also keeps only the rows whose key prints exactly as the key
+// text: format('%s', ...) gives the output of the type, and the "C"
+// collation compares the bytes. Two key texts that the server holds as
+// equal but prints in a different way, such as -0 and 0 in a float column,
+// therefore never find the same row: each text finds only the row that
+// printed it, and the two rows are reported as rows of one node only.
+// The printed expression must be the same as in the key query, trim_scale()
+// included, or a numeric key never matches its own text. A ::text cast must
+// not replace format(): for bpchar, boolean and inet it is not the output of
+// the type.
 //
 // filter, if not empty, is added to the WHERE clause of the lookup as it is.
 func (t Table) ReadQuery(colTypes map[string]string, filter string) (string, error) {
@@ -109,7 +114,7 @@ func (t Table) ReadQuery(colTypes map[string]string, filter string) (string, err
 
 	params := make([]string, len(t.Key))
 	keyCols := make([]string, len(t.Key))
-	conds := make([]string, len(t.Key))
+	conds := make([]string, 0, 2*len(t.Key)+1)
 	for i, k := range t.Key {
 		typ, ok := colTypes[k]
 		if !ok || strings.TrimSpace(typ) == "" {
@@ -118,17 +123,19 @@ func (t Table) ReadQuery(colTypes map[string]string, filter string) (string, err
 		alias := fmt.Sprintf("%s%d", keyColAlias, i+1)
 		params[i] = fmt.Sprintf("$%d::text[]", i+1)
 		keyCols[i] = alias
-		conds[i] = fmt.Sprintf("%s = %s.%s::%s", pgx.Identifier{k}.Sanitize(), keysAlias, alias, typ)
+		conds = append(conds, fmt.Sprintf("%s = %s.%s::%s", pgx.Identifier{k}.Sanitize(), keysAlias, alias, typ))
+	}
+	for i, k := range t.Key {
+		conds = append(conds, fmt.Sprintf(`format('%%s', %s) COLLATE "C" = %s.%s%d`,
+			queries.ColExpr("", k, t.HashTypes[k]), keysAlias, keyColAlias, i+1))
 	}
 	if f := strings.TrimSpace(filter); f != "" {
 		conds = append(conds, "("+f+")")
 	}
 
-	sel := make([]string, 0, len(t.Cols)+5)
+	sel := make([]string, 0, len(t.Cols)+3)
 	sel = append(sel,
 		h+" AS "+rowHashCol,
-		tableAlias+".tableoid::bigint AS "+relCol,
-		tableAlias+".ctid::text AS "+tidCol,
 		"pg_xact_commit_timestamp("+tableAlias+".xmin) AS commit_ts",
 		"to_json(pg_xact_commit_timestamp_origin("+tableAlias+".xmin))->>'roident' AS node_origin")
 	for _, c := range t.Cols {

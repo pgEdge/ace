@@ -139,15 +139,22 @@ func runHTMLPlanOnPage(t *testing.T, diff types.DiffOutput, limit int64, page *h
 		t.Fatal(err)
 	}
 
-	upserts, _, err := CalculatePlanRepairSets(task)
+	sets, err := calculatePlanRepairSets(task)
+	if err != nil {
+		return nil, string(planText), err
+	}
 	got := map[string][]string{}
-	for nodeName, rows := range upserts {
-		for _, row := range rows {
-			got[nodeName] = append(got[nodeName], fmt.Sprint(row["id"]))
+	for _, written := range []map[string]map[string]map[string]any{sets.inserts, sets.updates} {
+		for nodeName, rows := range written {
+			for _, row := range rows {
+				got[nodeName] = append(got[nodeName], fmt.Sprint(row["id"]))
+			}
 		}
+	}
+	for nodeName := range got {
 		sort.Strings(got[nodeName])
 	}
-	return got, string(planText), err
+	return got, string(planText), nil
 }
 
 func idRange(from, to int) []string {
