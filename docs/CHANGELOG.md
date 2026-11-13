@@ -60,6 +60,14 @@ All notable changes to ACE will be captured in this document. This project follo
 - **The `incomplete_pairs` field of the diff summary is removed.** When the
   comparison of a range fails, `mtree table-diff` now fails without a
   report, as `table-diff` does. Old reports with this field still load.
+- **A repair plan refuses `bidirectional` on `row_mismatch`.** In a plan,
+  `bidirectional` now only copies a row that one node has to the other
+  node, as `--bidirectional` does. Before, on a row that both nodes had,
+  each node got the row of the other node, so the two rows changed places
+  and still differed. A rule with `diff_type: [row_mismatch]` and
+  `bidirectional` is refused when the plan is read. A mismatched row that
+  comes to `bidirectional` through another rule or a default action stops
+  the repair with an error.
 
 ### Upgrading
 - **Check `table_diff.max_connections` in `ace.yaml`.** It is now the old

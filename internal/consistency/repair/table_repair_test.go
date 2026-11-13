@@ -12,10 +12,13 @@
 package repair
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
 	pgxv5type "github.com/jackc/pgx/v5/pgtype"
+	"github.com/pgedge/ace/internal/consistency/repair/plan"
 	"github.com/stretchr/testify/require"
 )
 
@@ -272,4 +275,54 @@ func TestRepairSetsOneOperationPerKey(t *testing.T) {
 	}}
 	require.Equal(t, want, task.FailedOps)
 	require.Equal(t, want, task.report.Changes["n2"].(map[string]any)["failed_rows"])
+}
+
+// TestPlanBidirectional checks that the bidirectional action of a plan
+// inserts a row that one node has on the other node, and refuses a row that
+// both nodes have.
+func TestPlanBidirectional(t *testing.T) {
+	a := map[string]any{"id": 1, "v": "a"}
+	b := map[string]any{"id": 1, "v": "b"}
+	action := &planner.RepairPlanAction{Type: planner.RepairActionBidirectional}
+
+	mismatch := planDiffRow{pkStr: "1", node1Name: "n1", node2Name: "n2", n1Row: a, n2Row: b, diffType: "row_mismatch"}
+	require.Error(t, validateActionCompatibility(action, mismatch))
+	require.Error(t, ensureActionCompatible(mismatch, action))
+	require.Error(t, applyPlanAction(mismatch, action, "r", newRepairSets(), nil, nil))
+
+	tests := []struct {
+		row    planDiffRow
+		target string
+		want   map[string]any
+	}{
+		{planDiffRow{pkStr: "1", node1Name: "n1", node2Name: "n2", n1Row: a, diffType: "missing_on_n2"}, "n2", a},
+		{planDiffRow{pkStr: "1", node1Name: "n1", node2Name: "n2", n2Row: b, diffType: "missing_on_n1"}, "n1", b},
+	}
+	for _, tc := range tests {
+		t.Run(tc.row.diffType, func(t *testing.T) {
+			require.NoError(t, validateActionCompatibility(action, tc.row))
+			require.NoError(t, ensureActionCompatible(tc.row, action))
+			s := newRepairSets()
+			require.NoError(t, applyPlanAction(tc.row, action, "r", s, nil, nil))
+			require.Equal(t, map[string]map[string]map[string]any{tc.target: {"1": tc.want}}, s.inserts)
+			require.Empty(t, s.updates)
+			require.Empty(t, s.deletes)
+		})
+	}
+}
+
+// TestPlanBidirectionalOnMismatchRefused checks that a plan with a
+// bidirectional rule for row_mismatch is refused when it is read.
+func TestPlanBidirectionalOnMismatchRefused(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "plan.yaml")
+	require.NoError(t, os.WriteFile(path, []byte(`version: 1
+tables:
+  public.t:
+    rules:
+      - name: swap
+        diff_type: [row_mismatch]
+        action: { type: bidirectional }
+`), 0o600))
+	_, err := planner.LoadRepairPlanFile(path)
+	require.ErrorContains(t, err, "bidirectional incompatible with diff_type row_mismatch")
 }

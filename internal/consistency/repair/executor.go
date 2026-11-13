@@ -440,9 +440,6 @@ func recordPlanStaleCheck(staleChecks map[string]map[string]planStaleCheck, node
 // applyPlanAction adds the row operations of action for one diff row to
 // sets. A row goes to a node as an UPDATE if the node had the row at diff
 // time, and as an INSERT if it did not.
-//
-// XXX bidirectional on a row that both nodes have gives each node the row of
-// the other node, so the two rows change places and still differ.
 func applyPlanAction(row planDiffRow, action *planner.RepairPlanAction, ruleName string, sets *repairSets, matches map[string]map[string]string, staleChecks map[string]map[string]planStaleCheck) error {
 	switch action.Type {
 	case planner.RepairActionKeepN1:
@@ -490,15 +487,18 @@ func applyPlanAction(row planDiffRow, action *planner.RepairPlanAction, ruleName
 			return fmt.Errorf("apply_from requires from to be n1 or n2 (pk %s)", row.pkStr)
 		}
 	case planner.RepairActionBidirectional:
-		if row.n1Row != nil {
-			sets.write(row.node2Name, row.pkStr, copyMap(row.n1Row), row.n2Row != nil)
+		// A row that only one node has is inserted on the other node.
+		switch {
+		case row.n1Row != nil && row.n2Row == nil:
+			sets.write(row.node2Name, row.pkStr, copyMap(row.n1Row), false)
 			recordPlanStaleCheck(staleChecks, row.node2Name, row.pkStr, row, action, ruleName)
 			recordMatch(matches, row.node2Name, row.pkStr, ruleName)
-		}
-		if row.n2Row != nil {
-			sets.write(row.node1Name, row.pkStr, copyMap(row.n2Row), row.n1Row != nil)
+		case row.n2Row != nil && row.n1Row == nil:
+			sets.write(row.node1Name, row.pkStr, copyMap(row.n2Row), false)
 			recordPlanStaleCheck(staleChecks, row.node1Name, row.pkStr, row, action, ruleName)
 			recordMatch(matches, row.node1Name, row.pkStr, ruleName)
+		default:
+			return fmt.Errorf("bidirectional needs a row on one node only (pk %s)", row.pkStr)
 		}
 	case planner.RepairActionCustom:
 		customRow, err := buildCustomRow(action, row)
@@ -625,7 +625,11 @@ func validateActionCompatibility(action *planner.RepairPlanAction, row planDiffR
 		}
 	case planner.RepairActionCustom:
 		// allow; buildCustomRow will enforce availability
-	case planner.RepairActionBidirectional, planner.RepairActionSkip, planner.RepairActionDelete:
+	case planner.RepairActionBidirectional:
+		if row.diffType == "row_mismatch" {
+			return fmt.Errorf("bidirectional cannot be used on mismatched rows (pk %s)", row.pkStr)
+		}
+	case planner.RepairActionSkip, planner.RepairActionDelete:
 		return nil
 	default:
 		return fmt.Errorf("unsupported action type %s", action.Type)
@@ -798,6 +802,9 @@ func ensureActionCompatible(row planDiffRow, action *planner.RepairPlanAction) e
 
 	if action.Type == planner.RepairActionApplyFrom && action.Mode == planner.RepairApplyModeInsert && row.diffType == "row_mismatch" {
 		return fmt.Errorf("apply_from insert mode cannot be used on mismatched rows (pk %s)", row.pkStr)
+	}
+	if action.Type == planner.RepairActionBidirectional && row.diffType == "row_mismatch" {
+		return fmt.Errorf("bidirectional cannot be used on mismatched rows (pk %s)", row.pkStr)
 	}
 
 	if action.Type == planner.RepairActionCustom && action.CustomRow == nil && action.CustomHelpers == nil {
