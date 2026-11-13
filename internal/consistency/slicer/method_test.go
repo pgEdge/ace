@@ -261,7 +261,10 @@ func TestCheckSample(t *testing.T) {
 		t.Errorf("SamePage = %v", c.SamePage)
 	}
 
-	c, _ = decide(&cfg, MethodAuto, signals())
+	c, err = decide(&cfg, MethodAuto, signals())
+	if err != nil {
+		t.Fatal(err)
+	}
 	sw, w := c.CheckSample(cfg, clustered)
 	if !sw || c.Method != MethodCutter || !strings.Contains(w, "98%") || !strings.Contains(w, "cutter is used instead") {
 		t.Errorf("clustered heap, auto: switched=%v method=%s warning=%q", sw, c.Method, w)
@@ -276,7 +279,10 @@ func TestCheckSample(t *testing.T) {
 		t.Errorf("Describe() = %q", d)
 	}
 
-	c, _ = decide(&cfg, MethodSample, signals())
+	c, err = decide(&cfg, MethodSample, signals())
+	if err != nil {
+		t.Fatal(err)
+	}
 	sw, w = c.CheckSample(cfg, clustered)
 	if sw || c.Method != MethodSample || !strings.Contains(w, "--slicer=cutter") {
 		t.Errorf("clustered heap, explicit sample: switched=%v method=%s warning=%q", sw, c.Method, w)
@@ -284,12 +290,18 @@ func TestCheckSample(t *testing.T) {
 
 	// A sample with few keys says nothing about the heap order, but its
 	// bounds are too few: auto takes the cutter, an explicit sample is kept.
-	c, _ = decide(&cfg, MethodAuto, signals())
+	c, err = decide(&cfg, MethodAuto, signals())
+	if err != nil {
+		t.Fatal(err)
+	}
 	if sw, w := c.CheckSample(cfg, &Sample{keys: 50, samePage: 0.98}); !sw || w != "" ||
 		c.Method != MethodCutter || c.Reason != "the sample has only 50 keys" || c.SamePage != nil {
 		t.Errorf("a small sample, auto: switched=%v warning=%q %+v", sw, w, c)
 	}
-	c, _ = decide(&cfg, MethodSample, signals())
+	c, err = decide(&cfg, MethodSample, signals())
+	if err != nil {
+		t.Fatal(err)
+	}
 	if sw, w := c.CheckSample(cfg, &Sample{}); sw || w != "" || c.Method != MethodSample {
 		t.Errorf("an empty sample, explicit sample: switched=%v warning=%q method=%s", sw, w, c.Method)
 	}
@@ -312,7 +324,10 @@ func TestSampleFailed(t *testing.T) {
 		t.Error("the cutter needs no advice about the sample")
 	}
 
-	c, _ = decide(&cfg, MethodSample, signals)
+	c, err = decide(&cfg, MethodSample, signals)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if c.SampleFailed(cfg) || c.Method != MethodSample {
 		t.Errorf("an explicit sample must be kept: %+v", c)
 	}

@@ -13,8 +13,6 @@ package integration
 
 import (
 	"context"
-	"os"
-	"path/filepath"
 	"testing"
 
 	"github.com/jackc/pgx/v5"
@@ -33,12 +31,9 @@ func createPartitionedTable(t *testing.T, ctx context.Context, env *testEnv, tab
 
 	t.Cleanup(func() {
 		for _, pool := range env.pools() {
-			_, _ = pool.Exec(ctx, "DROP TABLE IF EXISTS "+parent+" CASCADE") // nosemgrep
+			execOK(t, ctx, pool, "DROP TABLE IF EXISTS "+parent+" CASCADE") // nosemgrep
 		}
-		files, _ := filepath.Glob("*_diffs-*")
-		for _, f := range files {
-			os.RemoveAll(f)
-		}
+		removeGlob(t, "*_diffs-*")
 	})
 
 	for _, pool := range env.pools() {
@@ -99,7 +94,7 @@ func TestMerkleTreeOnPartition(t *testing.T) {
 	require.NoError(t, task.MtreeInit())
 	t.Cleanup(func() {
 		if err := task.MtreeTeardown(); err != nil {
-			t.Logf("MtreeTeardown cleanup: %v", err)
+			t.Errorf("MtreeTeardown cleanup: %v", err)
 		}
 	})
 	require.NoError(t, task.BuildMtree())
@@ -131,7 +126,7 @@ func TestMerkleTreeRefusesInheritanceParent(t *testing.T) {
 	child := pgx.Identifier{testSchema, "mtree_inh_child"}.Sanitize()
 	t.Cleanup(func() {
 		for _, pool := range env.pools() {
-			_, _ = pool.Exec(ctx, "DROP TABLE IF EXISTS "+parent+" CASCADE") // nosemgrep
+			execOK(t, ctx, pool, "DROP TABLE IF EXISTS "+parent+" CASCADE") // nosemgrep
 		}
 	})
 	for _, pool := range env.pools() {
@@ -163,7 +158,7 @@ func TestMerkleTreeOnPartitionSeesRowsMovedBetweenPartitions(t *testing.T) {
 	require.NoError(t, task.MtreeInit())
 	t.Cleanup(func() {
 		if err := task.MtreeTeardown(); err != nil {
-			t.Logf("MtreeTeardown cleanup: %v", err)
+			t.Errorf("MtreeTeardown cleanup: %v", err)
 		}
 	})
 	require.NoError(t, task.BuildMtree())
@@ -194,7 +189,7 @@ func TestMerkleTreeRefusesTablePartitionedOnOneNode(t *testing.T) {
 	leaf := pgx.Identifier{testSchema, "mtree_part_drift_2026"}.Sanitize()
 	t.Cleanup(func() {
 		for _, pool := range env.pools() {
-			_, _ = pool.Exec(ctx, "DROP TABLE IF EXISTS "+parent+" CASCADE") // nosemgrep
+			execOK(t, ctx, pool, "DROP TABLE IF EXISTS "+parent+" CASCADE") // nosemgrep
 		}
 	})
 
@@ -239,7 +234,7 @@ func testTeardownTableOfParent(t *testing.T, tableName string, childPublished bo
 	publication := config.Cfg.MTree.CDC.PublicationName
 	t.Cleanup(func() {
 		for _, pool := range env.pools() {
-			_, _ = pool.Exec(ctx, "DROP TABLE IF EXISTS "+parent+" CASCADE") // nosemgrep
+			execOK(t, ctx, pool, "DROP TABLE IF EXISTS "+parent+" CASCADE") // nosemgrep
 		}
 	})
 	for _, pool := range env.pools() {
@@ -256,7 +251,7 @@ func testTeardownTableOfParent(t *testing.T, tableName string, childPublished bo
 	require.NoError(t, task.MtreeInit())
 	t.Cleanup(func() {
 		if err := task.MtreeTeardown(); err != nil {
-			t.Logf("MtreeTeardown cleanup: %v", err)
+			t.Errorf("MtreeTeardown cleanup: %v", err)
 		}
 	})
 	require.NoError(t, task.BuildMtree())

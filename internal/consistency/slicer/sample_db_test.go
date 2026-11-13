@@ -28,7 +28,9 @@ func newTable(t *testing.T, pool *pgxpool.Pool, name string, setup ...string) {
 		exec(t, pool, s)
 	}
 	t.Cleanup(func() {
-		_, _ = pool.Exec(context.Background(), `DROP TABLE IF EXISTS ace_slicer_test.`+name)
+		if _, err := pool.Exec(context.Background(), `DROP TABLE IF EXISTS ace_slicer_test.`+name); err != nil {
+			t.Errorf("drop table: %v", err)
+		}
 	})
 }
 

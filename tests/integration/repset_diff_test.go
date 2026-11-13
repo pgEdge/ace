@@ -89,14 +89,10 @@ func createRepsetDiffTable(t *testing.T, tableName, repsetName string, divergent
 
 	t.Cleanup(func() {
 		for _, pool := range pools {
-			pool.Exec(ctx, fmt.Sprintf(
-				`SELECT spock.repset_remove_table('%s', '%s');`, repsetName, qualifiedTableName)) //nolint:errcheck
-			pool.Exec(ctx, fmt.Sprintf(`DROP TABLE IF EXISTS %s CASCADE`, qualifiedTableName))   //nolint:errcheck
+			repsetRemoveTable(t, ctx, pool, repsetName, qualifiedTableName)
+			execOK(t, ctx, pool, fmt.Sprintf(`DROP TABLE IF EXISTS %s CASCADE`, qualifiedTableName))
 		}
-		files, _ := filepath.Glob(fmt.Sprintf("%s_%s_diffs-*.json", testSchema, tableName))
-		for _, f := range files {
-			os.Remove(f)
-		}
+		removeGlob(t, fmt.Sprintf("%s_%s_diffs-*.json", testSchema, tableName))
 	})
 
 	return qualifiedTableName
@@ -194,7 +190,7 @@ func TestRepsetDiff_SkipTables(t *testing.T) {
 
 	t.Run("SkippedTableProducesNoDiffFile", func(t *testing.T) {
 		for _, f := range repsetDiffFilesForTable(t, tableName) {
-			_ = os.Remove(f)
+			removeFile(t, f)
 		}
 
 		task := newTestRepsetDiffTask("default")
@@ -210,11 +206,11 @@ func TestRepsetDiff_SkipTables(t *testing.T) {
 
 	t.Run("NotSkippedTableProducesDiffFile", func(t *testing.T) {
 		for _, f := range repsetDiffFilesForTable(t, tableName) {
-			_ = os.Remove(f)
+			removeFile(t, f)
 		}
 		t.Cleanup(func() {
 			for _, f := range repsetDiffFilesForTable(t, tableName) {
-				os.Remove(f)
+				removeFile(t, f)
 			}
 		})
 
@@ -242,7 +238,7 @@ func TestRepsetDiff_SkipTablesFile(t *testing.T) {
 	require.NoError(t, err)
 	_, err = fmt.Fprintln(skipFile, qualifiedTableName)
 	require.NoError(t, err)
-	skipFile.Close()
+	require.NoError(t, skipFile.Close())
 
 	task := newTestRepsetDiffTask("default")
 	task.SkipFile = skipFile.Name()
@@ -350,9 +346,9 @@ func TestRepsetDiff_SkipsForeignRelations(t *testing.T) {
 	t.Cleanup(func() {
 		for _, pool := range pools {
 			for _, rel := range []string{parent, heapPart, fdwPart} {
-				pool.Exec(ctx, fmt.Sprintf(`SELECT spock.repset_remove_table('%s', '%s');`, repsetName, rel))
+				repsetRemoveTable(t, ctx, pool, repsetName, rel)
 			}
-			pool.Exec(ctx, fmt.Sprintf(`DROP TABLE IF EXISTS %s CASCADE`, parent))
+			execOK(t, ctx, pool, fmt.Sprintf(`DROP TABLE IF EXISTS %s CASCADE`, parent))
 		}
 	})
 
@@ -415,9 +411,9 @@ func TestRepsetDiff_SkipsRelationUnsupportedOnOneNode(t *testing.T) {
 	t.Cleanup(func() {
 		for _, pool := range pools {
 			for _, rel := range []string{parent, heapPart, fdwPart} {
-				pool.Exec(ctx, fmt.Sprintf(`SELECT spock.repset_remove_table('%s', '%s');`, repsetName, rel))
+				repsetRemoveTable(t, ctx, pool, repsetName, rel)
 			}
-			pool.Exec(ctx, fmt.Sprintf(`DROP TABLE IF EXISTS %s CASCADE`, parent))
+			execOK(t, ctx, pool, fmt.Sprintf(`DROP TABLE IF EXISTS %s CASCADE`, parent))
 		}
 	})
 

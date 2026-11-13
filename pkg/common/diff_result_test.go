@@ -179,7 +179,7 @@ func TestDiffResultPairNodeOrder(t *testing.T) {
 	})
 	b := w.OpenBlock("n1/n2", "n2", "n1", 0, 1)
 	require.Error(t, b.Add(DiffKindNode1Only, testRow(2, "b"), nil, testHash(2), nil))
-	b.Close()
+	require.NoError(t, b.Close())
 	w.Abort()
 }
 

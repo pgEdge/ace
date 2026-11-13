@@ -48,7 +48,11 @@ func TestOpenConnsRoleLimit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer admin.Close(ctx)
+	t.Cleanup(func() {
+		if err := admin.Close(context.Background()); err != nil {
+			t.Errorf("close admin connection: %v", err)
+		}
+	})
 
 	const role = "ace_open_conns_test"
 	if _, err := admin.Exec(ctx, "DROP ROLE IF EXISTS "+role); err != nil {
@@ -57,7 +61,11 @@ func TestOpenConnsRoleLimit(t *testing.T) {
 	if _, err := admin.Exec(ctx, "CREATE ROLE "+role+" LOGIN CONNECTION LIMIT 2"); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _, _ = admin.Exec(context.Background(), "DROP ROLE IF EXISTS "+role) })
+	t.Cleanup(func() {
+		if _, err := admin.Exec(context.Background(), "DROP ROLE IF EXISTS "+role); err != nil {
+			t.Errorf("drop role: %v", err)
+		}
+	})
 
 	cfg, err := pgxpool.ParseConfig(dsn)
 	if err != nil {

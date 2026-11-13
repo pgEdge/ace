@@ -50,6 +50,10 @@ func TestNewCreatesOwnerOnlyDatabase(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reopen: %v", err)
 	}
-	t.Cleanup(func() { _ = reopened.Close() })
+	t.Cleanup(func() {
+		if err := reopened.Close(); err != nil {
+			t.Errorf("close: %v", err)
+		}
+	})
 	assertOwnerOnly(t, path)
 }

@@ -18,6 +18,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgproto3"
 	auth "github.com/pgedge/ace/internal/infra/db"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -87,7 +88,7 @@ func TestACEConnPinsOutputSettings(t *testing.T) {
 	// settings. A walsender in database mode accepts SHOW.
 	repl, err := auth.GetReplModeConnection(node)
 	require.NoError(t, err)
-	defer repl.Close(ctx)
+	defer func() { assert.NoError(t, repl.Close(ctx)) }()
 
 	for name, want := range auth.OutputSettings() {
 		results, err := repl.Exec(ctx, "SHOW "+name).ReadAll()

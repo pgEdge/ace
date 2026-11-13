@@ -362,7 +362,9 @@ func writeRepsetSkipFile(t *testing.T, lines ...string) string {
 			t.Fatalf("write skip file: %v", err)
 		}
 	}
-	f.Close()
+	if err := f.Close(); err != nil {
+		t.Fatalf("close skip file: %v", err)
+	}
 	return f.Name()
 }
 

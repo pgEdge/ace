@@ -18,6 +18,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -39,14 +40,14 @@ func TestBuildMtreeFailsClearlyOnEmptyTable(t *testing.T) {
 	}
 	t.Cleanup(func() {
 		for _, pool := range []*pgxpool.Pool{pgCluster.Node1Pool, pgCluster.Node2Pool} {
-			_, _ = pool.Exec(ctx, "DROP TABLE IF EXISTS "+safeTable) // nosemgrep
+			execOK(t, ctx, pool, "DROP TABLE IF EXISTS "+safeTable) // nosemgrep
 		}
 	})
 
 	task := newTestMerkleTreeTask(t, qualifiedTable, nodes)
 	require.NoError(t, task.RunChecks(false))
 	require.NoError(t, task.MtreeInit())
-	t.Cleanup(func() { _ = task.MtreeTeardown() })
+	t.Cleanup(func() { assert.NoError(t, task.MtreeTeardown()) })
 
 	err := task.BuildMtree()
 	require.Error(t, err, "build on an empty table must fail")

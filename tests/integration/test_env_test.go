@@ -298,7 +298,7 @@ func (e *testEnv) setupNullDivergence(t *testing.T, ctx context.Context, qualifi
 // runTableDiff executes a table-diff and returns the path to the latest diff file.
 func (e *testEnv) runTableDiff(t *testing.T, qualifiedTableName string, nodesToCompare []string) string {
 	t.Helper()
-	removeTestDiffResults()
+	require.NoError(t, removeTestDiffResults())
 
 	tdTask := e.newTableDiffTask(t, qualifiedTableName, nodesToCompare)
 	err := tdTask.RunChecks(false)
@@ -325,25 +325,18 @@ func (e *testEnv) assertNoTableDiff(t *testing.T, qualifiedTableName string) {
 	assert.Empty(t, diffPairs(t, tdTask), "Expected no differences after repair, but diffs were found")
 }
 
-// repairTable runs a new table-diff of n1 and n2 and, if the nodes differ,
-// repairs the table from this diff. A diff file left by an earlier step may
-// not match the tables any more, and repair fails on each row that it cannot
-// apply as the report says.
+// repairTable makes the table on the other node the same as on
+// sourceOfTruthNode: it runs a table-diff of the table, repairs from its
+// result and checks that no differences are left.
 func (e *testEnv) repairTable(t *testing.T, qualifiedTableName, sourceOfTruthNode string) {
 	t.Helper()
-	removeTestDiffResults()
 	tdTask := e.newTableDiffTask(t, qualifiedTableName, []string{e.ServiceN1, e.ServiceN2})
-	if err := tdTask.RunChecks(false); err != nil {
-		t.Fatalf("repairTable: table-diff validation failed: %v", err)
-	}
-	if err := tdTask.ExecuteTask(); err != nil {
-		t.Fatalf("repairTable: table-diff failed: %v", err)
-	}
+	require.NoError(t, tdTask.RunChecks(false), "repairTable: table-diff validation failed")
+	require.NoError(t, tdTask.ExecuteTask(), "repairTable: table-diff execution failed")
 	if tdTask.DiffFilePath == "" {
-		log.Println("No differences, skipping repair.")
 		return
 	}
-	log.Printf("Using diff file for repair: %s", tdTask.DiffFilePath)
+	log.Printf("Repairing %s from %s", qualifiedTableName, tdTask.DiffFilePath)
 
 	repairTask := e.newTableRepairTask(sourceOfTruthNode, qualifiedTableName, tdTask.DiffFilePath)
 	time.Sleep(2 * time.Second)
@@ -351,6 +344,7 @@ func (e *testEnv) repairTable(t *testing.T, qualifiedTableName, sourceOfTruthNod
 		t.Fatalf("Failed to repair table: %v", err)
 	}
 	log.Printf("Table '%s' repaired successfully using %s as source of truth.", qualifiedTableName, sourceOfTruthNode)
+	e.assertNoTableDiff(t, qualifiedTableName)
 }
 
 // resetSharedTable truncates and reloads the given table from CSV on n1 and n2.

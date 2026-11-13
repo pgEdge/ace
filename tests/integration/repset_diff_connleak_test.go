@@ -101,9 +101,8 @@ func TestConnLeak_100Tables_ConnectionExhaustion(t *testing.T) {
 	t.Cleanup(func() {
 		for _, qn := range tableNames {
 			for _, pool := range []*pgxpool.Pool{pgCluster.Node1Pool, pgCluster.Node2Pool} {
-				pool.Exec(ctx, fmt.Sprintf(
-					`SELECT spock.repset_remove_table('%s', '%s')`, repsetName, qn))
-				pool.Exec(ctx, fmt.Sprintf(`DROP TABLE IF EXISTS %s CASCADE`, qn))
+				repsetRemoveTable(t, ctx, pool, repsetName, qn)
+				execOK(t, ctx, pool, fmt.Sprintf(`DROP TABLE IF EXISTS %s CASCADE`, qn))
 			}
 		}
 	})
@@ -343,9 +342,8 @@ func TestConnLeak_RunChecksLeakAccumulation(t *testing.T) {
 	t.Cleanup(func() {
 		for _, qn := range allTableNames {
 			for _, pool := range []*pgxpool.Pool{pgCluster.Node1Pool, pgCluster.Node2Pool} {
-				pool.Exec(ctx, fmt.Sprintf(
-					`SELECT spock.repset_remove_table('%s', '%s')`, repsetName, qn))
-				pool.Exec(ctx, fmt.Sprintf(`DROP TABLE IF EXISTS %s CASCADE`, qn))
+				repsetRemoveTable(t, ctx, pool, repsetName, qn)
+				execOK(t, ctx, pool, fmt.Sprintf(`DROP TABLE IF EXISTS %s CASCADE`, qn))
 			}
 		}
 	})
