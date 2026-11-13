@@ -209,7 +209,7 @@ tables:
 
 	logPath := findNewStaleSkipLog(t, beforeLogs)
 	entries := readStaleSkipEntries(t, logPath)
-	require.True(t, hasStaleSkipEntry(entries, 1, "upsert", "stale_keep_n1_for_pk1"))
+	require.True(t, hasStaleSkipEntry(entries, 1, "update", "stale_keep_n1_for_pk1"))
 	require.True(t, hasStaleSkipEntry(entries, 2001, "delete", "stale_delete_missing_on_n1"))
 }
 
@@ -414,8 +414,8 @@ func hasStaleSkipEntry(entries []map[string]any, index int, operation, rule stri
 		if !ok {
 			continue
 		}
-		idx, ok := rawIdx.(float64)
-		if !ok || int(idx) != index {
+		// The key is the text of the diff.
+		if fmt.Sprint(rawIdx) != fmt.Sprint(index) {
 			continue
 		}
 		if reason, _ := entry["reason"].(string); reason != "target_row_newer_than_diff" {

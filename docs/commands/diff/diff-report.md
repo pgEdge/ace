@@ -29,7 +29,7 @@ The HTML file is written next to the result directory, with the same base name a
 - At most `--max-html-rows` rows for each pair. The last block that the report reads can be cut: it shows the first rows of that block file, which are not in key order. A row with no visible difference (see below) does not count toward the limit.
 - When a value of a row is cut, the editor of a custom repair action for that row starts empty, so that a repair does not write a cut value.
 - The number of rows that the report does not show, by kind.
-- A row that exists on both nodes but shows no difference after the values are turned into text (for example `1` against `"1"`) is not shown; the report gives the number of such rows of the blocks it read.
+- A row that exists on both nodes but shows no difference in the text of its values (for example a difference only in the spock metadata) is not shown; the report gives the number of such rows of the blocks it read.
 
 The command needs the result directory. A JSON report without its result directory, for example one written by an older ACE, cannot be read.
 
@@ -44,6 +44,6 @@ A diff that finds differences writes, next to the JSON report, a directory with 
 
 - `manifest.json`: the table, the key, the columns and their types, the nodes, the format version, the version of the row hash, the counts of each node pair and the diff summary. A result is complete when its directory has a manifest and the JSON report with the same base name is next to it. `diff-report` does not read a directory without the JSON report: such a directory is left by a run that stopped before it published the report.
 - One directory for each node pair, with one file for each compared block that has differences, for example `n1_n2/00003-000000017.jsonl`: the part of the table and the number of the block in that part. The names sort in block order.
-- Each line of a block file is one differing row: its kind (`node1_only`, `node2_only` or `changed`), the row of each node and the row hash of each node.
+- Each line of a block file is one differing row: its kind (`node1_only`, `node2_only` or `changed`), the row of each node and the row hash of each node. Each value of a column of the table is the text that the server prints for it, as a JSON string, or `null` for a NULL. The JSON report holds the same strings. `table-repair` and `table-rerun` read the block files; the JSON report is only a view of the result.
 
 A diff that fails, times out or is stopped writes no result. The directory and its files are readable only by their owner, because they hold table data.

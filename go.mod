@@ -20,7 +20,6 @@ require (
 	github.com/golang/mock v1.6.0
 	github.com/google/uuid v1.6.0
 	github.com/jackc/pglogrepl v0.0.0-20250509230407-a9884f6bd75a
-	github.com/jackc/pgtype v1.14.4
 	github.com/jackc/pgx/v5 v5.9.0
 	github.com/stretchr/testify v1.11.1
 	github.com/testcontainers/testcontainers-go v0.41.0

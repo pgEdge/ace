@@ -120,21 +120,21 @@ curl --cert client.crt --key client.key --cacert ca.crt \
 
 ### POST /api/v1/table-rerun
 
-Re-runs a diff from an existing diff file.
+Re-runs a diff from an existing diff result.
 
 Request body:
 
 | Field | Type | Required | Notes |
 | --- | --- | --- | --- |
 | `cluster` | string | no | Defaults to `default_cluster`. |
-| `diff_file` | string | yes | Path on the server filesystem. |
+| `diff_file` | string | yes | Path of the diff result directory, or of the JSON report next to it, on the server filesystem. |
 | `dbname` | string | no | Overrides DB name from config. |
 | `nodes` | array[string] | no | Defaults to `"all"`. |
 | `quiet` | bool | no | Suppress output. |
 
 ### POST /api/v1/table-repair
 
-Repairs table inconsistencies using a diff file.
+Repairs table inconsistencies using a diff result.
 
 Request body:
 
@@ -144,17 +144,17 @@ Request body:
 | `table` | string | yes | `schema.table`. |
 | `dbname` | string | no | Overrides DB name from config. |
 | `nodes` | array[string] | no | Defaults to `"all"`. |
-| `diff_file` | string | yes | Path on the server filesystem. |
+| `diff_file` | string | yes | Path of the diff result directory, or of the JSON report next to it, on the server filesystem. |
 | `repair_plan` | string | no | Repair plan file path on the server. |
 | `source_of_truth` | string | no | Required unless using `fix_nulls` or bidirectional insert-only. |
 | `quiet` | bool | no | Suppress output. |
 | `dry_run` | bool | no | Generate plan without applying changes. |
-| `insert_only` | bool | no | Only insert missing rows. |
-| `upsert_only` | bool | no | Only upsert missing/different rows. |
+| `insert_only` | bool | no | Only insert the rows that the target does not have; no updates, no deletes. |
+| `upsert_only` | bool | no | Insert the rows that the target does not have and update the rows that differ; no deletes. |
 | `fire_triggers` | bool | no | Use `session_replication_role=local`. |
 | `generate_report` | bool | no | Write a JSON report. |
 | `fix_nulls` | bool | no | Fill NULLs using peer values. |
-| `bidirectional` | bool | no | Insert-only in both directions. |
+| `bidirectional` | bool | no | Insert on each node the rows that only the other node has. |
 | `preserve_origin` | bool | no | Preserve replication origin node ID and LSN with per-row timestamp accuracy. Default: `false` |
 
 Notes:
@@ -162,6 +162,7 @@ Notes:
 - Recovery-mode is not exposed via HTTP; origin-only diff files will be rejected.
 - The client certificate CN must map to a DB role that can run `SET ROLE` and perform required DML.
 - Preserve-origin maintains microsecond-precision timestamps for each repaired row, ensuring accurate temporal ordering in recovery scenarios.
+- Each row operation must change exactly one row, and a failed row rolls back its command of up to 1000 rows. If any row was not applied, the task status is `FAILED`; the repair report (`generate_report`) lists the failed rows. See [How repair applies the changes](commands/repair/table-repair.md#how-repair-applies-the-changes).
 
 ### POST /api/v1/spock-diff
 

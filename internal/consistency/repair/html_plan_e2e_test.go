@@ -126,28 +126,42 @@ func runHTMLPlanOnPage(t *testing.T, diff types.DiffOutput, limit int64, page *h
 	if err != nil {
 		t.Fatalf("plan does not load: %v\n%s", err, planText)
 	}
-	raw, err := os.ReadFile(jsonPath)
-	if err != nil {
-		t.Fatal(err)
-	}
 	task := &TableRepairTask{}
 	task.Schema, task.Table = "public", "t"
 	task.Key = []string{"id"}
 	task.SimplePrimaryKey = true
 	task.RepairPlan = plan
-	if err := json.Unmarshal(raw, &task.RawDiffs); err != nil {
+	// Repair reads the result directory; the JSON report next to it names
+	// the same result.
+	if task.diff, err = readDiffResult(jsonPath); err != nil {
 		t.Fatal(err)
 	}
+	// A plan of integer keys has pk_in ranges, which the server compares;
+	// here Go does.
+	task.compareValues = func(_ string, cmps []textComparison) ([]bool, error) { return goCompare(cmps) }
+	task.HostMap = map[string]string{}
+	task.castTypes = map[string]map[string]string{}
+	for node := range task.diff.nodes() {
+		task.HostMap[node+":5432"] = node
+		task.castTypes[node+":5432"] = map[string]string{"id": "bigint", "v": "text"}
+	}
 
-	upserts, _, err := CalculatePlanRepairSets(task)
+	sets, err := calculatePlanRepairSets(task)
+	if err != nil {
+		return nil, string(planText), err
+	}
 	got := map[string][]string{}
-	for nodeName, rows := range upserts {
-		for _, row := range rows {
-			got[nodeName] = append(got[nodeName], fmt.Sprint(row["id"]))
+	for _, written := range []map[string]map[string]map[string]any{sets.inserts, sets.updates} {
+		for nodeName, rows := range written {
+			for _, row := range rows {
+				got[nodeName] = append(got[nodeName], fmt.Sprint(row["id"]))
+			}
 		}
+	}
+	for nodeName := range got {
 		sort.Strings(got[nodeName])
 	}
-	return got, string(planText), err
+	return got, string(planText), nil
 }
 
 func idRange(from, to int) []string {
@@ -177,6 +191,38 @@ func twoNodeDiff() types.DiffOutput {
 		NodeDiffs: map[string]types.DiffByNodePair{"n1/n2": {Rows: map[string][]types.OrderedMap{"n1": a, "n2": b}}},
 		Summary: types.DiffSummary{Schema: "public", Table: "t", Nodes: []string{"n1", "n2"},
 			PrimaryKey: []string{"id"}, DiffRowsCount: map[string]int{"n1/n2": 53}},
+	}
+}
+
+// A diff holds every value as text, so an integer key is the text of the
+// number. The page must still turn a run of such keys into a range, and the
+// plan must match the rows: the range is compared as integers, so 10 is not
+// between 1 and 2.
+func TestHTMLPlanIntegerKeysAsText(t *testing.T) {
+	text := types.DiffOutput{}
+	src := twoNodeDiff()
+	text.Summary = src.Summary
+	text.NodeDiffs = map[string]types.DiffByNodePair{}
+	for pair, d := range src.NodeDiffs {
+		rows := map[string][]types.OrderedMap{}
+		for node, list := range d.Rows {
+			for _, r := range list {
+				id, _ := r.Get("id")
+				v, _ := r.Get("v")
+				rows[node] = append(rows[node], e2eRow(fmt.Sprint(id), fmt.Sprint(v)))
+			}
+		}
+		text.NodeDiffs[pair] = types.DiffByNodePair{Rows: rows}
+	}
+	got, plan, err := runHTMLPlan(t, text, 25)
+	if err != nil {
+		t.Fatalf("plan does not resolve: %v\n%s", err, plan)
+	}
+	if !strings.Contains(plan, "range:") {
+		t.Errorf("integer keys as text must give ranges:\n%s", plan)
+	}
+	if want := idRange(1, 25); fmt.Sprint(got["n2"]) != fmt.Sprint(want) || len(got["n1"]) != 0 {
+		t.Errorf("upserts: got %v, want n2=%v and nothing on n1\n%s", got, want, plan)
 	}
 }
 
@@ -321,12 +367,10 @@ func TestHTMLPlanKeysWithYAMLLineBreaks(t *testing.T) {
 	}
 }
 
-// Keys of the kinds NormalizeScannedValue puts in a diff file: timestamps
+// Keys that a tool can put in a diff result as Go values: timestamps
 // (time.Time, written as RFC 3339 text), numerics (text), bytea (base64 text)
-// and UUIDs (text). The plan must copy the diff file's text exactly, as
-// quoted strings, so table-repair compares string with string. An unquoted
-// timestamp or number in the YAML would be read as another type and match
-// nothing.
+// and UUIDs (text). The plan must copy the text of the result exactly, as
+// quoted strings, so that table-repair compares the same texts.
 func TestHTMLPlanNormalizedKeyTypes(t *testing.T) {
 	india := time.FixedZone("IST", 5*3600+30*60)
 	cases := []struct {

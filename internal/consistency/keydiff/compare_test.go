@@ -13,6 +13,7 @@ package keydiff
 
 import (
 	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"strings"
@@ -22,15 +23,13 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 )
 
-// fakeRows is a pgx.Rows over fixed rows. For the key query it serves
-// RawValues; for the row read it serves Values. Scan fails, so that a test
-// fails if the row read does not use the common way to read a row. It
-// records whether the context of its query was cancelled when Close was
-// called.
+// fakeRows is a pgx.Rows over fixed rows. It serves RawValues only: Values
+// and Scan fail, so that a test fails if a query converts a value to a Go
+// type. It records whether the context of its query was cancelled when Close
+// was called.
 type fakeRows struct {
 	ctx              context.Context
 	raw              [][][]byte
-	vals             [][]any
 	fields           []pgconn.FieldDescription
 	i                int
 	closed           bool
@@ -50,14 +49,7 @@ func (r *fakeRows) CommandTag() pgconn.CommandTag                { return pgconn
 func (r *fakeRows) FieldDescriptions() []pgconn.FieldDescription { return r.fields }
 func (r *fakeRows) Conn() *pgx.Conn                              { return nil }
 
-// n returns the number of rows: raw rows for the key query, values for the
-// row read.
-func (r *fakeRows) n() int {
-	if r.raw != nil {
-		return len(r.raw)
-	}
-	return len(r.vals)
-}
+func (r *fakeRows) n() int { return len(r.raw) }
 
 // Next moves to the next row and closes the rows after the last one, as pgx
 // does.
@@ -69,10 +61,12 @@ func (r *fakeRows) Next() bool {
 	r.i++
 	return true
 }
-func (r *fakeRows) RawValues() [][]byte    { return r.raw[r.i-1] }
-func (r *fakeRows) Values() ([]any, error) { return r.vals[r.i-1], nil }
+func (r *fakeRows) RawValues() [][]byte { return r.raw[r.i-1] }
+func (r *fakeRows) Values() ([]any, error) {
+	return nil, fmt.Errorf("fakeRows: Values is not supported, use RawValues")
+}
 func (r *fakeRows) Scan(dest ...any) error {
-	return fmt.Errorf("fakeRows: Scan is not supported, use Values")
+	return fmt.Errorf("fakeRows: Scan is not supported, use RawValues")
 }
 
 // fakeNode answers the key query with keys and the row read with one row for
@@ -87,7 +81,6 @@ type fakeNode struct {
 
 type fakeRow struct {
 	hash byte
-	tid  string
 	v    string
 }
 
@@ -103,13 +96,18 @@ func hash8(b byte) []byte {
 func (n *fakeNode) Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error) {
 	if strings.HasPrefix(sql, "SELECT _ace_keys.") {
 		*n.log = append(*n.log, n.name+":read")
-		texts := args[0].([]string)
-		r := &fakeRows{ctx: ctx, fields: []pgconn.FieldDescription{
-			{Name: posCol}, {Name: rowHashCol}, {Name: relCol}, {Name: tidCol},
+		if _, ok := args[0].(pgx.QueryResultFormats); !ok {
+			return nil, fmt.Errorf("the row read must ask for its result formats")
+		}
+		texts := args[1].([]string)
+		r := &fakeRows{ctx: ctx, raw: [][][]byte{}, fields: []pgconn.FieldDescription{
+			{Name: posCol}, {Name: rowHashCol},
 			{Name: "commit_ts"}, {Name: "node_origin"}, {Name: "id"}, {Name: "v"}}}
 		for i, k := range texts {
 			for _, fr := range n.stored[k] {
-				r.vals = append(r.vals, []any{int64(i + 1), hash8(fr.hash), int64(1), fr.tid, nil, nil, k, fr.v})
+				pos := make([]byte, 8)
+				binary.BigEndian.PutUint64(pos, uint64(i+1))
+				r.raw = append(r.raw, [][]byte{pos, hash8(fr.hash), nil, nil, []byte(k), []byte(fr.v)})
 			}
 		}
 		n.opened = append(n.opened, r)
@@ -126,8 +124,7 @@ func (n *fakeNode) Query(ctx context.Context, sql string, args ...any) (pgx.Rows
 
 func keyRaw(k string, b byte) [][]byte { return [][]byte{[]byte(k), hash8(b)} }
 
-var fakeTable = Table{Schema: "public", Name: "t", Key: []string{"id"}, Cols: []string{"id", "v"},
-	HashTypes: map[string]string{"id": "text", "v": "text"}}
+var fakeTable = Table{Schema: "public", Name: "t", Key: []string{"id"}, Cols: []string{"id", "v"}}
 var fakeTypes = map[string]string{"id": "text", "v": "text"}
 
 func twoNodes() (*fakeNode, *fakeNode, *[]string) {
@@ -138,7 +135,7 @@ func twoNodes() (*fakeNode, *fakeNode, *[]string) {
 }
 
 func side(n *fakeNode, rows int64, known bool) Side {
-	return Side{Name: n.name, Conn: n, ColTypes: fakeTypes, Rows: rows, RowsKnown: known}
+	return Side{Name: n.name, Conn: n, CastTypes: fakeTypes, Rows: rows, RowsKnown: known}
 }
 
 // collected holds the entries that a comparison gave to its sink.
@@ -179,8 +176,8 @@ func TestCompareBuildSideAndResult(t *testing.T) {
 	// n1: a, b (changed), c (only n1); n2: a, b, d (only n2)
 	n1.keys = [][][]byte{keyRaw("a", 1), keyRaw("b", 2), keyRaw("c", 3)}
 	n2.keys = [][][]byte{keyRaw("a", 1), keyRaw("b", 9), keyRaw("d", 4)}
-	n1.stored = map[string][]fakeRow{"b": {{2, "(0,2)", "b1"}}, "c": {{3, "(0,3)", "c1"}}}
-	n2.stored = map[string][]fakeRow{"b": {{9, "(0,2)", "b2"}}, "d": {{4, "(0,4)", "d2"}}}
+	n1.stored = map[string][]fakeRow{"b": {{2, "b1"}}, "c": {{3, "c1"}}}
+	n2.stored = map[string][]fakeRow{"b": {{9, "b2"}}, "d": {{4, "d2"}}}
 
 	// n2 has fewer rows, so its keys go into the map: its key query is first.
 	var got collected
@@ -234,7 +231,7 @@ func TestCompareBuildSideAndResult(t *testing.T) {
 func TestCompareEmptyBuildSideIsNotQueried(t *testing.T) {
 	n1, n2, log := twoNodes()
 	n1.keys = [][][]byte{keyRaw("a", 1)}
-	n1.stored = map[string][]fakeRow{"a": {{1, "(0,1)", "a"}}}
+	n1.stored = map[string][]fakeRow{"a": {{1, "a"}}}
 	var got collected
 	res, err := Compare(context.Background(), fakeTable, Block{Where: "TRUE"}, side(n1, 1, true), side(n2, 0, true), Options{}, got.sink())
 	if err != nil {
@@ -306,22 +303,21 @@ func TestCompareBadKeyRows(t *testing.T) {
 	}
 }
 
-// TestCompareSameRowForTwoKeys checks that one row found through two key
-// texts in different batches is reported once, as a changed row.
-func TestCompareSameRowForTwoKeys(t *testing.T) {
-	// "-0" and "0" are two key texts for one row: the server finds the same
-	// row (same ctid) for both, in different batches.
+// TestCompareKeyPrintedDifferently checks a key that the nodes print in a
+// different way, such as -0 and 0: each node finds the row only through its
+// own key text, so the comparison reports a row on each node only.
+func TestCompareKeyPrintedDifferently(t *testing.T) {
 	n1, n2, _ := twoNodes()
 	n1.keys = [][][]byte{keyRaw("-0", 1)}
 	n2.keys = [][][]byte{keyRaw("0", 2)}
-	n1.stored = map[string][]fakeRow{"-0": {{1, "(0,1)", "x"}}, "0": {{1, "(0,1)", "x"}}}
-	n2.stored = map[string][]fakeRow{"-0": {{2, "(0,1)", "x"}}, "0": {{2, "(0,1)", "x"}}}
+	n1.stored = map[string][]fakeRow{"-0": {{1, "x"}}}
+	n2.stored = map[string][]fakeRow{"0": {{2, "x"}}}
 	res, err := Compare(context.Background(), fakeTable, Block{Where: "TRUE"}, side(n1, 1, true), side(n2, 1, true), Options{BatchSize: 1}, discard)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if res.DiffKeys != 2 || res.Changed != 1 || res.Only1+res.Only2 != 0 {
-		t.Fatalf("DiffKeys=%d Changed=%d Only1=%d Only2=%d, want one changed row", res.DiffKeys, res.Changed, res.Only1, res.Only2)
+	if res.DiffKeys != 2 || res.Changed != 0 || res.Only1 != 1 || res.Only2 != 1 {
+		t.Fatalf("DiffKeys=%d Changed=%d Only1=%d Only2=%d, want one row on each node only", res.DiffKeys, res.Changed, res.Only1, res.Only2)
 	}
 }
 
@@ -330,7 +326,7 @@ func TestCompareSameRowForTwoKeys(t *testing.T) {
 func TestCompareSinkError(t *testing.T) {
 	n1, n2, log := twoNodes()
 	n1.keys = [][][]byte{keyRaw("a", 1), keyRaw("b", 2)}
-	n1.stored = map[string][]fakeRow{"a": {{1, "(0,1)", "a"}}, "b": {{2, "(0,2)", "b"}}}
+	n1.stored = map[string][]fakeRow{"a": {{1, "a"}}, "b": {{2, "b"}}}
 	stop := errors.New("disk full")
 	calls := 0
 	_, err := Compare(context.Background(), fakeTable, Block{Where: "TRUE"}, side(n1, 2, true), side(n2, 0, true), Options{BatchSize: 1},

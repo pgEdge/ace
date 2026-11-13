@@ -259,9 +259,9 @@ func testTableRepair_InsertOnly(t *testing.T, env *testEnv) {
 			require.NoError(t, err)
 
 			pairKey := env.pairKey()
-			// After insert-only repair with n1 as source (DO NOTHING on conflict):
+			// After insert-only repair with n1 as source:
 			// - Rows 1001, 1002 (n1-only) are inserted into n2
-			// - Rows 1, 2 (conflicting) are NOT overwritten on n2 (DO NOTHING), so they still differ
+			// - Rows 1, 2 (on both nodes) are not updated, so they still differ
 			// - n1 has 2 differing rows (its versions of rows 1, 2)
 			// - n2 has 4 differing rows (its versions of rows 1, 2 + unique rows 2001, 2002)
 			// - Total diff count is 4
@@ -477,7 +477,7 @@ func testTableRepair_DryRun(t *testing.T, env *testEnv) {
 			})
 
 			assert.Contains(t, output, "DRY RUN")
-			assert.Contains(t, output, fmt.Sprintf("Node %s: Would attempt to UPSERT 4 rows and DELETE 2 rows.", env.ServiceN2))
+			assert.Contains(t, output, fmt.Sprintf("Node %s: Would INSERT 2 rows, UPDATE 2 rows and DELETE 2 rows.", env.ServiceN2))
 
 			count1After, count2After := getTableCount(t, ctx, env.N1Pool, qualifiedTableName), getTableCount(t, ctx, env.N2Pool, qualifiedTableName)
 			assert.Equal(t, count1Before, count1After, "Node1 count should not change after dry run")

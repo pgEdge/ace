@@ -138,7 +138,7 @@ func SetupCLI(version string) *cli.Command {
 		&cli.StringFlag{
 			Name:     "diff-file",
 			Aliases:  []string{"f"},
-			Usage:    "Path to the diff file to rerun from (required)",
+			Usage:    "Path to the diff result directory, or to the JSON report next to it, to rerun from (required)",
 			Required: true,
 		},
 	}
@@ -244,7 +244,7 @@ func SetupCLI(version string) *cli.Command {
 		&cli.StringFlag{
 			Name:     "diff-file",
 			Aliases:  []string{"f"},
-			Usage:    "Path to the diff file (required)",
+			Usage:    "Path to the diff result directory, or to the JSON report next to it (required)",
 			Required: true,
 		},
 		&cli.StringFlag{

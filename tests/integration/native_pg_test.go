@@ -466,12 +466,12 @@ func TestNativePG(t *testing.T) {
 		runMerkleTreeTests(t, env, "customers")
 	})
 
-	t.Run("MerkleTreeNumericScaleInvariance", func(t *testing.T) {
-		testMerkleTreeNumericScaleInvariance(t, env)
+	t.Run("MerkleTreeNumericScale", func(t *testing.T) {
+		testMerkleTreeNumericScale(t, env)
 	})
 
-	t.Run("NumericScaleInMismatchedBlock", func(t *testing.T) {
-		testNumericScaleInMismatchedBlock(t, env)
+	t.Run("NumericScaleIsADifference", func(t *testing.T) {
+		testNumericScaleIsADifference(t, env)
 	})
 
 	t.Run("NumericKeyRepair", func(t *testing.T) {

@@ -79,32 +79,134 @@ type RepairRule struct {
 	compiledWhen *parser.WhenExpr `json:"-" yaml:"-"`
 }
 
-// RepairRowOverride matches an exact PK (map for composite keys) and wins before any rule.
+// RepairRowOverride matches an exact PK (map for composite keys) and wins
+// before any rule. The text of each key column must be the key text, as the
+// server prints the key.
 type RepairRowOverride struct {
-	Name   string           `json:"name,omitempty" yaml:"name,omitempty"`
-	PK     map[string]any   `json:"pk" yaml:"pk"`
-	Action RepairPlanAction `json:"action" yaml:"action"`
+	Name   string               `json:"name,omitempty" yaml:"name,omitempty"`
+	PK     map[string]PlanValue `json:"pk" yaml:"pk"`
+	Action RepairPlanAction     `json:"action" yaml:"action"`
 }
 
 // RepairPKMatcher supports exact PKs and ranges (range only for simple PKs).
+// An equals key matches a row whose key text is the same, byte for byte. A
+// range is compared on the server with the type of the key column.
 type RepairPKMatcher struct {
-	Equals []any          `json:"equals,omitempty" yaml:"equals,omitempty"` // []any for simple PK, []any slice for composite PK values
+	Equals []PlanKey      `json:"equals,omitempty" yaml:"equals,omitempty"`
 	Range  *RepairPKRange `json:"range,omitempty" yaml:"range,omitempty"`
 }
 
 type RepairPKRange struct {
-	From any `json:"from" yaml:"from"`
-	To   any `json:"to" yaml:"to"`
+	From *PlanValue `json:"from" yaml:"from"`
+	To   *PlanValue `json:"to" yaml:"to"`
+}
+
+// PlanValue is a value of a repair plan: the text of a YAML scalar as the
+// file writes it, or NULL. The text is not converted: 1.50, 007 and true
+// stay as they are. Repair compares a key text with it byte for byte, and
+// sends a value to the server, which reads the text with the type of the
+// column. The zero value is NULL: the YAML parser leaves a null scalar
+// (null, ~ or nothing) at the zero value, while a quoted "null" is the text
+// null.
+type PlanValue struct {
+	Text  string
+	Valid bool
+}
+
+// UnmarshalYAML takes the text of a scalar node.
+func (v *PlanValue) UnmarshalYAML(n *yaml.Node) error {
+	if n.Kind == yaml.AliasNode && n.Alias != nil {
+		n = n.Alias
+	}
+	if n.Kind != yaml.ScalarNode {
+		return fmt.Errorf("line %d: a value must be a scalar", n.Line)
+	}
+	if n.ShortTag() == "!!null" {
+		*v = PlanValue{}
+		return nil
+	}
+	*v = PlanValue{Text: n.Value, Valid: true}
+	return nil
+}
+
+// UnmarshalJSON takes the text of a JSON string, or the text of another JSON
+// scalar as the file writes it.
+func (v *PlanValue) UnmarshalJSON(b []byte) error {
+	t := strings.TrimSpace(string(b))
+	switch {
+	case t == "null":
+		*v = PlanValue{}
+	case strings.HasPrefix(t, `"`):
+		var s string
+		if err := json.Unmarshal(b, &s); err != nil {
+			return err
+		}
+		*v = PlanValue{Text: s, Valid: true}
+	case strings.HasPrefix(t, "{"), strings.HasPrefix(t, "["):
+		return fmt.Errorf("a value must be a scalar, got %s", t)
+	default:
+		*v = PlanValue{Text: t, Valid: true}
+	}
+	return nil
+}
+
+// PlanKey is one key in pk_in.equals: a scalar for a one-column key, or a
+// list of scalars, one for each key column, for a composite key.
+type PlanKey struct {
+	Values []PlanValue
+	List   bool
+}
+
+func (k *PlanKey) UnmarshalYAML(n *yaml.Node) error {
+	if n.Kind == yaml.AliasNode && n.Alias != nil {
+		n = n.Alias
+	}
+	if n.Kind != yaml.SequenceNode {
+		var v PlanValue
+		if err := v.UnmarshalYAML(n); err != nil {
+			return err
+		}
+		*k = PlanKey{Values: []PlanValue{v}}
+		return nil
+	}
+	out := PlanKey{List: true}
+	for _, item := range n.Content {
+		var v PlanValue
+		if err := v.UnmarshalYAML(item); err != nil {
+			return err
+		}
+		out.Values = append(out.Values, v)
+	}
+	*k = out
+	return nil
+}
+
+func (k *PlanKey) UnmarshalJSON(b []byte) error {
+	t := strings.TrimSpace(string(b))
+	if !strings.HasPrefix(t, "[") {
+		var v PlanValue
+		if err := v.UnmarshalJSON(b); err != nil {
+			return err
+		}
+		*k = PlanKey{Values: []PlanValue{v}}
+		return nil
+	}
+	var vals []PlanValue
+	if err := json.Unmarshal(b, &vals); err != nil {
+		return err
+	}
+	*k = PlanKey{Values: vals, List: true}
+	return nil
 }
 
 // RepairPlanAction captures the small, memorable action set.
 type RepairPlanAction struct {
-	Type          RepairActionType  `json:"type" yaml:"type"`
-	From          string            `json:"from,omitempty" yaml:"from,omitempty"` // n1 or n2 for apply_from
-	Mode          RepairApplyMode   `json:"mode,omitempty" yaml:"mode,omitempty"` // replace|upsert|insert for apply_from
-	AllowStaleRepairs *bool             `json:"allow_stale_repairs,omitempty" yaml:"allow_stale_repairs,omitempty"`
-	CustomRow     map[string]any    `json:"custom_row,omitempty" yaml:"custom_row,omitempty"`
-	CustomHelpers *CustomHelperSpec `json:"helpers,omitempty" yaml:"helpers,omitempty"`
+	Type              RepairActionType     `json:"type" yaml:"type"`
+	From              string               `json:"from,omitempty" yaml:"from,omitempty"` // n1 or n2 for apply_from
+	Mode              RepairApplyMode      `json:"mode,omitempty" yaml:"mode,omitempty"` // replace|upsert|insert for apply_from
+	AllowStaleRepairs *bool                `json:"allow_stale_repairs,omitempty" yaml:"allow_stale_repairs,omitempty"`
+	CustomRow         map[string]PlanValue `json:"custom_row,omitempty" yaml:"custom_row,omitempty"`
+	CustomHelpers     *CustomHelperSpec    `json:"helpers,omitempty" yaml:"helpers,omitempty"`
 }
 
 type CustomHelperSpec struct {
@@ -182,6 +284,11 @@ func (plan *RepairPlanFile) Validate() error {
 			if len(override.PK) == 0 {
 				return fmt.Errorf("table %s row_override[%d] must provide pk map", tableName, i)
 			}
+			for col, v := range override.PK {
+				if !v.Valid {
+					return fmt.Errorf("table %s row_override[%d] pk column %s cannot be null", tableName, i, col)
+				}
+			}
 			if err := validateRepairAction(&override.Action, tableName, fmt.Sprintf("row_override[%d]", i)); err != nil {
 				return err
 			}
@@ -249,8 +356,18 @@ func validatePKMatchers(matchers []RepairPKMatcher, tableName, label string) err
 			return fmt.Errorf("table %s rule%s pk_in[%d] must specify equals or range", tableName, label, i)
 		}
 		if matcher.Range != nil {
-			if matcher.Range.From == nil || matcher.Range.To == nil {
+			if matcher.Range.From == nil || matcher.Range.To == nil || !matcher.Range.From.Valid || !matcher.Range.To.Valid {
 				return fmt.Errorf("table %s rule%s pk_in[%d] range requires both from and to", tableName, label, i)
+			}
+		}
+		for _, k := range matcher.Equals {
+			if len(k.Values) == 0 {
+				return fmt.Errorf("table %s rule%s pk_in[%d] equals cannot hold null", tableName, label, i)
+			}
+			for _, v := range k.Values {
+				if !v.Valid {
+					return fmt.Errorf("table %s rule%s pk_in[%d] equals cannot hold null", tableName, label, i)
+				}
 			}
 		}
 	}
@@ -345,6 +462,9 @@ func validateActionCompatibility(action *RepairPlanAction, diffTypes []string, t
 		case "row_mismatch":
 			if action.Type == RepairActionApplyFrom && action.Mode == RepairApplyModeInsert {
 				return fmt.Errorf("table %s rule%s: apply_from insert incompatible with diff_type %s", tableName, label, dt)
+			}
+			if action.Type == RepairActionBidirectional {
+				return fmt.Errorf("table %s rule%s: bidirectional incompatible with diff_type %s", tableName, label, dt)
 			}
 		}
 	}

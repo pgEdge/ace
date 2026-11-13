@@ -22,8 +22,11 @@ package keydiff
 
 import (
 	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
+	"math"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	utils "github.com/pgedge/ace/pkg/common"
@@ -50,10 +53,6 @@ type Table struct {
 	Key []string
 	// Cols is the list of all columns, in the order of the diff report.
 	Cols []string
-	// HashTypes are the column types (format_type) used by the row hash. They
-	// must be the same for both nodes and the same as for the block hash, or
-	// equal rows get different hashes.
-	HashTypes map[string]string
 	// ScanChildren tells that the table has inheritance children that the
 	// primary key index of the parent does not cover. The row read then lets
 	// the planner join the list of keys with the table in one pass, instead
@@ -67,9 +66,9 @@ type Side struct {
 	Name string
 	// Conn must not be nil.
 	Conn Querier
-	// ColTypes are the column types (format_type) on this node. The row read
-	// casts the key texts to them and uses them for its select list.
-	ColTypes map[string]string
+	// CastTypes are the types of the columns on this node without their
+	// type modifiers. The row read casts the key texts to them.
+	CastTypes map[string]string
 	// Rows is the number of rows of the block on this node, from the block
 	// hash. It is used only if RowsKnown is true.
 	Rows      int64
@@ -121,7 +120,10 @@ const (
 
 // Entry is one differing row. Row1 and Hash1 are set for KindOnly1 and
 // KindChanged, Row2 and Hash2 for KindOnly2 and KindChanged. Each row has
-// the columns commit_ts and node_origin, then the columns of the table.
+// the columns commit_ts (a time.Time or nil) and node_origin (a string or
+// nil), then the columns of the table. The value of a column of the table is
+// the text that the output function of its type gives, as a string, or nil
+// for NULL.
 type Entry struct {
 	Kind  Kind
 	Row1  types.OrderedMap
@@ -224,30 +226,70 @@ func Compare(ctx context.Context, t Table, b Block, s1, s2 Side, o Options, sink
 		return res, nil
 	}
 
-	seen1 := make(map[string]struct{})
-	seen2 := make(map[string]struct{})
+	if err := compareKeys(ctx, t, b.ReadFilter, s1, s2, ids, o.BatchSize, &res, sink); err != nil {
+		return Result{}, err
+	}
+	return res, nil
+}
+
+// CompareKeys reads the rows of the keys in texts on the nodes s1 and s2 and
+// gives the rows that differ to sink, in the same way as a comparison of a
+// block after its key queries. Each element of texts is the text of every
+// key column of one key. A key must be in texts only once: the row read
+// gives all rows of a key for each element, so a repeated key gives its
+// differences again. A key that neither node has gives nothing. filter, if
+// not empty, is added to the WHERE clause of the row read as it is.
+func CompareKeys(ctx context.Context, t Table, filter string, s1, s2 Side, texts [][]string, o Options, sink Sink) (Result, error) {
+	if o.BatchSize <= 0 {
+		o.BatchSize = defaultBatchSize
+	}
+	ids := make([]string, len(texts))
+	for i, key := range texts {
+		if len(key) != len(t.Key) {
+			return Result{}, fmt.Errorf("key %d has %d values, the table has %d key columns", i+1, len(key), len(t.Key))
+		}
+		parts := make([][]byte, len(key))
+		for j := range key {
+			parts[j] = []byte(key[j])
+		}
+		id, err := encodeKeyID(parts)
+		if err != nil {
+			return Result{}, err
+		}
+		ids[i] = id
+	}
+	res := Result{DiffKeys: len(ids)}
+	if err := compareKeys(ctx, t, filter, s1, s2, ids, o.BatchSize, &res, sink); err != nil {
+		return Result{}, err
+	}
+	return res, nil
+}
+
+// compareKeys reads the rows of the keys ids on both nodes, batchSize keys
+// at a time, and gives the rows that differ to sink.
+func compareKeys(ctx context.Context, t Table, filter string, s1, s2 Side, ids []string, batchSize int, res *Result, sink Sink) error {
 	var entries []Entry
-	for start := 0; start < len(ids); start += o.BatchSize {
-		end := min(start+o.BatchSize, len(ids))
+	for start := 0; start < len(ids); start += batchSize {
+		end := min(start+batchSize, len(ids))
 		batch := ids[start:end]
-		rows1, err := readRows(ctx, t, b.ReadFilter, s1, batch, seen1)
+		rows1, err := readRows(ctx, t, filter, s1, batch)
 		if err != nil {
-			return Result{}, err
+			return err
 		}
-		rows2, err := readRows(ctx, t, b.ReadFilter, s2, batch, seen2)
+		rows2, err := readRows(ctx, t, filter, s2, batch)
 		if err != nil {
-			return Result{}, err
+			return err
 		}
-		entries = classify(len(batch), rows1, rows2, entries[:0], &res)
+		entries = classify(len(batch), rows1, rows2, entries[:0], res)
 		if len(entries) == 0 {
 			continue
 		}
 		if err := sink(entries); err != nil {
-			return Result{}, err
+			return err
 		}
 		clear(entries)
 	}
-	return res, nil
+	return nil
 }
 
 // KeyWidth returns the average size of the primary key of one row of
@@ -463,11 +505,15 @@ type readRow struct {
 
 // readRows reads the full rows for the keys ids on one node. The result is
 // indexed by the position of the key in ids. A key can have no row (the row
-// was deleted) or more than one row (an inheritance tree). seen holds the
-// rows (table OID and ctid) already returned for other keys of the same
-// comparison; such a row is not returned again.
-func readRows(ctx context.Context, t Table, filter string, s Side, ids []string, seen map[string]struct{}) ([][]readRow, error) {
-	query, err := t.ReadQuery(s.ColTypes, filter)
+// was deleted, or its key now prints in another way) or more than one row (an
+// inheritance tree).
+//
+// The values are taken from the result as raw bytes: the columns of the
+// table come in the text format, so each value is the output of its type,
+// and the client keeps it as it is. A NULL is nil, which is not the same as
+// an empty string.
+func readRows(ctx context.Context, t Table, filter string, s Side, ids []string) ([][]readRow, error) {
+	query, err := t.ReadQuery(s.CastTypes, filter)
 	if err != nil {
 		return nil, err
 	}
@@ -485,9 +531,10 @@ func readRows(ctx context.Context, t Table, filter string, s Side, ids []string,
 			cols[i][j] = texts[i]
 		}
 	}
-	args := make([]any, n)
+	args := make([]any, 0, n+1)
+	args = append(args, t.readFormats())
 	for i := range cols {
-		args[i] = cols[i]
+		args = append(args, cols[i])
 	}
 
 	rows, err := s.Conn.Query(ctx, query, args...) // nosemgrep
@@ -496,41 +543,71 @@ func readRows(ctx context.Context, t Table, filter string, s Side, ids []string,
 	}
 	defer rows.Close()
 
-	const first = 4 // position, row hash, table OID, ctid
+	want := readServiceCols + len(t.Cols)
 	out := make([][]readRow, len(ids))
 	for rows.Next() {
-		// The row is read in the same form as every other row read for a
-		// diff report. The service columns keep their Go types in this form.
-		row, err := utils.ScanRow(rows)
-		if err != nil {
-			return nil, fmt.Errorf("row read by key on node %s: %w", s.Name, err)
+		raw := rows.RawValues()
+		if len(raw) != want {
+			return nil, fmt.Errorf("row read by key on node %s returned %d columns, want %d", s.Name, len(raw), want)
 		}
-		if len(row) < first {
-			return nil, fmt.Errorf("row read by key on node %s returned %d columns", s.Name, len(row))
+		if len(raw[0]) != 8 {
+			return nil, fmt.Errorf("row read by key on node %s returned a bad key position", s.Name)
 		}
-		pos, ok := row[0].Value.(int64)
-		if !ok || pos < 1 || pos > int64(len(ids)) {
-			return nil, fmt.Errorf("row read by key on node %s returned a bad key position %v", s.Name, row[0].Value)
+		pos := int64(binary.BigEndian.Uint64(raw[0]))
+		if pos < 1 || pos > int64(len(ids)) {
+			return nil, fmt.Errorf("row read by key on node %s returned a bad key position %d", s.Name, pos)
 		}
-		hb, ok := row[1].Value.([]byte)
-		if !ok || len(hb) != rowHashSize {
+		if len(raw[1]) != rowHashSize {
 			return nil, fmt.Errorf("row read by key on node %s returned a bad row hash", s.Name)
 		}
-		where := fmt.Sprintf("%v/%v", row[2].Value, row[3].Value)
-		if _, dup := seen[where]; dup {
-			continue
+		commitTS, err := decodeCommitTS(raw[2])
+		if err != nil {
+			return nil, fmt.Errorf("row read by key on node %s: commit timestamp: %w", s.Name, err)
 		}
-		seen[where] = struct{}{}
+		var origin any
+		if raw[3] != nil {
+			origin = string(raw[3])
+		}
+
 		var r readRow
-		copy(r.hash[:], hb)
-		// A copy, so that the service columns are not kept with the row.
-		r.row = append(make(types.OrderedMap, 0, len(row)-first), row[first:]...)
+		copy(r.hash[:], raw[1])
+		r.row = make(types.OrderedMap, 0, 2+len(t.Cols))
+		r.row = append(r.row, types.KVPair{Key: "commit_ts", Value: commitTS}, types.KVPair{Key: "node_origin", Value: origin})
+		for i, c := range t.Cols {
+			var v any
+			if b := raw[readServiceCols+i]; b != nil {
+				v = string(b)
+			}
+			r.row = append(r.row, types.KVPair{Key: c, Value: v})
+		}
 		out[pos-1] = append(out[pos-1], r)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("row read by key failed on node %s: %w", s.Name, err)
 	}
 	return out, nil
+}
+
+// pgEpochMicros is the PostgreSQL epoch, 2000-01-01 00:00:00 UTC, in
+// microseconds since the Unix epoch.
+const pgEpochMicros = 946684800 * 1000000
+
+// decodeCommitTS decodes a commit timestamp in the binary format: the
+// microseconds since the PostgreSQL epoch, as a big-endian int64. It returns
+// nil for a NULL, which a row without a known commit timestamp has, and for
+// an infinite timestamp.
+func decodeCommitTS(raw []byte) (any, error) {
+	if raw == nil {
+		return nil, nil
+	}
+	if len(raw) != 8 {
+		return nil, fmt.Errorf("%d bytes, want 8", len(raw))
+	}
+	v := int64(binary.BigEndian.Uint64(raw))
+	if v == math.MaxInt64 || v == math.MinInt64 {
+		return nil, nil
+	}
+	return time.UnixMicro(v + pgEpochMicros).UTC(), nil
 }
 
 // classify appends the differing rows of one batch to entries and counts

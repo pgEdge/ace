@@ -12,12 +12,9 @@
 package parser
 
 import (
-	"encoding/json"
 	"fmt"
 	"strings"
 	"unicode"
-
-	utils "github.com/pgedge/ace/pkg/common"
 )
 
 // WhenExpr represents a compiled predicate over diff row values (n1./n2.).
@@ -25,15 +22,37 @@ type WhenExpr struct {
 	root exprNode
 }
 
-// ValueProvider returns the value for a given source ("n1" or "n2") and column.
-type ValueProvider func(source, column string) (any, bool)
+// Value is a value in a when expression: the text of a column value or of a
+// literal, or NULL.
+type Value struct {
+	Text string
+	Null bool
+}
 
-// Eval evaluates the predicate against the provided values.
-func (w *WhenExpr) Eval(provider ValueProvider) (bool, error) {
+// ValueProvider returns the value of a column of a source ("n1" or "n2"). A
+// column that the row does not have is NULL.
+type ValueProvider func(source, column string) Value
+
+// Comparison is one comparison of two values that are not NULL. Op is one of
+// =, <>, <, <=, > and >=. A side that is a column names it in LeftColumn or
+// RightColumn; a literal has an empty name. At least one side is a column,
+// and the server compares the texts with the type of the column.
+type Comparison struct {
+	Op                      string
+	Left, Right             string
+	LeftColumn, RightColumn string
+}
+
+// Comparator returns the result of a comparison.
+type Comparator func(c Comparison) (bool, error)
+
+// Eval evaluates the predicate against the provided values. A comparison
+// with a NULL side is decided here; every other comparison goes to cmp.
+func (w *WhenExpr) Eval(provider ValueProvider, cmp Comparator) (bool, error) {
 	if w == nil || w.root == nil {
 		return true, nil
 	}
-	val, err := w.root.eval(provider)
+	val, err := w.root.eval(provider, cmp)
 	if err != nil {
 		return false, err
 	}
@@ -44,10 +63,26 @@ func (w *WhenExpr) Eval(provider ValueProvider) (bool, error) {
 	return b, nil
 }
 
+// Comparisons returns every comparison that Eval can give to its comparator
+// for these values, so that a caller can compute them all at once before
+// Eval. It does not skip the parts that AND and OR would not evaluate.
+func (w *WhenExpr) Comparisons(provider ValueProvider) []Comparison {
+	if w == nil || w.root == nil {
+		return nil
+	}
+	var out []Comparison
+	w.root.comparisons(provider, &out)
+	return out
+}
+
 // CompileWhenExpression parses a restricted predicate language:
 // - Identifiers: n1.col, n2.col
 // - Literals: strings ('x'), numbers, booleans, NULL
 // - Operators: = != < <= > >=, IN (...), IS [NOT] NULL, AND, OR, NOT, parentheses.
+//
+// A literal keeps its text: the number 1.50 is the text 1.50. A comparison
+// needs a column on at least one side, whose type the server uses to read
+// both texts.
 func CompileWhenExpression(expr string) (*WhenExpr, error) {
 	lex := newLexer(expr)
 	tokens, err := lex.lex()
@@ -199,7 +234,7 @@ func (l *lexer) scanString() (token, error) {
 				continue
 			}
 			l.pos++
-			return token{typ: tokString, lit: l.input[start:l.pos], pos: start, value: sb.String()}, nil
+			return token{typ: tokString, lit: l.input[start:l.pos], pos: start, value: Value{Text: sb.String()}}, nil
 		}
 		sb.WriteByte(ch)
 		l.pos++
@@ -229,10 +264,7 @@ func (l *lexer) scanNumber() (token, error) {
 		l.pos++
 	}
 	text := l.input[start:l.pos]
-	// Store as json.Number to preserve full precision for large integers
-	// and high-precision decimals. CompareNumeric handles json.Number natively.
-	// Syntax is already validated by the character-by-character scan above.
-	return token{typ: tokNumber, lit: text, pos: start, value: json.Number(text)}, nil
+	return token{typ: tokNumber, lit: text, pos: start, value: Value{Text: text}}, nil
 }
 
 func (l *lexer) scanIdent() (token, error) {
@@ -259,10 +291,9 @@ func (l *lexer) scanIdent() (token, error) {
 	case "is":
 		return token{typ: tokIs, lit: text, pos: start}, nil
 	case "true", "false":
-		val := low == "true"
-		return token{typ: tokBool, lit: text, pos: start, value: val}, nil
+		return token{typ: tokBool, lit: text, pos: start, value: Value{Text: low}}, nil
 	case "null":
-		return token{typ: tokNull, lit: text, pos: start, value: nil}, nil
+		return token{typ: tokNull, lit: text, pos: start, value: Value{Null: true}}, nil
 	default:
 		return token{typ: tokIdent, lit: text, pos: start}, nil
 	}
@@ -379,6 +410,9 @@ func (p *parser) parseComparison() (exprNode, error) {
 		if err != nil {
 			return nil, err
 		}
+		if err := needColumn(left, right, tok.pos); err != nil {
+			return nil, err
+		}
 		return &comparisonNode{op: tok.typ, left: left, right: right}, nil
 	case tokIn:
 		p.advance()
@@ -389,6 +423,9 @@ func (p *parser) parseComparison() (exprNode, error) {
 		for {
 			val, err := p.parseValue()
 			if err != nil {
+				return nil, err
+			}
+			if err := needColumn(left, val, tok.pos); err != nil {
 				return nil, err
 			}
 			values = append(values, val)
@@ -431,13 +468,24 @@ func (p *parser) parseValue() (exprNode, error) {
 		return &identNode{source: source, column: col}, nil
 	case tokString, tokNumber, tokBool, tokNull:
 		p.advance()
-		return &literalNode{value: tok.value}, nil
+		return &literalNode{lit: tok.value.(Value)}, nil
 	case tokLParen:
 		// allow nested parentheses via primary path
 		return p.parsePrimary()
 	default:
 		return nil, fmt.Errorf("unexpected token %q at pos %d", tok.lit, tok.pos)
 	}
+}
+
+// needColumn returns an error if neither side of a comparison is a column:
+// two literals have no column type to compare them with.
+func needColumn(left, right exprNode, pos int) error {
+	_, l := left.(*identNode)
+	_, r := right.(*identNode)
+	if !l && !r {
+		return fmt.Errorf("comparison at pos %d needs a column n1.<col> or n2.<col> on one side", pos)
+	}
+	return nil
 }
 
 func splitIdent(lit string) (string, string, error) {
@@ -458,7 +506,14 @@ func splitIdent(lit string) (string, string, error) {
 
 // AST nodes and evaluation
 type exprNode interface {
-	eval(ValueProvider) (any, error)
+	eval(ValueProvider, Comparator) (any, error)
+	comparisons(ValueProvider, *[]Comparison)
+}
+
+// valueNode is a node that gives a value: a column or a literal.
+type valueNode interface {
+	exprNode
+	value(ValueProvider) (Value, string)
 }
 
 type identNode struct {
@@ -466,21 +521,31 @@ type identNode struct {
 	column string
 }
 
-func (n *identNode) eval(provider ValueProvider) (any, error) {
+func (n *identNode) eval(provider ValueProvider, _ Comparator) (any, error) {
+	return nil, fmt.Errorf("column %s.%s is not a boolean", n.source, n.column)
+}
+
+func (n *identNode) comparisons(ValueProvider, *[]Comparison) {}
+
+// value returns the value of the column and its name.
+func (n *identNode) value(provider ValueProvider) (Value, string) {
 	if provider == nil {
-		return nil, fmt.Errorf("no value provider available")
+		return Value{Null: true}, n.column
 	}
-	val, _ := provider(n.source, n.column)
-	return val, nil
+	return provider(n.source, n.column), n.column
 }
 
 type literalNode struct {
-	value any
+	lit Value
 }
 
-func (n *literalNode) eval(_ ValueProvider) (any, error) {
-	return n.value, nil
+func (n *literalNode) eval(ValueProvider, Comparator) (any, error) {
+	return nil, fmt.Errorf("a literal is not a boolean")
 }
+
+func (n *literalNode) comparisons(ValueProvider, *[]Comparison) {}
+
+func (n *literalNode) value(ValueProvider) (Value, string) { return n.lit, "" }
 
 type logicalNode struct {
 	op    tokenType
@@ -488,8 +553,8 @@ type logicalNode struct {
 	right exprNode
 }
 
-func (n *logicalNode) eval(provider ValueProvider) (any, error) {
-	lv, err := n.left.eval(provider)
+func (n *logicalNode) eval(provider ValueProvider, cmp Comparator) (any, error) {
+	lv, err := n.left.eval(provider, cmp)
 	if err != nil {
 		return nil, err
 	}
@@ -504,7 +569,7 @@ func (n *logicalNode) eval(provider ValueProvider) (any, error) {
 		return true, nil
 	}
 
-	rv, err := n.right.eval(provider)
+	rv, err := n.right.eval(provider, cmp)
 	if err != nil {
 		return nil, err
 	}
@@ -523,12 +588,17 @@ func (n *logicalNode) eval(provider ValueProvider) (any, error) {
 	}
 }
 
+func (n *logicalNode) comparisons(provider ValueProvider, out *[]Comparison) {
+	n.left.comparisons(provider, out)
+	n.right.comparisons(provider, out)
+}
+
 type notNode struct {
 	child exprNode
 }
 
-func (n *notNode) eval(provider ValueProvider) (any, error) {
-	val, err := n.child.eval(provider)
+func (n *notNode) eval(provider ValueProvider, cmp Comparator) (any, error) {
+	val, err := n.child.eval(provider, cmp)
 	if err != nil {
 		return nil, err
 	}
@@ -539,22 +609,22 @@ func (n *notNode) eval(provider ValueProvider) (any, error) {
 	return !b, nil
 }
 
+func (n *notNode) comparisons(provider ValueProvider, out *[]Comparison) {
+	n.child.comparisons(provider, out)
+}
+
 type comparisonNode struct {
 	op    tokenType
 	left  exprNode
 	right exprNode
 }
 
-func (n *comparisonNode) eval(provider ValueProvider) (any, error) {
-	lv, err := n.left.eval(provider)
-	if err != nil {
-		return nil, err
-	}
-	rv, err := n.right.eval(provider)
-	if err != nil {
-		return nil, err
-	}
-	return compareValues(n.op, lv, rv)
+func (n *comparisonNode) eval(provider ValueProvider, cmp Comparator) (any, error) {
+	return compare(n.op, n.left, n.right, provider, cmp)
+}
+
+func (n *comparisonNode) comparisons(provider ValueProvider, out *[]Comparison) {
+	addComparison(n.op, n.left, n.right, provider, out)
 }
 
 type inNode struct {
@@ -562,17 +632,9 @@ type inNode struct {
 	set   []exprNode
 }
 
-func (n *inNode) eval(provider ValueProvider) (any, error) {
-	val, err := n.value.eval(provider)
-	if err != nil {
-		return nil, err
-	}
+func (n *inNode) eval(provider ValueProvider, cmp Comparator) (any, error) {
 	for _, el := range n.set {
-		ev, err := el.eval(provider)
-		if err != nil {
-			return nil, err
-		}
-		ok, err := compareValues(tokEq, val, ev)
+		ok, err := compare(tokEq, n.value, el, provider, cmp)
 		if err != nil {
 			return nil, err
 		}
@@ -583,89 +645,80 @@ func (n *inNode) eval(provider ValueProvider) (any, error) {
 	return false, nil
 }
 
+func (n *inNode) comparisons(provider ValueProvider, out *[]Comparison) {
+	for _, el := range n.set {
+		addComparison(tokEq, n.value, el, provider, out)
+	}
+}
+
 type isNullNode struct {
 	value  exprNode
 	negate bool
 }
 
-func (n *isNullNode) eval(provider ValueProvider) (any, error) {
-	val, err := n.value.eval(provider)
-	if err != nil {
-		return nil, err
+func (n *isNullNode) eval(provider ValueProvider, _ Comparator) (any, error) {
+	vn, ok := n.value.(valueNode)
+	if !ok {
+		return nil, fmt.Errorf("IS NULL needs a column or a literal")
 	}
-	isNull := val == nil
+	v, _ := vn.value(provider)
 	if n.negate {
-		return !isNull, nil
+		return !v.Null, nil
 	}
-	return isNull, nil
+	return v.Null, nil
 }
 
-func compareValues(op tokenType, left any, right any) (bool, error) {
-	// nil handling
-	if left == nil || right == nil {
-		switch op {
-		case tokEq:
-			return left == nil && right == nil, nil
-		case tokNeq:
-			return !(left == nil && right == nil), nil
-		default:
-			return false, fmt.Errorf("cannot compare nil with operator %v", op)
-		}
-	}
+func (n *isNullNode) comparisons(ValueProvider, *[]Comparison) {}
 
-	if cmp, ok := utils.CompareNumeric(left, right); ok {
-		switch op {
-		case tokEq:
-			return cmp == 0, nil
-		case tokNeq:
-			return cmp != 0, nil
-		case tokLt:
-			return cmp < 0, nil
-		case tokLte:
-			return cmp <= 0, nil
-		case tokGt:
-			return cmp > 0, nil
-		case tokGte:
-			return cmp >= 0, nil
-		default:
-			return false, fmt.Errorf("unsupported numeric operator %v", op)
-		}
-	}
-
-	ls, lsok := left.(string)
-	rs, rsok := right.(string)
-	if lsok && rsok {
-		switch op {
-		case tokEq:
-			return ls == rs, nil
-		case tokNeq:
-			return ls != rs, nil
-		case tokLt:
-			return ls < rs, nil
-		case tokLte:
-			return ls <= rs, nil
-		case tokGt:
-			return ls > rs, nil
-		case tokGte:
-			return ls >= rs, nil
-		default:
-			return false, fmt.Errorf("unsupported string operator %v", op)
-		}
-	}
-
-	lb, lbok := left.(bool)
-	rb, rbok := right.(bool)
-	if lbok && rbok {
-		switch op {
-		case tokEq:
-			return lb == rb, nil
-		case tokNeq:
-			return lb != rb, nil
-		default:
-			return false, fmt.Errorf("unsupported boolean operator %v", op)
-		}
-	}
-
-	return false, fmt.Errorf("cannot compare values of different or unsupported types (%T vs %T)", left, right)
+// sqlOps are the operators of the comparisons, as SQL writes them.
+var sqlOps = map[tokenType]string{
+	tokEq: "=", tokNeq: "<>", tokLt: "<", tokLte: "<=", tokGt: ">", tokGte: ">=",
 }
 
+// comparisonOf returns the comparison of two value nodes, and false if a side
+// is NULL: then the comparison is decided without the server.
+func comparisonOf(op tokenType, left, right exprNode, provider ValueProvider) (Comparison, Value, Value, error) {
+	ln, lok := left.(valueNode)
+	rn, rok := right.(valueNode)
+	if !lok || !rok {
+		return Comparison{}, Value{}, Value{}, fmt.Errorf("a comparison needs a column or a literal on each side")
+	}
+	lv, lcol := ln.value(provider)
+	rv, rcol := rn.value(provider)
+	sqlOp, ok := sqlOps[op]
+	if !ok {
+		return Comparison{}, Value{}, Value{}, fmt.Errorf("unknown comparison operator %v", op)
+	}
+	return Comparison{Op: sqlOp, Left: lv.Text, Right: rv.Text, LeftColumn: lcol, RightColumn: rcol}, lv, rv, nil
+}
+
+func addComparison(op tokenType, left, right exprNode, provider ValueProvider, out *[]Comparison) {
+	c, lv, rv, err := comparisonOf(op, left, right, provider)
+	if err != nil || lv.Null || rv.Null {
+		return
+	}
+	*out = append(*out, c)
+}
+
+// compare decides a comparison. With a NULL side, = is true only if both
+// sides are NULL and != is its negation; the other operators give an error.
+func compare(op tokenType, left, right exprNode, provider ValueProvider, cmp Comparator) (bool, error) {
+	c, lv, rv, err := comparisonOf(op, left, right, provider)
+	if err != nil {
+		return false, err
+	}
+	if lv.Null || rv.Null {
+		switch op {
+		case tokEq:
+			return lv.Null && rv.Null, nil
+		case tokNeq:
+			return !(lv.Null && rv.Null), nil
+		default:
+			return false, fmt.Errorf("cannot compare NULL with operator %s", c.Op)
+		}
+	}
+	if cmp == nil {
+		return false, fmt.Errorf("no comparator for %s %s %s", c.Left, c.Op, c.Right)
+	}
+	return cmp(c)
+}
