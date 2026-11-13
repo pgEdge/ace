@@ -17,6 +17,21 @@ permissions:
 jobs:
   test:
     runs-on: ubuntu-latest
+    # A plain PostgreSQL server for the unit tests that need a database. They
+    # are skipped when their DSN variable is not set. Trust authentication
+    # lets a test log in as a role that it creates without a password.
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 2s
+          --health-timeout 5s
+          --health-retries 30
     steps:
     - uses: actions/checkout@v3
       with:
@@ -31,6 +46,9 @@ jobs:
     # without a change here, and each test runs once. The integration tests
     # share one cluster for the whole run; each test cleans up after itself.
     - name: Run unit tests
+      env:
+        ACE_TEST_DSN: postgres://postgres@localhost:5432/postgres?sslmode=disable
+        ACE_SLICER_TEST_DSN: postgres://postgres@localhost:5432/postgres?sslmode=disable
       run: go test -count=1 -v $(go list ./... | grep -v /tests/integration)
 
     - name: Run integration tests
