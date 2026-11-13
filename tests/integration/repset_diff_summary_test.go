@@ -12,15 +12,12 @@
 package integration
 
 import (
-	"bytes"
 	"context"
 	"fmt"
-	"os"
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/pgedge/ace/internal/consistency/diff"
-	"github.com/pgedge/ace/pkg/logger"
 	"github.com/pgedge/ace/pkg/taskstore"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -63,21 +60,9 @@ func TestRepsetDiff_UniDirectional(t *testing.T) {
 		removeGlob(t, fmt.Sprintf("%s_%s_diffs-*.json", testSchema, tableName))
 	})
 
-	// Capture logger output.
-	r, w, err := os.Pipe()
-	require.NoError(t, err)
-	logger.SetOutput(w)
-	t.Cleanup(func() { logger.SetOutput(os.Stderr) })
-
 	task := newTestRepsetDiffTask(repsetName)
-	diffErr := diff.RepsetDiff(task)
-
-	require.NoError(t, w.Close())
-	var buf bytes.Buffer
-	_, err = buf.ReadFrom(r)
-	require.NoError(t, err)
-	logOutput := buf.String()
-	t.Logf("Captured log output:\n%s", logOutput)
+	var diffErr error
+	logOutput := captureLog(t, func() { diffErr = diff.RepsetDiff(task) })
 
 	// Should succeed — the table exists on both nodes even though it's only
 	// in the repset on node1. Our code discovers it from node1's repset and
@@ -149,23 +134,11 @@ func TestRepsetDiff_Summary(t *testing.T) {
 		}
 	})
 
-	// Capture logger output.
-	r, w, err := os.Pipe()
-	require.NoError(t, err)
-	logger.SetOutput(w)
-	t.Cleanup(func() { logger.SetOutput(os.Stderr) })
-
 	task := newTestRepsetDiffTask(repsetName)
 	task.SkipTables = skippedQualified
 
-	diffErr := diff.RepsetDiff(task)
-
-	require.NoError(t, w.Close())
-	var buf bytes.Buffer
-	_, err = buf.ReadFrom(r)
-	require.NoError(t, err)
-	logOutput := buf.String()
-	t.Logf("Captured log output:\n%s", logOutput)
+	var diffErr error
+	logOutput := captureLog(t, func() { diffErr = diff.RepsetDiff(task) })
 
 	// Should return error because nopk table failed.
 	require.Error(t, diffErr)
@@ -205,23 +178,11 @@ func TestSchemaDiff_SkippedTableNamesInSummary(t *testing.T) {
 
 	createDivergentTable(t, skipTableName)
 
-	// Capture logger output.
-	r, w, err := os.Pipe()
-	require.NoError(t, err)
-	logger.SetOutput(w)
-	t.Cleanup(func() { logger.SetOutput(os.Stderr) })
-
 	task := newTestSchemaDiffTask(testSchema, nodes)
 	task.SkipTables = skipTableName
 
-	diffErr := task.SchemaTableDiff()
-
-	require.NoError(t, w.Close())
-	var buf bytes.Buffer
-	_, err = buf.ReadFrom(r)
-	require.NoError(t, err)
-	logOutput := buf.String()
-	t.Logf("Captured log output:\n%s", logOutput)
+	var diffErr error
+	logOutput := captureLog(t, func() { diffErr = task.SchemaTableDiff() })
 
 	require.NoError(t, diffErr)
 

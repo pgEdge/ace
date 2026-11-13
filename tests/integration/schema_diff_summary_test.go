@@ -12,16 +12,13 @@
 package integration
 
 import (
-	"bytes"
 	"context"
 	"fmt"
-	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/pgedge/ace/pkg/logger"
 	"github.com/pgedge/ace/pkg/taskstore"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -143,14 +140,6 @@ func TestSchemaDiff_Summary(t *testing.T) {
 		execOK(t, ctx, pgCluster.Node1Pool, fmt.Sprintf(`DROP TABLE IF EXISTS %s.%s CASCADE`, testSchema, n1OnlyTable))
 	})
 
-	// --- Capture logger output ---
-	r, w, err := os.Pipe()
-	require.NoError(t, err)
-	logger.SetOutput(w)
-	t.Cleanup(func() {
-		logger.SetOutput(os.Stderr)
-	})
-
 	// --- Run schema-diff ---
 	task := newTestSchemaDiffTask(testSchema, nodes)
 	task.SkipDBUpdate = true
@@ -166,15 +155,8 @@ func TestSchemaDiff_Summary(t *testing.T) {
 	}
 	task.SkipTables = skipList
 
-	diffErr := task.SchemaTableDiff()
-
-	// --- Read captured log output ---
-	require.NoError(t, w.Close())
-	var buf bytes.Buffer
-	_, err = buf.ReadFrom(r)
-	require.NoError(t, err)
-	logOutput := buf.String()
-	t.Logf("Captured log output:\n%s", logOutput)
+	var diffErr error
+	logOutput := captureLog(t, func() { diffErr = task.SchemaTableDiff() })
 
 	// --- Assertions ---
 
