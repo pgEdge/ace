@@ -64,13 +64,10 @@ func newUnreplicatedTable(t *testing.T, env *testEnv, tableName, ddl string) (qu
 	}
 	t.Cleanup(func() {
 		for _, pool := range env.pools() {
-			_, _ = pool.Exec(ctx, "DROP TABLE IF EXISTS "+safe+" CASCADE") // nosemgrep
+			execOK(t, ctx, pool, "DROP TABLE IF EXISTS "+safe+" CASCADE") // nosemgrep
 		}
 		// Remove only the diff files of this table: other tests can keep theirs.
-		files, _ := filepath.Glob(fmt.Sprintf("%s_%s_diffs-*.json", testSchema, tableName))
-		for _, f := range files {
-			os.Remove(f)
-		}
+		removeGlob(t, fmt.Sprintf("%s_%s_diffs-*.json", testSchema, tableName))
 	})
 	for _, pool := range env.pools() {
 		env.withRepairMode(t, ctx, pool, func(conn *pgxpool.Conn) {
@@ -126,7 +123,7 @@ func TestMerkleTreeRowsBelowReferenceMin(t *testing.T) {
 			require.NoError(t, mtreeTask.MtreeInit())
 			t.Cleanup(func() {
 				if err := mtreeTask.MtreeTeardown(); err != nil {
-					t.Logf("MtreeTeardown cleanup: %v", err)
+					t.Errorf("MtreeTeardown cleanup: %v", err)
 				}
 			})
 			require.NoError(t, mtreeTask.BuildMtree())
@@ -166,7 +163,7 @@ func TestMerkleTreeFirstLeafHashUpgrade(t *testing.T) {
 	require.NoError(t, mtreeTask.MtreeInit())
 	t.Cleanup(func() {
 		if err := mtreeTask.MtreeTeardown(); err != nil {
-			t.Logf("MtreeTeardown cleanup: %v", err)
+			t.Errorf("MtreeTeardown cleanup: %v", err)
 		}
 	})
 	require.NoError(t, mtreeTask.BuildMtree())
@@ -226,7 +223,7 @@ func TestMerkleTreeSplitFirstBlockBelowMin(t *testing.T) {
 			require.NoError(t, mtreeTask.MtreeInit())
 			t.Cleanup(func() {
 				if err := mtreeTask.MtreeTeardown(); err != nil {
-					t.Logf("MtreeTeardown cleanup: %v", err)
+					t.Errorf("MtreeTeardown cleanup: %v", err)
 				}
 			})
 			require.NoError(t, mtreeTask.BuildMtree())
@@ -307,7 +304,7 @@ func TestMerkleTreeMergeCountsRowsBelowFirstBlockStart(t *testing.T) {
 	require.NoError(t, mtreeTask.MtreeInit())
 	t.Cleanup(func() {
 		if err := mtreeTask.MtreeTeardown(); err != nil {
-			t.Logf("MtreeTeardown cleanup: %v", err)
+			t.Errorf("MtreeTeardown cleanup: %v", err)
 		}
 	})
 	require.NoError(t, mtreeTask.BuildMtree())
@@ -380,7 +377,7 @@ func TestMerkleTreeSplitFirstBlockOnOneNode(t *testing.T) {
 			require.NoError(t, mtreeTask.MtreeInit())
 			t.Cleanup(func() {
 				if err := mtreeTask.MtreeTeardown(); err != nil {
-					t.Logf("MtreeTeardown cleanup: %v", err)
+					t.Errorf("MtreeTeardown cleanup: %v", err)
 				}
 			})
 			require.NoError(t, mtreeTask.BuildMtree())
@@ -439,7 +436,7 @@ func TestMerkleTreeFirstLeafKeepsPositionOnTie(t *testing.T) {
 	require.NoError(t, mtreeTask.MtreeInit())
 	t.Cleanup(func() {
 		if err := mtreeTask.MtreeTeardown(); err != nil {
-			t.Logf("MtreeTeardown cleanup: %v", err)
+			t.Errorf("MtreeTeardown cleanup: %v", err)
 		}
 	})
 	require.NoError(t, mtreeTask.BuildMtree())
@@ -517,7 +514,7 @@ func TestMerkleTreeSplitWithMixedCaseKey(t *testing.T) {
 			require.NoError(t, mtreeTask.MtreeInit())
 			t.Cleanup(func() {
 				if err := mtreeTask.MtreeTeardown(); err != nil {
-					t.Logf("MtreeTeardown cleanup: %v", err)
+					t.Errorf("MtreeTeardown cleanup: %v", err)
 				}
 			})
 			require.NoError(t, mtreeTask.BuildMtree())

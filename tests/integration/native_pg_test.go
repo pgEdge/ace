@@ -138,15 +138,12 @@ func (s *nativeClusterState) teardown(t *testing.T) {
 			compose.RemoveVolumes(true),
 		)
 		if execErr != nil {
-			t.Logf("Failed to tear down native compose stack: %v", execErr)
+			t.Errorf("Failed to tear down native compose stack: %v", execErr)
 		}
 	}
 	// Clean up diff files and cluster config
-	files, _ := filepath.Glob("*_diffs-*")
-	for _, f := range files {
-		os.RemoveAll(f)
-	}
-	os.Remove(nativeClusterName + ".json")
+	removeGlob(t, "*_diffs-*")
+	removeFile(t, nativeClusterName+".json")
 }
 
 // writeClusterConfig writes a cluster config JSON that the diff/repair
@@ -257,7 +254,7 @@ func TestNativePG(t *testing.T) {
 		}
 		t.Cleanup(func() {
 			for _, pool := range env.pools() {
-				_, _ = pool.Exec(context.Background(), "DROP TABLE IF EXISTS "+parent+" CASCADE") // nosemgrep
+				execOK(t, context.Background(), pool, "DROP TABLE IF EXISTS "+parent+" CASCADE") // nosemgrep
 			}
 		})
 		_, err := state.n1Pool.Exec(ctx, "INSERT INTO "+parent+" VALUES (1, 'dup')") // nosemgrep
@@ -304,10 +301,10 @@ func TestNativePG(t *testing.T) {
 		require.NoError(t, err)
 
 		t.Cleanup(func() {
-			state.n2Pool.Exec(ctx, fmt.Sprintf("DROP SUBSCRIPTION IF EXISTS %s", subName))
-			state.n1Pool.Exec(ctx, fmt.Sprintf("DROP PUBLICATION IF EXISTS %s", pubName))
-			state.n1Pool.Exec(ctx, "DROP TABLE IF EXISTS public.origin_test")
-			state.n2Pool.Exec(ctx, "DROP TABLE IF EXISTS public.origin_test")
+			execOK(t, ctx, state.n2Pool, fmt.Sprintf("DROP SUBSCRIPTION IF EXISTS %s", subName))
+			execOK(t, ctx, state.n1Pool, fmt.Sprintf("DROP PUBLICATION IF EXISTS %s", pubName))
+			execOK(t, ctx, state.n1Pool, "DROP TABLE IF EXISTS public.origin_test")
+			execOK(t, ctx, state.n2Pool, "DROP TABLE IF EXISTS public.origin_test")
 		})
 
 		// GetNodeOriginNames on n2 should route to GetNativeNodeOriginNames
@@ -564,11 +561,11 @@ func testNativePreserveOrigin(t *testing.T, state *nativeClusterState, env *test
 	require.NoError(t, err)
 
 	t.Cleanup(func() {
-		state.n1Pool.Exec(ctx, fmt.Sprintf("DROP SUBSCRIPTION IF EXISTS %s", subN1Name))
-		state.n2Pool.Exec(ctx, fmt.Sprintf("DROP SUBSCRIPTION IF EXISTS %s", subN2Name))
-		state.n3Pool.Exec(ctx, fmt.Sprintf("DROP PUBLICATION IF EXISTS %s", pubName))
+		execOK(t, ctx, state.n1Pool, fmt.Sprintf("DROP SUBSCRIPTION IF EXISTS %s", subN1Name))
+		execOK(t, ctx, state.n2Pool, fmt.Sprintf("DROP SUBSCRIPTION IF EXISTS %s", subN2Name))
+		execOK(t, ctx, state.n3Pool, fmt.Sprintf("DROP PUBLICATION IF EXISTS %s", pubName))
 		for _, pool := range []*pgxpool.Pool{state.n1Pool, state.n2Pool, state.n3Pool} {
-			pool.Exec(ctx, fmt.Sprintf("DROP TABLE IF EXISTS %s CASCADE", qualifiedTableName))
+			execOK(t, ctx, pool, fmt.Sprintf("DROP TABLE IF EXISTS %s CASCADE", qualifiedTableName))
 		}
 	})
 

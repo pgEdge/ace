@@ -53,12 +53,12 @@ func TestSpockDiff_SucceedsOnSpockCluster(t *testing.T) {
 	t.Cleanup(func() {
 		files, err := filepath.Glob("spock_diffs-*.json")
 		if err != nil {
-			t.Logf("failed to glob spock diff artifacts: %v", err)
+			t.Errorf("failed to glob spock diff artifacts: %v", err)
 			return
 		}
 		for _, f := range files {
 			if err := os.Remove(f); err != nil {
-				t.Logf("failed to remove %s: %v", f, err)
+				t.Errorf("failed to remove %s: %v", f, err)
 			}
 		}
 	})

@@ -121,7 +121,7 @@ func dropOnBoth(t *testing.T, ctx context.Context, env *testEnv, objects ...stri
 	drop := func() {
 		for _, pool := range env.pools() {
 			for _, o := range objects {
-				_, _ = pool.Exec(ctx, "DROP "+o+" CASCADE") // nosemgrep
+				execOK(t, ctx, pool, "DROP "+o+" CASCADE") // nosemgrep
 			}
 		}
 	}

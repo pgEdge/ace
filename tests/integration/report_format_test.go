@@ -47,9 +47,9 @@ func typedKeyTable(t *testing.T, env *testEnv, name, defs, cols string, n1Rows, 
 	t.Cleanup(func() {
 		for _, pool := range env.pools() {
 			if env.HasSpock {
-				_, _ = pool.Exec(context.Background(), "SELECT spock.repset_remove_table('default', $1)", qualifiedTable)
+				repsetRemoveTable(t, context.Background(), pool, "default", qualifiedTable)
 			}
-			_, _ = pool.Exec(context.Background(), "DROP TABLE IF EXISTS "+qualifiedTable+" CASCADE") // nosemgrep
+			execOK(t, context.Background(), pool, "DROP TABLE IF EXISTS "+qualifiedTable+" CASCADE") // nosemgrep
 		}
 	})
 	for _, side := range []struct {

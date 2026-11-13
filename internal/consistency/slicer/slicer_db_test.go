@@ -13,6 +13,7 @@ package slicer
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"reflect"
@@ -20,6 +21,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -199,7 +201,9 @@ func TestSlicerOnDB(t *testing.T) {
 	}
 	icu := "C"
 	var hasICU bool
-	_ = pool.QueryRow(context.Background(), `SELECT EXISTS (SELECT 1 FROM pg_collation WHERE collname = 'und-x-icu')`).Scan(&hasICU)
+	if err := pool.QueryRow(context.Background(), `SELECT EXISTS (SELECT 1 FROM pg_collation WHERE collname = 'und-x-icu')`).Scan(&hasICU); err != nil {
+		t.Fatal(err)
+	}
 	if hasICU {
 		icu = "und-x-icu"
 	}
@@ -495,7 +499,11 @@ func TestCutPlanUsesIndex(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer func() { _ = tx.Rollback(ctx) }()
+	defer func() {
+		if err := tx.Rollback(ctx); err != nil && !errors.Is(err, pgx.ErrTxClosed) {
+			t.Errorf("rollback: %v", err)
+		}
+	}()
 	if _, err := tx.Exec(ctx, chunkPlanGuard); err != nil {
 		t.Fatal(err)
 	}

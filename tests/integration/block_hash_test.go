@@ -34,7 +34,7 @@ func blockHashes(t *testing.T, ctx context.Context, conn *pgxpool.Conn, name, co
 
 	_, err := conn.Exec(ctx, fmt.Sprintf("CREATE TEMP TABLE %s (id int PRIMARY KEY, %s)", name, colDefs)) // nosemgrep
 	require.NoError(t, err)
-	t.Cleanup(func() { _, _ = conn.Exec(context.Background(), "DROP TABLE IF EXISTS pg_temp."+name) }) // nosemgrep
+	t.Cleanup(func() { execOK(t, context.Background(), conn, "DROP TABLE IF EXISTS pg_temp."+name) }) // nosemgrep
 	if values != "" {
 		_, err = conn.Exec(ctx, fmt.Sprintf("INSERT INTO %s VALUES %s", name, values)) // nosemgrep
 		require.NoError(t, err)
@@ -128,7 +128,7 @@ func inheritedBlockHashes(t *testing.T, ctx context.Context, conn *pgxpool.Conn,
 	require.NoError(t, err)
 	_, err = conn.Exec(ctx, fmt.Sprintf("CREATE TEMP TABLE %s (PRIMARY KEY (id)) INHERITS (%s)", child, name)) // nosemgrep
 	require.NoError(t, err)
-	t.Cleanup(func() { _, _ = conn.Exec(context.Background(), "DROP TABLE IF EXISTS pg_temp."+name+" CASCADE") }) // nosemgrep
+	t.Cleanup(func() { execOK(t, context.Background(), conn, "DROP TABLE IF EXISTS pg_temp."+name+" CASCADE") }) // nosemgrep
 	for tbl, values := range map[string]string{name: parentRows, child: childRows} {
 		if values == "" {
 			continue
@@ -315,7 +315,7 @@ func TestBlockHashEncoding(t *testing.T) {
 			t.Skipf("cannot create a LATIN1 database: %v", err)
 		}
 		t.Cleanup(func() {
-			_, _ = pgCluster.Node1Pool.Exec(context.Background(), "DROP DATABASE IF EXISTS "+dbName+" WITH (FORCE)") // nosemgrep
+			execOK(t, context.Background(), pgCluster.Node1Pool, "DROP DATABASE IF EXISTS "+dbName+" WITH (FORCE)") // nosemgrep
 		})
 
 		cfg := pgCluster.Node1Pool.Config().Copy()

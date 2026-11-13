@@ -20,12 +20,6 @@ import (
 func TestTableDiffAgainstOriginWithUntil(t *testing.T) {
 	ctx := context.Background()
 
-	// Light netem delay on n3 to mimic slower replication
-	if err := addNetemDelay(ctx, serviceN3, "200ms"); err != nil {
-		t.Logf("warning: failed to add netem delay on %s: %v (continuing)", serviceN3, err)
-	}
-	defer removeNetemDelay(ctx, serviceN3)
-
 	tableName := "crash_customers"
 	qualified := fmt.Sprintf("%s.%s", testSchema, tableName)
 
@@ -43,7 +37,7 @@ func TestTableDiffAgainstOriginWithUntil(t *testing.T) {
 	}
 	t.Cleanup(func() {
 		for _, pool := range []*pgxpool.Pool{pgCluster.Node1Pool, pgCluster.Node2Pool, pgCluster.Node3Pool} {
-			pool.Exec(ctx, fmt.Sprintf("DROP TABLE IF EXISTS %s CASCADE;", qualified))
+			execOK(t, ctx, pool, fmt.Sprintf("DROP TABLE IF EXISTS %s CASCADE;", qualified))
 		}
 	})
 
@@ -100,7 +94,7 @@ func TestTableDiffAgainstOriginWithUntil(t *testing.T) {
 	require.NoError(t, err, "disable repair_mode on n2")
 	require.NoError(t, tx.Commit(ctx), "commit delete on n2")
 
-	// Stop n3 to mimic failure
+	// Stop n3 to mimic failure.
 	if err := stopService(ctx, serviceN3); err != nil {
 		t.Fatalf("failed to stop %s: %v", serviceN3, err)
 	}
@@ -185,23 +179,6 @@ func TestTableDiffAgainstOriginWithUntil(t *testing.T) {
 	var countAfter int
 	require.NoError(t, pgCluster.Node2Pool.QueryRow(ctx, fmt.Sprintf("SELECT count(*) FROM %s WHERE id=$1", qualified), insertedIDs[0]).Scan(&countAfter))
 	require.Equal(t, 1, countAfter, "recovery repair should restore missing row on n2")
-}
-
-func addNetemDelay(ctx context.Context, service, delay string) error {
-	container, err := pgCluster.Cluster.ServiceContainer(ctx, service)
-	if err != nil {
-		return err
-	}
-	_, _, err = container.Exec(ctx, []string{"tc", "qdisc", "add", "dev", "eth0", "root", "netem", "delay", delay})
-	return err
-}
-
-func removeNetemDelay(ctx context.Context, service string) {
-	container, err := pgCluster.Cluster.ServiceContainer(ctx, service)
-	if err != nil {
-		return
-	}
-	container.Exec(ctx, []string{"tc", "qdisc", "del", "dev", "eth0", "root"})
 }
 
 func stopService(ctx context.Context, service string) error {

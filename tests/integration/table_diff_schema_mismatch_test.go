@@ -51,7 +51,7 @@ func setupKeyMismatch(t *testing.T) {
 
 	t.Cleanup(func() {
 		for _, pool := range []*pgxpool.Pool{pgCluster.Node1Pool, pgCluster.Node2Pool} {
-			pool.Exec(ctx, drop) //nolint:errcheck // best-effort cleanup
+			execOK(t, ctx, pool, drop)
 		}
 	})
 }
@@ -90,7 +90,7 @@ func TestTableDiffSchemaMismatch_NarrowingNamesTheNarrowSide(t *testing.T) {
 	}
 	t.Cleanup(func() {
 		for _, pool := range []*pgxpool.Pool{pgCluster.Node1Pool, pgCluster.Node2Pool} {
-			pool.Exec(ctx, drop) //nolint:errcheck // best-effort cleanup
+			execOK(t, ctx, pool, drop)
 		}
 	})
 

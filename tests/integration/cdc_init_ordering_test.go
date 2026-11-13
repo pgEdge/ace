@@ -58,7 +58,7 @@ func TestMtreeInitSlotIsAfterPublication(t *testing.T) {
 	require.NoError(t, mtreeTask.MtreeInit())
 	t.Cleanup(func() {
 		if err := mtreeTask.MtreeTeardown(); err != nil {
-			t.Logf("MtreeTeardown during cleanup: %v", err)
+			t.Errorf("MtreeTeardown during cleanup: %v", err)
 		}
 		dropCDCTestTable(t, tableName)
 	})
@@ -121,7 +121,7 @@ func TestProcessReplicationStreamRejectsStaleStartLSN(t *testing.T) {
 	require.NoError(t, mtreeTask.MtreeInit())
 	t.Cleanup(func() {
 		if err := mtreeTask.MtreeTeardown(); err != nil {
-			t.Logf("MtreeTeardown during cleanup: %v", err)
+			t.Errorf("MtreeTeardown during cleanup: %v", err)
 		}
 		dropCDCTestTable(t, tableName)
 	})

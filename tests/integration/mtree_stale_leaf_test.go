@@ -19,6 +19,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/pgedge/ace/pkg/config"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -45,7 +46,7 @@ func TestMerkleTreeStaleLeafHeals(t *testing.T) {
 	}
 	t.Cleanup(func() {
 		for _, pool := range pools {
-			_, _ = pool.Exec(ctx, "DROP TABLE IF EXISTS "+safe+" CASCADE") // nosemgrep
+			execOK(t, ctx, pool, "DROP TABLE IF EXISTS "+safe+" CASCADE") // nosemgrep
 		}
 	})
 
@@ -54,7 +55,7 @@ func TestMerkleTreeStaleLeafHeals(t *testing.T) {
 	task.OverrideBlockSize = true
 	require.NoError(t, task.RunChecks(false))
 	require.NoError(t, task.MtreeInit())
-	t.Cleanup(func() { _ = task.MtreeTeardown() })
+	t.Cleanup(func() { assert.NoError(t, task.MtreeTeardown()) })
 	require.NoError(t, task.BuildMtree())
 
 	mt := pgx.Identifier{config.Cfg.MTree.Schema, "ace_mtree_" + testSchema + "_" + tableName}.Sanitize()

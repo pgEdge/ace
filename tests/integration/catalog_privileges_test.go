@@ -82,7 +82,7 @@ func setupSelectOnlyRole(t *testing.T) {
 	t.Cleanup(func() {
 		cleanup(func(p *pgxpool.Pool, sql string) {
 			if _, err := p.Exec(ctx, sql); err != nil {
-				t.Logf("cleanup: %s: %v", sql, err)
+				t.Errorf("cleanup: %s: %v", sql, err)
 			}
 		})
 	})
@@ -275,7 +275,7 @@ func TestRepsetDiffSkipsUnreadableTables(t *testing.T) {
 	// the set is gone before its tables are dropped.
 	t.Cleanup(func() {
 		for _, p := range []*pgxpool.Pool{pgCluster.Node1Pool, pgCluster.Node2Pool} {
-			p.Exec(ctx, "SELECT spock.repset_drop($1)", catalogPrivsRepset) //nolint:errcheck
+			execOK(t, ctx, p, "SELECT spock.repset_drop($1)", catalogPrivsRepset)
 		}
 	})
 
@@ -304,9 +304,10 @@ func captureLog(t *testing.T, fn func()) string {
 
 	fn()
 
-	w.Close()
+	require.NoError(t, w.Close())
 	var buf bytes.Buffer
-	buf.ReadFrom(r)
+	_, err = buf.ReadFrom(r)
+	require.NoError(t, err)
 	t.Logf("Captured log output:\n%s", buf.String())
 	return buf.String()
 }
@@ -330,6 +331,6 @@ func writeRoleClusterConfig(t *testing.T, user, password string) string {
 	require.NoError(t, err)
 	path := cfg.ClusterName + ".json"
 	require.NoError(t, os.WriteFile(path, data, 0644))
-	t.Cleanup(func() { os.Remove(path) })
+	t.Cleanup(func() { removeFile(t, path) })
 	return cfg.ClusterName
 }

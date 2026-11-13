@@ -20,6 +20,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/pgedge/ace/internal/consistency/diff"
@@ -67,8 +68,8 @@ func seedTypedRepairTable(t *testing.T, ctx context.Context, env *testEnv, safe 
 	}
 	t.Cleanup(func() {
 		for _, pool := range pools {
-			_, _ = pool.Exec(ctx, "DROP TABLE IF EXISTS "+safe+" CASCADE") // nosemgrep
-			_, _ = pool.Exec(ctx, "DROP TYPE IF EXISTS typed_repair_mood CASCADE")
+			execOK(t, ctx, pool, "DROP TABLE IF EXISTS "+safe+" CASCADE") // nosemgrep
+			execOK(t, ctx, pool, "DROP TYPE IF EXISTS typed_repair_mood CASCADE")
 		}
 	})
 
@@ -131,7 +132,7 @@ func TestMtreeDiffRepairTypedColumns(t *testing.T) {
 	mtreeTask.OverrideBlockSize = true
 	require.NoError(t, mtreeTask.RunChecks(false))
 	require.NoError(t, mtreeTask.MtreeInit())
-	t.Cleanup(func() { _ = mtreeTask.MtreeTeardown() })
+	t.Cleanup(func() { assert.NoError(t, mtreeTask.MtreeTeardown()) })
 	require.NoError(t, mtreeTask.BuildMtree())
 
 	// mtree table-diff must find the 100 n1-only rows and write a new report.

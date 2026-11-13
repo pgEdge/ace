@@ -14,6 +14,7 @@ package integration
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -68,7 +69,7 @@ var pgCluster struct {
 	ClusterNodes []map[string]any
 }
 
-func setupPostgresCluster(t *testing.T) error {
+func setupPostgresCluster() error {
 	absComposeFile, err := filepath.Abs(composeFilePath)
 	if err != nil {
 		return fmt.Errorf("failed to get absolute path for compose file: %w", err)
@@ -314,7 +315,10 @@ func setupPostgresCluster(t *testing.T) error {
 	return nil
 }
 
-func teardownPostgresCluster(t *testing.T) {
+// teardownPostgresCluster stops the cluster and removes the files of the run.
+// It returns all errors that it meets.
+func teardownPostgresCluster() error {
+	var errs []error
 	if pgCluster.Node1Pool != nil {
 		pgCluster.Node1Pool.Close()
 	}
@@ -328,14 +332,17 @@ func teardownPostgresCluster(t *testing.T) {
 			compose.RemoveVolumes(true),
 		)
 		if execError != nil {
-			t.Logf("Failed to tear down Docker Compose: %v", execError)
+			errs = append(errs, fmt.Errorf("tear down Docker Compose: %w", execError))
 		}
 	}
 	log.Printf("Cleaning up diff files...")
-	removeTestDiffResults()
-	if err := os.Remove("test_cluster.json"); err != nil && !os.IsNotExist(err) {
-		t.Logf("failed to remove test_cluster.json: %v", err)
+	if err := removeTestDiffResults(); err != nil {
+		errs = append(errs, err)
 	}
+	if err := os.Remove("test_cluster.json"); err != nil && !os.IsNotExist(err) {
+		errs = append(errs, fmt.Errorf("remove test_cluster.json: %w", err))
+	}
+	return errors.Join(errs...)
 }
 
 // TestMain loads the ACE config, then brings up the three-node spock cluster
@@ -347,25 +354,36 @@ var suiteStart = time.Now()
 
 // removeTestDiffResults removes the diff results, directories and reports,
 // that this test run wrote into the working directory. Results that were
-// there before the run are kept.
-func removeTestDiffResults() {
-	files, _ := filepath.Glob("*_diffs-*")
+// there before the run are kept. It returns all errors that it meets.
+func removeTestDiffResults() error {
+	files, err := filepath.Glob("*_diffs-*")
+	if err != nil {
+		return fmt.Errorf("list diff results: %w", err)
+	}
+	var errs []error
 	for _, f := range files {
 		st, err := os.Lstat(f)
-		if err != nil || st.ModTime().Before(suiteStart) {
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			errs = append(errs, fmt.Errorf("stat diff result: %w", err))
+			continue
+		}
+		if st.ModTime().Before(suiteStart) {
 			continue
 		}
 		if err := os.RemoveAll(f); err != nil {
-			log.Printf("failed to remove diff result %s: %v", f, err)
+			errs = append(errs, fmt.Errorf("remove diff result %s: %w", f, err))
 		}
 	}
+	return errors.Join(errs...)
 }
 
 func TestMain(m *testing.M) {
-	os.Setenv(
-		"TESTCONTAINERS_RYUK_DISABLED",
-		"true",
-	)
+	if err := os.Setenv("TESTCONTAINERS_RYUK_DISABLED", "true"); err != nil {
+		log.Fatalf("Failed to set TESTCONTAINERS_RYUK_DISABLED: %v", err)
+	}
 	tcLog.SetDefault(log.New(io.Discard, "", 0))
 
 	if err := config.Init("../../ace.sample.yaml"); err != nil {
@@ -373,7 +391,7 @@ func TestMain(m *testing.M) {
 	}
 
 	log.Println("Setting up PostgreSQL cluster for integration tests...")
-	if err := setupPostgresCluster(&testing.T{}); err != nil {
+	if err := setupPostgresCluster(); err != nil {
 		log.Fatalf("Failed to setup PostgreSQL cluster: %v", err)
 	}
 	log.Println("PostgreSQL cluster setup complete.")
@@ -393,8 +411,14 @@ func TestMain(m *testing.M) {
 	exitCode := m.Run()
 
 	log.Println("Tearing down PostgreSQL cluster...")
-	teardownPostgresCluster(&testing.T{})
-	log.Println("PostgreSQL cluster teardown complete.")
+	if err := teardownPostgresCluster(); err != nil {
+		log.Printf("PostgreSQL cluster teardown failed: %v", err)
+		if exitCode == 0 {
+			exitCode = 1
+		}
+	} else {
+		log.Println("PostgreSQL cluster teardown complete.")
+	}
 
 	os.Exit(exitCode)
 }

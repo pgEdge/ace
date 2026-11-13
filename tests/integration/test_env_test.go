@@ -16,9 +16,7 @@ import (
 	"fmt"
 	"log"
 	"math"
-	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -300,7 +298,7 @@ func (e *testEnv) setupNullDivergence(t *testing.T, ctx context.Context, qualifi
 // runTableDiff executes a table-diff and returns the path to the latest diff file.
 func (e *testEnv) runTableDiff(t *testing.T, qualifiedTableName string, nodesToCompare []string) string {
 	t.Helper()
-	removeTestDiffResults()
+	require.NoError(t, removeTestDiffResults())
 
 	tdTask := e.newTableDiffTask(t, qualifiedTableName, nodesToCompare)
 	err := tdTask.RunChecks(false)
@@ -327,41 +325,26 @@ func (e *testEnv) assertNoTableDiff(t *testing.T, qualifiedTableName string) {
 	assert.Empty(t, diffPairs(t, tdTask), "Expected no differences after repair, but diffs were found")
 }
 
-// repairTable finds the latest diff file and runs a repair.
+// repairTable makes the table on the other node the same as on
+// sourceOfTruthNode: it runs a table-diff of the table, repairs from its
+// result and checks that no differences are left.
 func (e *testEnv) repairTable(t *testing.T, qualifiedTableName, sourceOfTruthNode string) {
 	t.Helper()
-	files, err := filepath.Glob("*_diffs-*.json")
-	if err != nil {
-		t.Fatalf("Failed to find diff files: %v", err)
-	}
-	if len(files) == 0 {
-		log.Println("No diff file found to repair from, skipping repair.")
+	tdTask := e.newTableDiffTask(t, qualifiedTableName, []string{e.ServiceN1, e.ServiceN2})
+	require.NoError(t, tdTask.RunChecks(false), "repairTable: table-diff validation failed")
+	require.NoError(t, tdTask.ExecuteTask(), "repairTable: table-diff execution failed")
+	if tdTask.DiffFilePath == "" {
 		return
 	}
+	log.Printf("Repairing %s from %s", qualifiedTableName, tdTask.DiffFilePath)
 
-	sort.Slice(files, func(i, j int) bool {
-		fi, errI := os.Stat(files[i])
-		if errI != nil {
-			t.Logf("Warning: could not stat file %s: %v", files[i], errI)
-			return false
-		}
-		fj, errJ := os.Stat(files[j])
-		if errJ != nil {
-			t.Logf("Warning: could not stat file %s: %v", files[j], errJ)
-			return false
-		}
-		return fi.ModTime().After(fj.ModTime())
-	})
-
-	latestDiffFile := files[0]
-	log.Printf("Using latest diff file for repair: %s", latestDiffFile)
-
-	repairTask := e.newTableRepairTask(sourceOfTruthNode, qualifiedTableName, latestDiffFile)
+	repairTask := e.newTableRepairTask(sourceOfTruthNode, qualifiedTableName, tdTask.DiffFilePath)
 	time.Sleep(2 * time.Second)
 	if err := repairTask.Run(false); err != nil {
 		t.Fatalf("Failed to repair table: %v", err)
 	}
 	log.Printf("Table '%s' repaired successfully using %s as source of truth.", qualifiedTableName, sourceOfTruthNode)
+	e.assertNoTableDiff(t, qualifiedTableName)
 }
 
 // resetSharedTable truncates and reloads the given table from CSV on n1 and n2.

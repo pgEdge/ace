@@ -64,13 +64,10 @@ func createDivergentTable(t *testing.T, tableName string) {
 	t.Cleanup(func() {
 		dropSQL := fmt.Sprintf(`DROP TABLE IF EXISTS %s.%s CASCADE`, testSchema, tableName)
 		for _, pool := range []*pgxpool.Pool{pgCluster.Node1Pool, pgCluster.Node2Pool} {
-			pool.Exec(ctx, dropSQL) //nolint:errcheck – best-effort cleanup
+			execOK(t, ctx, pool, dropSQL)
 		}
 		// Remove any diff files left by this table.
-		files, _ := filepath.Glob(fmt.Sprintf("%s_%s_diffs-*.json", testSchema, tableName))
-		for _, f := range files {
-			os.Remove(f)
-		}
+		removeGlob(t, fmt.Sprintf("%s_%s_diffs-*.json", testSchema, tableName))
 	})
 }
 
@@ -100,7 +97,7 @@ func TestSchemaDiff_SkipTablesFlag(t *testing.T) {
 
 	t.Run("SkippedTableProducesNoDiffFile", func(t *testing.T) {
 		for _, f := range diffFilesForTable(t, skipTableName) {
-			_ = os.Remove(f)
+			removeFile(t, f)
 		}
 
 		task := newTestSchemaDiffTask(testSchema, nodes)
@@ -116,12 +113,12 @@ func TestSchemaDiff_SkipTablesFlag(t *testing.T) {
 
 	t.Run("NotSkippedTableProducesDiffFile", func(t *testing.T) {
 		for _, f := range diffFilesForTable(t, skipTableName) {
-			_ = os.Remove(f)
+			removeFile(t, f)
 		}
 
 		t.Cleanup(func() {
 			for _, f := range diffFilesForTable(t, skipTableName) {
-				os.Remove(f)
+				removeFile(t, f)
 			}
 		})
 
@@ -149,7 +146,7 @@ func TestSchemaDiff_SkipTablesFile(t *testing.T) {
 	require.NoError(t, err)
 	_, err = fmt.Fprintln(skipFile, skipTableName)
 	require.NoError(t, err)
-	skipFile.Close()
+	require.NoError(t, skipFile.Close())
 
 	nodes := fmt.Sprintf("%s,%s", serviceN1, serviceN2)
 	task := newTestSchemaDiffTask(testSchema, nodes)

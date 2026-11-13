@@ -88,12 +88,16 @@ func loadDataFromCSV(
 	ctx context.Context,
 	pool *pgxpool.Pool,
 	schemaName, tableName, csvFilePath string,
-) error {
+) (err error) {
 	file, err := os.Open(csvFilePath)
 	if err != nil {
 		return fmt.Errorf("failed to open CSV file %s: %w", csvFilePath, err)
 	}
-	defer file.Close()
+	defer func() {
+		if cerr := file.Close(); cerr != nil && err == nil {
+			err = fmt.Errorf("failed to close CSV file %s: %w", csvFilePath, cerr)
+		}
+	}()
 
 	reader := csv.NewReader(file)
 	headers, err := reader.Read()

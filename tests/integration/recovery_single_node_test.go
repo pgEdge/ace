@@ -112,7 +112,7 @@ func writeN2N3ClusterJSON(t *testing.T) string {
 	require.NoError(t, err)
 	path := clusterName + ".json"
 	require.NoError(t, os.WriteFile(path, data, 0644))
-	t.Cleanup(func() { _ = os.Remove(path) })
+	t.Cleanup(func() { removeFile(t, path) })
 	return clusterName
 }
 

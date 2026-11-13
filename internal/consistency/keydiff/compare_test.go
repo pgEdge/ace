@@ -257,8 +257,11 @@ func TestCompareMemoryLimitError(t *testing.T) {
 	n1, n2, _ := twoNodes()
 	n1.keys = [][][]byte{keyRaw("a", 1), keyRaw("b", 2)}
 	n2.keys = [][][]byte{keyRaw("c", 1), keyRaw("d", 2), keyRaw("e", 3)}
-	idA, _ := encodeKeyID([][]byte{[]byte("a")})
-	_, err := Compare(context.Background(), fakeTable, Block{Where: "TRUE"}, side(n1, 2, true), side(n2, 3, true),
+	idA, err := encodeKeyID([][]byte{[]byte("a")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = Compare(context.Background(), fakeTable, Block{Where: "TRUE"}, side(n1, 2, true), side(n2, 3, true),
 		Options{MaxMemory: 2*keyCost(idA) + 1}, discard)
 	var me *MemoryLimitError
 	if !errors.As(err, &me) {

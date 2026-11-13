@@ -25,6 +25,7 @@ import (
 	"github.com/pgedge/ace/internal/consistency/diff"
 	"github.com/pgedge/ace/internal/consistency/schema"
 	utils "github.com/pgedge/ace/pkg/common"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -87,7 +88,7 @@ func setupStructureSchema(t *testing.T) {
 
 	t.Cleanup(func() {
 		for _, pool := range pools {
-			pool.Exec(ctx, fmt.Sprintf(`DROP SCHEMA IF EXISTS %s CASCADE`, structureSchema)) //nolint:errcheck // best-effort cleanup
+			execOK(t, ctx, pool, fmt.Sprintf(`DROP SCHEMA IF EXISTS %s CASCADE`, structureSchema))
 		}
 	})
 
@@ -432,7 +433,7 @@ func TestSchemaDiffStructure_TextOutputWithoutExplicitFlag(t *testing.T) {
 	// the same state a task never touched by the --output flag is in.
 
 	stdout := captureStdout(t, func() {
-		_ = task.SchemaTableDiff()
+		assert.NoError(t, task.SchemaTableDiff())
 	})
 	require.True(t, strings.HasPrefix(strings.TrimSpace(stdout), "==="),
 		"default output must stay the prose report, not JSON: %s", stdout)

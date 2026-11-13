@@ -14,8 +14,6 @@ package integration
 import (
 	"context"
 	"fmt"
-	"os"
-	"path/filepath"
 	"testing"
 	"time"
 
@@ -68,16 +66,13 @@ $f$`, funcName, slowHashSleep)
 	t.Cleanup(func() {
 		for _, pool := range []*pgxpool.Pool{pgCluster.Node1Pool, pgCluster.Node2Pool} {
 			if _, err := pool.Exec(ctx, fmt.Sprintf(`DROP TABLE IF EXISTS "%s"."%s" CASCADE`, testSchema, tableName)); err != nil {
-				t.Logf("cleanup: drop table: %v", err)
+				t.Errorf("cleanup: drop table: %v", err)
 			}
 			if _, err := pool.Exec(ctx, fmt.Sprintf(`DROP FUNCTION IF EXISTS %s()`, funcName)); err != nil {
-				t.Logf("cleanup: drop function: %v", err)
+				t.Errorf("cleanup: drop function: %v", err)
 			}
 		}
-		files, _ := filepath.Glob(fmt.Sprintf("%s_%s_diffs-*.json", testSchema, tableName))
-		for _, f := range files {
-			os.Remove(f)
-		}
+		removeGlob(t, fmt.Sprintf("%s_%s_diffs-*.json", testSchema, tableName))
 	})
 
 	return qualified, funcName + "()"

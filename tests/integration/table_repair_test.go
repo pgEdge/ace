@@ -527,10 +527,10 @@ func testTableRepair_GenerateReport(t *testing.T, env *testEnv) {
 			t.Cleanup(tc.teardown)
 
 			t.Cleanup(func() {
-				os.RemoveAll(reportDir)
+				assert.NoError(t, os.RemoveAll(reportDir))
 				env.repairTable(t, qualifiedTableName, env.ServiceN1)
 			})
-			os.RemoveAll(reportDir)
+			assert.NoError(t, os.RemoveAll(reportDir))
 
 			env.setupDivergence(t, ctx, qualifiedTableName)
 
@@ -615,21 +615,18 @@ CREATE TABLE IF NOT EXISTS %s.%s (
 
 	t.Cleanup(func() {
 		if env.HasSpock {
-			_, _ = env.N1Pool.Exec(ctx, fmt.Sprintf(`SELECT spock.repset_remove_table('default', '%s');`, qualifiedTableName))
+			repsetRemoveTable(t, ctx, env.N1Pool, "default", qualifiedTableName)
 		}
 		for _, pool := range []*pgxpool.Pool{env.N1Pool, env.N2Pool} {
-			_, _ = pool.Exec(ctx, fmt.Sprintf("DROP TABLE IF EXISTS %s CASCADE", qualifiedTableName))
+			execOK(t, ctx, pool, fmt.Sprintf("DROP TABLE IF EXISTS %s CASCADE", qualifiedTableName))
 		}
-		files, _ := filepath.Glob("*_diffs-*")
-		for _, f := range files {
-			_ = os.RemoveAll(f)
-		}
+		removeGlob(t, "*_diffs-*")
 	})
 
 	insertRow := func(pool *pgxpool.Pool, data map[string]any) {
 		tx, err := pool.Begin(ctx)
 		require.NoError(t, err)
-		defer func() { _ = tx.Rollback(ctx) }()
+		defer rollback(t, ctx, tx)
 
 		env.withRepairModeTx(t, ctx, tx, func() {
 			_, err = tx.Exec(
@@ -934,21 +931,18 @@ CREATE TABLE IF NOT EXISTS %s.%s (
 
 	t.Cleanup(func() {
 		if env.HasSpock {
-			_, _ = env.N1Pool.Exec(ctx, fmt.Sprintf(`SELECT spock.repset_remove_table('default', '%s');`, qualifiedTableName))
+			repsetRemoveTable(t, ctx, env.N1Pool, "default", qualifiedTableName)
 		}
 		for _, pool := range []*pgxpool.Pool{env.N1Pool, env.N2Pool} {
-			_, _ = pool.Exec(ctx, fmt.Sprintf("DROP TABLE IF EXISTS %s CASCADE", qualifiedTableName))
+			execOK(t, ctx, pool, fmt.Sprintf("DROP TABLE IF EXISTS %s CASCADE", qualifiedTableName))
 		}
-		files, _ := filepath.Glob("*_diffs-*")
-		for _, f := range files {
-			_ = os.RemoveAll(f)
-		}
+		removeGlob(t, "*_diffs-*")
 	})
 
 	insertRow := func(pool *pgxpool.Pool, id int, ts, tstz time.Time, timeStr, timetzStr string) {
 		tx, err := pool.Begin(ctx)
 		require.NoError(t, err)
-		defer func() { _ = tx.Rollback(ctx) }()
+		defer rollback(t, ctx, tx)
 
 		env.withRepairModeTx(t, ctx, tx, func() {
 			_, err = tx.Exec(ctx, fmt.Sprintf(
@@ -1269,8 +1263,8 @@ func TestTableRepair_PreserveOrigin(t *testing.T) {
 
 	t.Cleanup(func() {
 		for _, pool := range []*pgxpool.Pool{pgCluster.Node1Pool, pgCluster.Node2Pool, pgCluster.Node3Pool} {
-			_, _ = pool.Exec(ctx, fmt.Sprintf(`SELECT spock.repset_remove_table('default', '%s');`, qualifiedTableName))
-			pool.Exec(ctx, fmt.Sprintf("DROP TABLE IF EXISTS %s CASCADE;", qualifiedTableName))
+			repsetRemoveTable(t, ctx, pool, "default", qualifiedTableName)
+			execOK(t, ctx, pool, fmt.Sprintf("DROP TABLE IF EXISTS %s CASCADE;", qualifiedTableName))
 		}
 	})
 
@@ -1341,7 +1335,7 @@ func TestTableRepair_PreserveOrigin(t *testing.T) {
 	log.Println("Simulating data loss on n2...")
 	tx, err := pgCluster.Node2Pool.Begin(ctx)
 	require.NoError(t, err, "Failed to begin transaction on n2")
-	defer func() { _ = tx.Rollback(ctx) }()
+	defer rollback(t, ctx, tx)
 	_, err = tx.Exec(ctx, "SELECT spock.repair_mode(true)")
 	require.NoError(t, err, "Failed to enable repair_mode on n2")
 
@@ -1407,7 +1401,7 @@ func TestTableRepair_PreserveOrigin(t *testing.T) {
 	log.Println("\nResetting: Deleting rows from n2 again for preserve-origin test...")
 	tx2, err := pgCluster.Node2Pool.Begin(ctx)
 	require.NoError(t, err)
-	defer func() { _ = tx2.Rollback(ctx) }()
+	defer rollback(t, ctx, tx2)
 	_, err = tx2.Exec(ctx, "SELECT spock.repair_mode(true)")
 	require.NoError(t, err)
 	for _, id := range sampleIDs {
@@ -1575,14 +1569,11 @@ func TestTableRepair_FixNulls_PreserveOrigin(t *testing.T) {
 		for _, pool := range []*pgxpool.Pool{
 			pgCluster.Node1Pool, pgCluster.Node2Pool, pgCluster.Node3Pool,
 		} {
-			_, _ = pool.Exec(ctx, fmt.Sprintf(`SELECT spock.repset_remove_table('default', '%s');`, qualifiedTableName))
-			pool.Exec(ctx, fmt.Sprintf(
+			repsetRemoveTable(t, ctx, pool, "default", qualifiedTableName)
+			execOK(t, ctx, pool, fmt.Sprintf(
 				"DROP TABLE IF EXISTS %s CASCADE;", qualifiedTableName))
 		}
-		files, _ := filepath.Glob("*_diffs-*")
-		for _, f := range files {
-			os.RemoveAll(f)
-		}
+		removeGlob(t, "*_diffs-*")
 	})
 
 	// Insert rows on n3 so they replicate with origin=node_n3
@@ -1619,7 +1610,7 @@ func TestTableRepair_FixNulls_PreserveOrigin(t *testing.T) {
 	// Set some columns to NULL on n2 in repair_mode (creating divergence)
 	tx, err := pgCluster.Node2Pool.Begin(ctx)
 	require.NoError(t, err)
-	defer func() { _ = tx.Rollback(ctx) }()
+	defer rollback(t, ctx, tx)
 	_, err = tx.Exec(ctx, "SELECT spock.repair_mode(true)")
 	require.NoError(t, err)
 	_, err = tx.Exec(ctx, fmt.Sprintf(
@@ -1709,15 +1700,12 @@ func TestTableRepair_Bidirectional_PreserveOrigin(t *testing.T) {
 		for _, pool := range []*pgxpool.Pool{
 			pgCluster.Node1Pool, pgCluster.Node2Pool, pgCluster.Node3Pool,
 		} {
-			_, _ = pool.Exec(ctx, fmt.Sprintf(`SELECT spock.repset_remove_table('default', '%s');`, qualifiedTableName))
-			pool.Exec(ctx, fmt.Sprintf(
+			repsetRemoveTable(t, ctx, pool, "default", qualifiedTableName)
+			execOK(t, ctx, pool, fmt.Sprintf(
 				"DROP TABLE IF EXISTS %s CASCADE;",
 				qualifiedTableName))
 		}
-		files, _ := filepath.Glob("*_diffs-*")
-		for _, f := range files {
-			os.RemoveAll(f)
-		}
+		removeGlob(t, "*_diffs-*")
 	})
 
 	// Insert 2 rows on n3 so they replicate with origin=node_n3
@@ -1756,7 +1744,7 @@ func TestTableRepair_Bidirectional_PreserveOrigin(t *testing.T) {
 	// Delete row 2 from n1, row 1 from n2 (symmetric divergence)
 	tx1, err := pgCluster.Node1Pool.Begin(ctx)
 	require.NoError(t, err)
-	defer func() { _ = tx1.Rollback(ctx) }()
+	defer rollback(t, ctx, tx1)
 	_, err = tx1.Exec(ctx, "SELECT spock.repair_mode(true)")
 	require.NoError(t, err)
 	_, err = tx1.Exec(ctx, fmt.Sprintf(
@@ -1768,7 +1756,7 @@ func TestTableRepair_Bidirectional_PreserveOrigin(t *testing.T) {
 
 	tx2, err := pgCluster.Node2Pool.Begin(ctx)
 	require.NoError(t, err)
-	defer func() { _ = tx2.Rollback(ctx) }()
+	defer rollback(t, ctx, tx2)
 	_, err = tx2.Exec(ctx, "SELECT spock.repair_mode(true)")
 	require.NoError(t, err)
 	_, err = tx2.Exec(ctx, fmt.Sprintf(
@@ -1860,13 +1848,10 @@ func TestTableRepair_MixedOps_PreserveOrigin(t *testing.T) {
 
 	t.Cleanup(func() {
 		for _, pool := range []*pgxpool.Pool{pgCluster.Node1Pool, pgCluster.Node2Pool, pgCluster.Node3Pool} {
-			_, _ = pool.Exec(ctx, fmt.Sprintf(`SELECT spock.repset_remove_table('default', '%s');`, qualifiedTableName))
-			pool.Exec(ctx, fmt.Sprintf("DROP TABLE IF EXISTS %s CASCADE;", qualifiedTableName))
+			repsetRemoveTable(t, ctx, pool, "default", qualifiedTableName)
+			execOK(t, ctx, pool, fmt.Sprintf("DROP TABLE IF EXISTS %s CASCADE;", qualifiedTableName))
 		}
-		files, _ := filepath.Glob("*_diffs-*")
-		for _, f := range files {
-			os.RemoveAll(f)
-		}
+		removeGlob(t, "*_diffs-*")
 	})
 
 	// --- Phase 1: Insert 9 rows on n3 so they replicate to n1 and n2 with origin=node_n3 ---
@@ -1938,7 +1923,7 @@ func TestTableRepair_MixedOps_PreserveOrigin(t *testing.T) {
 	log.Println("Creating divergence on n2...")
 	tx, err := pgCluster.Node2Pool.Begin(ctx)
 	require.NoError(t, err)
-	defer func() { _ = tx.Rollback(ctx) }()
+	defer rollback(t, ctx, tx)
 	_, err = tx.Exec(ctx, "SELECT spock.repair_mode(true)")
 	require.NoError(t, err)
 
@@ -2127,21 +2112,18 @@ CREATE TABLE IF NOT EXISTS %s.%s (
 
 	t.Cleanup(func() {
 		if env.HasSpock {
-			_, _ = env.N1Pool.Exec(ctx, fmt.Sprintf(`SELECT spock.repset_remove_table('default', '%s');`, qualifiedTableName))
+			repsetRemoveTable(t, ctx, env.N1Pool, "default", qualifiedTableName)
 		}
 		for _, pool := range []*pgxpool.Pool{env.N1Pool, env.N2Pool} {
-			_, _ = pool.Exec(ctx, fmt.Sprintf("DROP TABLE IF EXISTS %s CASCADE", qualifiedTableName))
+			execOK(t, ctx, pool, fmt.Sprintf("DROP TABLE IF EXISTS %s CASCADE", qualifiedTableName))
 		}
-		files, _ := filepath.Glob("*_diffs-*")
-		for _, f := range files {
-			_ = os.RemoveAll(f)
-		}
+		removeGlob(t, "*_diffs-*")
 	})
 
 	insertRow := func(pool *pgxpool.Pool, id int64, data string, amount string) {
 		tx, err := pool.Begin(ctx)
 		require.NoError(t, err)
-		defer func() { _ = tx.Rollback(ctx) }()
+		defer rollback(t, ctx, tx)
 
 		env.withRepairModeTx(t, ctx, tx, func() {
 			_, err = tx.Exec(ctx,

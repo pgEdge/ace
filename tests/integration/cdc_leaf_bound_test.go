@@ -46,7 +46,7 @@ func TestCDCLeafBoundBelongsToOneLeaf(t *testing.T) {
 
 	t.Cleanup(func() {
 		if err := mtreeTask.MtreeTeardown(); err != nil {
-			t.Logf("Warning: MtreeTeardown failed during cleanup: %v", err)
+			t.Errorf("MtreeTeardown failed during cleanup: %v", err)
 		}
 		dropCDCTestTable(t, tableName)
 	})

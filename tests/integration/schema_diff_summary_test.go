@@ -72,7 +72,7 @@ func TestSchemaDiff_Summary(t *testing.T) {
 	}
 	t.Cleanup(func() {
 		for _, pool := range []*pgxpool.Pool{pgCluster.Node1Pool, pgCluster.Node2Pool} {
-			pool.Exec(ctx, fmt.Sprintf(`DROP TABLE IF EXISTS %s.%s CASCADE`, testSchema, matchingTable))
+			execOK(t, ctx, pool, fmt.Sprintf(`DROP TABLE IF EXISTS %s.%s CASCADE`, testSchema, matchingTable))
 		}
 	})
 
@@ -92,10 +92,10 @@ func TestSchemaDiff_Summary(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() {
 		for _, pool := range []*pgxpool.Pool{pgCluster.Node1Pool, pgCluster.Node2Pool} {
-			pool.Exec(ctx, fmt.Sprintf(`DROP TABLE IF EXISTS %s.%s CASCADE`, testSchema, divergentTable))
+			execOK(t, ctx, pool, fmt.Sprintf(`DROP TABLE IF EXISTS %s.%s CASCADE`, testSchema, divergentTable))
 		}
 		for _, f := range diffFilesForTable(t, divergentTable) {
-			os.Remove(f)
+			removeFile(t, f)
 		}
 	})
 
@@ -111,7 +111,7 @@ func TestSchemaDiff_Summary(t *testing.T) {
 	}
 	t.Cleanup(func() {
 		for _, pool := range []*pgxpool.Pool{pgCluster.Node1Pool, pgCluster.Node2Pool} {
-			pool.Exec(ctx, fmt.Sprintf(`DROP TABLE IF EXISTS %s.%s CASCADE`, testSchema, noPKTable))
+			execOK(t, ctx, pool, fmt.Sprintf(`DROP TABLE IF EXISTS %s.%s CASCADE`, testSchema, noPKTable))
 		}
 	})
 
@@ -127,7 +127,7 @@ func TestSchemaDiff_Summary(t *testing.T) {
 	}
 	t.Cleanup(func() {
 		for _, pool := range []*pgxpool.Pool{pgCluster.Node1Pool, pgCluster.Node2Pool} {
-			pool.Exec(ctx, fmt.Sprintf(`DROP TABLE IF EXISTS %s.%s CASCADE`, testSchema, skippedTable))
+			execOK(t, ctx, pool, fmt.Sprintf(`DROP TABLE IF EXISTS %s.%s CASCADE`, testSchema, skippedTable))
 		}
 	})
 
@@ -140,7 +140,7 @@ func TestSchemaDiff_Summary(t *testing.T) {
 	_, err = pgCluster.Node1Pool.Exec(ctx, createN1OnlySQL)
 	require.NoError(t, err)
 	t.Cleanup(func() {
-		pgCluster.Node1Pool.Exec(ctx, fmt.Sprintf(`DROP TABLE IF EXISTS %s.%s CASCADE`, testSchema, n1OnlyTable))
+		execOK(t, ctx, pgCluster.Node1Pool, fmt.Sprintf(`DROP TABLE IF EXISTS %s.%s CASCADE`, testSchema, n1OnlyTable))
 	})
 
 	// --- Capture logger output ---
@@ -169,9 +169,10 @@ func TestSchemaDiff_Summary(t *testing.T) {
 	diffErr := task.SchemaTableDiff()
 
 	// --- Read captured log output ---
-	w.Close()
+	require.NoError(t, w.Close())
 	var buf bytes.Buffer
-	buf.ReadFrom(r)
+	_, err = buf.ReadFrom(r)
+	require.NoError(t, err)
 	logOutput := buf.String()
 	t.Logf("Captured log output:\n%s", logOutput)
 
@@ -219,7 +220,8 @@ func TestSchemaDiff_Summary(t *testing.T) {
 	assert.NotEmpty(t, files, "expected a diff file for the divergent table")
 
 	// No diff file for the matching table
-	matchFiles, _ := filepath.Glob(fmt.Sprintf("%s_%s_diffs-*.json", testSchema, matchingTable))
+	matchFiles, err := filepath.Glob(fmt.Sprintf("%s_%s_diffs-*.json", testSchema, matchingTable))
+	require.NoError(t, err)
 	assert.Empty(t, matchFiles, "no diff file expected for matching table")
 }
 
