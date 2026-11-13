@@ -55,8 +55,14 @@ func TestKeyIDRoundTrip(t *testing.T) {
 // TestKeyIDHasNoAmbiguity checks that the same bytes split between the key
 // columns in two ways give two key IDs.
 func TestKeyIDHasNoAmbiguity(t *testing.T) {
-	a, _ := encodeKeyID([][]byte{[]byte("ab"), []byte("c")})
-	b, _ := encodeKeyID([][]byte{[]byte("a"), []byte("bc")})
+	a, err := encodeKeyID([][]byte{[]byte("ab"), []byte("c")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := encodeKeyID([][]byte{[]byte("a"), []byte("bc")})
+	if err != nil {
+		t.Fatal(err)
+	}
 	if a == b {
 		t.Fatal("two different keys gave the same key ID")
 	}
@@ -72,7 +78,10 @@ func TestKeyIDNull(t *testing.T) {
 // TestKeyIDDecodeErrors checks that a key ID that does not fit the number of
 // key columns, or that is cut short, gives an error.
 func TestKeyIDDecodeErrors(t *testing.T) {
-	id, _ := encodeKeyID([][]byte{[]byte("abc")})
+	id, err := encodeKeyID([][]byte{[]byte("abc")})
+	if err != nil {
+		t.Fatal(err)
+	}
 	if _, err := decodeKeyID(id, 2); err == nil {
 		t.Fatal("wrong number of columns must give an error")
 	}
@@ -458,7 +467,10 @@ func FuzzKeyID(f *testing.F) {
 		}
 		// A different split of the same bytes must give a different ID.
 		if len(a) > 0 {
-			other, _ := encodeKeyID([][]byte{[]byte(a[:len(a)-1]), []byte(a[len(a)-1:] + b)})
+			other, err := encodeKeyID([][]byte{[]byte(a[:len(a)-1]), []byte(a[len(a)-1:] + b)})
+			if err != nil {
+				t.Fatal(err)
+			}
 			if other == id {
 				t.Fatalf("two splits of %q%q gave the same ID", a, b)
 			}

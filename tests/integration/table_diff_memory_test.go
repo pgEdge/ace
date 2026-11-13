@@ -16,8 +16,6 @@ import (
 	"fmt"
 	"log"
 	"math"
-	"os"
-	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
@@ -66,13 +64,10 @@ func TestTableDiffMemoryUsage(t *testing.T) {
 		for _, pool := range []*pgxpool.Pool{pgCluster.Node1Pool, pgCluster.Node2Pool} {
 			_, err := pool.Exec(ctx, fmt.Sprintf(`DROP TABLE IF EXISTS "%s"."%s" CASCADE`, testSchema, tableName))
 			if err != nil {
-				t.Logf("cleanup: failed to drop table: %v", err)
+				t.Errorf("cleanup: failed to drop table: %v", err)
 			}
 		}
-		files, _ := filepath.Glob("*_diffs-*")
-		for _, f := range files {
-			os.RemoveAll(f)
-		}
+		removeDiffResults(t, testSchema+"."+tableName)
 		log.Println("Cleanup: memory test table dropped")
 	})
 
@@ -87,7 +82,7 @@ func TestTableDiffMemoryUsage(t *testing.T) {
 	// Truncate node2 to create maximum mismatches (all rows only on node1)
 	tx, err := pgCluster.Node2Pool.Begin(ctx)
 	require.NoError(t, err, "failed to begin transaction on node2")
-	defer tx.Rollback(ctx)
+	defer rollback(t, ctx, tx)
 
 	_, err = tx.Exec(ctx, "SELECT spock.repair_mode(true)")
 	require.NoError(t, err, "failed to enable repair mode on node2")

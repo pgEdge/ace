@@ -16,8 +16,6 @@ import (
 	"fmt"
 	"log"
 	"math"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -96,23 +94,17 @@ func newMtreePerf(t *testing.T, ctx context.Context, env *testEnv, tableName str
 }
 
 // cleanup tears down the merkle tree, drops the table on both nodes, and
-// removes this table's diff reports. MtreeTeardown and DROP IF EXISTS both
-// tolerate partial/absent objects, so it is safe even on a mid-setup failure.
+// removes this table's diff reports. A failure of any step fails the test.
 func (h *mtreePerf) cleanup() {
 	if err := h.task.MtreeTeardown(); err != nil {
-		h.t.Logf("cleanup: MtreeTeardown failed: %v", err)
+		h.t.Errorf("cleanup: MtreeTeardown failed: %v", err)
 	}
 	for _, pool := range []*pgxpool.Pool{h.env.N1Pool, h.env.N2Pool} {
 		if _, err := pool.Exec(h.ctx, fmt.Sprintf(`DROP TABLE IF EXISTS %s CASCADE`, h.tableIdent)); err != nil { // nosemgrep
-			h.t.Logf("cleanup: failed to drop table: %v", err)
+			h.t.Errorf("cleanup: failed to drop table: %v", err)
 		}
 	}
-	// Diff results are named "<schema>_<table>_diffs-<ts>", a directory and
-	// a JSON report; scope cleanup to this table only.
-	files, _ := filepath.Glob(fmt.Sprintf("%s_%s_diffs-*", testSchema, h.tableName))
-	for _, f := range files {
-		os.RemoveAll(f)
-	}
+	removeDiffResults(h.t, testSchema+"."+h.tableName)
 	log.Println("Cleanup: perf test table and merkle tree torn down")
 }
 

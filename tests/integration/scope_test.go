@@ -36,8 +36,8 @@ func TestSchemaProvider_ResolvesBaseTablesOnly(t *testing.T) {
 	require.NoError(t, err, "create view")
 
 	t.Cleanup(func() {
-		pgCluster.Node1Pool.Exec(ctx, fmt.Sprintf(`DROP VIEW IF EXISTS %s.%s`, testSchema, viewName))           //nolint:errcheck
-		pgCluster.Node1Pool.Exec(ctx, fmt.Sprintf(`DROP TABLE IF EXISTS %s.%s CASCADE`, testSchema, tableName)) //nolint:errcheck
+		execOK(t, ctx, pgCluster.Node1Pool, fmt.Sprintf(`DROP VIEW IF EXISTS %s.%s`, testSchema, viewName))
+		execOK(t, ctx, pgCluster.Node1Pool, fmt.Sprintf(`DROP TABLE IF EXISTS %s.%s CASCADE`, testSchema, tableName))
 	})
 
 	provider := scope.SchemaProvider{SchemaName: testSchema}

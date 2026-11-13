@@ -197,9 +197,8 @@ func TestRepsetDiff_MaxConnectionsCap(t *testing.T) {
 	t.Cleanup(func() {
 		for _, qn := range tableNames {
 			for _, pool := range []*pgxpool.Pool{pgCluster.Node1Pool, pgCluster.Node2Pool} {
-				pool.Exec(ctx, fmt.Sprintf(
-					`SELECT spock.repset_remove_table('%s', '%s')`, repsetName, qn))
-				pool.Exec(ctx, fmt.Sprintf(`DROP TABLE IF EXISTS %s CASCADE`, qn))
+				repsetRemoveTable(t, ctx, pool, repsetName, qn)
+				execOK(t, ctx, pool, fmt.Sprintf(`DROP TABLE IF EXISTS %s CASCADE`, qn))
 			}
 		}
 	})
@@ -298,7 +297,7 @@ func TestTableDiff_ConnectionsPerNode(t *testing.T) {
 	}
 	t.Cleanup(func() {
 		for _, pool := range pools {
-			pool.Exec(ctx, fmt.Sprintf(`DROP TABLE IF EXISTS %s CASCADE`, qualifiedName))
+			execOK(t, ctx, pool, fmt.Sprintf(`DROP TABLE IF EXISTS %s CASCADE`, qualifiedName))
 		}
 	})
 
@@ -364,7 +363,7 @@ func TestTableDiff_OneConnectionPerNode(t *testing.T) {
 	}
 	t.Cleanup(func() {
 		for _, pool := range pools {
-			pool.Exec(ctx, fmt.Sprintf(`DROP TABLE IF EXISTS %s CASCADE`, qualifiedName))
+			execOK(t, ctx, pool, fmt.Sprintf(`DROP TABLE IF EXISTS %s CASCADE`, qualifiedName))
 		}
 	})
 	// The table is in no replication set, so the change stays on n1. The

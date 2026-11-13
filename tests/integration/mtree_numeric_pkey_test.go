@@ -14,13 +14,12 @@ package integration
 import (
 	"context"
 	"fmt"
-	"os"
-	"path/filepath"
 	"strconv"
 	"testing"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -50,14 +49,9 @@ func TestMtreeNumericPrimaryKeyDiff(t *testing.T) {
 	}
 	t.Cleanup(func() {
 		for _, pool := range pools {
-			_, _ = pool.Exec(ctx, "DROP TABLE IF EXISTS "+safe+" CASCADE") // nosemgrep
+			execOK(t, ctx, pool, "DROP TABLE IF EXISTS "+safe+" CASCADE") // nosemgrep
 		}
-		for _, pattern := range []string{"*_diffs-*.json", "*_diffs-*.html"} {
-			files, _ := filepath.Glob(pattern)
-			for _, f := range files {
-				os.Remove(f)
-			}
-		}
+		removeDiffResults(t, qualified)
 	})
 
 	// n1 stores the keys with two digits after the point, n2 without the
@@ -72,7 +66,7 @@ func TestMtreeNumericPrimaryKeyDiff(t *testing.T) {
 	task.OverrideBlockSize = true
 	require.NoError(t, task.RunChecks(false))
 	require.NoError(t, task.MtreeInit())
-	t.Cleanup(func() { _ = task.MtreeTeardown() })
+	t.Cleanup(func() { assert.NoError(t, task.MtreeTeardown()) })
 	require.NoError(t, task.BuildMtree())
 
 	tag, err := env.N1Pool.Exec(ctx, "UPDATE "+safe+" SET val = 'diverged' WHERE id = 50.5") // nosemgrep

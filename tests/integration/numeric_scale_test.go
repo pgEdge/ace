@@ -20,9 +20,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/pgedge/ace/pkg/types"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -58,7 +58,7 @@ func testNumericScaleInMismatchedBlock(t *testing.T, env *testEnv) {
 	}
 	t.Cleanup(func() {
 		for _, pool := range env.pools() {
-			_, _ = pool.Exec(context.Background(), "DROP TABLE IF EXISTS "+qualifiedTable) // nosemgrep
+			execOK(t, context.Background(), pool, "DROP TABLE IF EXISTS "+qualifiedTable) // nosemgrep
 		}
 	})
 
@@ -79,7 +79,7 @@ func testNumericScaleInMismatchedBlock(t *testing.T, env *testEnv) {
 	for _, pool := range env.pools() {
 		tx, err := pool.Begin(ctx)
 		require.NoError(t, err)
-		defer func(tx pgx.Tx) { _ = tx.Rollback(ctx) }(tx)
+		defer rollback(t, ctx, tx)
 		env.withRepairModeTx(t, ctx, tx, func() {
 			for _, r := range rows {
 				amt, lbl := r.n1Amt, r.n1Lbl
@@ -117,7 +117,7 @@ func testNumericScaleInMismatchedBlock(t *testing.T, env *testEnv) {
 		task.BlockSize = 1000
 		require.NoError(t, task.RunChecks(false))
 		require.NoError(t, task.MtreeInit())
-		t.Cleanup(func() { task.MtreeTeardown() })
+		t.Cleanup(func() { assert.NoError(t, task.MtreeTeardown()) })
 		require.NoError(t, task.BuildMtree())
 		task.NoCDC = true
 		require.NoError(t, task.DiffMtree())
@@ -190,9 +190,9 @@ func testNumericKeyRepair(t *testing.T, env *testEnv) {
 			t.Cleanup(func() {
 				for _, pool := range env.pools() {
 					if env.HasSpock {
-						_, _ = pool.Exec(context.Background(), "SELECT spock.repset_remove_table('default', $1)", qualifiedTable)
+						repsetRemoveTable(t, context.Background(), pool, "default", qualifiedTable)
 					}
-					_, _ = pool.Exec(context.Background(), "DROP TABLE IF EXISTS "+qualifiedTable+" CASCADE") // nosemgrep
+					execOK(t, context.Background(), pool, "DROP TABLE IF EXISTS "+qualifiedTable+" CASCADE") // nosemgrep
 				}
 			})
 
@@ -289,7 +289,7 @@ func TestNumericNamedEnum(t *testing.T) {
 	// Cleanups run in reverse order: the type is dropped after the table.
 	t.Cleanup(func() {
 		for _, pool := range env.pools() {
-			_, _ = pool.Exec(context.Background(), "DROP TYPE IF EXISTS "+enumType) // nosemgrep
+			execOK(t, context.Background(), pool, "DROP TYPE IF EXISTS "+enumType) // nosemgrep
 		}
 	})
 	qualifiedTable := typedKeyTable(t, env, "ace_numeric_enum", "id int PRIMARY KEY, level "+enumType, "id, level",

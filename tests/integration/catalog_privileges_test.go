@@ -12,7 +12,6 @@
 package integration
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -22,7 +21,6 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/pgedge/ace/db/queries"
 	"github.com/pgedge/ace/internal/consistency/diff"
-	"github.com/pgedge/ace/pkg/logger"
 	"github.com/pgedge/ace/pkg/taskstore"
 	"github.com/pgedge/ace/pkg/types"
 	"github.com/stretchr/testify/assert"
@@ -82,7 +80,7 @@ func setupSelectOnlyRole(t *testing.T) {
 	t.Cleanup(func() {
 		cleanup(func(p *pgxpool.Pool, sql string) {
 			if _, err := p.Exec(ctx, sql); err != nil {
-				t.Logf("cleanup: %s: %v", sql, err)
+				t.Errorf("cleanup: %s: %v", sql, err)
 			}
 		})
 	})
@@ -275,7 +273,7 @@ func TestRepsetDiffSkipsUnreadableTables(t *testing.T) {
 	// the set is gone before its tables are dropped.
 	t.Cleanup(func() {
 		for _, p := range []*pgxpool.Pool{pgCluster.Node1Pool, pgCluster.Node2Pool} {
-			p.Exec(ctx, "SELECT spock.repset_drop($1)", catalogPrivsRepset) //nolint:errcheck
+			execOK(t, ctx, p, "SELECT spock.repset_drop($1)", catalogPrivsRepset)
 		}
 	})
 
@@ -291,24 +289,6 @@ func TestRepsetDiffSkipsUnreadableTables(t *testing.T) {
 	skipped := extractBetween(summary, "table(s) were skipped:", "table(s)")
 	assert.Contains(t, skipped,
 		fmt.Sprintf("%s.hidden (no SELECT privilege on %s)", catalogPrivsSchema, serviceN1))
-}
-
-// captureLog runs fn with the logger writing to a pipe and returns what it
-// logged.
-func captureLog(t *testing.T, fn func()) string {
-	t.Helper()
-	r, w, err := os.Pipe()
-	require.NoError(t, err)
-	logger.SetOutput(w)
-	defer logger.SetOutput(os.Stderr)
-
-	fn()
-
-	w.Close()
-	var buf bytes.Buffer
-	buf.ReadFrom(r)
-	t.Logf("Captured log output:\n%s", buf.String())
-	return buf.String()
 }
 
 // writeRoleClusterConfig copies the test cluster config with user and
@@ -330,6 +310,6 @@ func writeRoleClusterConfig(t *testing.T, user, password string) string {
 	require.NoError(t, err)
 	path := cfg.ClusterName + ".json"
 	require.NoError(t, os.WriteFile(path, data, 0644))
-	t.Cleanup(func() { os.Remove(path) })
+	t.Cleanup(func() { removeFile(t, path) })
 	return cfg.ClusterName
 }

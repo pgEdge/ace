@@ -80,10 +80,7 @@ func TestTableDiffRerunKeepsRows(t *testing.T) {
 
 	rerunGlob := strings.ReplaceAll(qualifiedTable, ".", "_") + "_rerun-diffs-*.json"
 	removeRerunFiles := func() {
-		files, _ := filepath.Glob(rerunGlob)
-		for _, f := range files {
-			_ = os.Remove(f)
-		}
+		removeGlob(t, rerunGlob)
 	}
 	removeRerunFiles()
 	t.Cleanup(removeRerunFiles)
@@ -261,10 +258,7 @@ func TestTableDiffRerunRowGoneOnBothNodes(t *testing.T) {
 
 	rerunGlob := strings.ReplaceAll(qualifiedTable, ".", "_") + "_rerun-diffs-*.json"
 	removeRerunFiles := func() {
-		files, _ := filepath.Glob(rerunGlob)
-		for _, f := range files {
-			_ = os.Remove(f)
-		}
+		removeGlob(t, rerunGlob)
 	}
 	removeRerunFiles()
 	t.Cleanup(removeRerunFiles)
@@ -305,10 +299,7 @@ func TestTableDiffRerunMatchesRowsByPosition(t *testing.T) {
 
 	rerunGlob := strings.ReplaceAll(qualifiedTable, ".", "_") + "_rerun-diffs-*.json"
 	removeRerunFiles := func() {
-		files, _ := filepath.Glob(rerunGlob)
-		for _, f := range files {
-			_ = os.Remove(f)
-		}
+		removeGlob(t, rerunGlob)
 	}
 	removeRerunFiles()
 	t.Cleanup(removeRerunFiles)
@@ -355,10 +346,7 @@ func TestTableDiffRerunVersion0SplitKey(t *testing.T) {
 
 	rerunGlob := strings.ReplaceAll(qualifiedTable, ".", "_") + "_rerun-diffs-*.json"
 	removeRerunFiles := func() {
-		files, _ := filepath.Glob(rerunGlob)
-		for _, f := range files {
-			_ = os.Remove(f)
-		}
+		removeGlob(t, rerunGlob)
 	}
 	removeRerunFiles()
 	t.Cleanup(removeRerunFiles)

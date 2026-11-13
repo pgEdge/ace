@@ -21,12 +21,11 @@ package integration
 import (
 	"context"
 	"fmt"
-	"os"
-	"path/filepath"
 	"testing"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -48,7 +47,7 @@ func TestMtreeUUIDPrimaryKeyDiff(t *testing.T) {
 	}
 	t.Cleanup(func() {
 		for _, pool := range pools {
-			_, _ = pool.Exec(ctx, "DROP TABLE IF EXISTS "+safe+" CASCADE") // nosemgrep
+			execOK(t, ctx, pool, "DROP TABLE IF EXISTS "+safe+" CASCADE") // nosemgrep
 		}
 	})
 
@@ -64,19 +63,7 @@ func TestMtreeUUIDPrimaryKeyDiff(t *testing.T) {
 		require.NoError(t, err)
 	}
 
-	// Remove the diff report this test produces. Left behind, a later test that
-	// repairs from "the most recent diff file" picks it up and fails with a
-	// table mismatch -- measured against TestMerkleTreeSimplePK.
-	t.Cleanup(func() {
-		files, _ := filepath.Glob("*_diffs-*")
-		for _, f := range files {
-			os.RemoveAll(f)
-		}
-		files, _ = filepath.Glob("*_diffs-*.html")
-		for _, f := range files {
-			os.Remove(f)
-		}
-	})
+	t.Cleanup(func() { removeDiffResults(t, qualified) })
 
 	task := env.newMerkleTreeTask(t, qualified, []string{env.ServiceN1, env.ServiceN2})
 	// Several blocks, so the bounds are really cut, sorted and merged. With one
@@ -85,7 +72,7 @@ func TestMtreeUUIDPrimaryKeyDiff(t *testing.T) {
 	task.OverrideBlockSize = true
 	require.NoError(t, task.RunChecks(false))
 	require.NoError(t, task.MtreeInit())
-	t.Cleanup(func() { _ = task.MtreeTeardown() })
+	t.Cleanup(func() { assert.NoError(t, task.MtreeTeardown()) })
 	require.NoError(t, task.BuildMtree())
 
 	// Pick the row by the server's own ordering, so it lands inside a block

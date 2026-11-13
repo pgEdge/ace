@@ -39,7 +39,7 @@ func TestMtreeDiffFailsFastWhenTreeNotBuilt(t *testing.T) {
 	}
 	t.Cleanup(func() {
 		for _, pool := range []*pgxpool.Pool{pgCluster.Node1Pool, pgCluster.Node2Pool} {
-			_, _ = pool.Exec(ctx, "DROP TABLE IF EXISTS "+safeTable) // nosemgrep
+			execOK(t, ctx, pool, "DROP TABLE IF EXISTS "+safeTable) // nosemgrep
 		}
 	})
 

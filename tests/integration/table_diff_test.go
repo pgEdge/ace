@@ -15,8 +15,6 @@ import (
 	"context"
 	"fmt"
 	"log"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -74,7 +72,7 @@ func TestTableDiffUntilFilter(t *testing.T) {
 	require.NoError(t, tx.Commit(ctx))
 
 	t.Cleanup(func() {
-		pgCluster.Node1Pool.Exec(ctx, fmt.Sprintf("DELETE FROM %s WHERE index = 99999", qualifiedTableName))
+		execOK(t, ctx, pgCluster.Node1Pool, fmt.Sprintf("DELETE FROM %s WHERE index = 99999", qualifiedTableName))
 		resetSharedTable(t, tableName)
 	})
 
@@ -208,10 +206,7 @@ func testTableDiff_DataOnlyOnNode1(t *testing.T, env *testEnv) {
 
 	t.Cleanup(func() {
 		env.repairTable(t, qualifiedTableName, env.ServiceN1)
-		files, _ := filepath.Glob("*_diffs-*")
-		for _, f := range files {
-			os.RemoveAll(f)
-		}
+		removeDiffResults(t, qualifiedTableName)
 	})
 
 	// Truncate the table on the second node to create the diff
@@ -219,7 +214,7 @@ func testTableDiff_DataOnlyOnNode1(t *testing.T, env *testEnv) {
 	if err != nil {
 		t.Fatalf("Failed to begin transaction on node %s: %v", env.ServiceN2, err)
 	}
-	defer tx.Rollback(ctx)
+	defer rollback(t, ctx, tx)
 
 	env.withRepairModeTx(t, ctx, tx, func() {
 		_, err = tx.Exec(ctx, fmt.Sprintf("TRUNCATE TABLE %s.%s CASCADE", env.Schema, tableName))
@@ -300,17 +295,14 @@ func testTableDiff_DataOnlyOnNode2(t *testing.T, env *testEnv) {
 
 	t.Cleanup(func() {
 		env.repairTable(t, qualifiedTableName, env.ServiceN2)
-		files, _ := filepath.Glob("*_diffs-*")
-		for _, f := range files {
-			os.RemoveAll(f)
-		}
+		removeDiffResults(t, qualifiedTableName)
 	})
 
 	tx, err := env.N1Pool.Begin(ctx)
 	if err != nil {
 		t.Fatalf("Failed to begin transaction on node %s: %v", env.ServiceN1, err)
 	}
-	defer tx.Rollback(ctx)
+	defer rollback(t, ctx, tx)
 
 	env.withRepairModeTx(t, ctx, tx, func() {
 		_, err = tx.Exec(ctx, fmt.Sprintf("TRUNCATE TABLE %s.%s CASCADE", env.Schema, tableName))
@@ -391,10 +383,7 @@ func testTableDiff_ModifiedRows(t *testing.T, env *testEnv) {
 
 	t.Cleanup(func() {
 		env.repairTable(t, qualifiedTableName, env.ServiceN1)
-		files, _ := filepath.Glob("*_diffs-*")
-		for _, f := range files {
-			os.RemoveAll(f)
-		}
+		removeDiffResults(t, qualifiedTableName)
 	})
 
 	modifications := []struct {
@@ -418,7 +407,7 @@ func testTableDiff_ModifiedRows(t *testing.T, env *testEnv) {
 	if err != nil {
 		t.Fatalf("Failed to begin transaction on node %s: %v", env.ServiceN2, err)
 	}
-	defer tx.Rollback(ctx)
+	defer rollback(t, ctx, tx)
 
 	env.withRepairModeTx(t, ctx, tx, func() {
 		for _, mod := range modifications {
@@ -582,13 +571,10 @@ func testTableDiff_MixedCaseIdentifiers(t *testing.T, env *testEnv, compositeKey
 		for _, pool := range []*pgxpool.Pool{env.N1Pool, env.N2Pool} {
 			_, err := pool.Exec(ctx, fmt.Sprintf("DROP TABLE IF EXISTS %s CASCADE", qualifiedTableName))
 			if err != nil {
-				t.Logf("Failed to drop test table %s: %v", qualifiedTableName, err)
+				t.Errorf("Failed to drop test table %s: %v", qualifiedTableName, err)
 			}
 		}
-		files, _ := filepath.Glob("*_diffs-*")
-		for _, f := range files {
-			os.RemoveAll(f)
-		}
+		removeDiffResults(t, qualifiedTableName)
 	})
 
 	commonRows := []map[string]any{
@@ -726,22 +712,15 @@ CREATE TABLE IF NOT EXISTS %s.%s (
 
 	t.Cleanup(func() {
 		if env.HasSpock {
-			removeFromRepSetSQL := fmt.Sprintf(`SELECT spock.repset_remove_table('default', '%s');`, qualifiedTableName)
-			_, err := env.N1Pool.Exec(ctx, removeFromRepSetSQL)
-			if err != nil {
-				t.Logf("cleanup: failed to remove table from replication set: %v", err)
-			}
+			repsetRemoveTable(t, ctx, env.N1Pool, "default", qualifiedTableName)
 		}
 		for _, pool := range []*pgxpool.Pool{env.N1Pool, env.N2Pool} {
 			_, err := pool.Exec(ctx, fmt.Sprintf("DROP TABLE IF EXISTS %s CASCADE", qualifiedTableName))
 			if err != nil {
-				t.Logf("Failed to drop test table %s: %v", qualifiedTableName, err)
+				t.Errorf("Failed to drop test table %s: %v", qualifiedTableName, err)
 			}
 		}
-		files, _ := filepath.Glob("*_diffs-*")
-		for _, f := range files {
-			os.RemoveAll(f)
-		}
+		removeDiffResults(t, qualifiedTableName)
 	})
 
 	refTime := time.Date(2024, 1, 15, 10, 30, 0, 0, time.UTC)
@@ -785,7 +764,7 @@ CREATE TABLE IF NOT EXISTS %s.%s (
 		if err != nil {
 			t.Fatalf("Failed to begin transaction: %v", err)
 		}
-		defer tx.Rollback(ctx)
+		defer rollback(t, ctx, tx)
 
 		env.withRepairModeTx(t, ctx, tx, func() {
 			_, err = tx.Exec(
@@ -969,22 +948,15 @@ CREATE TABLE IF NOT EXISTS %s.%s (
 
 	t.Cleanup(func() {
 		if env.HasSpock {
-			removeFromRepSetSQL := fmt.Sprintf(`SELECT spock.repset_remove_table('default', '%s');`, qualifiedTableName)
-			_, err := env.N1Pool.Exec(ctx, removeFromRepSetSQL)
-			if err != nil {
-				t.Logf("cleanup: failed to remove table from replication set: %v", err)
-			}
+			repsetRemoveTable(t, ctx, env.N1Pool, "default", qualifiedTableName)
 		}
 		for _, pool := range []*pgxpool.Pool{env.N1Pool, env.N2Pool} {
 			_, err := pool.Exec(ctx, fmt.Sprintf("DROP TABLE IF EXISTS %s CASCADE", qualifiedTableName))
 			if err != nil {
-				t.Logf("Failed to drop test table %s: %v", qualifiedTableName, err)
+				t.Errorf("Failed to drop test table %s: %v", qualifiedTableName, err)
 			}
 		}
-		files, _ := filepath.Glob("*_diffs-*")
-		for _, f := range files {
-			os.RemoveAll(f)
-		}
+		removeDiffResults(t, qualifiedTableName)
 	})
 
 	// Row 1: same on both nodes
@@ -1000,7 +972,7 @@ CREATE TABLE IF NOT EXISTS %s.%s (
 		if err != nil {
 			t.Fatalf("Failed to begin transaction: %v", err)
 		}
-		defer tx.Rollback(ctx)
+		defer rollback(t, ctx, tx)
 
 		env.withRepairModeTx(t, ctx, tx, func() {
 			_, err = tx.Exec(ctx, insertSQL, id, name, uuid)
@@ -1095,10 +1067,7 @@ func testTableDiff_TableFiltering(t *testing.T, env *testEnv) {
 
 	t.Cleanup(func() {
 		env.repairTable(t, qualifiedTableName, env.ServiceN1)
-		files, _ := filepath.Glob("*_diffs-*")
-		for _, f := range files {
-			os.RemoveAll(f)
-		}
+		removeDiffResults(t, qualifiedTableName)
 	})
 
 	updatesNode2 := []struct {
@@ -1127,7 +1096,7 @@ func testTableDiff_TableFiltering(t *testing.T, env *testEnv) {
 	if err != nil {
 		t.Fatalf("Failed to begin transaction on node %s: %v", env.ServiceN2, err)
 	}
-	defer tx.Rollback(ctx)
+	defer rollback(t, ctx, tx)
 
 	env.withRepairModeTx(t, ctx, tx, func() {
 		for _, mod := range updatesNode2 {
@@ -1294,12 +1263,9 @@ func TestTableDiffMaxDiffRowsAllPairs(t *testing.T) {
 	}
 	t.Cleanup(func() {
 		for _, pool := range pools {
-			_, _ = pool.Exec(ctx, "DROP TABLE IF EXISTS "+safeTable+" CASCADE") // nosemgrep
+			execOK(t, ctx, pool, "DROP TABLE IF EXISTS "+safeTable+" CASCADE") // nosemgrep
 		}
-		files, _ := filepath.Glob("*_diffs-*")
-		for _, f := range files {
-			os.RemoveAll(f)
-		}
+		removeDiffResults(t, qualifiedTable)
 	})
 
 	// n1: full 1..20. n2/n3: the same {1..5, 16..20} (missing the 10 middle rows).
@@ -1373,10 +1339,7 @@ func testTableDiff_MaxDiffRowsLimit(t *testing.T, env *testEnv) {
 
 	t.Cleanup(func() {
 		env.repairTable(t, qualifiedTableName, env.ServiceN1)
-		files, _ := filepath.Glob("*_diffs-*")
-		for _, f := range files {
-			os.RemoveAll(f)
-		}
+		removeDiffResults(t, qualifiedTableName)
 	})
 
 	modifications := []struct {
@@ -1391,7 +1354,7 @@ func testTableDiff_MaxDiffRowsLimit(t *testing.T, env *testEnv) {
 
 	tx, err := env.N2Pool.Begin(ctx)
 	require.NoError(t, err)
-	defer tx.Rollback(ctx)
+	defer rollback(t, ctx, tx)
 
 	env.withRepairModeTx(t, ctx, tx, func() {
 		updateSQL := fmt.Sprintf("UPDATE %s.%s SET email = $1 WHERE index = $2", env.Schema, tableName)
@@ -1468,20 +1431,10 @@ func testTableDiff_WithSpockMetadata(t *testing.T, compositeKey bool) {
 
 	t.Cleanup(func() {
 		for _, pool := range []*pgxpool.Pool{pgCluster.Node1Pool, pgCluster.Node2Pool} {
-			removeFromRepSetSQL := fmt.Sprintf(`SELECT spock.repset_remove_table('default', '%s');`, qualifiedTableName)
-			_, err := pool.Exec(ctx, removeFromRepSetSQL)
-			if err != nil {
-				t.Logf("cleanup: failed to remove table from replication set: %v", err)
-			}
-			_, err = pool.Exec(ctx, fmt.Sprintf("DROP TABLE IF EXISTS %s CASCADE;", qualifiedTableName))
-			if err != nil {
-				t.Logf("cleanup: failed to drop table: %v", err)
-			}
+			repsetRemoveTable(t, ctx, pool, "default", qualifiedTableName)
+			execOK(t, ctx, pool, fmt.Sprintf("DROP TABLE IF EXISTS %s CASCADE;", qualifiedTableName))
 		}
-		files, _ := filepath.Glob("*_diffs-*")
-		for _, f := range files {
-			os.RemoveAll(f)
-		}
+		removeDiffResults(t, qualifiedTableName)
 	})
 
 	time.Sleep(5 * time.Second)
@@ -1509,7 +1462,7 @@ func testTableDiff_WithSpockMetadata(t *testing.T, compositeKey bool) {
 	if err != nil {
 		t.Fatalf("Failed to begin transaction on node1: %v", err)
 	}
-	defer tx.Rollback(ctx)
+	defer rollback(t, ctx, tx)
 	_, err = tx.Exec(ctx, "SELECT spock.repair_mode(true)")
 	if err != nil {
 		t.Fatalf("Failed to enable repair mode on node1: %v", err)

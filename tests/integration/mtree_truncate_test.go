@@ -14,8 +14,6 @@ package integration
 import (
 	"context"
 	"fmt"
-	"os"
-	"path/filepath"
 	"testing"
 
 	"github.com/jackc/pgx/v5"
@@ -48,7 +46,7 @@ func TestMerkleTreeDiffAfterTruncate(t *testing.T) {
 	require.NoError(t, mtreeTask.MtreeInit())
 	t.Cleanup(func() {
 		if err := mtreeTask.MtreeTeardown(); err != nil {
-			t.Logf("MtreeTeardown cleanup: %v", err)
+			t.Errorf("MtreeTeardown cleanup: %v", err)
 		}
 	})
 	require.NoError(t, mtreeTask.BuildMtree())
@@ -101,12 +99,9 @@ func seedIdenticalTruncateTable(t *testing.T, ctx context.Context, env *testEnv,
 	}
 	t.Cleanup(func() {
 		for _, pool := range env.pools() {
-			_, _ = pool.Exec(ctx, "DROP TABLE IF EXISTS "+safeTable+" CASCADE") // nosemgrep
+			execOK(t, ctx, pool, "DROP TABLE IF EXISTS "+safeTable+" CASCADE") // nosemgrep
 		}
-		files, _ := filepath.Glob("*_diffs-*")
-		for _, f := range files {
-			os.RemoveAll(f)
-		}
+		removeDiffResults(t, qualifiedTable)
 	})
 
 	for _, pool := range env.pools() {

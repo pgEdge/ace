@@ -63,12 +63,12 @@ func TestCDCDrainCompletesWithBusyTable(t *testing.T) {
 		stopWriter()
 		mtreeTask.Ctx = context.Background()
 		if err := mtreeTask.MtreeTeardown(); err != nil {
-			t.Logf("Warning: MtreeTeardown failed during cleanup: %v", err)
+			t.Errorf("MtreeTeardown failed during cleanup: %v", err)
 		}
 		for _, pool := range []*pgxpool.Pool{pgCluster.Node1Pool, pgCluster.Node2Pool} {
 			_, err := pool.Exec(context.Background(), fmt.Sprintf("DROP TABLE IF EXISTS %s.%s", testSchema, tableName))
 			if err != nil {
-				t.Logf("Warning: failed to drop table %s.%s during cleanup: %v", testSchema, tableName, err)
+				t.Errorf("failed to drop table %s.%s during cleanup: %v", testSchema, tableName, err)
 			}
 		}
 	})
@@ -155,7 +155,7 @@ func TestCDCDrainHandlesLargeSingleTransaction(t *testing.T) {
 
 	t.Cleanup(func() {
 		if err := mtreeTask.MtreeTeardown(); err != nil {
-			t.Logf("Warning: MtreeTeardown failed during cleanup: %v", err)
+			t.Errorf("MtreeTeardown failed during cleanup: %v", err)
 		}
 		dropCDCTestTable(t, tableName)
 	})
@@ -210,7 +210,7 @@ func TestCDCUpdateHighWater(t *testing.T) {
 
 	t.Cleanup(func() {
 		if err := mtreeTask.MtreeTeardown(); err != nil {
-			t.Logf("Warning: MtreeTeardown failed during cleanup: %v", err)
+			t.Errorf("MtreeTeardown failed during cleanup: %v", err)
 		}
 		dropCDCTestTable(t, tableName)
 	})
@@ -244,7 +244,7 @@ func TestCDCFallbackToSlotLSN(t *testing.T) {
 
 	t.Cleanup(func() {
 		if err := mtreeTask.MtreeTeardown(); err != nil {
-			t.Logf("Warning: MtreeTeardown failed during cleanup: %v", err)
+			t.Errorf("MtreeTeardown failed during cleanup: %v", err)
 		}
 		dropCDCTestTable(t, tableName)
 	})
@@ -284,7 +284,7 @@ func TestCDCSLotInUseError(t *testing.T) {
 
 	t.Cleanup(func() {
 		if err := mtreeTask.MtreeTeardown(); err != nil {
-			t.Logf("Warning: MtreeTeardown failed during cleanup: %v", err)
+			t.Errorf("MtreeTeardown failed during cleanup: %v", err)
 		}
 		dropCDCTestTable(t, tableName)
 	})
@@ -312,7 +312,7 @@ func currentMetadataLSN(t *testing.T, ctx context.Context) pglogrepl.LSN {
 	t.Helper()
 	tx, err := pgCluster.Node1Pool.Begin(ctx)
 	require.NoError(t, err)
-	defer tx.Rollback(ctx)
+	defer rollback(t, ctx, tx)
 
 	_, lsnStr, _, _, err := queries.GetCDCMetadata(ctx, tx, config.Cfg.MTree.CDC.PublicationName)
 	require.NoError(t, err)
@@ -395,7 +395,7 @@ func dropCDCTestTable(t *testing.T, tableName string) {
 	for _, pool := range []*pgxpool.Pool{pgCluster.Node1Pool, pgCluster.Node2Pool} {
 		_, err := pool.Exec(context.Background(), fmt.Sprintf("DROP TABLE IF EXISTS %s.%s", testSchema, tableName))
 		if err != nil {
-			t.Logf("Warning: failed to drop table %s.%s during cleanup: %v", testSchema, tableName, err)
+			t.Errorf("failed to drop table %s.%s during cleanup: %v", testSchema, tableName, err)
 		}
 	}
 }
@@ -420,12 +420,12 @@ func TestGetCDCMetadataLegacySchema(t *testing.T) {
 
 	t.Cleanup(func() {
 		if err := mtreeTask.MtreeTeardown(); err != nil {
-			t.Logf("Warning: MtreeTeardown failed during cleanup: %v", err)
+			t.Errorf("MtreeTeardown failed during cleanup: %v", err)
 		}
 		dropCDCTestTable(t, tableName)
 	})
 
-	_, _, _, pubCommitBefore, err := getCDCMetadataInTx(ctx, pgCluster.Node1Pool)
+	_, _, _, pubCommitBefore, err := getCDCMetadataInTx(t, ctx, pgCluster.Node1Pool)
 	require.NoError(t, err)
 	require.NotEmpty(t, pubCommitBefore, "fresh mtree init should populate pub_commit_lsn")
 
@@ -437,7 +437,7 @@ func TestGetCDCMetadataLegacySchema(t *testing.T) {
 	_, err = pgCluster.Node1Pool.Exec(ctx, "ALTER TABLE "+metadataTbl+" DROP COLUMN pub_commit_lsn") // nosemgrep
 	require.NoError(t, err)
 
-	slot, startLSN, tables, pubCommitAfter, err := getCDCMetadataInTx(ctx, pgCluster.Node1Pool)
+	slot, startLSN, tables, pubCommitAfter, err := getCDCMetadataInTx(t, ctx, pgCluster.Node1Pool)
 	require.NoError(t, err, "GetCDCMetadata must tolerate missing pub_commit_lsn column")
 	require.Equal(t, "", pubCommitAfter, "pub_commit_lsn must be empty on legacy schema")
 	require.NotEmpty(t, slot, "slot_name should still be returned")
@@ -461,11 +461,11 @@ func TestGetCDCMetadataLegacySchema(t *testing.T) {
 	require.True(t, startAfter >= targetFlush, "start_lsn should catch up to wal_flush_lsn")
 }
 
-func getCDCMetadataInTx(ctx context.Context, pool *pgxpool.Pool) (string, string, []string, string, error) {
+func getCDCMetadataInTx(t *testing.T, ctx context.Context, pool *pgxpool.Pool) (string, string, []string, string, error) {
 	tx, err := pool.Begin(ctx)
 	if err != nil {
 		return "", "", nil, "", err
 	}
-	defer tx.Rollback(ctx)
+	defer rollback(t, ctx, tx)
 	return queries.GetCDCMetadata(ctx, tx, config.Cfg.MTree.CDC.PublicationName)
 }

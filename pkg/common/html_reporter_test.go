@@ -42,7 +42,10 @@ func storeTestDiff(t *testing.T, diff types.DiffOutput, blockSize int) *StoredDi
 			t.Fatal(err)
 		}
 		m := DiffResultManifest{FormatVersion: DiffResultFormatVersion, Summary: diff.Summary, PrimaryKey: diff.Summary.PrimaryKey}
-		data, _ := json.Marshal(m)
+		data, err := json.Marshal(m)
+		if err != nil {
+			t.Fatal(err)
+		}
 		if err := os.WriteFile(filepath.Join(base, DiffResultManifestName), data, 0o600); err != nil {
 			t.Fatal(err)
 		}
@@ -635,7 +638,10 @@ func TestWriteHTMLDiffReportRemovesFileOnError(t *testing.T) {
 	if got != "" {
 		t.Errorf("returned path %q on error", got)
 	}
-	left, _ := filepath.Glob(htmlPath + "*")
+	left, err := filepath.Glob(htmlPath + "*")
+	if err != nil {
+		t.Fatal(err)
+	}
 	if len(left) != 0 {
 		t.Errorf("files left behind after error: %v", left)
 	}

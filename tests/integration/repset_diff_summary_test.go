@@ -12,16 +12,12 @@
 package integration
 
 import (
-	"bytes"
 	"context"
 	"fmt"
-	"os"
-	"path/filepath"
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/pgedge/ace/internal/consistency/diff"
-	"github.com/pgedge/ace/pkg/logger"
 	"github.com/pgedge/ace/pkg/taskstore"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -57,31 +53,16 @@ func TestRepsetDiff_UniDirectional(t *testing.T) {
 	require.NoError(t, err)
 
 	t.Cleanup(func() {
-		pgCluster.Node1Pool.Exec(ctx,
-			fmt.Sprintf(`SELECT spock.repset_remove_table('%s', '%s');`, repsetName, qualifiedTableName))
+		repsetRemoveTable(t, ctx, pgCluster.Node1Pool, repsetName, qualifiedTableName)
 		for _, pool := range []*pgxpool.Pool{pgCluster.Node1Pool, pgCluster.Node2Pool} {
-			pool.Exec(ctx, fmt.Sprintf(`DROP TABLE IF EXISTS %s CASCADE`, qualifiedTableName))
+			execOK(t, ctx, pool, fmt.Sprintf(`DROP TABLE IF EXISTS %s CASCADE`, qualifiedTableName))
 		}
-		files, _ := filepath.Glob(fmt.Sprintf("%s_%s_diffs-*.json", testSchema, tableName))
-		for _, f := range files {
-			os.Remove(f)
-		}
+		removeDiffResults(t, testSchema+"."+tableName)
 	})
 
-	// Capture logger output.
-	r, w, err := os.Pipe()
-	require.NoError(t, err)
-	logger.SetOutput(w)
-	t.Cleanup(func() { logger.SetOutput(os.Stderr) })
-
 	task := newTestRepsetDiffTask(repsetName)
-	diffErr := diff.RepsetDiff(task)
-
-	w.Close()
-	var buf bytes.Buffer
-	buf.ReadFrom(r)
-	logOutput := buf.String()
-	t.Logf("Captured log output:\n%s", logOutput)
+	var diffErr error
+	logOutput := captureLog(t, func() { diffErr = diff.RepsetDiff(task) })
 
 	// Should succeed — the table exists on both nodes even though it's only
 	// in the repset on node1. Our code discovers it from node1's repset and
@@ -148,28 +129,16 @@ func TestRepsetDiff_Summary(t *testing.T) {
 	}
 	t.Cleanup(func() {
 		for _, pool := range []*pgxpool.Pool{pgCluster.Node1Pool, pgCluster.Node2Pool} {
-			pool.Exec(ctx, fmt.Sprintf(
-				`SELECT spock.repset_remove_table('%s', '%s');`, repsetName, noPKQualified))
-			pool.Exec(ctx, fmt.Sprintf(`DROP TABLE IF EXISTS %s CASCADE`, noPKQualified))
+			repsetRemoveTable(t, ctx, pool, repsetName, noPKQualified)
+			execOK(t, ctx, pool, fmt.Sprintf(`DROP TABLE IF EXISTS %s CASCADE`, noPKQualified))
 		}
 	})
-
-	// Capture logger output.
-	r, w, err := os.Pipe()
-	require.NoError(t, err)
-	logger.SetOutput(w)
-	t.Cleanup(func() { logger.SetOutput(os.Stderr) })
 
 	task := newTestRepsetDiffTask(repsetName)
 	task.SkipTables = skippedQualified
 
-	diffErr := diff.RepsetDiff(task)
-
-	w.Close()
-	var buf bytes.Buffer
-	buf.ReadFrom(r)
-	logOutput := buf.String()
-	t.Logf("Captured log output:\n%s", logOutput)
+	var diffErr error
+	logOutput := captureLog(t, func() { diffErr = diff.RepsetDiff(task) })
 
 	// Should return error because nopk table failed.
 	require.Error(t, diffErr)
@@ -209,24 +178,13 @@ func TestSchemaDiff_SkippedTableNamesInSummary(t *testing.T) {
 
 	createDivergentTable(t, skipTableName)
 
-	// Capture logger output.
-	r, w, err := os.Pipe()
-	require.NoError(t, err)
-	logger.SetOutput(w)
-	t.Cleanup(func() { logger.SetOutput(os.Stderr) })
-
 	task := newTestSchemaDiffTask(testSchema, nodes)
 	task.SkipTables = skipTableName
 
-	err = task.SchemaTableDiff()
+	var diffErr error
+	logOutput := captureLog(t, func() { diffErr = task.SchemaTableDiff() })
 
-	w.Close()
-	var buf bytes.Buffer
-	buf.ReadFrom(r)
-	logOutput := buf.String()
-	t.Logf("Captured log output:\n%s", logOutput)
-
-	require.NoError(t, err)
+	require.NoError(t, diffErr)
 
 	// The skipped table name should appear in the summary, not just a count.
 	assert.Contains(t, logOutput, "table(s) were skipped:")

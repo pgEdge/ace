@@ -54,29 +54,37 @@ func TestSplitQueriesQuoteKeyColumns(t *testing.T) {
 
 	cases := []struct {
 		name string
-		run  func(db DBQuerier)
+		run  func(db DBQuerier) error
 		cols []string
 	}{
-		{"GetMaxValSimple/open", func(db DBQuerier) {
-			_, _ = GetMaxValSimple(ctx, db, "public", "t", simple[0], nil)
+		{"GetMaxValSimple/open", func(db DBQuerier) error {
+			_, err := GetMaxValSimple(ctx, db, "public", "t", simple[0], nil)
+			return err
 		}, simple},
-		{"GetMaxValSimple/bounded", func(db DBQuerier) {
-			_, _ = GetMaxValSimple(ctx, db, "public", "t", simple[0], 1)
+		{"GetMaxValSimple/bounded", func(db DBQuerier) error {
+			_, err := GetMaxValSimple(ctx, db, "public", "t", simple[0], 1)
+			return err
 		}, simple},
-		{"GetMinValSimple", func(db DBQuerier) {
-			_, _ = GetMinValSimple(ctx, db, "public", "t", simple[0])
+		{"GetMinValSimple", func(db DBQuerier) error {
+			_, err := GetMinValSimple(ctx, db, "public", "t", simple[0])
+			return err
 		}, simple},
-		{"GetBlockRowCount/simple", func(db DBQuerier) {
-			_, _ = GetBlockRowCount(ctx, db, "public", "t", simple, false, []any{1}, []any{9})
+		{"GetBlockRowCount/simple", func(db DBQuerier) error {
+			_, err := GetBlockRowCount(ctx, db, "public", "t", simple, false, []any{1}, []any{9})
+			return err
 		}, simple},
-		{"GetBlockRowCount/composite", func(db DBQuerier) {
-			_, _ = GetBlockRowCount(ctx, db, "public", "t", composite, true, []any{1, "a"}, []any{9, "z"})
+		{"GetBlockRowCount/composite", func(db DBQuerier) error {
+			_, err := GetBlockRowCount(ctx, db, "public", "t", composite, true, []any{1, "a"}, []any{9, "z"})
+			return err
 		}, composite},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			rec := &sqlRecorder{}
-			tc.run(rec)
+			// The recorder answers with no rows; any other error is a failure.
+			if err := tc.run(rec); err != nil && !errors.Is(err, pgx.ErrNoRows) {
+				t.Fatalf("unexpected error: %v", err)
+			}
 			if rec.sql == "" {
 				t.Fatal("no query was sent")
 			}
@@ -120,7 +128,9 @@ func TestGetBlockRowCountOpenBounds(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			rec := &sqlRecorder{}
-			_, _ = GetBlockRowCount(ctx, rec, "public", "t", tc.key, tc.composite, tc.start, tc.end)
+			if _, err := GetBlockRowCount(ctx, rec, "public", "t", tc.key, tc.composite, tc.start, tc.end); err != nil && !errors.Is(err, pgx.ErrNoRows) {
+				t.Fatalf("unexpected error: %v", err)
+			}
 			for _, w := range tc.want {
 				if !strings.Contains(rec.sql, w) {
 					t.Errorf("want %q in:\n%s", w, rec.sql)

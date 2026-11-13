@@ -17,7 +17,6 @@ import (
 	"fmt"
 	"math/rand"
 	"os"
-	"path/filepath"
 	"regexp"
 	"sort"
 	"strconv"
@@ -34,6 +33,7 @@ import (
 	"github.com/pgedge/ace/internal/infra/db"
 	"github.com/pgedge/ace/pkg/config"
 	"github.com/pgedge/ace/pkg/types"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -82,7 +82,7 @@ func TestMerkleTreeUntilFilter(t *testing.T) {
 	}
 	t.Cleanup(func() {
 		for _, pool := range []*pgxpool.Pool{pgCluster.Node1Pool, pgCluster.Node2Pool} {
-			pool.Exec(ctx, fmt.Sprintf("DROP TABLE IF EXISTS %s CASCADE", qualifiedTable))
+			execOK(t, ctx, pool, fmt.Sprintf("DROP TABLE IF EXISTS %s CASCADE", qualifiedTable))
 		}
 	})
 
@@ -120,7 +120,7 @@ func TestMerkleTreeUntilFilter(t *testing.T) {
 	require.NoError(t, mtreeTask.RunChecks(false))
 	require.NoError(t, mtreeTask.MtreeInit())
 	t.Cleanup(func() {
-		mtreeTask.MtreeTeardown()
+		assert.NoError(t, mtreeTask.MtreeTeardown())
 	})
 	require.NoError(t, mtreeTask.BuildMtree())
 
@@ -239,7 +239,7 @@ func testMerkleTreeInit(t *testing.T, env *testEnv, tableName string) {
 	t.Cleanup(func() {
 		err := mtreeTask.MtreeTeardown()
 		if err != nil {
-			t.Logf("Warning: MtreeTeardown failed during cleanup: %v", err)
+			t.Errorf("MtreeTeardown failed during cleanup: %v", err)
 		}
 	})
 
@@ -275,7 +275,7 @@ func testMerkleTreeBuild(t *testing.T, env *testEnv, tableName string) {
 	t.Cleanup(func() {
 		err := mtreeTask.MtreeTeardown()
 		if err != nil {
-			t.Logf("Warning: MtreeTeardown failed during cleanup: %v", err)
+			t.Errorf("MtreeTeardown failed during cleanup: %v", err)
 		}
 	})
 
@@ -319,20 +319,17 @@ func testMerkleTreeDiffDataOnlyOnNode1(t *testing.T, env *testEnv, tableName str
 	t.Cleanup(func() {
 		err := mtreeTask.MtreeTeardown()
 		if err != nil {
-			t.Logf("Warning: MtreeTeardown failed during cleanup: %v", err)
+			t.Errorf("MtreeTeardown failed during cleanup: %v", err)
 		}
 		env.repairTable(t, qualifiedTableName, env.ServiceN2)
-		files, _ := filepath.Glob("*_diffs-*")
-		for _, f := range files {
-			os.RemoveAll(f)
-		}
+		removeDiffResults(t, qualifiedTableName)
 	})
 	err = mtreeTask.BuildMtree()
 	require.NoError(t, err, "BuildMtree should succeed")
 
 	tx, err := env.N1Pool.Begin(ctx)
 	require.NoError(t, err)
-	defer tx.Rollback(ctx)
+	defer rollback(t, ctx, tx)
 
 	env.withRepairModeTx(t, ctx, tx, func() {
 		if mtreeTask.SimplePrimaryKey {
@@ -408,16 +405,13 @@ func testMerkleTreeDiffBoundaryModifications(t *testing.T, env *testEnv, tableNa
 	err = mtreeTask.MtreeInit()
 	require.NoError(t, err, "MtreeInit should succeed")
 	t.Cleanup(func() {
-		_, _ = env.N1Pool.Exec(ctx, fmt.Sprintf("UPDATE %s SET email = regexp_replace(email, '\\\\.(cdc_hw|cdc_fallback)$', '')", qualifiedTableName))
+		execOK(t, ctx, env.N1Pool, fmt.Sprintf("UPDATE %s SET email = regexp_replace(email, '\\\\.(cdc_hw|cdc_fallback)$', '')", qualifiedTableName))
 		err := mtreeTask.MtreeTeardown()
 		if err != nil {
-			t.Logf("Warning: MtreeTeardown failed during cleanup: %v", err)
+			t.Errorf("MtreeTeardown failed during cleanup: %v", err)
 		}
 		env.repairTable(t, qualifiedTableName, env.ServiceN1)
-		files, _ := filepath.Glob("*_diffs-*")
-		for _, f := range files {
-			os.RemoveAll(f)
-		}
+		removeDiffResults(t, qualifiedTableName)
 	})
 	err = mtreeTask.BuildMtree()
 	require.NoError(t, err, "BuildMtree should succeed")
@@ -486,7 +480,7 @@ func testMerkleTreeDiffBoundaryModifications(t *testing.T, env *testEnv, tableNa
 
 	tx, err := env.N2Pool.Begin(ctx)
 	require.NoError(t, err)
-	defer tx.Rollback(ctx)
+	defer rollback(t, ctx, tx)
 
 	env.withRepairModeTx(t, ctx, tx, func() {
 		if mtreeTask.SimplePrimaryKey {
@@ -594,13 +588,10 @@ func testMerkleTreeContinuousCDC(t *testing.T, env *testEnv, tableName string) {
 	t.Cleanup(func() {
 		err := mtreeTask.MtreeTeardown()
 		if err != nil {
-			t.Logf("Warning: MtreeTeardown failed during cleanup: %v", err)
+			t.Errorf("MtreeTeardown failed during cleanup: %v", err)
 		}
 		env.repairTable(t, qualifiedTableName, env.ServiceN2)
-		files, _ := filepath.Glob("*_diffs-*")
-		for _, f := range files {
-			os.RemoveAll(f)
-		}
+		removeDiffResults(t, qualifiedTableName)
 	})
 
 	err = mtreeTask.BuildMtree()
@@ -631,7 +622,7 @@ func testMerkleTreeContinuousCDC(t *testing.T, env *testEnv, tableName string) {
 
 	tx, err := pool.Begin(context.Background())
 	require.NoError(t, err)
-	defer tx.Rollback(context.Background())
+	defer rollback(t, context.Background(), tx)
 
 	env.withRepairModeTx(t, context.Background(), tx, func() {
 		if mtreeTask.SimplePrimaryKey {
@@ -765,13 +756,10 @@ func testMerkleTreeDiffWhileListenActive(t *testing.T, env *testEnv, tableName s
 	t.Cleanup(func() {
 		err := mtreeTask.MtreeTeardown()
 		if err != nil {
-			t.Logf("Warning: MtreeTeardown failed during cleanup: %v", err)
+			t.Errorf("MtreeTeardown failed during cleanup: %v", err)
 		}
 		env.repairTable(t, qualifiedTableName, env.ServiceN2)
-		files, _ := filepath.Glob("*_diffs-*")
-		for _, f := range files {
-			os.RemoveAll(f)
-		}
+		removeDiffResults(t, qualifiedTableName)
 	})
 
 	err = mtreeTask.BuildMtree()
@@ -790,7 +778,7 @@ func testMerkleTreeDiffWhileListenActive(t *testing.T, env *testEnv, tableName s
 	pool := env.N1Pool
 	tx, err := pool.Begin(ctx)
 	require.NoError(t, err)
-	defer tx.Rollback(ctx)
+	defer rollback(t, ctx, tx)
 
 	env.withRepairModeTx(t, ctx, tx, func() {
 		if mtreeTask.SimplePrimaryKey {
@@ -882,13 +870,10 @@ func runMerkleTreeMergeTest(t *testing.T, env *testEnv, tableName string, mc mer
 	t.Cleanup(func() {
 		err := mtreeTask.MtreeTeardown()
 		if err != nil {
-			t.Logf("Warning: MtreeTeardown failed during cleanup: %v", err)
+			t.Errorf("MtreeTeardown failed during cleanup: %v", err)
 		}
 		env.repairTable(t, qualifiedTableName, env.ServiceN2)
-		files, _ := filepath.Glob("*_diffs-*")
-		for _, f := range files {
-			os.RemoveAll(f)
-		}
+		removeDiffResults(t, qualifiedTableName)
 	})
 	err = mtreeTask.BuildMtree()
 	require.NoError(t, err, "BuildMtree should succeed")
@@ -937,7 +922,8 @@ func runMerkleTreeMergeTest(t *testing.T, env *testEnv, tableName string, mc mer
 		require.NoError(t, err)
 		startMatches := re.FindStringSubmatch(startStr)
 		require.Len(t, startMatches, 3, "should parse composite key from string")
-		startIndex, _ := strconv.Atoi(startMatches[1])
+		startIndex, err := strconv.Atoi(startMatches[1])
+		require.NoError(t, err)
 		startRange = []any{int32(startIndex), startMatches[2]}
 
 		if endPos != -1 {
@@ -946,14 +932,15 @@ func runMerkleTreeMergeTest(t *testing.T, env *testEnv, tableName string, mc mer
 			require.NoError(t, err)
 			endMatches := re.FindStringSubmatch(endStr)
 			require.Len(t, endMatches, 3, "should parse composite key from string")
-			endIndex, _ := strconv.Atoi(endMatches[1])
+			endIndex, err := strconv.Atoi(endMatches[1])
+			require.NoError(t, err)
 			endRange = []any{int32(endIndex), endMatches[2]}
 		}
 	}
 
 	tx, err := env.N1Pool.Begin(ctx)
 	require.NoError(t, err)
-	defer tx.Rollback(ctx)
+	defer rollback(t, ctx, tx)
 
 	env.withRepairModeTx(t, ctx, tx, func() {
 		var cmdTag pgconn.CommandTag
@@ -1038,7 +1025,7 @@ func runMerkleTreeSplitTest(t *testing.T, env *testEnv, tableName string, sc spl
 	if deleteRange != nil {
 		tx, err := env.N2Pool.Begin(ctx)
 		require.NoError(t, err)
-		defer tx.Rollback(ctx)
+		defer rollback(t, ctx, tx)
 
 		env.withRepairModeTx(t, ctx, tx, func() {
 			_, err = tx.Exec(ctx, "DROP TABLE IF EXISTS "+tempTableName)
@@ -1056,19 +1043,16 @@ func runMerkleTreeSplitTest(t *testing.T, env *testEnv, tableName string, sc spl
 
 	t.Cleanup(func() {
 		env.repairTable(t, qualifiedTableName, env.ServiceN1)
-		files, _ := filepath.Glob("*_diffs-*")
-		for _, f := range files {
-			os.RemoveAll(f)
-		}
+		removeDiffResults(t, qualifiedTableName)
 
 		_, err = env.N2Pool.Exec(ctx, "DROP TABLE IF EXISTS "+tempTableName)
 		if err != nil {
-			t.Logf("Warning: failed to drop temp table %s during cleanup: %v", tempTableName, err)
+			t.Errorf("failed to drop temp table %s during cleanup: %v", tempTableName, err)
 		}
 
 		err = mtreeTask.MtreeTeardown()
 		if err != nil {
-			t.Logf("Warning: MtreeTeardown failed during cleanup: %v", err)
+			t.Errorf("MtreeTeardown failed during cleanup: %v", err)
 		}
 	})
 
@@ -1076,7 +1060,7 @@ func runMerkleTreeSplitTest(t *testing.T, env *testEnv, tableName string, sc spl
 	require.NoError(t, err, "MtreeInit should succeed")
 
 	mtreeTask.Nodes = env.ServiceN2
-	mtreeTask.RunChecks(false)
+	require.NoError(t, mtreeTask.RunChecks(false))
 	err = mtreeTask.BuildMtree()
 	require.NoError(t, err, "BuildMtree should succeed")
 
@@ -1101,7 +1085,7 @@ func runMerkleTreeSplitTest(t *testing.T, env *testEnv, tableName string, sc spl
 
 	tx, err := env.N2Pool.Begin(ctx)
 	require.NoError(t, err)
-	defer tx.Rollback(ctx)
+	defer rollback(t, ctx, tx)
 
 	env.withRepairModeTx(t, ctx, tx, func() {
 		_, err = tx.Exec(ctx, q)
@@ -1147,13 +1131,10 @@ func testMerkleTreeDiffModifiedRows(t *testing.T, env *testEnv, tableName string
 	t.Cleanup(func() {
 		err := mtreeTask.MtreeTeardown()
 		if err != nil {
-			t.Logf("Warning: MtreeTeardown failed during cleanup: %v", err)
+			t.Errorf("MtreeTeardown failed during cleanup: %v", err)
 		}
 		env.repairTable(t, qualifiedTableName, env.ServiceN1)
-		files, _ := filepath.Glob("*_diffs-*")
-		for _, f := range files {
-			os.RemoveAll(f)
-		}
+		removeDiffResults(t, qualifiedTableName)
 	})
 	err = mtreeTask.BuildMtree()
 	require.NoError(t, err, "BuildMtree should succeed")
@@ -1177,7 +1158,7 @@ func testMerkleTreeDiffModifiedRows(t *testing.T, env *testEnv, tableName string
 
 	tx, err := env.N2Pool.Begin(ctx)
 	require.NoError(t, err)
-	defer tx.Rollback(ctx)
+	defer rollback(t, ctx, tx)
 
 	env.withRepairModeTx(t, ctx, tx, func() {
 		for _, mod := range modifications {
@@ -1281,7 +1262,7 @@ func testMerkleTreeNumericScaleInvariance(t *testing.T, env *testEnv) {
 	}
 	t.Cleanup(func() {
 		for _, pool := range []*pgxpool.Pool{env.N1Pool, env.N2Pool} {
-			pool.Exec(ctx, fmt.Sprintf("DROP TABLE IF EXISTS %s", qualifiedTable))
+			execOK(t, ctx, pool, fmt.Sprintf("DROP TABLE IF EXISTS %s", qualifiedTable))
 		}
 	})
 
@@ -1307,7 +1288,7 @@ func testMerkleTreeNumericScaleInvariance(t *testing.T, env *testEnv) {
 	for _, pool := range []*pgxpool.Pool{env.N1Pool, env.N2Pool} {
 		tx, err := pool.Begin(ctx)
 		require.NoError(t, err)
-		defer func(tx pgx.Tx) { _ = tx.Rollback(ctx) }(tx)
+		defer rollback(t, ctx, tx)
 		env.withRepairModeTx(t, ctx, tx, func() {
 			for _, r := range rows {
 				amt := r.n1Amt
@@ -1343,7 +1324,7 @@ func testMerkleTreeNumericScaleInvariance(t *testing.T, env *testEnv) {
 	err = mtreeTask.MtreeInit()
 	require.NoError(t, err, "MtreeInit should succeed")
 	t.Cleanup(func() {
-		mtreeTask.MtreeTeardown()
+		assert.NoError(t, mtreeTask.MtreeTeardown())
 	})
 
 	err = mtreeTask.BuildMtree()
@@ -1475,7 +1456,7 @@ func TestBuildMtreePoolLeakOnNodeError(t *testing.T) {
 
 	t.Cleanup(func() {
 		if err := mtreeTask.MtreeTeardown(); err != nil {
-			t.Logf("Warning: MtreeTeardown failed during cleanup: %v", err)
+			t.Errorf("MtreeTeardown failed during cleanup: %v", err)
 		}
 		dropCDCTestTable(t, tableName)
 	})
@@ -1543,7 +1524,7 @@ func TestBuildMtreeAvoidsRedundantDDL(t *testing.T) {
 
 	t.Cleanup(func() {
 		if err := mtreeTask.MtreeTeardown(); err != nil {
-			t.Logf("Warning: MtreeTeardown failed during cleanup: %v", err)
+			t.Errorf("MtreeTeardown failed during cleanup: %v", err)
 		}
 		dropCDCTestTable(t, tableName)
 	})
@@ -1602,7 +1583,7 @@ func TestUpdateMtreeReflectsInserts(t *testing.T) {
 
 	t.Cleanup(func() {
 		if err := mtreeTask.MtreeTeardown(); err != nil {
-			t.Logf("Warning: MtreeTeardown failed during cleanup: %v", err)
+			t.Errorf("MtreeTeardown failed during cleanup: %v", err)
 		}
 		dropCDCTestTable(t, tableName)
 	})
@@ -1747,7 +1728,7 @@ func TestUpdateMtreeReflectsDeletes(t *testing.T) {
 
 	t.Cleanup(func() {
 		if err := mtreeTask.MtreeTeardown(); err != nil {
-			t.Logf("Warning: MtreeTeardown failed during cleanup: %v", err)
+			t.Errorf("MtreeTeardown failed during cleanup: %v", err)
 		}
 		dropCDCTestTable(t, tableName)
 	})
@@ -1851,7 +1832,7 @@ func TestMtreeInitReapsOrphanedSlot(t *testing.T) {
 
 	t.Cleanup(func() {
 		if err := mtreeTask.MtreeTeardown(); err != nil {
-			t.Logf("Warning: MtreeTeardown failed during cleanup: %v", err)
+			t.Errorf("MtreeTeardown failed during cleanup: %v", err)
 		}
 		dropCDCTestTable(t, tableName)
 	})
@@ -1909,11 +1890,11 @@ func TestMtreeInitDropsLegacyXOROperator(t *testing.T) {
 			"DROP SCHEMA IF EXISTS " + otherSchema + " CASCADE",
 		} {
 			if _, err := pool.Exec(context.Background(), stmt); err != nil {
-				t.Logf("Warning: cleanup %q failed: %v", stmt, err)
+				t.Errorf("cleanup %q failed: %v", stmt, err)
 			}
 		}
 		if err := mtreeTask.MtreeTeardown(); err != nil {
-			t.Logf("Warning: MtreeTeardown failed during cleanup: %v", err)
+			t.Errorf("MtreeTeardown failed during cleanup: %v", err)
 		}
 		dropCDCTestTable(t, tableName)
 	})
@@ -2008,7 +1989,7 @@ func TestBuildMtreeConcurrentSpockNodes(t *testing.T) {
 
 	t.Cleanup(func() {
 		if err := initTask.MtreeTeardown(); err != nil {
-			t.Logf("Warning: MtreeTeardown failed during cleanup: %v", err)
+			t.Errorf("MtreeTeardown failed during cleanup: %v", err)
 		}
 		dropCDCTestTable(t, tableName)
 	})
@@ -2073,7 +2054,7 @@ func TestUpdateMtreeReflectsUpdates(t *testing.T) {
 
 	t.Cleanup(func() {
 		if err := mtreeTask.MtreeTeardown(); err != nil {
-			t.Logf("Warning: MtreeTeardown failed during cleanup: %v", err)
+			t.Errorf("MtreeTeardown failed during cleanup: %v", err)
 		}
 		dropCDCTestTable(t, tableName)
 	})
@@ -2196,12 +2177,9 @@ func TestMerkleTreeBidirectionalDiff(t *testing.T) {
 			}
 			t.Cleanup(func() {
 				for _, pool := range env.pools() {
-					_, _ = pool.Exec(ctx, "DROP TABLE IF EXISTS "+safeTable+" CASCADE") // nosemgrep
+					execOK(t, ctx, pool, "DROP TABLE IF EXISTS "+safeTable+" CASCADE") // nosemgrep
 				}
-				files, _ := filepath.Glob("*_diffs-*")
-				for _, f := range files {
-					os.RemoveAll(f)
-				}
+				removeDiffResults(t, qualifiedTable)
 			})
 
 			// TRUNCATE inside repair_mode in case a DDL-replicated CREATE
@@ -2256,7 +2234,7 @@ func TestMerkleTreeBidirectionalDiff(t *testing.T) {
 			require.NoError(t, mtreeTask.MtreeInit())
 			t.Cleanup(func() {
 				if err := mtreeTask.MtreeTeardown(); err != nil {
-					t.Logf("MtreeTeardown cleanup: %v", err)
+					t.Errorf("MtreeTeardown cleanup: %v", err)
 				}
 			})
 			require.NoError(t, mtreeTask.BuildMtree())
@@ -2342,12 +2320,9 @@ func TestMerkleTreeReferenceMaxInMultiLeafTail(t *testing.T) {
 	}
 	t.Cleanup(func() {
 		for _, pool := range env.pools() {
-			_, _ = pool.Exec(ctx, "DROP TABLE IF EXISTS "+safeTable+" CASCADE") // nosemgrep
+			execOK(t, ctx, pool, "DROP TABLE IF EXISTS "+safeTable+" CASCADE") // nosemgrep
 		}
-		files, _ := filepath.Glob("*_diffs-*")
-		for _, f := range files {
-			os.RemoveAll(f)
-		}
+		removeDiffResults(t, qualifiedTable)
 	})
 
 	for _, pool := range env.pools() {
@@ -2369,7 +2344,7 @@ func TestMerkleTreeReferenceMaxInMultiLeafTail(t *testing.T) {
 	require.NoError(t, mtreeTask.MtreeInit())
 	t.Cleanup(func() {
 		if err := mtreeTask.MtreeTeardown(); err != nil {
-			t.Logf("MtreeTeardown cleanup: %v", err)
+			t.Errorf("MtreeTeardown cleanup: %v", err)
 		}
 	})
 	require.NoError(t, mtreeTask.BuildMtree())
@@ -2410,7 +2385,7 @@ func writeClusterConfigJSON(t *testing.T, clusterName string, nodes []types.Node
 	require.NoError(t, err)
 	path := clusterName + ".json"
 	require.NoError(t, os.WriteFile(path, data, 0644))
-	t.Cleanup(func() { os.Remove(path) })
+	t.Cleanup(func() { removeFile(t, path) })
 }
 
 // writeThreeNodeClusterConfig emits a 3-node cluster config (n1/n2/n3) for the
@@ -2488,12 +2463,9 @@ func TestMerkleTreeThreeNodeReferenceTail(t *testing.T) {
 	}
 	t.Cleanup(func() {
 		for _, pool := range pools {
-			_, _ = pool.Exec(ctx, "DROP TABLE IF EXISTS "+safeTable+" CASCADE") // nosemgrep
+			execOK(t, ctx, pool, "DROP TABLE IF EXISTS "+safeTable+" CASCADE") // nosemgrep
 		}
-		files, _ := filepath.Glob("*_diffs-*")
-		for _, f := range files {
-			os.RemoveAll(f)
-		}
+		removeDiffResults(t, qualifiedTable)
 	})
 
 	for name, pool := range pools {
@@ -2516,7 +2488,7 @@ func TestMerkleTreeThreeNodeReferenceTail(t *testing.T) {
 	require.NoError(t, mtreeTask.MtreeInit())
 	t.Cleanup(func() {
 		if err := mtreeTask.MtreeTeardown(); err != nil {
-			t.Logf("MtreeTeardown cleanup: %v", err)
+			t.Errorf("MtreeTeardown cleanup: %v", err)
 		}
 	})
 	require.NoError(t, mtreeTask.BuildMtree())

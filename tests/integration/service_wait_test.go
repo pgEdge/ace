@@ -99,7 +99,10 @@ func waitForSpockSettled(ctx context.Context, timeout time.Duration) error {
 	}
 
 	for _, service := range services {
-		pool, _ := poolForService(service)
+		pool, err := poolForService(service)
+		if err != nil {
+			return err
+		}
 		for {
 			err := spockSettledOn(ctx, pool, targets[service])
 			if err == nil {

@@ -84,7 +84,7 @@ func TestRowFetchMatchesRowHash(t *testing.T) {
 		txt_arr    text[]
 	)`)
 	require.NoError(t, err)
-	t.Cleanup(func() { _, _ = conn.Exec(context.Background(), "DROP TABLE IF EXISTS pg_temp."+table) }) // nosemgrep
+	t.Cleanup(func() { execOK(t, context.Background(), conn, "DROP TABLE IF EXISTS pg_temp."+table) }) // nosemgrep
 
 	_, err = conn.Exec(ctx, `INSERT INTO `+table+` VALUES
 		(1, 9007199254740993, 1.50, 3000.00, '{1.50,2}', 'a,b "c" (d) \e', 'ab', 'xy', true, 0.1, 0.1,
