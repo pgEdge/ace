@@ -346,6 +346,9 @@ func validateActionCompatibility(action *RepairPlanAction, diffTypes []string, t
 			if action.Type == RepairActionApplyFrom && action.Mode == RepairApplyModeInsert {
 				return fmt.Errorf("table %s rule%s: apply_from insert incompatible with diff_type %s", tableName, label, dt)
 			}
+			if action.Type == RepairActionBidirectional {
+				return fmt.Errorf("table %s rule%s: bidirectional incompatible with diff_type %s", tableName, label, dt)
+			}
 		}
 	}
 	return nil
