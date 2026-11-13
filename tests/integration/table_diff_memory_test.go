@@ -67,7 +67,7 @@ func TestTableDiffMemoryUsage(t *testing.T) {
 				t.Errorf("cleanup: failed to drop table: %v", err)
 			}
 		}
-		removeGlob(t, "*_diffs-*")
+		removeDiffResults(t, testSchema+"."+tableName)
 		log.Println("Cleanup: memory test table dropped")
 	})
 

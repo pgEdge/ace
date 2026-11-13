@@ -57,7 +57,7 @@ func TestRepsetDiff_UniDirectional(t *testing.T) {
 		for _, pool := range []*pgxpool.Pool{pgCluster.Node1Pool, pgCluster.Node2Pool} {
 			execOK(t, ctx, pool, fmt.Sprintf(`DROP TABLE IF EXISTS %s CASCADE`, qualifiedTableName))
 		}
-		removeGlob(t, fmt.Sprintf("%s_%s_diffs-*.json", testSchema, tableName))
+		removeDiffResults(t, testSchema+"."+tableName)
 	})
 
 	task := newTestRepsetDiffTask(repsetName)
