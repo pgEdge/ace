@@ -19,7 +19,6 @@ import (
 	"log"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -41,30 +40,10 @@ func setupDivergence(t *testing.T, ctx context.Context, qualifiedTableName strin
 	newSpockEnv().setupDivergence(t, ctx, qualifiedTableName)
 }
 
-// runTableDiff executes a table-diff task and returns the path to the latest diff file.
+// runTableDiff executes a table-diff task and returns the path to the diff file that it wrote.
 func runTableDiff(t *testing.T, qualifiedTableName string, nodesToCompare []string) string {
 	t.Helper()
 	return newSpockEnv().runTableDiff(t, qualifiedTableName, nodesToCompare)
-}
-
-// getLatestDiffFile finds the most recently modified diff file.
-func getLatestDiffFile(t *testing.T) string {
-	t.Helper()
-	files, err := filepath.Glob("*_diffs-*.json")
-	require.NoError(t, err, "Failed to glob for diff files")
-	if len(files) == 0 {
-		return ""
-	}
-
-	sort.Slice(files, func(i, j int) bool {
-		fi, errI := os.Stat(files[i])
-		require.NoError(t, errI)
-		fj, errJ := os.Stat(files[j])
-		require.NoError(t, errJ)
-		return fi.ModTime().After(fj.ModTime())
-	})
-
-	return files[0]
 }
 
 // assertNoTableDiff runs a diff and asserts that there are no differences.
@@ -611,7 +590,7 @@ CREATE TABLE IF NOT EXISTS %s.%s (
 		for _, pool := range []*pgxpool.Pool{env.N1Pool, env.N2Pool} {
 			execOK(t, ctx, pool, fmt.Sprintf("DROP TABLE IF EXISTS %s CASCADE", qualifiedTableName))
 		}
-		removeGlob(t, "*_diffs-*")
+		removeDiffResults(t, qualifiedTableName)
 	})
 
 	insertRow := func(pool *pgxpool.Pool, data map[string]any) {
@@ -927,7 +906,7 @@ CREATE TABLE IF NOT EXISTS %s.%s (
 		for _, pool := range []*pgxpool.Pool{env.N1Pool, env.N2Pool} {
 			execOK(t, ctx, pool, fmt.Sprintf("DROP TABLE IF EXISTS %s CASCADE", qualifiedTableName))
 		}
-		removeGlob(t, "*_diffs-*")
+		removeDiffResults(t, qualifiedTableName)
 	})
 
 	insertRow := func(pool *pgxpool.Pool, id int, ts, tstz time.Time, timeStr, timetzStr string) {
@@ -1348,7 +1327,7 @@ func TestTableRepair_PreserveOrigin(t *testing.T) {
 	err = tdTask.ExecuteTask()
 	require.NoError(t, err, "table-diff execution failed")
 
-	latestDiffFile := getLatestDiffFile(t)
+	latestDiffFile := tdTask.DiffFilePath
 	require.NotEmpty(t, latestDiffFile, "No diff file was generated")
 	log.Printf("Generated diff file: %s", latestDiffFile)
 
@@ -1410,7 +1389,7 @@ func TestTableRepair_PreserveOrigin(t *testing.T) {
 	require.NoError(t, err)
 	err = tdTask2.ExecuteTask()
 	require.NoError(t, err)
-	latestDiffFile2 := getLatestDiffFile(t)
+	latestDiffFile2 := tdTask2.DiffFilePath
 	require.NotEmpty(t, latestDiffFile2)
 
 	// Test 2: Repair WITH preserve-origin (feature test)
@@ -1564,7 +1543,7 @@ func TestTableRepair_FixNulls_PreserveOrigin(t *testing.T) {
 			execOK(t, ctx, pool, fmt.Sprintf(
 				"DROP TABLE IF EXISTS %s CASCADE;", qualifiedTableName))
 		}
-		removeGlob(t, "*_diffs-*")
+		removeDiffResults(t, qualifiedTableName)
 	})
 
 	// Insert rows on n3 so they replicate with origin=node_n3
@@ -1696,7 +1675,7 @@ func TestTableRepair_Bidirectional_PreserveOrigin(t *testing.T) {
 				"DROP TABLE IF EXISTS %s CASCADE;",
 				qualifiedTableName))
 		}
-		removeGlob(t, "*_diffs-*")
+		removeDiffResults(t, qualifiedTableName)
 	})
 
 	// Insert 2 rows on n3 so they replicate with origin=node_n3
@@ -1842,7 +1821,7 @@ func TestTableRepair_MixedOps_PreserveOrigin(t *testing.T) {
 			repsetRemoveTable(t, ctx, pool, "default", qualifiedTableName)
 			execOK(t, ctx, pool, fmt.Sprintf("DROP TABLE IF EXISTS %s CASCADE;", qualifiedTableName))
 		}
-		removeGlob(t, "*_diffs-*")
+		removeDiffResults(t, qualifiedTableName)
 	})
 
 	// --- Phase 1: Insert 9 rows on n3 so they replicate to n1 and n2 with origin=node_n3 ---
@@ -2108,7 +2087,7 @@ CREATE TABLE IF NOT EXISTS %s.%s (
 		for _, pool := range []*pgxpool.Pool{env.N1Pool, env.N2Pool} {
 			execOK(t, ctx, pool, fmt.Sprintf("DROP TABLE IF EXISTS %s CASCADE", qualifiedTableName))
 		}
-		removeGlob(t, "*_diffs-*")
+		removeDiffResults(t, qualifiedTableName)
 	})
 
 	insertRow := func(pool *pgxpool.Pool, id int64, data string, amount string) {

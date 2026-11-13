@@ -35,7 +35,7 @@ func createCollisionTable(t *testing.T, ctx context.Context, env *testEnv, table
 		for _, pool := range env.pools() {
 			execOK(t, ctx, pool, "DROP TABLE IF EXISTS "+ident) // nosemgrep
 		}
-		removeGlob(t, "*_diffs-*")
+		removeDiffResults(t, ident)
 	})
 	for _, pool := range env.pools() {
 		_, err := pool.Exec(ctx, "CREATE TABLE IF NOT EXISTS "+ident+" (id int PRIMARY KEY, a text, b text)") // nosemgrep

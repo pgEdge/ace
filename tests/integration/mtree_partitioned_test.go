@@ -33,7 +33,9 @@ func createPartitionedTable(t *testing.T, ctx context.Context, env *testEnv, tab
 		for _, pool := range env.pools() {
 			execOK(t, ctx, pool, "DROP TABLE IF EXISTS "+parent+" CASCADE") // nosemgrep
 		}
-		removeGlob(t, "*_diffs-*")
+		for _, rel := range []string{parent, leaf2026, leaf2027} {
+			removeDiffResults(t, rel)
+		}
 	})
 
 	for _, pool := range env.pools() {

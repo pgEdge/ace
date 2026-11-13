@@ -138,7 +138,9 @@ func (s *nativeClusterState) teardown(t *testing.T) {
 		}
 	}
 	// Clean up diff files and cluster config
-	removeGlob(t, "*_diffs-*")
+	if err := removeTestDiffResults(); err != nil {
+		t.Errorf("remove diff results: %v", err)
+	}
 	removeFile(t, nativeClusterName+".json")
 }
 
@@ -645,7 +647,7 @@ func testNativePreserveOrigin(t *testing.T, state *nativeClusterState, env *test
 	diffTask := env.newTableDiffTask(t, qualifiedTableName, []string{nativeServiceN1, nativeServiceN2})
 	require.NoError(t, diffTask.RunChecks(false))
 	require.NoError(t, diffTask.ExecuteTask())
-	diffFile := getLatestDiffFile(t)
+	diffFile := diffTask.DiffFilePath
 	require.NotEmpty(t, diffFile)
 	log.Printf("Diff file: %s", diffFile)
 

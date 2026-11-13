@@ -332,36 +332,50 @@ func teardownPostgresCluster() error {
 	return errors.Join(errs...)
 }
 
-// TestMain loads the ACE config, then brings up the three-node spock cluster
-// and the shared customers tables that every test in this package compares
-// against, and tears the cluster down once the run finishes.
-// suiteStart is the time the test binary started. Diff results older than
-// that were not written by this run.
-var suiteStart = time.Now()
+// preexistingEntries holds the names in the working directory at the start
+// of the run. Diff results with these names were not written by this run.
+var preexistingEntries map[string]bool
+
+// recordPreexistingEntries fills preexistingEntries.
+func recordPreexistingEntries() error {
+	entries, err := os.ReadDir(".")
+	if err != nil {
+		return fmt.Errorf("read the working directory: %w", err)
+	}
+	preexistingEntries = make(map[string]bool, len(entries))
+	for _, e := range entries {
+		preexistingEntries[e.Name()] = true
+	}
+	return nil
+}
 
 // removeTestDiffResults removes the diff results, directories and reports,
 // that this test run wrote into the working directory. Results that were
 // there before the run are kept. It returns all errors that it meets.
 func removeTestDiffResults() error {
-	files, err := filepath.Glob("*_diffs-*")
+	return removeRunResults("*_diffs-*")
+}
+
+// removeRunResults removes the files and directories in the working
+// directory that match pattern and that this test run wrote. Entries that
+// were there before the run are kept. It returns all errors that it meets.
+func removeRunResults(pattern string) error {
+	entries, err := os.ReadDir(".")
 	if err != nil {
-		return fmt.Errorf("list diff results: %w", err)
+		return fmt.Errorf("read the working directory: %w", err)
 	}
 	var errs []error
-	for _, f := range files {
-		st, err := os.Lstat(f)
-		if errors.Is(err, os.ErrNotExist) {
-			continue
-		}
+	for _, e := range entries {
+		name := e.Name()
+		match, err := filepath.Match(pattern, name)
 		if err != nil {
-			errs = append(errs, fmt.Errorf("stat diff result: %w", err))
+			return fmt.Errorf("match %q: %w", pattern, err)
+		}
+		if !match || preexistingEntries[name] {
 			continue
 		}
-		if st.ModTime().Before(suiteStart) {
-			continue
-		}
-		if err := os.RemoveAll(f); err != nil {
-			errs = append(errs, fmt.Errorf("remove diff result %s: %w", f, err))
+		if err := os.RemoveAll(name); err != nil {
+			errs = append(errs, fmt.Errorf("remove %s: %w", name, err))
 		}
 	}
 	return errors.Join(errs...)
@@ -378,11 +392,18 @@ func exitAfterTeardown(format string, args ...any) {
 	os.Exit(1)
 }
 
+// TestMain loads the ACE config, then brings up the three-node spock cluster
+// and the shared customers tables that every test in this package compares
+// against, and tears the cluster down once the run finishes.
 func TestMain(m *testing.M) {
 	if err := os.Setenv("TESTCONTAINERS_RYUK_DISABLED", "true"); err != nil {
 		log.Fatalf("Failed to set TESTCONTAINERS_RYUK_DISABLED: %v", err)
 	}
 	tcLog.SetDefault(log.New(io.Discard, "", 0))
+
+	if err := recordPreexistingEntries(); err != nil {
+		log.Fatalf("Failed to list the working directory: %v", err)
+	}
 
 	if err := config.Init("../../ace.sample.yaml"); err != nil {
 		log.Fatalf("Failed to load config: %v", err)

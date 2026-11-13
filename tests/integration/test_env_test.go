@@ -295,7 +295,7 @@ func (e *testEnv) setupNullDivergence(t *testing.T, ctx context.Context, qualifi
 	})
 }
 
-// runTableDiff executes a table-diff and returns the path to the latest diff file.
+// runTableDiff executes a table-diff and returns the path to the diff file that it wrote.
 func (e *testEnv) runTableDiff(t *testing.T, qualifiedTableName string, nodesToCompare []string) string {
 	t.Helper()
 	require.NoError(t, removeTestDiffResults())
@@ -306,9 +306,8 @@ func (e *testEnv) runTableDiff(t *testing.T, qualifiedTableName string, nodesToC
 	err = tdTask.ExecuteTask()
 	require.NoError(t, err, "table-diff execution failed")
 
-	latestDiffFile := getLatestDiffFile(t)
-	require.NotEmpty(t, latestDiffFile, "No diff file was generated")
-	return latestDiffFile
+	require.NotEmpty(t, tdTask.DiffFilePath, "No diff file was generated")
+	return tdTask.DiffFilePath
 }
 
 // assertNoTableDiff runs a diff and asserts that there are no differences.
