@@ -63,13 +63,7 @@ func TestMtreeUUIDPrimaryKeyDiff(t *testing.T) {
 		require.NoError(t, err)
 	}
 
-	// Remove the diff report this test produces. Left behind, a later test that
-	// repairs from "the most recent diff file" picks it up and fails with a
-	// table mismatch -- measured against TestMerkleTreeSimplePK.
-	t.Cleanup(func() {
-		removeGlob(t, "*_diffs-*")
-		removeGlob(t, "*_diffs-*.html")
-	})
+	t.Cleanup(func() { removeDiffResults(t, qualified) })
 
 	task := env.newMerkleTreeTask(t, qualified, []string{env.ServiceN1, env.ServiceN2})
 	// Several blocks, so the bounds are really cut, sorted and merged. With one

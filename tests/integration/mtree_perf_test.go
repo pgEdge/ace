@@ -104,9 +104,7 @@ func (h *mtreePerf) cleanup() {
 			h.t.Errorf("cleanup: failed to drop table: %v", err)
 		}
 	}
-	// Diff results are named "<schema>_<table>_diffs-<ts>", a directory and
-	// a JSON report; scope cleanup to this table only.
-	removeGlob(h.t, fmt.Sprintf("%s_%s_diffs-*", testSchema, h.tableName))
+	removeDiffResults(h.t, testSchema+"."+h.tableName)
 	log.Println("Cleanup: perf test table and merkle tree torn down")
 }
 

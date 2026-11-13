@@ -67,7 +67,7 @@ func createDivergentTable(t *testing.T, tableName string) {
 			execOK(t, ctx, pool, dropSQL)
 		}
 		// Remove any diff files left by this table.
-		removeGlob(t, fmt.Sprintf("%s_%s_diffs-*.json", testSchema, tableName))
+		removeDiffResults(t, testSchema+"."+tableName)
 	})
 }
 

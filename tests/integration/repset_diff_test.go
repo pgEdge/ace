@@ -92,7 +92,7 @@ func createRepsetDiffTable(t *testing.T, tableName, repsetName string, divergent
 			repsetRemoveTable(t, ctx, pool, repsetName, qualifiedTableName)
 			execOK(t, ctx, pool, fmt.Sprintf(`DROP TABLE IF EXISTS %s CASCADE`, qualifiedTableName))
 		}
-		removeGlob(t, fmt.Sprintf("%s_%s_diffs-*.json", testSchema, tableName))
+		removeDiffResults(t, testSchema+"."+tableName)
 	})
 
 	return qualifiedTableName

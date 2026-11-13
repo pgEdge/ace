@@ -72,7 +72,7 @@ $f$`, funcName, slowHashSleep)
 				t.Errorf("cleanup: drop function: %v", err)
 			}
 		}
-		removeGlob(t, fmt.Sprintf("%s_%s_diffs-*.json", testSchema, tableName))
+		removeDiffResults(t, testSchema+"."+tableName)
 	})
 
 	return qualified, funcName + "()"

@@ -353,6 +353,28 @@ func captureLog(t *testing.T, fn func()) string {
 	return out
 }
 
+// diffResultPrefix returns the start of the names of the diff results that
+// table-diff writes for qualifiedTableName ("schema.table", the parts can be
+// quoted): "<schema>_<table>_diffs-".
+func diffResultPrefix(t testing.TB, qualifiedTableName string) string {
+	t.Helper()
+	schema, table, ok := strings.Cut(qualifiedTableName, ".")
+	if !ok {
+		t.Fatalf("table name %q has no schema", qualifiedTableName)
+	}
+	schema = strings.Trim(schema, `"`)
+	table = strings.Trim(table, `"`)
+	return strings.ReplaceAll(schema, ".", "_") + "_" + strings.ReplaceAll(table, ".", "_") + "_diffs-"
+}
+
+// removeDiffResults removes the diff results of one table: the result
+// directories and the JSON and HTML reports. The results of other tables
+// are kept.
+func removeDiffResults(t testing.TB, qualifiedTableName string) {
+	t.Helper()
+	removeGlob(t, diffResultPrefix(t, qualifiedTableName)+"*")
+}
+
 // getCommitTimestamp retrieves the commit timestamp for a specific row
 func getCommitTimestamp(t *testing.T, ctx context.Context, pool *pgxpool.Pool, qualifiedTableName string, id int) time.Time {
 	t.Helper()

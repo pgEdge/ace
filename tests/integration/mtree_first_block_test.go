@@ -66,8 +66,7 @@ func newUnreplicatedTable(t *testing.T, env *testEnv, tableName, ddl string) (qu
 		for _, pool := range env.pools() {
 			execOK(t, ctx, pool, "DROP TABLE IF EXISTS "+safe+" CASCADE") // nosemgrep
 		}
-		// Remove only the diff files of this table: other tests can keep theirs.
-		removeGlob(t, fmt.Sprintf("%s_%s_diffs-*.json", testSchema, tableName))
+		removeDiffResults(t, testSchema+"."+tableName)
 	})
 	for _, pool := range env.pools() {
 		env.withRepairMode(t, ctx, pool, func(conn *pgxpool.Conn) {

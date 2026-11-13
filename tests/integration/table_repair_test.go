@@ -611,7 +611,7 @@ CREATE TABLE IF NOT EXISTS %s.%s (
 		for _, pool := range []*pgxpool.Pool{env.N1Pool, env.N2Pool} {
 			execOK(t, ctx, pool, fmt.Sprintf("DROP TABLE IF EXISTS %s CASCADE", qualifiedTableName))
 		}
-		removeGlob(t, "*_diffs-*")
+		removeDiffResults(t, qualifiedTableName)
 	})
 
 	insertRow := func(pool *pgxpool.Pool, data map[string]any) {
@@ -927,7 +927,7 @@ CREATE TABLE IF NOT EXISTS %s.%s (
 		for _, pool := range []*pgxpool.Pool{env.N1Pool, env.N2Pool} {
 			execOK(t, ctx, pool, fmt.Sprintf("DROP TABLE IF EXISTS %s CASCADE", qualifiedTableName))
 		}
-		removeGlob(t, "*_diffs-*")
+		removeDiffResults(t, qualifiedTableName)
 	})
 
 	insertRow := func(pool *pgxpool.Pool, id int, ts, tstz time.Time, timeStr, timetzStr string) {
@@ -1564,7 +1564,7 @@ func TestTableRepair_FixNulls_PreserveOrigin(t *testing.T) {
 			execOK(t, ctx, pool, fmt.Sprintf(
 				"DROP TABLE IF EXISTS %s CASCADE;", qualifiedTableName))
 		}
-		removeGlob(t, "*_diffs-*")
+		removeDiffResults(t, qualifiedTableName)
 	})
 
 	// Insert rows on n3 so they replicate with origin=node_n3
@@ -1696,7 +1696,7 @@ func TestTableRepair_Bidirectional_PreserveOrigin(t *testing.T) {
 				"DROP TABLE IF EXISTS %s CASCADE;",
 				qualifiedTableName))
 		}
-		removeGlob(t, "*_diffs-*")
+		removeDiffResults(t, qualifiedTableName)
 	})
 
 	// Insert 2 rows on n3 so they replicate with origin=node_n3
@@ -1842,7 +1842,7 @@ func TestTableRepair_MixedOps_PreserveOrigin(t *testing.T) {
 			repsetRemoveTable(t, ctx, pool, "default", qualifiedTableName)
 			execOK(t, ctx, pool, fmt.Sprintf("DROP TABLE IF EXISTS %s CASCADE;", qualifiedTableName))
 		}
-		removeGlob(t, "*_diffs-*")
+		removeDiffResults(t, qualifiedTableName)
 	})
 
 	// --- Phase 1: Insert 9 rows on n3 so they replicate to n1 and n2 with origin=node_n3 ---
@@ -2108,7 +2108,7 @@ CREATE TABLE IF NOT EXISTS %s.%s (
 		for _, pool := range []*pgxpool.Pool{env.N1Pool, env.N2Pool} {
 			execOK(t, ctx, pool, fmt.Sprintf("DROP TABLE IF EXISTS %s CASCADE", qualifiedTableName))
 		}
-		removeGlob(t, "*_diffs-*")
+		removeDiffResults(t, qualifiedTableName)
 	})
 
 	insertRow := func(pool *pgxpool.Pool, id int64, data string, amount string) {

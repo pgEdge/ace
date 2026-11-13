@@ -51,9 +51,7 @@ func TestMtreeNumericPrimaryKeyDiff(t *testing.T) {
 		for _, pool := range pools {
 			execOK(t, ctx, pool, "DROP TABLE IF EXISTS "+safe+" CASCADE") // nosemgrep
 		}
-		for _, pattern := range []string{"*_diffs-*.json", "*_diffs-*.html"} {
-			removeGlob(t, pattern)
-		}
+		removeDiffResults(t, qualified)
 	})
 
 	// n1 stores the keys with two digits after the point, n2 without the

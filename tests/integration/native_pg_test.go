@@ -142,7 +142,9 @@ func (s *nativeClusterState) teardown(t *testing.T) {
 		}
 	}
 	// Clean up diff files and cluster config
-	removeGlob(t, "*_diffs-*")
+	if err := removeTestDiffResults(); err != nil {
+		t.Errorf("remove diff results: %v", err)
+	}
 	removeFile(t, nativeClusterName+".json")
 }
 

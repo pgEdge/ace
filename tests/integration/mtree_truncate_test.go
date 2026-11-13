@@ -101,7 +101,7 @@ func seedIdenticalTruncateTable(t *testing.T, ctx context.Context, env *testEnv,
 		for _, pool := range env.pools() {
 			execOK(t, ctx, pool, "DROP TABLE IF EXISTS "+safeTable+" CASCADE") // nosemgrep
 		}
-		removeGlob(t, "*_diffs-*")
+		removeDiffResults(t, qualifiedTable)
 	})
 
 	for _, pool := range env.pools() {

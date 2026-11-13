@@ -206,7 +206,7 @@ func testTableDiff_DataOnlyOnNode1(t *testing.T, env *testEnv) {
 
 	t.Cleanup(func() {
 		env.repairTable(t, qualifiedTableName, env.ServiceN1)
-		removeGlob(t, "*_diffs-*")
+		removeDiffResults(t, qualifiedTableName)
 	})
 
 	// Truncate the table on the second node to create the diff
@@ -295,7 +295,7 @@ func testTableDiff_DataOnlyOnNode2(t *testing.T, env *testEnv) {
 
 	t.Cleanup(func() {
 		env.repairTable(t, qualifiedTableName, env.ServiceN2)
-		removeGlob(t, "*_diffs-*")
+		removeDiffResults(t, qualifiedTableName)
 	})
 
 	tx, err := env.N1Pool.Begin(ctx)
@@ -383,7 +383,7 @@ func testTableDiff_ModifiedRows(t *testing.T, env *testEnv) {
 
 	t.Cleanup(func() {
 		env.repairTable(t, qualifiedTableName, env.ServiceN1)
-		removeGlob(t, "*_diffs-*")
+		removeDiffResults(t, qualifiedTableName)
 	})
 
 	modifications := []struct {
@@ -574,7 +574,7 @@ func testTableDiff_MixedCaseIdentifiers(t *testing.T, env *testEnv, compositeKey
 				t.Errorf("Failed to drop test table %s: %v", qualifiedTableName, err)
 			}
 		}
-		removeGlob(t, "*_diffs-*")
+		removeDiffResults(t, qualifiedTableName)
 	})
 
 	commonRows := []map[string]any{
@@ -720,7 +720,7 @@ CREATE TABLE IF NOT EXISTS %s.%s (
 				t.Errorf("Failed to drop test table %s: %v", qualifiedTableName, err)
 			}
 		}
-		removeGlob(t, "*_diffs-*")
+		removeDiffResults(t, qualifiedTableName)
 	})
 
 	refTime := time.Date(2024, 1, 15, 10, 30, 0, 0, time.UTC)
@@ -956,7 +956,7 @@ CREATE TABLE IF NOT EXISTS %s.%s (
 				t.Errorf("Failed to drop test table %s: %v", qualifiedTableName, err)
 			}
 		}
-		removeGlob(t, "*_diffs-*")
+		removeDiffResults(t, qualifiedTableName)
 	})
 
 	// Row 1: same on both nodes
@@ -1067,7 +1067,7 @@ func testTableDiff_TableFiltering(t *testing.T, env *testEnv) {
 
 	t.Cleanup(func() {
 		env.repairTable(t, qualifiedTableName, env.ServiceN1)
-		removeGlob(t, "*_diffs-*")
+		removeDiffResults(t, qualifiedTableName)
 	})
 
 	updatesNode2 := []struct {
@@ -1265,7 +1265,7 @@ func TestTableDiffMaxDiffRowsAllPairs(t *testing.T) {
 		for _, pool := range pools {
 			execOK(t, ctx, pool, "DROP TABLE IF EXISTS "+safeTable+" CASCADE") // nosemgrep
 		}
-		removeGlob(t, "*_diffs-*")
+		removeDiffResults(t, qualifiedTable)
 	})
 
 	// n1: full 1..20. n2/n3: the same {1..5, 16..20} (missing the 10 middle rows).
@@ -1339,7 +1339,7 @@ func testTableDiff_MaxDiffRowsLimit(t *testing.T, env *testEnv) {
 
 	t.Cleanup(func() {
 		env.repairTable(t, qualifiedTableName, env.ServiceN1)
-		removeGlob(t, "*_diffs-*")
+		removeDiffResults(t, qualifiedTableName)
 	})
 
 	modifications := []struct {
@@ -1434,7 +1434,7 @@ func testTableDiff_WithSpockMetadata(t *testing.T, compositeKey bool) {
 			repsetRemoveTable(t, ctx, pool, "default", qualifiedTableName)
 			execOK(t, ctx, pool, fmt.Sprintf("DROP TABLE IF EXISTS %s CASCADE;", qualifiedTableName))
 		}
-		removeGlob(t, "*_diffs-*")
+		removeDiffResults(t, qualifiedTableName)
 	})
 
 	time.Sleep(5 * time.Second)
