@@ -286,3 +286,39 @@ func TestMtreeKeyTypesWithDifferentLeaves(t *testing.T) {
 		})
 	}
 }
+
+// A key column with another collation on one node orders the key in another
+// way there. mtree builds its leaves and the ranges of the diff in the order
+// of one node, so it refuses such a table; table-diff still compares it.
+func TestKeyCollationDiffersByNode(t *testing.T) {
+	ctx := context.Background()
+	env := newSpockEnv()
+	tableName := "key_collation_by_node"
+	qualified := fmt.Sprintf("%s.%s", testSchema, tableName)
+	safe := pgx.Identifier{testSchema, tableName}.Sanitize()
+	for i, pool := range env.pools() {
+		coll := `"C"`
+		if i == 1 {
+			coll = `"en_US.utf8"`
+		}
+		_, err := pool.Exec(ctx, fmt.Sprintf( // nosemgrep
+			"CREATE TABLE %s (id text COLLATE %s PRIMARY KEY, v text)", safe, coll))
+		require.NoError(t, err)
+		t.Cleanup(func() {
+			execOK(t, context.Background(), pool, "DROP TABLE IF EXISTS "+safe+" CASCADE") // nosemgrep
+		})
+		_, err = pool.Exec(ctx, "INSERT INTO "+safe+" VALUES ('a', 'x'), ('B', 'x'), ('c', 'x')") // nosemgrep
+		require.NoError(t, err)
+	}
+
+	task := env.newMerkleTreeTask(t, qualified, []string{env.ServiceN1, env.ServiceN2})
+	err := task.RunChecks(false)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), `primary key column "id" has collation`)
+	require.Contains(t, err.Error(), "mtree needs the same key collations on every node")
+
+	t.Cleanup(func() { removeDiffResults(t, qualified) })
+	td := newTestTableDiffTask(t, qualified, []string{env.ServiceN1, env.ServiceN2})
+	require.NoError(t, td.RunChecks(false))
+	require.NoError(t, td.ExecuteTask())
+}

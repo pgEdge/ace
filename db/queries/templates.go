@@ -430,17 +430,40 @@ var SQLTemplates = Templates{
 		ORDER BY b.attnum, b.depth DESC;
 	`)),
 	// GetCollations takes the collation of the column itself, which is also
-	// the collation of an index on the column.
+	// the collation of the primary key index on the column. For the default
+	// collation the provider, the locale and the ICU rules are these of the
+	// database. The fields are read through to_jsonb, because their names
+	// differ by server version.
 	GetCollations: template.Must(template.New("getCollations").Parse(`
 		SELECT
 			a.attname,
-			pg_catalog.quote_ident(cn.nspname) || '.' || pg_catalog.quote_ident(co.collname)
+			pg_catalog.quote_ident(cn.nspname) || '.' || pg_catalog.quote_ident(co.collname),
+			dflt.is_default,
+			coalesce(CASE WHEN dflt.is_default THEN db.j->>'datlocprovider'
+				ELSE cj.j->>'collprovider' END, ''),
+			coalesce(CASE WHEN dflt.is_default THEN db.j->>'datcollate'
+				ELSE cj.j->>'collcollate' END, ''),
+			coalesce(CASE WHEN dflt.is_default
+				THEN coalesce(db.j->>'datlocale', db.j->>'daticulocale')
+				ELSE coalesce(cj.j->>'colllocale', cj.j->>'colliculocale') END, ''),
+			coalesce(CASE WHEN dflt.is_default THEN db.j->>'daticurules'
+				ELSE cj.j->>'collicurules' END, ''),
+			co.collisdeterministic
 		FROM
 			pg_catalog.pg_attribute a
 			JOIN pg_catalog.pg_class c ON a.attrelid = c.oid
 			JOIN pg_catalog.pg_namespace n ON c.relnamespace = n.oid
 			JOIN pg_catalog.pg_collation co ON co.oid = a.attcollation
 			JOIN pg_catalog.pg_namespace cn ON co.collnamespace = cn.oid
+			CROSS JOIN LATERAL (
+				SELECT co.collname = 'default' AND cn.nspname = 'pg_catalog' AS is_default
+			) dflt
+			CROSS JOIN LATERAL (SELECT pg_catalog.to_jsonb(co) AS j) cj
+			CROSS JOIN (
+				SELECT pg_catalog.to_jsonb(d) AS j
+				FROM pg_catalog.pg_database d
+				WHERE d.datname = pg_catalog.current_database()
+			) db
 		WHERE
 			n.nspname = $1
 			AND c.relname = $2

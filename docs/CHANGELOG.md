@@ -219,6 +219,25 @@ All notable changes to ACE will be captured in this document. This project follo
   `mtree table-diff`.
 
 ### Changed
+- **mtree commands stop when a primary key column has another collation
+  on a node, and table-diff warns.** The collation decides the order of the
+  key, and the blocks are key ranges. mtree builds its leaves and the
+  ranges of the diff in the order of one node, so on a node with another
+  order a range can hold other rows, and the diff could miss rows. The
+  collations are compared by the settings that decide the order: the
+  provider, the determinism, the `LC_COLLATE` locale for libc, the locale
+  and the rules for ICU, the locale for the builtin provider, and for the
+  default collation these of the database. Spellings of one libc locale,
+  such as `en_US.UTF-8` and `en_US.utf8`, are the same locale; the library
+  version is not compared. A collation other
+  than the default one must also have the same schema-qualified name on
+  every node. A key type is compared by its name only, not by its
+  definition: the label order of an enum, the base type of a domain and
+  the fields of a composite type must be the same on every node, and this
+  is not checked. table-diff covers
+  every key on every node, but a key can fall into two blocks on a node,
+  so it can report rows that are the same on both nodes; it now logs a
+  warning that names the column, the collations and the nodes.
 - **mtree commands stop when a primary key column has another type on a
   node**, for example `varchar(3)` on one node and `text` on another. The
   diff looks up a row by its key cast to the key type, and such a cast can

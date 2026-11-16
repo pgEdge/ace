@@ -108,6 +108,8 @@ type MerkleTreeTask struct {
 	// refNode.
 	castTypes    map[string]map[string]string
 	refCastTypes map[string]string
+	// refCollations are the collations of the columns on refNode.
+	refCollations map[string]string
 
 	TaskStore     *taskstore.Store
 	TaskStorePath string
@@ -1148,11 +1150,17 @@ func keyTypesMatch(key []string, refTypes, types map[string]string, refNode, nod
 
 // addNodeColTypes keeps the column types and the cast types of node. The
 // first node is the reference node. It returns an error if a key column of
-// node has another type than on the reference node.
-func (m *MerkleTreeTask) addNodeColTypes(node string, colTypes, castTypes map[string]string, key []string) error {
+// node has another type or another collation than on the reference node.
+//
+// The leaves of the tree are cut in the order of the key on the reference
+// node, and the diff sorts the bounds of two nodes in the order of one of
+// them. With another collation of the key, a range of keys holds other rows
+// on another node, and the diff can miss rows.
+func (m *MerkleTreeTask) addNodeColTypes(node string, colTypes, castTypes, collations map[string]string, key []string) error {
 	if m.refColTypes == nil {
 		m.refColTypes = colTypes
 		m.refCastTypes = castTypes
+		m.refCollations = collations
 		m.refNode = node
 	}
 	m.ColTypes[node] = colTypes
@@ -1160,9 +1168,21 @@ func (m *MerkleTreeTask) addNodeColTypes(node string, colTypes, castTypes map[st
 		m.castTypes = make(map[string]map[string]string)
 	}
 	m.castTypes[node] = castTypes
-	return keyTypesMatch(key, m.refColTypes, colTypes, m.refNode, node)
+	if err := keyTypesMatch(key, m.refColTypes, colTypes, m.refNode, node); err != nil {
+		return err
+	}
+	if col, a, b, ok := queries.KeyCollationMismatch(key, m.refCollations, collations); ok {
+		return fmt.Errorf("primary key column %q has %s on %s and %s on %s; "+
+			"mtree needs the same key collations on every node",
+			col, queries.CollationText(a), m.refNode, queries.CollationText(b), node)
+	}
+	return nil
 }
 
+// RunChecks connects to every node and checks that a tree can be built and
+// compared on the table: no partitioned table or inheritance parent, the same
+// columns and key, and the same types and collations of the key columns on
+// every node. With skipValidation the options are not validated first.
 func (m *MerkleTreeTask) RunChecks(skipValidation bool) error {
 	if !skipValidation {
 		if err := m.Validate(); err != nil {
@@ -1216,6 +1236,10 @@ func (m *MerkleTreeTask) RunChecks(skipValidation bool) error {
 		if err != nil {
 			return fmt.Errorf("failed to get cast types on node %s: %w", nodeInfo["Name"], err)
 		}
+		collations, err := queries.GetCollationOrders(m.Ctx, tx, m.Schema, m.Table)
+		if err != nil {
+			return fmt.Errorf("failed to get collations on node %s: %w", nodeInfo["Name"], err)
+		}
 		currentKeySlice, err := queries.GetPrimaryKey(m.Ctx, tx, m.Schema, m.Table)
 		if err != nil {
 			return fmt.Errorf("failed to get primary key on node %s: %w", nodeInfo["Name"], err)
@@ -1240,7 +1264,7 @@ func (m *MerkleTreeTask) RunChecks(skipValidation bool) error {
 		if strings.Join(currentColsSlice, ",") != strings.Join(localCols, ",") || strings.Join(currentKeySlice, ",") != strings.Join(localKey, ",") {
 			return fmt.Errorf("table schemas or primary keys do not match between nodes")
 		}
-		if err := m.addNodeColTypes(nodeName, colTypes, castTypes, localKey); err != nil {
+		if err := m.addNodeColTypes(nodeName, colTypes, castTypes, collations, localKey); err != nil {
 			return fmt.Errorf("'%s': %w", m.QualifiedTableName, err)
 		}
 	}
