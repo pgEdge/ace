@@ -261,3 +261,62 @@ func TestRuntimeParamsNegativeLeavesServerDefault(t *testing.T) {
 		t.Fatalf("expected max_parallel_workers_per_gather to be unset, got %q", params["max_parallel_workers_per_gather"])
 	}
 }
+
+// A value of the connection string must reach pgconn as it is, whatever
+// characters it has: libpq rules read an unquoted backslash as an escape and
+// an unquoted space as the end of the value.
+func TestConnParamKeepsValue(t *testing.T) {
+	values := []string{
+		`plain`,
+		`two words`,
+		`C:\certs\ace.crt`,
+		`it's`,
+		`end with backslash\`,
+		`\'mixed\\ 'quotes'`,
+		``,
+	}
+	for _, v := range values {
+		connStr := "host=localhost sslmode=disable " + connParam("application_name", v)
+		cfg, err := pgconn.ParseConfig(connStr)
+		if err != nil {
+			t.Errorf("value %q: %v", v, err)
+			continue
+		}
+		if got := cfg.RuntimeParams["application_name"]; got != v {
+			t.Errorf("value %q: got %q", v, got)
+		}
+	}
+}
+
+func TestConnectionStringKeepsNodeValues(t *testing.T) {
+	prev := config.Get()
+	t.Cleanup(func() { config.Set(prev) })
+	config.Set(&config.Config{Postgres: config.PostgresConfig{ApplicationName: "ace check"}})
+
+	node := map[string]any{
+		"Host":       "localhost",
+		"Port":       float64(5433),
+		"DBUser":     "o'user",
+		"DBPassword": `p a\ss'w\\d`,
+		"DBName":     "my db",
+	}
+	cfg, err := pgconn.ParseConfig(toConnectionString(node, ""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Host != "localhost" || cfg.Port != 5433 {
+		t.Errorf("host %q port %d", cfg.Host, cfg.Port)
+	}
+	if cfg.User != "o'user" {
+		t.Errorf("user %q", cfg.User)
+	}
+	if cfg.Password != `p a\ss'w\\d` {
+		t.Errorf("password %q", cfg.Password)
+	}
+	if cfg.Database != "my db" {
+		t.Errorf("dbname %q", cfg.Database)
+	}
+	if got := cfg.RuntimeParams["application_name"]; got != "ace check" {
+		t.Errorf("application_name %q", got)
+	}
+}

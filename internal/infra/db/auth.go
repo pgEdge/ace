@@ -49,6 +49,18 @@ const keepOpenLifetime = 14 * 24 * time.Hour
 // database has no free connection slot.
 const tooManyConnections = "53300"
 
+// connParamEscaper escapes a value for a single-quoted value of a
+// keyword/value connection string.
+var connParamEscaper = strings.NewReplacer(`\`, `\\`, `'`, `\'`)
+
+// connParam returns key='value' for a keyword/value connection string. The
+// value is always quoted: without quotes a space ends the value and a
+// backslash escapes the next character, so a password or a file path could
+// be read as a different value.
+func connParam(key, value string) string {
+	return key + "='" + connParamEscaper.Replace(value) + "'"
+}
+
 func toConnectionString(node map[string]any, dbName string) string {
 	var parts []string
 
@@ -79,7 +91,7 @@ func toConnectionString(node map[string]any, dbName string) string {
 		host = h
 	}
 	if host != "" {
-		parts = append(parts, "host="+host)
+		parts = append(parts, connParam("host", host))
 	}
 
 	switch v := node["Port"].(type) {
@@ -93,15 +105,15 @@ func toConnectionString(node map[string]any, dbName string) string {
 		}
 	case string:
 		if trimmed := strings.TrimSpace(v); trimmed != "" {
-			parts = append(parts, "port="+trimmed)
+			parts = append(parts, connParam("port", trimmed))
 		}
 	}
 
 	if user := stringValue("DBUser"); user != "" {
-		parts = append(parts, "user="+user)
+		parts = append(parts, connParam("user", user))
 	}
 	if password := stringValue("DBPassword"); password != "" {
-		parts = append(parts, "password="+password)
+		parts = append(parts, connParam("password", password))
 	}
 
 	dbToUse := dbName
@@ -109,7 +121,7 @@ func toConnectionString(node map[string]any, dbName string) string {
 		dbToUse = stringValue("DBName")
 	}
 	if dbToUse != "" {
-		parts = append(parts, "dbname="+dbToUse)
+		parts = append(parts, connParam("dbname", dbToUse))
 	}
 
 	cfg := config.Get()
@@ -119,7 +131,7 @@ func toConnectionString(node map[string]any, dbName string) string {
 			parts = append(parts, fmt.Sprintf("connect_timeout=%d", pgCfg.ConnectionTimeout))
 		}
 		if pgCfg.ApplicationName != "" {
-			parts = append(parts, "application_name="+pgCfg.ApplicationName)
+			parts = append(parts, connParam("application_name", pgCfg.ApplicationName))
 		}
 		if pgCfg.TCPKeepalivesIdle != nil {
 			parts = append(parts, fmt.Sprintf("tcp_keepalives_idle=%d", *pgCfg.TCPKeepalivesIdle))
@@ -154,16 +166,16 @@ func toConnectionString(node map[string]any, dbName string) string {
 		}
 
 		if sslMode != "" {
-			parts = append(parts, "sslmode="+sslMode)
+			parts = append(parts, connParam("sslmode", sslMode))
 		}
 		if sslCert != "" {
-			parts = append(parts, "sslcert="+sslCert)
+			parts = append(parts, connParam("sslcert", sslCert))
 		}
 		if sslKey != "" {
-			parts = append(parts, "sslkey="+sslKey)
+			parts = append(parts, connParam("sslkey", sslKey))
 		}
 		if sslRoot != "" {
-			parts = append(parts, "sslrootcert="+sslRoot)
+			parts = append(parts, connParam("sslrootcert", sslRoot))
 		}
 	}
 
