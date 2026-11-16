@@ -3,6 +3,7 @@ package mtree
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -109,7 +110,7 @@ func TestRenumberBlockRanges(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			ranges := make([]types.BlockRange, len(tt.positions))
 			for i, p := range tt.positions {
-				ranges[i] = types.BlockRange{NodePosition: p, RangeStart: []any{int64(i * 10)}}
+				ranges[i] = types.BlockRange{NodePosition: p, RangeStart: types.KeyText{strconv.Itoa(i * 10)}}
 			}
 			if got := renumberBlockRanges(ranges); got != tt.wantChanged {
 				t.Errorf("changed = %v, want %v", got, tt.wantChanged)
@@ -118,7 +119,7 @@ func TestRenumberBlockRanges(t *testing.T) {
 				if r.NodePosition != int64(i) {
 					t.Errorf("block %d has position %d", i, r.NodePosition)
 				}
-				if r.RangeStart[0] != int64(i*10) {
+				if r.RangeStart[0] != strconv.Itoa(i*10) {
 					t.Errorf("block %d moved: start %v", i, r.RangeStart[0])
 				}
 			}

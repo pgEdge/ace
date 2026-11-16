@@ -29,6 +29,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/pgedge/ace/db/queries"
 	utils "github.com/pgedge/ace/pkg/common"
 	"github.com/pgedge/ace/pkg/types"
 )
@@ -88,10 +89,12 @@ func (s Side) rowsOrUnknown() int64 {
 
 // Block is the part of the table that both nodes hashed.
 type Block struct {
-	// Where is the WHERE clause of the block, with the same meaning on both
-	// nodes. It may use the parameters $1..$n, with values in Args.
-	Where string
-	Args  []any
+	// Range is the key range of the block. The key query of each node casts
+	// its bounds to the cast types of that node.
+	Range queries.KeyRange
+	// Filter, if not empty, is added to the WHERE clause of the key query
+	// as it is. It must not use parameters.
+	Filter string
 	// ReadFilter, if not empty, is added to the WHERE clause of the row read
 	// by key. It must not use parameters.
 	ReadFilter string
@@ -204,13 +207,8 @@ func Compare(ctx context.Context, t Table, b Block, s1, s2 Side, o Options, sink
 		return Result{}, err
 	}
 
-	query, err := t.keyQuery(b.Where)
-	if err != nil {
-		return Result{}, err
-	}
 	mem := &memCounter{limit: o.MaxMemory}
-
-	ids, err := runFindDiffKeys(ctx, t, query, b.Args, build, probe, mem)
+	ids, err := runFindDiffKeys(ctx, t, b, build, probe, mem)
 	if err != nil {
 		var me *errMemory
 		if errors.As(err, &me) {
@@ -375,19 +373,19 @@ func checkEstimate(t Table, build Side, o Options) error {
 	return &MemoryLimitError{BuildNode: build.Name, BuildRows: build.Rows, Used: est, Limit: o.MaxMemory, Estimated: true}
 }
 
-// runFindDiffKeys runs the key query on both sides and finds the differing
-// keys. A build side that is known to have no rows is not queried.
-func runFindDiffKeys(ctx context.Context, t Table, query string, args []any, build, probe Side, mem *memCounter) ([]string, error) {
+// runFindDiffKeys runs the key query of block b on both sides and finds the
+// differing keys. A build side that is known to have no rows is not queried.
+func runFindDiffKeys(ctx context.Context, t Table, b Block, build, probe Side, mem *memCounter) ([]string, error) {
 	var buildSrc keySource
 	if !build.RowsKnown || build.Rows != 0 {
-		src, err := openKeySource(ctx, t, query, args, build)
+		src, err := openKeySource(ctx, t, b, build)
 		if err != nil {
 			return nil, err
 		}
 		defer src.close()
 		buildSrc = src
 	}
-	probeSrc, err := openKeySource(ctx, t, query, args, probe)
+	probeSrc, err := openKeySource(ctx, t, b, probe)
 	if err != nil {
 		return nil, err
 	}
@@ -421,9 +419,17 @@ type keyRows struct {
 // openKeySource returns the rows of the key query of side s. The query is
 // sent on the first call of Next. It runs under its own context, so that it
 // can be cancelled alone.
-func openKeySource(ctx context.Context, t Table, query string, args []any, s Side) (*keyRows, error) {
+func openKeySource(ctx context.Context, t Table, b Block, s Side) (*keyRows, error) {
 	if s.Conn == nil {
 		return nil, fmt.Errorf("no connection for node %s", s.Name)
+	}
+	where, args, err := queries.BlockWhere(t.Key, s.CastTypes, b.Range, b.Filter)
+	if err != nil {
+		return nil, fmt.Errorf("the key range on node %s: %w", s.Name, err)
+	}
+	query, err := t.keyQuery(where)
+	if err != nil {
+		return nil, err
 	}
 	qctx, cancel := context.WithCancel(ctx)
 	return &keyRows{ctx: qctx, cancel: cancel, conn: s.Conn, query: query, args: args, t: t, side: s.Name,

@@ -22,6 +22,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/pgedge/ace/db/queries"
 	"github.com/pgedge/ace/internal/consistency/slicer"
 	auth "github.com/pgedge/ace/internal/infra/db"
 	"github.com/pgedge/ace/pkg/config"
@@ -109,7 +110,9 @@ func slicingExec(t *testing.T, ctx context.Context, pool *pgxpool.Pool, sql stri
 // and the last block are open, and returns the plan and the statistics.
 func slicingCut(t *testing.T, ctx context.Context, table string, key []string, filter string) (*slicer.Plan, *slicer.Stats) {
 	t.Helper()
-	cfg := slicer.Config{Schema: testSchema, Table: table, Key: key, Filter: filter, BlockSize: slicingBlockSize, Workers: 2}
+	castTypes, err := queries.GetCastTypes(ctx, pgCluster.Node1Pool, testSchema, table)
+	require.NoError(t, err)
+	cfg := slicer.Config{Schema: testSchema, Table: table, Key: key, CastTypes: castTypes, Filter: filter, BlockSize: slicingBlockSize, Workers: 2}
 	plan, err := slicer.PlanParts(ctx, pgCluster.Node1Pool, cfg)
 	require.NoError(t, err)
 

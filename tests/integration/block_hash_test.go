@@ -41,10 +41,10 @@ func blockHashes(t *testing.T, ctx context.Context, conn *pgxpool.Conn, name, co
 	}
 
 	allCols := append([]string{"id"}, cols...)
-	leaf, err := queries.ComputeLeafHashes(ctx, conn, "pg_temp", name, true, []string{"id"}, nil, nil, allCols)
+	leaf, err := queries.ComputeLeafHashes(ctx, conn, "pg_temp", name, []string{"id"}, map[string]string{"id": "integer"}, nil, nil, allCols)
 	require.NoError(t, err)
 
-	tdSQL, err := queries.BlockHashSQL("pg_temp", name, []string{"id"}, "TD_BLOCK_HASH", false, false, "", allCols)
+	tdSQL, err := queries.BlockHashSQL("pg_temp", name, "TD_BLOCK_HASH", "TRUE", allCols)
 	require.NoError(t, err)
 	var (
 		td   string
@@ -138,9 +138,9 @@ func inheritedBlockHashes(t *testing.T, ctx context.Context, conn *pgxpool.Conn,
 	}
 
 	allCols := []string{"id", "a", "b"}
-	leaf, err := queries.ComputeLeafHashes(ctx, conn, "pg_temp", name, true, []string{"id"}, nil, nil, allCols)
+	leaf, err := queries.ComputeLeafHashes(ctx, conn, "pg_temp", name, []string{"id"}, map[string]string{"id": "integer"}, nil, nil, allCols)
 	require.NoError(t, err)
-	tdSQL, err := queries.BlockHashSQL("pg_temp", name, []string{"id"}, "TD_BLOCK_HASH", false, false, "", allCols)
+	tdSQL, err := queries.BlockHashSQL("pg_temp", name, "TD_BLOCK_HASH", "TRUE", allCols)
 	require.NoError(t, err)
 	var (
 		td   string

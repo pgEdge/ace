@@ -99,7 +99,7 @@ func compareRows(ctx context.Context, tbl keydiff.Table, block keydiff.Block, s1
 func keydiffCompare(t *testing.T, ctx context.Context, env *testEnv, table string, o keydiff.Options) (keydiffRows, error) {
 	t.Helper()
 	tbl, s1, s2 := keydiffTable(t, ctx, env, table)
-	return compareRows(ctx, tbl, keydiff.Block{Where: "TRUE"},
+	return compareRows(ctx, tbl, keydiff.Block{},
 		s1, s2,
 		o)
 }
@@ -277,7 +277,7 @@ func TestKeyDiffCompositeKey(t *testing.T) {
 		fmt.Sprintf("UPDATE %s SET v = 'outside' WHERE a = 90", ident))
 
 	tbl, s1, s2 := keydiffTable(t, ctx, env, table)
-	block := keydiff.Block{Where: "ROW(a, b) >= ROW($1, $2) AND ROW(a, b) < ROW($3, $4)", Args: []any{10, "k0", 50, "k0"}}
+	block := keydiff.Block{Range: queries.KeyRange{Lower: []string{"10", "k0"}, Upper: []string{"50", "k0"}}}
 	res, err := compareRows(ctx, tbl, block,
 		s1, s2,
 		keydiff.Options{})
@@ -305,14 +305,14 @@ func TestKeyDiffBuildSide(t *testing.T) {
 	tbl, s1, s2 := keydiffTable(t, ctx, env, table)
 	s1.Rows, s1.RowsKnown = 100, true
 	s2.Rows, s2.RowsKnown = 90, true
-	res, err := compareRows(ctx, tbl, keydiff.Block{Where: "TRUE"}, s1, s2, keydiff.Options{})
+	res, err := compareRows(ctx, tbl, keydiff.Block{}, s1, s2, keydiff.Options{})
 	require.NoError(t, err)
 	require.Equal(t, env.ServiceN2, res.BuildNode)
 	require.Len(t, res.Only1, 10)
 
 	keydiffExec(t, ctx, env, env.N2Pool, "TRUNCATE "+ident)
 	s2.Rows = 0
-	res, err = compareRows(ctx, tbl, keydiff.Block{Where: "TRUE"}, s1, s2, keydiff.Options{})
+	res, err = compareRows(ctx, tbl, keydiff.Block{}, s1, s2, keydiff.Options{})
 	require.NoError(t, err)
 	require.Equal(t, env.ServiceN2, res.BuildNode)
 	require.Len(t, res.Only1, 100)
@@ -340,7 +340,7 @@ func TestKeyDiffInheritance(t *testing.T) {
 	for _, scan := range []bool{false, true} {
 		for _, batch := range []int{0, 1, 2} {
 			tbl.ScanChildren = scan
-			res, err := compareRows(ctx, tbl, keydiff.Block{Where: "TRUE"},
+			res, err := compareRows(ctx, tbl, keydiff.Block{},
 				s1, s2,
 				keydiff.Options{BatchSize: batch})
 			require.NoError(t, err)
@@ -369,7 +369,7 @@ func TestKeyDiffReadFilter(t *testing.T) {
 
 	tbl, s1, s2 := keydiffTable(t, ctx, env, table)
 	filter := `"status" = 'open'`
-	res, err := compareRows(ctx, tbl, keydiff.Block{Where: filter, ReadFilter: filter},
+	res, err := compareRows(ctx, tbl, keydiff.Block{Filter: filter, ReadFilter: filter},
 		s1, s2,
 		keydiff.Options{})
 	require.NoError(t, err)
@@ -408,7 +408,7 @@ func TestKeyDiffKeyOfAnotherTypmod(t *testing.T) {
 				fmt.Sprintf("INSERT INTO %s VALUES ('%s', 'same')", ident, tc.same))
 
 			tbl, s1, s2 := keydiffTable(t, ctx, env, table)
-			res, err := compareRows(ctx, tbl, keydiff.Block{Where: "TRUE"}, s1, s2, keydiff.Options{})
+			res, err := compareRows(ctx, tbl, keydiff.Block{}, s1, s2, keydiff.Options{})
 			require.NoError(t, err)
 			require.Equal(t, []string{"n1"}, columnValues(t, res.Only1, "v"))
 			require.Empty(t, res.Only2)
@@ -445,7 +445,7 @@ func TestKeyDiffMemoryLimit(t *testing.T) {
 	require.Greater(t, width, int64(0))
 	s1.Rows, s1.RowsKnown, s1.KeyWidth = 1000, true, width
 	s2.Rows, s2.RowsKnown, s2.KeyWidth = 1000, true, width
-	_, err = compareRows(ctx, tbl, keydiff.Block{Where: "TRUE"}, s1, s2, o)
+	_, err = compareRows(ctx, tbl, keydiff.Block{}, s1, s2, o)
 	var me *keydiff.MemoryLimitError
 	require.True(t, errors.As(err, &me), "got %v", err)
 	require.True(t, me.Estimated)
@@ -453,13 +453,13 @@ func TestKeyDiffMemoryLimit(t *testing.T) {
 
 	// During the build: no statistics.
 	s1.KeyWidth, s2.KeyWidth = 0, 0
-	_, err = compareRows(ctx, tbl, keydiff.Block{Where: "TRUE"}, s1, s2, o)
+	_, err = compareRows(ctx, tbl, keydiff.Block{}, s1, s2, o)
 	require.True(t, errors.As(err, &me), "got %v", err)
 	require.False(t, me.Estimated)
 
 	// With enough memory the comparison works.
 	o.MaxMemory = 64 << 20
-	res, err := compareRows(ctx, tbl, keydiff.Block{Where: "TRUE"}, s1, s2, o)
+	res, err := compareRows(ctx, tbl, keydiff.Block{}, s1, s2, o)
 	require.NoError(t, err)
 	require.Len(t, res.Changed, 1)
 }

@@ -15,6 +15,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -93,8 +94,9 @@ const maxSamePageShare = 0.5
 
 // Sample is the result of the sample query on the anchor node.
 type Sample struct {
-	// bounds are the block bounds in key order.
-	bounds [][]any
+	// bounds are the block bounds in key order, the texts of the key
+	// columns.
+	bounds [][]string
 	// keys is the number of sampled keys.
 	keys int64
 	// samePage is the share of sampled keys that lie on the same heap page
@@ -128,37 +130,29 @@ func ReadSample(ctx context.Context, q Querier, cfg Config) (*Sample, error) {
 	s := &Sample{pct: blockSamplePercent(cfg.BlockSize)}
 
 	// The names are quoted and the numbers are formatted by Go.
-	rows, err := q.Query(ctx, sampleBlocksSQL(&cfg, s.pct)) // nosemgrep
+	rows, err := q.Query(ctx, sampleBlocksSQL(&cfg, s.pct), textResult) // nosemgrep
 	if err != nil {
 		return nil, fmt.Errorf("slicer: sample block bounds: %w", err)
 	}
-	defer rows.Close()
 	const extra = 3
-	nk := len(cfg.Key)
+	rowsOf, err := scanKeys(rows, len(cfg.Key)+extra, 0)
+	if err != nil {
+		return nil, fmt.Errorf("slicer: sample block bounds: %w", err)
+	}
 	var same int64
-	for rows.Next() {
-		vals, err := rows.Values()
-		if err != nil {
-			return nil, fmt.Errorf("slicer: sample block bounds: %w", err)
+	for _, vals := range rowsOf {
+		var counts [extra]int64
+		for i := range counts {
+			if counts[i], err = strconv.ParseInt(vals[i], 10, 64); err != nil {
+				return nil, fmt.Errorf("slicer: sample block bounds: %w", err)
+			}
 		}
-		if len(vals) != nk+extra {
-			return nil, fmt.Errorf("slicer: expected %d columns, got %d", nk+extra, len(vals))
-		}
-		rn, ok1 := vals[0].(int64)
-		n, ok2 := vals[1].(int64)
-		sm, ok3 := vals[2].(int64)
-		if !ok1 || !ok2 || !ok3 {
-			return nil, fmt.Errorf("slicer: unexpected types of the sample counts: %T, %T, %T", vals[0], vals[1], vals[2])
-		}
-		s.keys, same = n, sm
+		rn := counts[0]
+		s.keys, same = counts[1], counts[2]
 		// The last sampled key is returned for the counts only.
 		if rn%sampleKeysPerBlock == 0 {
-			s.bounds = append(s.bounds, append([]any(nil), vals[extra:]...))
+			s.bounds = append(s.bounds, vals[extra:])
 		}
-	}
-	rows.Close()
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("slicer: sample block bounds: %w", err)
 	}
 	if s.keys > 1 {
 		s.samePage = float64(same) / float64(s.keys-1)
@@ -182,9 +176,9 @@ func (s *Sample) Send(ctx context.Context, out chan<- Block) (*Stats, error) {
 		FirstBlock:    s.elapsed,
 	}
 	start := time.Now()
-	var lo []any
+	var lo []string
 	for i := 0; i <= len(s.bounds); i++ {
-		var hi []any
+		var hi []string
 		if i < len(s.bounds) {
 			hi = s.bounds[i]
 		}

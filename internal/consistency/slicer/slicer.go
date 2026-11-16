@@ -55,7 +55,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
-	"reflect"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -63,6 +63,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/pgedge/ace/db/queries"
 )
 
 const (
@@ -111,6 +112,10 @@ type Config struct {
 	Schema string
 	Table  string
 	Key    []string
+	// CastTypes are the types of the columns on the anchor node without
+	// their type modifiers. A key bound is sent to the server as text
+	// cast to these types.
+	CastTypes map[string]string
 	// Filter is an optional SQL boolean expression. Rows that do not match
 	// it are not counted toward block_size.
 	Filter string
@@ -159,10 +164,11 @@ func DefaultParts(workers int) int {
 	return workers * 4
 }
 
-// Part is a range of full primary keys [Lo, Hi). nil means no bound.
+// Part is a range of full primary keys [Lo, Hi). A bound holds the text of
+// every key column, the output of its type; nil means no bound.
 type Part struct {
-	Lo []any
-	Hi []any
+	Lo []string
+	Hi []string
 }
 
 // Plan is the list of parts and the way ACE built it.
@@ -176,15 +182,17 @@ type Plan struct {
 	SamplePercent float64
 }
 
-// Block is one range of full primary keys [Start, End). nil means no bound.
+// Block is one range of full primary keys [Start, End). A bound holds the
+// text of every key column, the output of its type on the anchor node; nil
+// means no bound.
 type Block struct {
 	Part int
 	Seq  int
 	// Rows is the number of rows in the block on the anchor node when ACE
 	// cut it.
 	Rows  int64
-	Start []any
-	End   []any
+	Start []string
+	End   []string
 }
 
 // Less orders blocks by key.
@@ -244,9 +252,16 @@ func (st *Stats) String() string {
 		st.Blocks, st.Elapsed.Round(time.Millisecond), st.FirstBlock.Round(time.Millisecond), st.MaxBlockRows)
 }
 
+// validate refuses a configuration that cannot be cut and fills the
+// defaults. Every key column must have a cast type.
 func (c *Config) validate() error {
 	if len(c.Key) == 0 {
 		return errors.New("slicer: primary key is empty")
+	}
+	for _, k := range c.Key {
+		if strings.TrimSpace(c.CastTypes[k]) == "" {
+			return fmt.Errorf("slicer: no cast type for key column %s", k)
+		}
 	}
 	if c.BlockSize < 1 {
 		return fmt.Errorf("slicer: block size must be positive, got %d", c.BlockSize)
@@ -278,31 +293,25 @@ func (c *Config) keyList(alias string) string {
 	return strings.Join(cols, ", ")
 }
 
-// keyExpr is the key as one value: the column for a simple key and ROW(...)
-// for a composite key. Comparing ROW values follows the order of the
-// primary-key index.
-func (c *Config) keyExpr() string {
-	if len(c.Key) == 1 {
-		return pgx.Identifier{c.Key[0]}.Sanitize()
+// keyParams is a key bound from the parameters $first, $first+1, ...:
+// the text of each key column cast to its type. A configuration without a
+// cast type for every key column is refused before any query is built, so
+// this never fails.
+func (c *Config) keyParams(first int) string {
+	p, err := queries.KeyParams(first, c.Key, c.CastTypes)
+	if err != nil {
+		panic(err)
 	}
-	return "ROW(" + c.keyList("") + ")"
+	return p
 }
 
-func placeholders(first, n int) string {
-	ps := make([]string, n)
-	for i := range ps {
-		ps[i] = fmt.Sprintf("$%d", first+i)
-	}
-	if n == 1 {
-		return ps[0]
-	}
-	return "ROW(" + strings.Join(ps, ", ") + ")"
-}
+// textResult asks for every column of a result in the text format: a key
+// column then comes as the output of its type, and the client keeps it as it
+// is.
+var textResult = pgx.QueryResultFormats{pgx.TextFormatCode}
 
 // tableStats is what ACE reads from the catalog of the anchor node.
 type tableStats struct {
-	// typeName is the type of the leading key column.
-	typeName string
 	// pages is the size of the table, with all its partitions, in pages.
 	pages int64
 	// bounds is pg_stats.histogram_bounds of the leading key column as text,
@@ -333,6 +342,8 @@ SELECT
 	 ORDER BY s.inherited DESC
 	 LIMIT 1)`
 
+// readStats reads the size and the histogram of the leading key column of the
+// table on the anchor node. A missing key column is an error.
 func readStats(ctx context.Context, q Querier, cfg *Config) (*tableStats, error) {
 	rows, err := q.Query(ctx, statsSQL, cfg.Schema, cfg.Table, cfg.Key[0])
 	if err != nil {
@@ -360,7 +371,6 @@ func readStats(ctx context.Context, q Querier, cfg *Config) (*tableStats, error)
 	if typeName == nil {
 		return nil, fmt.Errorf("slicer: column %q of %s not found", cfg.Key[0], cfg.tableIdent())
 	}
-	st.typeName = *typeName
 	return &st, nil
 }
 
@@ -388,18 +398,24 @@ func pickBounds(bounds []string, parts int) []string {
 	return out
 }
 
-func scanKeys(rows pgx.Rows, width, offset int) ([][]any, error) {
+// scanKeys reads the keys of a query that ran with textResult: offset
+// columns of the query's own and then the width key columns of each row.
+func scanKeys(rows pgx.Rows, width, offset int) ([][]string, error) {
 	defer rows.Close()
-	var keys [][]any
+	var keys [][]string
 	for rows.Next() {
-		vals, err := rows.Values()
-		if err != nil {
-			return nil, err
+		raw := rows.RawValues()
+		if len(raw) != width+offset {
+			return nil, fmt.Errorf("slicer: expected %d columns, got %d", width+offset, len(raw))
 		}
-		if len(vals) != width+offset {
-			return nil, fmt.Errorf("slicer: expected %d columns, got %d", width+offset, len(vals))
+		key := make([]string, width)
+		for i, v := range raw[offset:] {
+			if v == nil {
+				return nil, fmt.Errorf("slicer: key column %d of a key is NULL", i+1)
+			}
+			key[i] = string(v)
 		}
-		keys = append(keys, append([]any(nil), vals[offset:]...))
+		keys = append(keys, key)
 	}
 	return keys, rows.Err()
 }
@@ -407,8 +423,8 @@ func scanKeys(rows pgx.Rows, width, offset int) ([][]any, error) {
 // probeBounds turns histogram values of the leading key column into full
 // keys that exist on the anchor node: for each value it reads the first key
 // that is not less than the value. The result is sorted and has no
-// duplicates.
-func probeBounds(ctx context.Context, q Querier, cfg *Config, typeName string, bounds []string) ([][]any, error) {
+// duplicates. The values are cast to the cast type of the column.
+func probeBounds(ctx context.Context, q Querier, cfg *Config, bounds []string) ([][]string, error) {
 	lead := "_ace_t." + pgx.Identifier{cfg.Key[0]}.Sanitize()
 	keys := cfg.keyList("_ace_t")
 	outKeys := cfg.keyList("_ace_p")
@@ -421,11 +437,11 @@ CROSS JOIN LATERAL (
 	ORDER BY %[2]s
 	LIMIT 1
 ) _ace_p
-ORDER BY %[1]s`, outKeys, keys, cfg.tableIdent(), lead, typeName)
+ORDER BY %[1]s`, outKeys, keys, cfg.tableIdent(), lead, cfg.CastTypes[cfg.Key[0]])
 
 	// The table and column names are quoted with pgx.Identifier, and the
 	// type name comes from format_type(); the bounds are parameters.
-	rows, err := q.Query(ctx, sql, bounds) // nosemgrep
+	rows, err := q.Query(ctx, sql, textResult, bounds) // nosemgrep
 	if err != nil {
 		return nil, fmt.Errorf("slicer: probe part bounds: %w", err)
 	}
@@ -445,7 +461,7 @@ func samplePercent(pages int64, parts int) float64 {
 
 // sampleBounds reads a TABLESAMPLE SYSTEM sample of the key, splits it into
 // parts groups and returns the first key of every group but the first one.
-func sampleBounds(ctx context.Context, q Querier, cfg *Config, parts int, pct float64) ([][]any, error) {
+func sampleBounds(ctx context.Context, q Querier, cfg *Config, parts int, pct float64) ([][]string, error) {
 	sample := ""
 	if pct < 100 {
 		sample = fmt.Sprintf(" TABLESAMPLE SYSTEM (%g) REPEATABLE (%d)", pct, sampleSeed)
@@ -467,7 +483,7 @@ ORDER BY _ace_bucket, %[1]s`, keys, parts, cfg.tableIdent(), sample, where)
 	// The names are quoted with pgx.Identifier and the numbers are
 	// formatted by Go. The filter is SQL that the user gave on purpose
 	// (table_filter); every other ACE query uses it the same way.
-	rows, err := q.Query(ctx, sql) // nosemgrep
+	rows, err := q.Query(ctx, sql, textResult) // nosemgrep
 	if err != nil {
 		return nil, fmt.Errorf("slicer: sample part bounds: %w", err)
 	}
@@ -475,15 +491,21 @@ ORDER BY _ace_bucket, %[1]s`, keys, parts, cfg.tableIdent(), sample, where)
 }
 
 // partsFromKeys builds len(keys)+1 parts: (nil, k0), [k0, k1), ...,
-// [kN, nil). Equal neighbours are merged. keys must be sorted in the order
-// of the primary-key index; both callers get them from a query with ORDER
-// BY on the key, so Go never compares key values itself. With this order
-// the parts do not overlap and cover the whole key space.
-func partsFromKeys(keys [][]any) []Part {
+// [kN, nil). keys must be sorted in the order of the primary-key index, as a
+// query with ORDER BY on the key returns them: Go never orders key values
+// itself. With this order the parts do not overlap and cover the whole key
+// space.
+//
+// Two neighbours with the same text are one key: the server prints a value
+// in one way. They are merged into one bound. Such neighbours can come only
+// from a table whose key is not unique as a whole, as in an inheritance
+// tree; there two texts of one value, such as 1.0 and 1.00, can still give
+// an empty part, which costs one more block and nothing else.
+func partsFromKeys(keys [][]string) []Part {
 	parts := make([]Part, 0, len(keys)+1)
-	var lo []any
+	var lo []string
 	for _, k := range keys {
-		if lo != nil && reflect.DeepEqual(lo, k) {
+		if lo != nil && slices.Equal(lo, k) {
 			continue
 		}
 		parts = append(parts, Part{Lo: lo, Hi: k})
@@ -514,7 +536,7 @@ func PlanParts(ctx context.Context, q Querier, cfg Config) (*Plan, error) {
 	// takes its bounds from a sample of the matching rows.
 	filtered := strings.TrimSpace(cfg.Filter) != ""
 	if len(st.bounds) >= 2 && !filtered {
-		keys, err := probeBounds(ctx, q, &cfg, st.typeName, pickBounds(st.bounds, cfg.Parts))
+		keys, err := probeBounds(ctx, q, &cfg, pickBounds(st.bounds, cfg.Parts))
 		if err != nil {
 			return nil, err
 		}
@@ -561,20 +583,13 @@ func hiIdx(hasHi bool) int {
 // hi are the first parameter numbers of the bounds, or 0 for no bound. A
 // non-empty alias qualifies the key columns.
 func cutWhere(cfg *Config, alias string, lo, hi int) []string {
-	keyExpr := cfg.keyExpr()
-	if alias != "" {
-		keyExpr = cfg.keyList(alias)
-		if len(cfg.Key) > 1 {
-			keyExpr = "ROW(" + keyExpr + ")"
-		}
-	}
-	nk := len(cfg.Key)
+	keyExpr := queries.KeyExpr(alias, cfg.Key)
 	var where []string
 	if lo > 0 {
-		where = append(where, fmt.Sprintf("%s >= %s", keyExpr, placeholders(lo, nk)))
+		where = append(where, fmt.Sprintf("%s >= %s", keyExpr, cfg.keyParams(lo)))
 	}
 	if hi > 0 {
-		where = append(where, fmt.Sprintf("%s < %s", keyExpr, placeholders(hi, nk)))
+		where = append(where, fmt.Sprintf("%s < %s", keyExpr, cfg.keyParams(hi)))
 	}
 	if f := strings.TrimSpace(cfg.Filter); f != "" {
 		where = append(where, "("+f+")")
@@ -717,17 +732,23 @@ func beginCut(ctx context.Context, q Querier) (pgx.Tx, error) {
 	return tx, nil
 }
 
-func keyArgs(lo, hi []any, extra ...any) []any {
+// keyArgs returns the arguments of a cut query: the texts of the lower
+// bound, the texts of the upper bound and then extra.
+func keyArgs(lo, hi []string, extra ...any) []any {
 	args := make([]any, 0, len(lo)+len(hi)+len(extra))
-	args = append(args, lo...)
-	args = append(args, hi...)
+	for _, v := range lo {
+		args = append(args, v)
+	}
+	for _, v := range hi {
+		args = append(args, v)
+	}
 	return append(args, extra...)
 }
 
 // firstKey returns the first key of part p, which has no lower bound, or
 // nil if the part has no rows.
-func (c *cutter) firstKey(ctx context.Context, tx pgx.Tx, p Part) ([]any, error) {
-	rows, err := tx.Query(ctx, c.sql.first[hiIdx(p.Hi != nil)], p.Hi...)
+func (c *cutter) firstKey(ctx context.Context, tx pgx.Tx, p Part) ([]string, error) {
+	rows, err := tx.Query(ctx, c.sql.first[hiIdx(p.Hi != nil)], append([]any{textResult}, keyArgs(nil, p.Hi)...)...)
 	if err != nil {
 		return nil, err
 	}
@@ -741,10 +762,10 @@ func (c *cutter) firstKey(ctx context.Context, tx pgx.Tx, p Part) ([]any, error)
 // readChunk returns up to n block starts after the block that starts at
 // cur, and, when there are fewer than n, the number of rows from the last
 // block start to the end of the part.
-func (c *cutter) readChunk(ctx context.Context, tx pgx.Tx, p Part, cur []any, n int64) (starts [][]any, tail int64, err error) {
+func (c *cutter) readChunk(ctx context.Context, tx pgx.Tx, p Part, cur []string, n int64) (starts [][]string, tail int64, err error) {
 	m := int64(c.cfg.BlockSize)
 	hi := hiIdx(p.Hi != nil)
-	rows, err := tx.Query(ctx, c.sql.chunk[hi], keyArgs(cur, p.Hi, m, n)...)
+	rows, err := tx.Query(ctx, c.sql.chunk[hi], append([]any{textResult}, keyArgs(cur, p.Hi, m, n)...)...)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -813,11 +834,11 @@ type partCut struct {
 	tx  pgx.Tx
 	idx int
 	p   Part
-	cur []any
+	cur []string
 	seq int
 }
 
-func (pc *partCut) send(ctx context.Context, end []any, rows int64) error {
+func (pc *partCut) send(ctx context.Context, end []string, rows int64) error {
 	b := Block{Part: pc.idx, Seq: pc.seq, Rows: rows, Start: pc.cur, End: end}
 	pc.seq++
 	pc.cur = end
