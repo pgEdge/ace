@@ -436,20 +436,66 @@ type PkeyColumnType struct {
 	DataType   string
 }
 
-// BlockRange represents a block in the Merkle tree.
-// The RangeStart and RangeEnd fields are of type any because they can be
-// a single value or a composite type.
-type BlockRange struct {
-	NodePosition int64 `db:"node_position"`
-	RangeStart   []any `db:"range_start"`
-	RangeEnd     []any `db:"range_end"`
+// KeyText is a key value: the text of every key column, the output of its
+// type on the server. nil is no value, an open bound of a block.
+type KeyText []string
+
+// UnmarshalJSON reads a key value from an array. A string is the text of a
+// column. A number or a boolean is taken as its literal text, which is the
+// output of the type for these values. An empty array or an array of nulls
+// is an open bound.
+func (k *KeyText) UnmarshalJSON(b []byte) error {
+	var raw []json.RawMessage
+	if err := json.Unmarshal(b, &raw); err != nil {
+		return err
+	}
+	if len(raw) == 0 {
+		*k = nil
+		return nil
+	}
+	out := make(KeyText, len(raw))
+	nulls := 0
+	for i, r := range raw {
+		r = bytes.TrimSpace(r)
+		switch {
+		case bytes.Equal(r, []byte("null")):
+			nulls++
+			continue
+		case len(r) > 0 && r[0] == '"':
+			if err := json.Unmarshal(r, &out[i]); err != nil {
+				return err
+			}
+		case len(r) > 0 && (r[0] == '[' || r[0] == '{'):
+			return fmt.Errorf("a key value in JSON must be a string, a number or a boolean, got %s", r)
+		default:
+			out[i] = string(r)
+		}
+	}
+	switch nulls {
+	case 0:
+		*k = out
+	case len(raw):
+		*k = nil
+	default:
+		return fmt.Errorf("a key value in JSON has a null column: %s", b)
+	}
+	return nil
 }
 
+// BlockRange is a leaf of a Merkle tree: its position and its key range
+// [RangeStart, RangeEnd).
+type BlockRange struct {
+	NodePosition int64   `db:"node_position"`
+	RangeStart   KeyText `db:"range_start"`
+	RangeEnd     KeyText `db:"range_end"`
+}
+
+// BlockRangeWithCount is a leaf with the number of its rows.
 type BlockRangeWithCount struct {
-	NodePosition int64 `db:"node_position"`
-	RangeStart   []any `db:"range_start"`
-	RangeEnd     []any `db:"range_end"`
-	Count        int64 `db:"count"`
+	NodePosition int64    `db:"node_position"`
+	RangeStart   []string `db:"range_start"`
+	RangeEnd     []string `db:"range_end"`
+	Count        int64    `db:"count"`
 }
 
 // RootNode represents the root of the Merkle tree.

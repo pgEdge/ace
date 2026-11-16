@@ -32,6 +32,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/pgedge/ace/pkg/config"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -185,6 +186,103 @@ func TestMtreePkeyTypesFindDivergence(t *testing.T) {
 				"%d rows differ, so the diff must report exactly that many; a smaller number "+
 					"means some block was skipped because its bounds were ordered differently "+
 					"than on the server", pkeyTypeDivergedRows)
+		})
+	}
+}
+
+// leafKeyTypeCase is a key type for a tree whose leaves differ on the two
+// nodes. base makes the rows of both nodes from n = 1..2000; extra makes
+// one more row for each n in 600..899, which sorts next to the base row of
+// that n, and gives it n + 10000.
+type leafKeyTypeCase struct {
+	name  string
+	setup []string
+	ddl   string
+	base  string
+	extra string
+}
+
+// leafKeyTypeCases returns the key types to test with leaves that differ on
+// the two nodes.
+func leafKeyTypeCases() []leafKeyTypeCase {
+	text := "CASE WHEN g % 2 = 0 THEN chr(65 + g % 26) ELSE chr(97 + g % 26) END || lpad(g::text, 6, '0')"
+	return []leafKeyTypeCase{
+		{
+			name:  "text_en_us",
+			ddl:   `(id TEXT COLLATE "en_US.utf8" PRIMARY KEY, n int, v text)`,
+			base:  "SELECT " + text + ", g, 'v' FROM generate_series(1, 2000) g",
+			extra: "SELECT " + text + " || 'x', g + 10000, 'v' FROM generate_series(600, 899) g",
+		},
+		{
+			name: "enum",
+			setup: []string{
+				fmt.Sprintf("DROP TYPE IF EXISTS %s.leaf_color CASCADE", testSchema),
+				fmt.Sprintf("CREATE TYPE %s.leaf_color AS ENUM ('red', 'green', 'blue')", testSchema),
+			},
+			ddl:   fmt.Sprintf("(c %s.leaf_color, n int, v text, PRIMARY KEY (c, n))", testSchema),
+			base:  fmt.Sprintf("SELECT (ARRAY['red', 'green', 'blue'])[1 + g / 700]::%s.leaf_color, g, 'v' FROM generate_series(1, 2000) g", testSchema),
+			extra: fmt.Sprintf("SELECT (ARRAY['red', 'green', 'blue'])[1 + g / 700]::%s.leaf_color, g + 10000, 'v' FROM generate_series(600, 899) g", testSchema),
+		},
+		{
+			name:  "numeric",
+			ddl:   "(id numeric PRIMARY KEY, n int, v text)",
+			base:  "SELECT g * 1.5, g, 'v' FROM generate_series(1, 2000) g",
+			extra: "SELECT g * 1.5 + 0.001, g + 10000, 'v' FROM generate_series(600, 899) g",
+		},
+	}
+}
+
+// After rows are added on one node only, mtree update splits the leaves of
+// that node, and the two trees have different leaf bounds. The diff builds
+// its ranges from the bounds of both nodes, sorted by the server in the
+// order of the key type, and must report exactly the added rows.
+func TestMtreeKeyTypesWithDifferentLeaves(t *testing.T) {
+	ctx := context.Background()
+	for _, tc := range leafKeyTypeCases() {
+		t.Run(tc.name, func(t *testing.T) {
+			env := newSpockEnv()
+			for _, pool := range env.pools() {
+				for _, sql := range tc.setup {
+					_, err := pool.Exec(ctx, sql) // nosemgrep
+					require.NoError(t, err, sql)
+				}
+			}
+			tableName := "mtree_leaves_" + tc.name
+			qualified, safe := newUnreplicatedTable(t, env, tableName, tc.ddl)
+			for _, pool := range env.pools() {
+				_, err := pool.Exec(ctx, "INSERT INTO "+safe+" "+tc.base) // nosemgrep
+				require.NoError(t, err)
+			}
+			analyzeTable(t, env, safe)
+
+			task := env.newMerkleTreeTask(t, qualified, []string{env.ServiceN1, env.ServiceN2})
+			task.BlockSize = 100
+			task.OverrideBlockSize = true
+			require.NoError(t, task.RunChecks(false))
+			require.NoError(t, task.MtreeInit())
+			t.Cleanup(func() { assert.NoError(t, task.MtreeTeardown()) })
+			require.NoError(t, task.BuildMtree())
+			t.Cleanup(func() { removeDiffResults(t, qualified) })
+
+			_, err := env.N2Pool.Exec(ctx, "INSERT INTO "+safe+" "+tc.extra) // nosemgrep
+			require.NoError(t, err)
+			require.NoError(t, task.DiffMtree())
+
+			mtreeTable := pgx.Identifier{
+				config.Cfg.MTree.Schema,
+				fmt.Sprintf("ace_mtree_%s_%s", testSchema, tableName),
+			}.Sanitize()
+			leaves := func(pool *pgxpool.Pool) int {
+				var n int
+				require.NoError(t, pool.QueryRow(ctx,
+					"SELECT count(*) FROM "+mtreeTable+" WHERE node_level = 0").Scan(&n)) // nosemgrep
+				return n
+			}
+			require.Greater(t, leaves(env.N2Pool), leaves(env.N1Pool), "only n2 should have split leaves")
+
+			nodeDiffs := diffPairs(t, task)[env.pairKey()]
+			require.Empty(t, extractDiffIDsByColumn(nodeDiffs.Rows[env.ServiceN1], "n"))
+			require.Equal(t, idRange(10600, 10899), extractDiffIDsByColumn(nodeDiffs.Rows[env.ServiceN2], "n"))
 		})
 	}
 }

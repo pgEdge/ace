@@ -108,7 +108,7 @@ func (h *blockHashers) work(node string, conn *pgxpool.Conn, cur *slicer.Cursor)
 		}
 		hashStart := time.Now()
 		own.idle += h.cutTime(waitStart, hashStart)
-		r := h.t.rangeFromBlock(b)
+		r := rangeFromBlock(b)
 		var (
 			hash string
 			rows int64
@@ -122,7 +122,7 @@ func (h *blockHashers) work(node string, conn *pgxpool.Conn, cur *slicer.Cursor)
 		if err != nil {
 			// Only the first error is kept, so the errors of the queries
 			// that the cancel below ends do not hide it.
-			h.t.recordError(fmt.Errorf("initial hash failed for node %s range %v-%v: %w", node, r.Start, r.End, err))
+			h.t.recordError(fmt.Errorf("initial hash failed for node %s range %q-%q: %w", node, r.Lower, r.Upper, err))
 			h.list.Stop()
 			h.cancel()
 			h.onErr()

@@ -54,18 +54,18 @@ func TestPartsFromKeys(t *testing.T) {
 		t.Fatalf("partsFromKeys(nil) = %v, want one open part", parts)
 	}
 
-	keys := [][]any{{int64(10)}, {int64(10)}, {int64(20)}}
+	keys := [][]string{{"10"}, {"10"}, {"20"}}
 	parts = partsFromKeys(keys)
 	if len(parts) != 3 {
 		t.Fatalf("partsFromKeys = %v, want 3 parts", parts)
 	}
-	if parts[0].Lo != nil || parts[0].Hi[0] != int64(10) {
+	if parts[0].Lo != nil || parts[0].Hi[0] != "10" {
 		t.Fatalf("first part = %v, want (nil, 10)", parts[0])
 	}
-	if parts[1].Lo[0] != int64(10) || parts[1].Hi[0] != int64(20) {
+	if parts[1].Lo[0] != "10" || parts[1].Hi[0] != "20" {
 		t.Fatalf("second part = %v, want [10, 20)", parts[1])
 	}
-	if parts[2].Lo[0] != int64(20) || parts[2].Hi != nil {
+	if parts[2].Lo[0] != "20" || parts[2].Hi != nil {
 		t.Fatalf("last part = %v, want [20, nil)", parts[2])
 	}
 }
@@ -109,15 +109,16 @@ func TestDefaults(t *testing.T) {
 }
 
 func TestCutQueries(t *testing.T) {
-	cfg := &Config{Schema: "public", Table: "t", Key: []string{"a", "b"}, Filter: "x > 0", BlockSize: 10}
+	cfg := &Config{Schema: "public", Table: "t", Key: []string{"a", "b"}, Filter: "x > 0", BlockSize: 10,
+		CastTypes: map[string]string{"a": "integer", "b": "text"}}
 
 	sql := chunkSQL(cfg, true)
 	for _, want := range []string{
 		`WITH RECURSIVE _ace_b(_ace_i, "a", "b")`,
-		`ROW("a", "b") >= ROW($1, $2)`,
-		`ROW("a", "b") < ROW($3, $4)`,
+		`ROW("a", "b") >= ROW($1::integer, $2::text)`,
+		`ROW("a", "b") < ROW($3::integer, $4::text)`,
 		`ROW(_ace_t."a", _ace_t."b") >= ROW(_ace_b."a", _ace_b."b")`,
-		`ROW(_ace_t."a", _ace_t."b") < ROW($3, $4)`,
+		`ROW(_ace_t."a", _ace_t."b") < ROW($3::integer, $4::text)`,
 		`(x > 0)`,
 		`OFFSET $5 LIMIT 1`,
 		`_ace_b._ace_i < $6`,
@@ -128,9 +129,10 @@ func TestCutQueries(t *testing.T) {
 		}
 	}
 
-	simple := &Config{Schema: "s", Table: "t", Key: []string{"id"}, BlockSize: 10}
+	simple := &Config{Schema: "s", Table: "t", Key: []string{"id"}, BlockSize: 10,
+		CastTypes: map[string]string{"id": "bigint"}}
 	sql = chunkSQL(simple, false)
-	for _, want := range []string{`"id" >= $1`, `_ace_t."id" >= _ace_b."id"`, `OFFSET $2 LIMIT 1`, `_ace_i < $3`} {
+	for _, want := range []string{`"id" >= $1::bigint`, `_ace_t."id" >= _ace_b."id"`, `OFFSET $2 LIMIT 1`, `_ace_i < $3`} {
 		if !strings.Contains(sql, want) {
 			t.Errorf("chunkSQL(no hi) does not contain %q:\n%s", want, sql)
 		}
@@ -142,13 +144,13 @@ func TestCutQueries(t *testing.T) {
 	if got := firstSQL(simple, false); got != `SELECT "id" FROM "s"."t" ORDER BY "id" LIMIT 1` {
 		t.Errorf("firstSQL(no hi) = %s", got)
 	}
-	if got := firstSQL(simple, true); !strings.Contains(got, `WHERE "id" < $1`) {
+	if got := firstSQL(simple, true); !strings.Contains(got, `WHERE "id" < $1::bigint`) {
 		t.Errorf("firstSQL(hi) = %s", got)
 	}
-	if got := tailSQL(cfg, true); !strings.Contains(got, `ROW("a", "b") >= ROW($1, $2) AND ROW("a", "b") < ROW($3, $4) AND (x > 0) LIMIT $5`) {
+	if got := tailSQL(cfg, true); !strings.Contains(got, `ROW("a", "b") >= ROW($1::integer, $2::text) AND ROW("a", "b") < ROW($3::integer, $4::text) AND (x > 0) LIMIT $5`) {
 		t.Errorf("tailSQL(hi) = %s", got)
 	}
-	if got := tailSQL(simple, false); !strings.Contains(got, `WHERE "id" >= $1 LIMIT $2`) {
+	if got := tailSQL(simple, false); !strings.Contains(got, `WHERE "id" >= $1::bigint LIMIT $2`) {
 		t.Errorf("tailSQL(no hi) = %s", got)
 	}
 }
@@ -163,6 +165,10 @@ func TestConfigValidate(t *testing.T) {
 		t.Fatal("empty key accepted")
 	}
 	c = Config{Key: []string{"id"}, BlockSize: 10}
+	if err := c.validate(); err == nil {
+		t.Fatal("a key column without a cast type accepted")
+	}
+	c = Config{Key: []string{"id"}, BlockSize: 10, CastTypes: map[string]string{"id": "integer"}}
 	if err := c.validate(); err != nil {
 		t.Fatal(err)
 	}

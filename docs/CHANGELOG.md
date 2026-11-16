@@ -274,6 +274,17 @@ All notable changes to ACE will be captured in this document. This project follo
   key.
 
 ### Fixed
+- **`table-diff` and `mtree` converted the bounds of the blocks to Go
+  values.** A key type that the driver did not know, or could not decode,
+  stopped the run with an error, and a value that the Go type could not
+  hold exactly moved the bound of a block to another key. Now the slicer,
+  the block hash and the Merkle tree read each bound as the text that the
+  server prints for it and send it back as text cast to the type of the
+  key column. The ranges file of `mtree build --write-ranges` holds each
+  bound as JSON strings. `--ranges-file` reads a file of an earlier
+  version only for a key of number, boolean, text, date or timestamp
+  types; for another key type, for example `bytea`, `uuid` or `interval`,
+  write the file again.
 - **`mtree table-diff` could miss differing rows for some primary key
   types.** ACE sorted the bounds of the mismatched blocks in the client,
   and this order was not the order of the server for a `text` key in a

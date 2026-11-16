@@ -239,7 +239,8 @@ func MtreeDiffRanges(ctx context.Context, db DBQuerier, key []string, castTypes,
 }
 
 // textBound returns the key texts of one bound, or nil if the bound is open:
-// a key column is never NULL, so NULL in the first column means no bound.
+// a key column is never NULL, so NULL in the first column means no bound. An
+// open bound of a composite key in a leaf can be NULL or a row of NULLs.
 func textBound(raw [][]byte) []string {
 	if raw[0] == nil {
 		return nil
