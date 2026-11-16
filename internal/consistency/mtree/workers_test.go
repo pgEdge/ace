@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/pgedge/ace/db/queries"
 	"github.com/pgedge/ace/pkg/config"
 )
 
@@ -166,8 +167,8 @@ func TestCompareRangesWithoutPoolFailsTheDiff(t *testing.T) {
 	n1 := map[string]any{"Name": "n1"}
 	n2 := map[string]any{"Name": "n2"}
 	items := []CompareRangesWorkItem{
-		{Node1: n1, Node2: n2, Range: [2][]any{{int64(1)}, {int64(2)}}},
-		{Node1: n1, Node2: n2, Range: [2][]any{{int64(2)}, {int64(3)}}, StartExclusive: true, Seq: 1},
+		{Node1: n1, Node2: n2, Range: queries.KeyRange{Lower: []string{"1"}, Upper: []string{"2"}, UpperClosed: true}},
+		{Node1: n1, Node2: n2, Range: queries.KeyRange{Lower: []string{"2"}, Upper: []string{"3"}, LowerOpen: true, UpperClosed: true}, Seq: 1},
 	}
 
 	m.CompareRanges(items, map[string]*pgxpool.Pool{})

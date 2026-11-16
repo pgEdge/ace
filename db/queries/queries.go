@@ -17,6 +17,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"strconv"
 	"strings"
 	"text/template"
 	"time"
@@ -98,7 +99,7 @@ const FirstBlockPosition = 0
 
 // OpenFirstBlockStart returns start, or nil for the first block. A nil start
 // means "no lower bound" to every function that builds a range condition.
-func OpenFirstBlockStart(nodePosition int64, start []any) []any {
+func OpenFirstBlockStart[T any](nodePosition int64, start []T) []T {
 	if nodePosition == FirstBlockPosition {
 		return nil
 	}
@@ -2081,97 +2082,56 @@ func GetNodeChildren(ctx context.Context, db DBQuerier, mtreeTable string, nodeL
 	return children, nil
 }
 
+// GetLeafRanges returns the bounds of the leaves at nodePositions, in the
+// order of their positions. A bound holds the text of every key column, the
+// output of its type: the query asks for the bounds in the text format, so
+// the client does not convert them. The first leaf has no lower bound, and a
+// NULL range_end is no upper bound.
 func GetLeafRanges(ctx context.Context, db DBQuerier, mtreeTable string, nodePositions []int64, simplePrimaryKey bool, key []string) ([]types.LeafRange, error) {
-	if simplePrimaryKey {
-		data := map[string]interface{}{
-			"MtreeTable": mtreeTable,
+	tmpl := SQLTemplates.GetLeafRanges
+	data := map[string]any{"MtreeTable": mtreeTable}
+	if !simplePrimaryKey {
+		startAttrs := make([]string, len(key))
+		endAttrs := make([]string, len(key))
+		for i, k := range key {
+			attr := pgx.Identifier{k}.Sanitize()
+			startAttrs[i] = fmt.Sprintf("(range_start).%s", attr)
+			endAttrs[i] = fmt.Sprintf("(range_end).%s", attr)
 		}
-
-		sql, err := RenderSQL(SQLTemplates.GetLeafRanges, data)
-		if err != nil {
-			return nil, fmt.Errorf("failed to render GetLeafRanges SQL: %w", err)
-		}
-
-		rows, err := db.Query(ctx, sql, nodePositions) // nosemgrep
-		if err != nil {
-			return nil, fmt.Errorf("query to get leaf ranges for '%s' failed: %w", mtreeTable, err)
-		}
-		defer rows.Close()
-
-		var ranges []types.LeafRange
-		for rows.Next() {
-			var r types.LeafRange
-			var pos int64
-			var start, end any
-			if err := rows.Scan(&pos, &start, &end); err != nil {
-				return nil, fmt.Errorf("failed to scan leaf range: %w", err)
-			}
-			r.RangeStart = OpenFirstBlockStart(pos, []any{start})
-			if end != nil {
-				r.RangeEnd = []any{end}
-			}
-			ranges = append(ranges, r)
-		}
-
-		if err := rows.Err(); err != nil {
-			return nil, fmt.Errorf("error iterating over leaf ranges: %w", err)
-		}
-
-		return ranges, nil
+		tmpl = SQLTemplates.GetLeafRangesExpanded
+		data["StartAttrs"] = strings.Join(startAttrs, ", ")
+		data["EndAttrs"] = strings.Join(endAttrs, ", ")
 	}
-
-	startAttrs := make([]string, len(key))
-	endAttrs := make([]string, len(key))
-	for i, k := range key {
-		attr := pgx.Identifier{k}.Sanitize()
-		startAttrs[i] = fmt.Sprintf("(range_start).%s", attr)
-		endAttrs[i] = fmt.Sprintf("(range_end).%s", attr)
-	}
-	data := map[string]any{
-		"MtreeTable": mtreeTable,
-		"StartAttrs": strings.Join(startAttrs, ", "),
-		"EndAttrs":   strings.Join(endAttrs, ", "),
-	}
-	sql, err := RenderSQL(SQLTemplates.GetLeafRangesExpanded, data)
+	sql, err := RenderSQL(tmpl, data)
 	if err != nil {
-		return nil, fmt.Errorf("failed to render GetLeafRangesExpanded SQL: %w", err)
+		return nil, fmt.Errorf("failed to render GetLeafRanges SQL: %w", err)
 	}
 
-	rows, err := db.Query(ctx, sql, nodePositions) // nosemgrep
+	n := len(key)
+	rows, err := db.Query(ctx, sql, pgx.QueryResultFormats{pgx.TextFormatCode}, nodePositions) // nosemgrep
 	if err != nil {
-		return nil, fmt.Errorf("query to get expanded leaf ranges for '%s' failed: %w", mtreeTable, err)
+		return nil, fmt.Errorf("query to get leaf ranges for '%s' failed: %w", mtreeTable, err)
 	}
 	defer rows.Close()
 
 	var ranges []types.LeafRange
-	numKeyCols := len(key)
 	for rows.Next() {
-		var pos int64
-		dest := make([]any, numKeyCols*2)
-		destPtrs := make([]any, 1+numKeyCols*2)
-		destPtrs[0] = &pos
-		for i := range dest {
-			destPtrs[1+i] = &dest[i]
+		raw := rows.RawValues()
+		if len(raw) != 1+2*n {
+			return nil, fmt.Errorf("leaf ranges of '%s': expected %d columns, got %d", mtreeTable, 1+2*n, len(raw))
 		}
-
-		if err := rows.Scan(destPtrs...); err != nil {
-			return nil, fmt.Errorf("failed to scan expanded leaf range: %w", err)
+		pos, err := strconv.ParseInt(string(raw[0]), 10, 64)
+		if err != nil {
+			return nil, fmt.Errorf("leaf ranges of '%s': node position: %w", mtreeTable, err)
 		}
-
-		startVals := make([]any, numKeyCols)
-		copy(startVals, dest[:numKeyCols])
-		endVals := make([]any, numKeyCols)
-		copy(endVals, dest[numKeyCols:])
-
 		ranges = append(ranges, types.LeafRange{
-			RangeStart: OpenFirstBlockStart(pos, startVals),
-			RangeEnd:   endVals,
+			RangeStart: OpenFirstBlockStart(pos, textBound(raw[1:1+n])),
+			RangeEnd:   textBound(raw[1+n:]),
 		})
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("error iterating over expanded leaf ranges: %w", err)
+		return nil, fmt.Errorf("error iterating over leaf ranges: %w", err)
 	}
-
 	return ranges, nil
 }
 

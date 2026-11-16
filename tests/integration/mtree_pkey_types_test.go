@@ -4,20 +4,13 @@ package integration
 // per type.
 //
 // The property is the whole promise of mtree: if N rows differ between two
-// nodes, the diff must report exactly those N. It holds only if ACE can
-// reproduce the Postgres order of the key type outside the database, because
-// the block bounds it builds in Go are sent back as range conditions. When the
-// two orders disagree, a range selects nothing, the block is never compared,
-// and the diff reports a match it never checked.
-//
-// The known instances -- uuid, bytea, numeric, and the text
-// collation gap -- is one instance of that. Each was found by hand, one at a
-// time, after it reached production. This test looks for the next one.
-//
-// The failures are partial, not total: restoring the pre-fix uuid and bytea
-// ordering makes the diff report 6 of 9 differing rows, and the text collation
-// case reports 4 of 9. A wrong order does not always empty a range -- often it
-// only widens one -- which is why this misses rows quietly instead of erroring.
+// nodes, the diff must report exactly those N. The diff builds the key ranges
+// to compare from the bounds of the mismatched leaves. If the bounds were
+// ordered in another way than the server orders the key type, a range would
+// select nothing, the block would never be compared, and the diff would report
+// a match it never checked. A wrong order does not always empty a range --
+// often it only widens one -- so such a defect misses rows quietly instead of
+// failing.
 //
 // Three things about the setup are load-bearing. The divergence has to span
 // many blocks: with a single differing row there is one mismatched leaf, two
@@ -35,7 +28,6 @@ package integration
 import (
 	"context"
 	"fmt"
-	"strings"
 	"testing"
 
 	"github.com/jackc/pgx/v5"
@@ -50,12 +42,6 @@ type pkeyTypeCase struct {
 	name      string
 	pkType    string
 	valuesSQL string
-	// skipReason, when the check returns a non-empty string, skips the case.
-	skipReason func(t *testing.T, ctx context.Context, pool *pgxpool.Pool) string
-	// knownGap marks a case that reproduces an open defect. It is skipped so
-	// the suite stays green; deleting the field is the acceptance criterion
-	// for the fix.
-	knownGap string
 }
 
 const (
@@ -72,6 +58,8 @@ const (
 	pkeyTypeDivergedRows = (pkeyTypeDivergeTo-pkeyTypeDivergeFrom)/pkeyTypeDivergeEvery + 1
 )
 
+// pkeyTypeCases returns the key types to test, with pkeyTypeRowCount rows of
+// each.
 func pkeyTypeCases() []pkeyTypeCase {
 	g := fmt.Sprintf("generate_series(1, %d) g", pkeyTypeRowCount)
 	return []pkeyTypeCase{
@@ -100,17 +88,12 @@ func pkeyTypeCases() []pkeyTypeCase {
 			valuesSQL: "SELECT CASE WHEN g % 2 = 0 THEN upper(md5(g::text)) ELSE md5(g::text) END FROM " + g,
 		},
 		{
-			// Reproduces the collation gap, and it is a real one: measured on
-			// PostgreSQL 17 the diff reported 4 of the 9 differing rows. The
-			// same collation with md5 values passes, so what matters is not the
-			// collation by itself but how far its order drifts from the byte
-			// order. Here the first character alternates case: byte order puts
-			// every uppercase before every lowercase, en_US interleaves them.
+			// The first character alternates case: the byte order puts
+			// every uppercase before every lowercase, en_US interleaves
+			// them. An order of the bounds by bytes loses rows here.
 			name:      "text_en_us_collation",
 			pkType:    `TEXT COLLATE "en_US.utf8"`,
 			valuesSQL: "SELECT CASE WHEN g % 2 = 0 THEN chr(65 + g % 26) ELSE chr(97 + g % 26) END || md5(g::text) FROM " + g,
-			knownGap: "mtree orders text bounds byte by byte while the server uses the column collation; " +
-				"fix is to order the bounds in SQL -- see Merkle Tree Architecture, \"Primary Key Types\"",
 		},
 		{
 			name:      "timestamptz",
@@ -126,24 +109,6 @@ func pkeyTypeCases() []pkeyTypeCase {
 			name:      "text_database_collation",
 			pkType:    "TEXT",
 			valuesSQL: "SELECT CASE WHEN g % 2 = 0 THEN upper(md5(g::text)) ELSE md5(g::text) END FROM " + g,
-			skipReason: func(t *testing.T, ctx context.Context, pool *pgxpool.Pool) string {
-				// pg_database, not current_setting('lc_collate'): that GUC was
-				// removed in PostgreSQL 16.
-				var collation string
-				require.NoError(t, pool.QueryRow(ctx,
-					"SELECT datcollate FROM pg_database WHERE datname = current_database()").Scan(&collation))
-				switch strings.ToUpper(collation) {
-				case "C", "POSIX", "C.UTF-8", "C.UTF8":
-					return ""
-				}
-				// Not a passing case dressed up as a skip: mtree sorts text
-				// bounds byte by byte, so under this collation it can order
-				// them differently than the server did and miss the row. The
-				// fix is to sort the bounds in SQL; until then the run is
-				// skipped rather than expected to pass.
-				return fmt.Sprintf("database collation is %s, not byte-ordered; "+
-					"see Merkle Tree Architecture, \"Primary Key Types\"", collation)
-			},
 		},
 	}
 }
@@ -155,15 +120,6 @@ func TestMtreePkeyTypesFindDivergence(t *testing.T) {
 
 	for _, tc := range pkeyTypeCases() {
 		t.Run(tc.name, func(t *testing.T) {
-			if tc.knownGap != "" {
-				t.Skip(tc.knownGap)
-			}
-			if tc.skipReason != nil {
-				if reason := tc.skipReason(t, ctx, env.N1Pool); reason != "" {
-					t.Skip(reason)
-				}
-			}
-
 			tableName := "mtree_pkey_" + tc.name
 			qualified := fmt.Sprintf("%s.%s", testSchema, tableName)
 			safe := pgx.Identifier{testSchema, tableName}.Sanitize()

@@ -70,15 +70,7 @@ holding the node's slot, then re-run, if you need a guaranteed-current drain.
   the result and the run time.
 - If the comparison of a range fails, the diff fails and writes no result.
 - The primary key columns must have the same types on every node; otherwise the command stops with an error that names the column, the types and the nodes. Other columns may have other types on the nodes.
-- Merkle trees do not order every primary key type the way the server does. `text`
-  keys are compared byte by byte, so a collation other than `C`, and also `enum`
-  or `citext` keys, can sort differently here than in the database; `numeric` and
-  the types the driver decodes into a struct are not ordered correctly at all.
-  When the two orders disagree, some blocks are skipped and the diff reports
-  fewer differences than exist. Use `table-diff` for those tables: it does not
-  sort block bounds outside the database. See
-  [Primary Key Types and the Postgres Type Boundary](../../design/merkle.md#primary-key-types-and-the-postgres-type-boundary)
-  for the full list and the reasons.
+- The server orders the bounds of the blocks to compare with the type and the collation of each key column, so every primary key type is compared in the order of its index. See [Primary Key Types and the Postgres Type Boundary](../../design/merkle.md#primary-key-types-and-the-postgres-type-boundary).
 - When *all* mismatched blocks between a node pair turn out to hold no row
   differences, the tree hashes were stale rather than the data divergent. The
   diff reports this, refreshes those blocks from live data (recorded in the

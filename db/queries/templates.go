@@ -29,6 +29,7 @@ type Templates struct {
 	GetPrimaryKey        *template.Template
 	GetColumns           *template.Template
 	GetCastTypes         *template.Template
+	GetCollations        *template.Template
 	CheckUserPrivileges  *template.Template
 	SpockNodeAndSubInfo  *template.Template
 	SpockRepSetInfo      *template.Template
@@ -445,6 +446,24 @@ var SQLTemplates = Templates{
 			JOIN pg_catalog.pg_type t ON t.oid = b.typ
 			JOIN pg_catalog.pg_namespace tn ON tn.oid = t.typnamespace
 		ORDER BY b.attnum, b.depth DESC;
+	`)),
+	// GetCollations takes the collation of the column itself, which is also
+	// the collation of an index on the column.
+	GetCollations: template.Must(template.New("getCollations").Parse(`
+		SELECT
+			a.attname,
+			pg_catalog.quote_ident(cn.nspname) || '.' || pg_catalog.quote_ident(co.collname)
+		FROM
+			pg_catalog.pg_attribute a
+			JOIN pg_catalog.pg_class c ON a.attrelid = c.oid
+			JOIN pg_catalog.pg_namespace n ON c.relnamespace = n.oid
+			JOIN pg_catalog.pg_collation co ON co.oid = a.attcollation
+			JOIN pg_catalog.pg_namespace cn ON co.collnamespace = cn.oid
+		WHERE
+			n.nspname = $1
+			AND c.relname = $2
+			AND a.attnum > 0
+			AND NOT a.attisdropped
 	`)),
 	CheckUserPrivileges: template.Must(template.New("checkUserPrivileges").Parse(`
 		WITH params AS (
