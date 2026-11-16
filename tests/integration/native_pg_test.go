@@ -22,7 +22,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/docker/go-connections/nat"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/pgedge/ace/db/queries"
 	"github.com/pgedge/ace/internal/consistency/diff"
@@ -69,7 +68,7 @@ func setupNativeCluster(t *testing.T) *nativeClusterState {
 	identifier := strings.ToLower(fmt.Sprintf("ace_native_test_%d", time.Now().UnixNano()))
 
 	waitForPort := func() *wait.HostPortStrategy {
-		return wait.ForListeningPort(nat.Port(nativeContainerPort)).
+		return wait.ForListeningPort(nativeContainerPort).
 			WithStartupTimeout(startupTimeout).
 			WithPollInterval(5 * time.Second)
 	}
@@ -89,16 +88,13 @@ func setupNativeCluster(t *testing.T) *nativeClusterState {
 
 	state := &nativeClusterState{stack: stack}
 
-	cPort, err := nat.NewPort("tcp", "5432")
-	require.NoError(t, err)
-
 	// Helper to extract mapped host/port for a service.
 	getHostPort := func(service string) (string, string) {
 		c, cErr := stack.ServiceContainer(ctx, service)
 		require.NoError(t, cErr, "get %s container", service)
 		h, hErr := c.Host(ctx)
 		require.NoError(t, hErr, "get %s host", service)
-		p, pErr := c.MappedPort(ctx, cPort)
+		p, pErr := c.MappedPort(ctx, nativeContainerPort)
 		require.NoError(t, pErr, "get %s mapped port", service)
 		return h, p.Port()
 	}
