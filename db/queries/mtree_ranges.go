@@ -24,6 +24,125 @@ import (
 // collation, the qualified and quoted name of that collation. A column of a
 // type without collations is not in the result.
 func GetCollations(ctx context.Context, db DBQuerier, schema, table string) (map[string]string, error) {
+	defs, err := queryCollations(ctx, db, schema, table)
+	if err != nil {
+		return nil, err
+	}
+	names := make(map[string]string, len(defs))
+	for col, d := range defs {
+		names[col] = d.name
+	}
+	return names, nil
+}
+
+// GetCollationOrders returns, for each column of schema.table that has a
+// collation, a text that tells collation orders apart across nodes. Two
+// collations that order values in the same way give the same text, also when
+// the catalog spells their locale in another way.
+//
+// XXX: The version of the collation library is not compared. Another ICU or
+// glibc version on another node can order some values in another way; such a
+// difference is not seen.
+func GetCollationOrders(ctx context.Context, db DBQuerier, schema, table string) (map[string]string, error) {
+	defs, err := queryCollations(ctx, db, schema, table)
+	if err != nil {
+		return nil, err
+	}
+	orders := make(map[string]string, len(defs))
+	for col, d := range defs {
+		orders[col] = d.orderText()
+	}
+	return orders, nil
+}
+
+// collationDef is a collation as the catalog defines it. For the default
+// collation provider, collate, locale and rules are these of the database.
+type collationDef struct {
+	name          string
+	isDefault     bool
+	provider      string
+	collate       string
+	locale        string
+	rules         string
+	deterministic bool
+}
+
+// orderText returns the name of the collation and only the settings that
+// decide the order of values. A libc collation orders by its LC_COLLATE
+// locale. ICU and the builtin provider order by their own locale; the
+// LC_COLLATE setting that a database with these providers still has does
+// not change the order of text values. A collation other than the default
+// one also keeps its qualified name, so that nodes use the same name in SQL.
+func (d collationDef) orderText() string {
+	name := d.name
+	if d.isDefault {
+		name = "default"
+	}
+	var parts []string
+	switch d.provider {
+	case "c":
+		parts = append(parts, "libc "+canonicalLibcLocale(d.collate))
+	case "i":
+		parts = append(parts, "icu "+d.locale)
+		if d.rules != "" {
+			parts = append(parts, "rules "+d.rules)
+		}
+	case "b":
+		parts = append(parts, "builtin "+d.locale)
+	default:
+		parts = append(parts, "provider "+d.provider, "collate "+d.collate, "locale "+d.locale)
+		if d.rules != "" {
+			parts = append(parts, "rules "+d.rules)
+		}
+	}
+	if !d.deterministic {
+		parts = append(parts, "nondeterministic")
+	}
+	return name + " (" + strings.Join(parts, ", ") + ")"
+}
+
+// canonicalLibcLocale writes a libc locale name in one form. The C library
+// reads the code set of a name in a normalised form, so en_US.UTF-8,
+// en_US.utf8 and en_US.UTF8 are one locale: here the code set keeps only
+// letters and digits, in lower case, and a code set of digits only gets the
+// prefix "iso", as the C library does. POSIX is another name of C.
+func canonicalLibcLocale(locale string) string {
+	if locale == "POSIX" {
+		return "C"
+	}
+	name, modifier := locale, ""
+	if i := strings.IndexByte(name, '@'); i >= 0 {
+		name, modifier = name[:i], name[i:]
+	}
+	i := strings.IndexByte(name, '.')
+	if i < 0 {
+		return locale
+	}
+	var cs strings.Builder
+	digitsOnly := true
+	for _, r := range name[i+1:] {
+		switch {
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9':
+			cs.WriteRune(r)
+		case r >= 'A' && r <= 'Z':
+			cs.WriteRune(r - 'A' + 'a')
+		default:
+			continue
+		}
+		if r < '0' || r > '9' {
+			digitsOnly = false
+		}
+	}
+	codeset := cs.String()
+	if digitsOnly && codeset != "" {
+		codeset = "iso" + codeset
+	}
+	return name[:i] + "." + codeset + modifier
+}
+
+// queryCollations returns the collation of each column of schema.table that
+// has one.
+func queryCollations(ctx context.Context, db DBQuerier, schema, table string) (map[string]collationDef, error) {
 	sql, err := RenderSQL(SQLTemplates.GetCollations, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to render GetCollations SQL: %w", err)
@@ -34,18 +153,43 @@ func GetCollations(ctx context.Context, db DBQuerier, schema, table string) (map
 	}
 	defer rows.Close()
 
-	colls := make(map[string]string)
+	defs := make(map[string]collationDef)
 	for rows.Next() {
-		var col, coll string
-		if err := rows.Scan(&col, &coll); err != nil {
+		var col string
+		var d collationDef
+		if err := rows.Scan(&col, &d.name, &d.isDefault, &d.provider, &d.collate,
+			&d.locale, &d.rules, &d.deterministic); err != nil {
 			return nil, fmt.Errorf("failed to scan collation: %w", err)
 		}
-		colls[col] = coll
+		defs[col] = d
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("error iterating over collations: %w", err)
 	}
-	return colls, nil
+	return defs, nil
+}
+
+// KeyCollationMismatch returns the first key column with another collation in
+// a than in b, and both collations; ok is false if there is none. a and b map
+// a column to the text that tells collation orders apart, a column without a
+// collation to "". With another collation a node orders the key in another
+// way, and the same key range holds other rows there.
+func KeyCollationMismatch(key []string, a, b map[string]string) (col, collA, collB string, ok bool) {
+	for _, k := range key {
+		if a[k] != b[k] {
+			return k, a[k], b[k], true
+		}
+	}
+	return "", "", "", false
+}
+
+// CollationText returns a collation name for a message: the name, or "no
+// collation".
+func CollationText(coll string) string {
+	if coll == "" {
+		return "no collation"
+	}
+	return "collation " + coll
 }
 
 // diffRangesSQL returns the query that builds the key ranges to compare from

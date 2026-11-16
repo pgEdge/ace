@@ -664,6 +664,37 @@ func (t *TableDiffTask) Validate() error {
 	return nil
 }
 
+// namedCollations are the collations of the columns of the table on one node.
+type namedCollations struct {
+	node  string
+	colls map[string]string
+}
+
+// warnKeyCollations logs a warning for each node whose key columns have
+// other collations than on the first node. The blocks are cut in the order
+// of the key on one node and hashed in the order of the key on each node.
+// With another order a key can fall into two blocks on a node, so the diff
+// can report rows that are the same on both nodes; it does not miss rows.
+func warnKeyCollations(table string, key []string, nodes []namedCollations) {
+	if len(nodes) < 2 {
+		return
+	}
+	ref := nodes[0]
+	for _, n := range nodes[1:] {
+		if col, a, b, ok := queries.KeyCollationMismatch(key, ref.colls, n.colls); ok {
+			logger.Warn("table %s: primary key column %q has %s on %s and %s on %s; "+
+				"the nodes order the key in other ways, and the diff can report rows "+
+				"that are the same on both nodes",
+				table, col, queries.CollationText(a), ref.node, queries.CollationText(b), n.node)
+		}
+	}
+}
+
+// RunChecks connects to every node and checks that the table can be compared:
+// the privileges of the user, the same columns and key on every node. It reads
+// the column types, the cast types and the collations of every node and warns
+// about key collations that differ. With skipValidation the options are not
+// validated first.
 func (t *TableDiffTask) RunChecks(skipValidation bool) (err error) {
 	if !skipValidation {
 		if err = t.Validate(); err != nil {
@@ -675,6 +706,7 @@ func (t *TableDiffTask) RunChecks(skipValidation bool) (err error) {
 	var refHostname string
 	var refNodeInfo map[string]any
 	hostMap := make(map[string]string)
+	var nodeCollations []namedCollations
 
 	schema := t.Schema
 	table := t.Table
@@ -750,6 +782,11 @@ func (t *TableDiffTask) RunChecks(skipValidation bool) (err error) {
 			if err != nil {
 				return fmt.Errorf("failed to get cast types for table %s.%s on node %s: %w", schema, table, hostname, err)
 			}
+			collations, err := queries.GetCollationOrders(t.Ctx, conn, schema, table)
+			if err != nil {
+				return fmt.Errorf("failed to get collations for table %s.%s on node %s: %w", schema, table, hostname, err)
+			}
+			nodeCollations = append(nodeCollations, namedCollations{node: hostname, colls: collations})
 
 			currKey, err := queries.GetPrimaryKey(t.Ctx, conn, schema, table)
 			if err != nil {
@@ -794,6 +831,7 @@ func (t *TableDiffTask) RunChecks(skipValidation bool) (err error) {
 	}
 
 	logger.Info("Connections successful to nodes in cluster")
+	warnKeyCollations(t.QualifiedTableName, key, nodeCollations)
 
 	t.HostMap = hostMap
 	t.Cols = cols

@@ -140,16 +140,35 @@ func TestKeyTypesMatch(t *testing.T) {
 	}
 }
 
+// A primary key column with another collation on a node stops mtree; other
+// columns may differ.
+func TestKeyCollationsMatch(t *testing.T) {
+	types := map[string]string{"id": "text", "v": "text"}
+	key := []string{"id"}
+	m := &MerkleTreeTask{}
+	m.ColTypes = map[string]map[string]string{}
+	if err := m.addNodeColTypes("n1", types, types, map[string]string{"id": `pg_catalog."C"`, "v": `pg_catalog."C"`}, key); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.addNodeColTypes("n2", types, types, map[string]string{"id": `pg_catalog."C"`, "v": `public."en_US"`}, key); err != nil {
+		t.Fatalf("a non-key column with another collation must not stop mtree: %v", err)
+	}
+	err := m.addNodeColTypes("n3", types, types, map[string]string{"id": `public."en_US"`, "v": `pg_catalog."C"`}, key)
+	if err == nil || !strings.Contains(err.Error(), `"id" has collation pg_catalog."C" on n1 and collation public."en_US" on n3`) {
+		t.Fatalf("got %v, want an error that names the column, both collations and both nodes", err)
+	}
+}
+
 // The row read of a node uses the cast types of that node, and the types of
 // the reference node when the node was not read.
 func TestNodeCastTypes(t *testing.T) {
 	m := &MerkleTreeTask{}
 	m.ColTypes = map[string]map[string]string{}
 	key := []string{"id"}
-	if err := m.addNodeColTypes("n1", map[string]string{"id": "integer", "v": "text"}, map[string]string{"id": "integer", "v": "text"}, key); err != nil {
+	if err := m.addNodeColTypes("n1", map[string]string{"id": "integer", "v": "text"}, map[string]string{"id": "integer", "v": "text"}, nil, key); err != nil {
 		t.Fatal(err)
 	}
-	if err := m.addNodeColTypes("n2", map[string]string{"id": "integer", "v": "jsonb"}, map[string]string{"id": "integer", "v": "jsonb"}, key); err != nil {
+	if err := m.addNodeColTypes("n2", map[string]string{"id": "integer", "v": "jsonb"}, map[string]string{"id": "integer", "v": "jsonb"}, nil, key); err != nil {
 		t.Fatal(err)
 	}
 	if got := m.nodeCastTypes("n2")["v"]; got != "jsonb" {
@@ -166,11 +185,11 @@ func TestNodeNameDoesNotReplaceReferenceTypes(t *testing.T) {
 	m := &MerkleTreeTask{}
 	m.ColTypes = map[string]map[string]string{}
 	key := []string{"id"}
-	if err := m.addNodeColTypes("n1", map[string]string{"id": "integer", "v": "text"}, nil, key); err != nil {
+	if err := m.addNodeColTypes("n1", map[string]string{"id": "integer", "v": "text"}, nil, nil, key); err != nil {
 		t.Fatal(err)
 	}
 	for _, name := range []string{"_ref", "ref", ""} {
-		err := m.addNodeColTypes(name, map[string]string{"id": "bigint", "v": "text"}, nil, key)
+		err := m.addNodeColTypes(name, map[string]string{"id": "bigint", "v": "text"}, nil, nil, key)
 		if err == nil || !strings.Contains(err.Error(), "primary key column") {
 			t.Errorf("node %q with another key type: got %v, want a key type error", name, err)
 		}
