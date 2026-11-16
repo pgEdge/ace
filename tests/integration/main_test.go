@@ -23,7 +23,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/docker/go-connections/nat"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/pgedge/ace/pkg/config"
@@ -112,11 +111,7 @@ func setupPostgresCluster(t *testing.T) error {
 	if err != nil {
 		return fmt.Errorf("failed to get host for %s: %w", serviceN1, err)
 	}
-	cPortN1, err := nat.NewPort("tcp", strings.Split(containerPort, "/")[0])
-	if err != nil {
-		return fmt.Errorf("failed to create nat.Port for %s: %w", serviceN1, err)
-	}
-	portN1Mapped, err := n1Container.MappedPort(context.Background(), cPortN1)
+	portN1Mapped, err := n1Container.MappedPort(context.Background(), containerPort)
 	if err != nil {
 		return fmt.Errorf("failed to get mapped port for %s: %w", serviceN1, err)
 	}
@@ -150,11 +145,7 @@ func setupPostgresCluster(t *testing.T) error {
 	if err != nil {
 		return fmt.Errorf("failed to get host for %s: %w", serviceN2, err)
 	}
-	cPortN2, err := nat.NewPort("tcp", strings.Split(containerPort, "/")[0])
-	if err != nil {
-		return fmt.Errorf("failed to create nat.Port for %s: %w", serviceN2, err)
-	}
-	portN2Mapped, err := n2Container.MappedPort(context.Background(), cPortN2)
+	portN2Mapped, err := n2Container.MappedPort(context.Background(), containerPort)
 	if err != nil {
 		return fmt.Errorf("failed to get mapped port for %s: %w", serviceN2, err)
 	}
@@ -188,11 +179,7 @@ func setupPostgresCluster(t *testing.T) error {
 	if err != nil {
 		return fmt.Errorf("failed to get host for %s: %w", serviceN3, err)
 	}
-	cPortN3, err := nat.NewPort("tcp", strings.Split(containerPort, "/")[0])
-	if err != nil {
-		return fmt.Errorf("failed to create nat.Port for %s: %w", serviceN3, err)
-	}
-	portN3Mapped, err := n3Container.MappedPort(context.Background(), cPortN3)
+	portN3Mapped, err := n3Container.MappedPort(context.Background(), containerPort)
 	if err != nil {
 		return fmt.Errorf("failed to get mapped port for %s: %w", serviceN3, err)
 	}
