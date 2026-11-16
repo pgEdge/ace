@@ -364,83 +364,13 @@ Notes:
 
 ### Primary Key Types and the Postgres Type Boundary
 
-ACE hashes and compares rows inside Postgres, but it decides *which* rows to
-compare in Go. It reads the block bounds out of the tree, sorts and merges them
-in the ACE process, then sends them back as parameters of the next query. So
-every primary key value crosses from one type system into the other. On the Go
-side it is no longer a Postgres value: it is whatever the driver turned it into.
+ACE never orders or compares primary key values itself. A key value leaves the server only as the output of its type, read in the text result format, and it goes back to the server as a parameter of the type of the column without a type modifier: `$n::type`, read with the input function of the type. Every comparison of keys runs on the server, with the type and the collation of the key column.
 
-That conversion loses information in three ways, and ACE has hit all three:
+The diff builds the key ranges to compare from the bounds of the mismatched leaves of both nodes. After an update the leaves of two nodes can have different bounds, so the ranges come from the bounds of both nodes together. The first node of the pair sorts these bounds, removes the ones that are equal for the type (`1.0` and `1.00` of a `numeric` key are one bound), and keeps only the ranges that overlap a mismatched leaf. The bounds go to that query as arrays of text and are cast to the type of the key column with the collation of the column.
 
-- **Representation.** What the driver returns is not always something it will
-  take back. A `uuid` comes back as a plain `[16]byte`, which Go prints as
-  `[17 17 ...]`. Used as a query parameter, that gives
-  `invalid input syntax for type uuid`. Any value that ACE reads from
-  a tree and sends back as a bound has to survive this round trip.
-- **Ordering.** Postgres cuts the blocks with `ORDER BY <pkey>`, but ACE merges
-  and sorts the bounds of the mismatched blocks in Go. The two orders agree only
-  when the btree order of the type is also the natural Go order for the decoded
-  value. When they do not agree, some pairs of neighbouring bounds end up the
-  wrong way round and the range condition selects no rows, so those blocks are
-  never compared and the diff under-reports. The loss is partial and depends on
-  the data: measured on PostgreSQL 17 with 9 differing rows, restoring the
-  pre-fix uuid ordering reported 6 of them, and a `text` key in `en_US.utf8`
-  reported 4. A wrong order often only widens a range instead of emptying it,
-  which is why this shows up as quietly missing rows rather than as an error.
-- **Identity.** Postgres can treat two values as equal where Go sees two
-  different ones. In `numeric`, `1.5` and `1.50` are the same value for the
-  database, but the driver returns two different `(digits, exponent)` pairs.
-  Row hashing compares the text of the values, so for it these are two
-  different values in any case. Bounds are compared as values, not as text.
+So the order of the ranges is the order of the primary key index for every key type: `text` in any collation, `enum`, `citext`, `numeric`, domains, and types that the driver of ACE does not know.
 
-So a Merkle tree only works over a primary key whose values ACE can sort and
-rebuild correctly outside the database:
-
-| Primary key type | Status in `mtree` |
-|---|---|
-| `smallint`, `integer`, `bigint`, `real`, `double precision`, `boolean` | Supported |
-| `uuid`, `bytea` | Supported; compared as bytes, like `uuid_cmp` and `byteacmp` |
-| `timestamp`, `timestamptz`, `date` | Supported |
-| `text`, `varchar`, `char` | Supported **only under the `C` or `POSIX` collation**; see below |
-| `numeric`, `time`, and any type the driver decodes into a struct | Accepted, but the order of the block bounds is not guaranteed; see below |
-| `enum`, `citext`, domains over any of the above, and types the driver has no codec for | Accepted, but the order is not guaranteed; see below |
-
-The rows of a mismatched block are matched by the text of their key, which the
-server prints, so the row identity works for every key type. What can go wrong
-is only the order of the block bounds, which ACE sorts in Go.
-
-A type the driver decodes into a struct -- `numeric`, `time` -- has no Go order
-that ACE knows. ACE then sorts its bounds by their Go rendering and logs a
-warning naming the type once per task. A clean verdict over such a key is worth
-no more than the ordering behind it.
-
-A string-like type whose collation Go cannot reproduce -- `text` outside `C`,
-`enum`, `citext` -- is the worse case, because identity works fine and only the
-*order* is wrong. There is nothing to refuse and nothing to report: the run
-completes, prints a verdict, and can be missing rows. A warning naming the type
-is logged once per task when the comparator meets a type it cannot order, but
-that warning does not fire for these, because Go will happily compare two
-strings.
-
-That second half is a known gap, not a supported setup, and it is
-reproducible: `tests/integration/mtree_pkey_types_test.go` carries a case for
-it, skipped until the fix lands. A `text` primary key in any collation other
-than `C` sorts differently in the database than byte by byte in Go: under
-`en_US.UTF-8` the database puts `'a'` before `'B'`, while ACE puts `'B'` first.
-How much that costs depends on the keys -- the same collation over hex strings
-loses nothing, while keys that alternate case lost 5 of 9 differing rows in
-testing -- so a run that finds differences is not evidence that it found all of
-them. An `enum` sorts by `enumsortorder` and not by
-its label, but it reaches ACE as a plain string. The same is true for any type
-the driver has no codec for: it arrives as raw bytes or as text and is compared
-byte by byte, which need not be the order the type really uses. ACE does not
-detect any of this today. The proper fix is to sort the bounds in SQL instead of
-in Go, which removes the whole group of problems at once. Adding more comparison
-cases in Go only makes more types look supported than they are.
-
-`table-diff` has none of these problems, because it never sorts or merges block
-bounds in Go. It stays the fallback for a table whose primary key `mtree`
-cannot sort reliably.
+The key types must be the same on every node; the checks of the task stop with an error otherwise.
 
 ### Observability and Teardown
 - **Task records**: Mtree runs are recorded in `ace_tasks.db` (table `ace_tasks`) with context about block size, nodes, and statuses. Check logs for counts of dirty blocks, splits/merges applied, parent rebuilds, and extra-leaf mismatches during diff traversal.

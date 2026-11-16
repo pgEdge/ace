@@ -466,9 +466,13 @@ type NodeChild struct {
 }
 
 // LeafRange represents the start and end of a leaf's range.
+//
+// Each bound holds the text of every key column, the output of its type on
+// the node. nil is an open side: the first leaf has no lower bound and the
+// last leaf has no upper bound.
 type LeafRange struct {
-	RangeStart []any `db:"range_start"`
-	RangeEnd   []any `db:"range_end"`
+	RangeStart []string `db:"range_start"`
+	RangeEnd   []string `db:"range_end"`
 }
 
 // MtreeMetadata represents a row in the ace_mtree_metadata table.

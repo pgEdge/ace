@@ -274,6 +274,15 @@ All notable changes to ACE will be captured in this document. This project follo
   key.
 
 ### Fixed
+- **`mtree table-diff` could miss differing rows for some primary key
+  types.** ACE sorted the bounds of the mismatched blocks in the client,
+  and this order was not the order of the server for a `text` key in a
+  collation other than `C`, an `enum`, a `citext` or a `numeric` key,
+  and for types that the driver did not know. A range of such bounds
+  then selected no rows, and the diff reported fewer differences than
+  there were. Now the server of the first node of a pair sorts the
+  bounds and builds the ranges, with the type and the collation of each
+  key column.
 - **`coalesce_priority` of a repair plan took the value of the last node.**
   With `coalesce_priority: [n1, n2]`, a column that was not NULL on both
   nodes got the value of `n2`. Now the first node in the list that has a
