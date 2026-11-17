@@ -74,6 +74,13 @@ All notable changes to ACE will be captured in this document. This project follo
   timestamp or a `numeric` column compares timestamps or numbers. A
   `when` comparison of two literals is refused. The HTML report writes
   the key text into the plans that it builds.
+- **A `custom` action of a repair plan cannot change the primary key.**
+  If `custom_row` sets a key column, the text of its value must be equal
+  to the key text of the diff row; a template such as `{{n1.id}}` gives
+  this text. Otherwise the plan is refused before any write. Before, the
+  row was written with the key of `custom_row`: repair could write over
+  another row with that key or add a new row, and the row of the diff
+  stayed as it was.
 - **`table-rerun` reads and writes a diff result directory.** It reads
   the keys from the result directory of the diff, reads the rows of
   these keys again by key text, compares them by row hash, and writes a

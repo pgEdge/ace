@@ -41,6 +41,7 @@ A value in a plan is the text of a YAML scalar, as the file writes it: `1.50`, `
 - `apply_from mode: insert` and `bidirectional` are invalid on `row_mismatch`.  
 - `diff_type` is validated; incompatible action/diff combos are rejected at parse time and at execution.  
 - `custom` requires `custom_row` or `helpers`.
+- `custom` cannot change the primary key: a key column in `custom_row` must have the key text of the diff row, such as `id: 42` for the row with key `42`, or a template such as `{{n1.id}}`. Otherwise the plan is refused before any write.
 
 ### Diff timing and stale rows
 Repair plans (and `table-repair` in general) only act on the rows captured in the diff file. The plan engine does not re-fetch current row values at repair time, and `when` predicates/helpers only see `n1`/`n2` values (plus optional `commit_ts`/`node_origin`) from the diff snapshot. If you need protection against stale repairs, set `allow_stale_repairs: false` on the relevant action: ACE will compare the target row's current commit timestamp with the diff snapshot and skip repairs where the current row is newer. Skipped rows are logged (see above). Re-running `table-diff` close to the repair window is still recommended when consistency is critical.
