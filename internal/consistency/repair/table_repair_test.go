@@ -226,3 +226,58 @@ tables:
 	_, err := planner.LoadRepairPlanFile(path)
 	require.ErrorContains(t, err, "bidirectional incompatible with diff_type row_mismatch")
 }
+
+// TestPlanCustomKey checks that a custom row keeps the key of the diff row:
+// a key column of custom_row must have the key text, and any other value,
+// NULL included, refuses the plan.
+func TestPlanCustomKey(t *testing.T) {
+	n1 := map[string]any{"id": "42", "v": "a"}
+	n2 := map[string]any{"id": "42", "v": "b"}
+	row := planDiffRow{pkStr: "42", pkMap: map[string]any{"id": "42"}, node1Name: "n1", node2Name: "n2", n1Row: n1, n2Row: n2, diffType: "row_mismatch"}
+	missing := planDiffRow{pkStr: "42", pkMap: map[string]any{"id": "42"}, node1Name: "n1", node2Name: "n2", n1Row: n1, diffType: "missing_on_n2"}
+	val := func(s string) planner.PlanValue { return planner.PlanValue{Text: s, Valid: true} }
+	custom := func(id planner.PlanValue) *planner.RepairPlanAction {
+		return &planner.RepairPlanAction{Type: planner.RepairActionCustom, CustomRow: map[string]planner.PlanValue{"id": id, "v": val("c")}}
+	}
+
+	refused := []struct {
+		name string
+		row  planDiffRow
+		id   planner.PlanValue
+	}{
+		{"other key", row, val("43")},
+		{"other text of the same number", row, val("042")},
+		{"NULL", row, planner.PlanValue{}},
+		{"template of a missing row", missing, val("{{n2.id}}")},
+	}
+	for _, tc := range refused {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newRepairSets()
+			err := applyPlanAction(tc.row, custom(tc.id), "r", s, nil, nil, nil)
+			require.ErrorContains(t, err, "rule r: custom row sets key column id")
+			require.ErrorContains(t, err, "a custom row cannot change the key")
+			require.True(t, s.empty())
+		})
+	}
+
+	want := map[string]any{"id": "42", "v": "c"}
+	accepted := []struct {
+		name   string
+		action *planner.RepairPlanAction
+		want   map[string]any
+	}{
+		{"same key text", custom(val("42")), want},
+		{"template", custom(val("{{n1.id}}")), want},
+		{"no key column", &planner.RepairPlanAction{Type: planner.RepairActionCustom, CustomRow: map[string]planner.PlanValue{"v": val("c")}}, want},
+		{"key from a helper", &planner.RepairPlanAction{Type: planner.RepairActionCustom, CustomHelpers: &planner.CustomHelperSpec{CoalescePriority: []string{"n2", "n1"}}}, n2},
+	}
+	for _, tc := range accepted {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newRepairSets()
+			require.NoError(t, applyPlanAction(row, tc.action, "r", s, nil, nil, nil))
+			require.Equal(t, map[string]map[string]map[string]any{"n1": {"42": tc.want}, "n2": {"42": tc.want}}, s.updates)
+			require.Empty(t, s.inserts)
+			require.Empty(t, s.deletes)
+		})
+	}
+}

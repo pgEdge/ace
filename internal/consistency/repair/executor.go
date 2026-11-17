@@ -14,6 +14,8 @@ package repair
 import (
 	"fmt"
 	"reflect"
+	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/pgedge/ace/internal/consistency/repair/plan"
@@ -506,7 +508,7 @@ func applyPlanAction(row planDiffRow, action *planner.RepairPlanAction, ruleName
 	case planner.RepairActionCustom:
 		customRow, err := buildCustomRow(action, row, cmp)
 		if err != nil {
-			return err
+			return fmt.Errorf("rule %s: %w", ruleName, err)
 		}
 		sets.write(row.node1Name, row.pkStr, copyMap(customRow), row.n1Row != nil)
 		sets.write(row.node2Name, row.pkStr, copyMap(customRow), row.n2Row != nil)
@@ -647,7 +649,8 @@ func validateActionCompatibility(action *planner.RepairPlanAction, row planDiffR
 // buildCustomRow returns the row that a custom action writes: the values of
 // custom_row, then the columns that coalesce_priority and pick_freshest
 // fill, then the key of the row. A value of custom_row is its text, NULL, or
-// the value of a template {{n1.col}} or {{n2.col}}.
+// the value of a template {{n1.col}} or {{n2.col}}. A key column of the
+// custom row must have the key text of the diff row.
 func buildCustomRow(action *planner.RepairPlanAction, row planDiffRow, cmp *comparer) (map[string]any, error) {
 	if action.CustomRow == nil && action.CustomHelpers == nil {
 		return nil, fmt.Errorf("custom action missing custom_row or helpers (pk %s)", row.pkStr)
@@ -703,14 +706,37 @@ func buildCustomRow(action *planner.RepairPlanAction, row planDiffRow, cmp *comp
 		}
 	}
 
-	// Ensure PK columns are present using existing PK map.
-	for k, v := range row.pkMap {
-		if _, exists := result[k]; !exists {
-			result[k] = v
+	// The row keeps the key of the diff row. The choice of UPDATE or INSERT,
+	// the conflicts and the stale check all use that key, so a key column
+	// that the custom row sets must have the same text.
+	keyCols := make([]string, 0, len(row.pkMap))
+	for k := range row.pkMap {
+		keyCols = append(keyCols, k)
+	}
+	sort.Strings(keyCols)
+	for _, k := range keyCols {
+		want, _ := valueText(row.pkMap[k])
+		v, exists := result[k]
+		if !exists {
+			result[k] = row.pkMap[k]
+			continue
+		}
+		if got, ok := valueText(v); !ok || got != want {
+			return nil, fmt.Errorf("custom row sets key column %s to %s, but the key of the row has %s (pk %s): a custom row cannot change the key",
+				k, quoteValue(v), strconv.Quote(want), row.pkStr)
 		}
 	}
 
 	return result, nil
+}
+
+// quoteValue returns the text of v in quotes, or NULL.
+func quoteValue(v any) string {
+	text, ok := valueText(v)
+	if !ok {
+		return "NULL"
+	}
+	return strconv.Quote(text)
 }
 
 // substituteValue returns the value of one column of custom_row: NULL, the
