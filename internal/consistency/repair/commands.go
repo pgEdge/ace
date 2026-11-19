@@ -248,7 +248,7 @@ func (t *TableRepairTask) rowStatement(op string, row map[string]any, castTypes 
 		if !ok || typ == "" {
 			return "", nil, fmt.Errorf("no type for column %s on the target node", c)
 		}
-		params[i] = fmt.Sprintf("$%d::%s", i+1, typ)
+		params[i] = queries.TextParam(i+1, typ)
 		if text, ok := valueText(row[c]); ok {
 			args[i] = text
 		}
