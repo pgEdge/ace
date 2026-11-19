@@ -120,21 +120,21 @@ curl --cert client.crt --key client.key --cacert ca.crt \
 
 ### POST /api/v1/table-rerun
 
-Re-runs a diff from an existing diff file.
+Re-runs a diff from an existing diff result.
 
 Request body:
 
 | Field | Type | Required | Notes |
 | --- | --- | --- | --- |
 | `cluster` | string | no | Defaults to `default_cluster`. |
-| `diff_file` | string | yes | Path on the server filesystem. |
+| `diff_file` | string | yes | Path of the diff result directory, or of the JSON report next to it, on the server filesystem. |
 | `dbname` | string | no | Overrides DB name from config. |
 | `nodes` | array[string] | no | Defaults to `"all"`. |
 | `quiet` | bool | no | Suppress output. |
 
 ### POST /api/v1/table-repair
 
-Repairs table inconsistencies using a diff file.
+Repairs table inconsistencies using a diff result.
 
 Request body:
 
@@ -144,7 +144,7 @@ Request body:
 | `table` | string | yes | `schema.table`. |
 | `dbname` | string | no | Overrides DB name from config. |
 | `nodes` | array[string] | no | Defaults to `"all"`. |
-| `diff_file` | string | yes | Path on the server filesystem. |
+| `diff_file` | string | yes | Path of the diff result directory, or of the JSON report next to it, on the server filesystem. |
 | `repair_plan` | string | no | Repair plan file path on the server. |
 | `source_of_truth` | string | no | Required unless using `fix_nulls` or bidirectional insert-only. |
 | `quiet` | bool | no | Suppress output. |

@@ -89,17 +89,21 @@ type DerivedFields struct {
 
 // DiffFormatVersion is the version of the diff report format this build
 // writes. Increment it when the meaning of the stored rows changes, so that
-// a reader can tell an old report from a new one and read each the right
-// way.
+// a reader can tell an old report from a new one.
 //
 //	0: a report without the format_version field, written before the field
 //	   existed. A scalar numeric value can have trailing zeros ("7.50"), as
-//	   the driver printed it. Such a report is brought to version 1 after it is
-//	   read.
+//	   the driver printed it.
 //	1: values as the pgx driver decoded them, with driver structs turned into
 //	   plain values. A scalar numeric value has no trailing zeros ("7.5"),
-//	   because the row fetch wraps it in trim_scale(), as the row hash does.
-const DiffFormatVersion = 1
+//	   because the row fetch wrapped it in trim_scale(), as the row hash did.
+//	2: a numeric value keeps its scale ("7.50"), as the server prints it.
+//	   The row hash has no trim_scale() either, so 7.5 and 7.50 are
+//	   different values.
+//	3: every value of a column of the table is the text that the output
+//	   function of its type gives, as a JSON string, or null for NULL. The
+//	   client does not convert a value to a Go type and back.
+const DiffFormatVersion = 3
 
 // DiffOutput holds the structured diff data.
 type DiffOutput struct {
@@ -110,14 +114,24 @@ type DiffOutput struct {
 	Summary       DiffSummary               `json:"summary"`
 }
 
-// CheckFormatVersion returns an error if this build cannot read the report:
-// it was written by a newer ACE with a format this build does not know.
-// Version 0 is accepted; the caller must bring it to the current version
-// before it compares row keys with rows read from a database.
+// CheckFormatVersion returns an error if this build cannot use the report:
+// it was written by another ACE with another format.
 func (d DiffOutput) CheckFormatVersion() error {
-	if d.FormatVersion < 0 || d.FormatVersion > DiffFormatVersion {
-		return fmt.Errorf("unsupported diff report format version %d: this ACE reads versions up to %d",
-			d.FormatVersion, DiffFormatVersion)
+	return CheckFormatVersion(d.FormatVersion)
+}
+
+// CheckFormatVersion returns an error if this build cannot use rows of the
+// format version, the version of a diff report or the row format version of
+// a diff result. The keys of an older version do not match the keys of the
+// rows that ACE reads now, so the diff must run again.
+func CheckFormatVersion(version int) error {
+	if version > DiffFormatVersion {
+		return fmt.Errorf("unsupported diff report format version %d: this ACE reads version %d",
+			version, DiffFormatVersion)
+	}
+	if version < DiffFormatVersion {
+		return fmt.Errorf("the diff report has format version %d, written by an older ACE; this ACE reads version %d, run the diff again",
+			version, DiffFormatVersion)
 	}
 	return nil
 }

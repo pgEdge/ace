@@ -35,12 +35,14 @@ func nodeFailureTask() *TableRepairTask {
 	task := NewTableRepairTask()
 	task.Schema, task.Table = "public", "t"
 	task.Key = []string{"id"}
-	task.RawDiffs = types.DiffOutput{NodeDiffs: map[string]types.DiffByNodePair{
-		"n1/n2": {Rows: map[string][]types.OrderedMap{
-			"n1": {row(1, "a"), row(2, "b")},
-			"n2": {row(2, "x"), row(3, "z")},
-		}},
-	}}
+	task.diff = &diffInput{key: task.Key, pairs: []*diffPair{{
+		name: "n1/n2", node1: "n1", node2: "n2",
+		entries: []diffEntry{
+			{key: "1", row1: row(1, "a")},
+			{key: "2", row1: row(2, "b"), row2: row(2, "x")},
+			{key: "3", row2: row(3, "z")},
+		},
+	}}}
 	return task
 }
 
@@ -67,7 +69,7 @@ func TestRepairStopsOnSetupError(t *testing.T) {
 		task := nodeFailureTask()
 		task.FixNulls = true
 		task.Cols = []string{"id", "v"}
-		task.RawDiffs.NodeDiffs["n1/n2"].Rows["n1"][1] = types.OrderedMap{{Key: "id", Value: 2}, {Key: "v", Value: nil}}
+		task.diff.pairs[0].entries[1].row1 = types.OrderedMap{{Key: "id", Value: 2}, {Key: "v", Value: nil}}
 		err := task.runFixNulls(time.Now())
 		require.ErrorContains(t, err, "no node info for n1")
 		require.Equal(t, "FAILED", task.TaskStatus)

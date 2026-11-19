@@ -20,7 +20,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"maps"
-	"os"
 	"path/filepath"
 	"reflect"
 	"slices"
@@ -31,7 +30,6 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pglogrepl"
 	"github.com/jackc/pgx/v5"
-	pgxv5type "github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/pgedge/ace/db/queries"
 	planner "github.com/pgedge/ace/internal/consistency/repair/plan"
@@ -87,8 +85,18 @@ type TableRepairTask struct {
 
 	Pools map[string]*pgxpool.Pool
 
-	RawDiffs types.DiffOutput
-	report   *RepairReport
+	// diff is the diff result that the repair works on.
+	diff   *diffInput
+	report *RepairReport
+
+	// castTypes holds, by node name as ColTypes, the types that a text value
+	// of each column is cast to: the type of the column without its type
+	// modifier. A node, not a host:port, owns the types: two nodes can be two
+	// databases of one server.
+	castTypes map[string]map[string]string
+	// compareValues, if set, decides the comparisons of a repair plan
+	// instead of a query on a node.
+	compareValues func(node string, cmps []textComparison) ([]bool, error)
 
 	planRuleMatches map[string]map[string]string // populated when using repair plans
 	planStaleChecks map[string]map[string]planStaleCheck
@@ -366,29 +374,24 @@ func (t *TableRepairTask) ValidateAndPrepare() error {
 		}
 	}
 
-	diffData, err := os.ReadFile(t.DiffFilePath)
+	diff, err := readDiffResult(t.DiffFilePath)
 	if err != nil {
-		return fmt.Errorf("failed to read diff file %s: %w", t.DiffFilePath, err)
+		return err
 	}
-	if err := json.Unmarshal(diffData, &t.RawDiffs); err != nil {
-		return fmt.Errorf("failed to unmarshal diff file %s: %w", t.DiffFilePath, err)
-	}
-	if err := t.RawDiffs.CheckFormatVersion(); err != nil {
-		return fmt.Errorf("diff file %s: %w", t.DiffFilePath, err)
-	}
+	t.diff = diff
 
-	diffSchema := strings.TrimSpace(t.RawDiffs.Summary.Schema)
-	diffTable := strings.TrimSpace(t.RawDiffs.Summary.Table)
+	diffSchema := strings.TrimSpace(t.diff.summary.Schema)
+	diffTable := strings.TrimSpace(t.diff.summary.Table)
 	if diffSchema == "" || diffTable == "" {
 		return fmt.Errorf("diff file %s is missing schema/table metadata; cannot verify repair target", t.DiffFilePath)
 	}
 	if diffSchema != t.Schema || diffTable != t.Table {
 		return fmt.Errorf("diff file %s was generated for %s.%s but repair target is %s.%s", t.DiffFilePath, diffSchema, diffTable, t.Schema, t.Table)
 	}
-	if t.RawDiffs.Summary.TableFilter != "" {
-		logger.Info("Diff file was generated with table filter: %s", t.RawDiffs.Summary.TableFilter)
+	if t.diff.summary.TableFilter != "" {
+		logger.Info("Diff file was generated with table filter: %s", t.diff.summary.TableFilter)
 	}
-	if strings.TrimSpace(t.RawDiffs.Summary.AgainstOrigin) != "" && !t.RecoveryMode {
+	if strings.TrimSpace(t.diff.summary.AgainstOrigin) != "" && !t.RecoveryMode {
 		return fmt.Errorf("diff file indicates an origin-scoped comparison (--against-origin); re-run table-repair with --recovery-mode or provide an explicit source_of_truth")
 	}
 
@@ -398,19 +401,7 @@ func (t *TableRepairTask) ValidateAndPrepare() error {
 		}
 	}
 
-	if t.RawDiffs.NodeDiffs == nil {
-		return fmt.Errorf("invalid diff file format: missing 'diffs' field or it's not a map")
-	}
-
-	involvedNodeNames := make(map[string]bool)
-	for nodePairKey := range t.RawDiffs.NodeDiffs {
-		nodesInPair := strings.Split(nodePairKey, "/")
-		if len(nodesInPair) != 2 {
-			return fmt.Errorf("invalid node pair key in diff file: %s", nodePairKey)
-		}
-		involvedNodeNames[nodesInPair[0]] = true
-		involvedNodeNames[nodesInPair[1]] = true
-	}
+	involvedNodeNames := t.diff.nodes()
 
 	var clusterNodes []map[string]any
 	for _, nodeMap := range t.ClusterNodes {
@@ -428,10 +419,10 @@ func (t *TableRepairTask) ValidateAndPrepare() error {
 
 	t.ClusterNodes = clusterNodes
 
-	if strings.TrimSpace(t.RawDiffs.Summary.AgainstOrigin) != "" && t.RecoveryMode && t.SourceOfTruth == "" {
-		failedNode := strings.TrimSpace(t.RawDiffs.Summary.AgainstOriginResolved)
+	if strings.TrimSpace(t.diff.summary.AgainstOrigin) != "" && t.RecoveryMode && t.SourceOfTruth == "" {
+		failedNode := strings.TrimSpace(t.diff.summary.AgainstOriginResolved)
 		if failedNode == "" {
-			failedNode = strings.TrimSpace(t.RawDiffs.Summary.AgainstOrigin)
+			failedNode = strings.TrimSpace(t.diff.summary.AgainstOrigin)
 		}
 		if failedNode == "" {
 			return fmt.Errorf("recovery-mode requires failed node information in diff summary")
@@ -497,6 +488,10 @@ func (t *TableRepairTask) ValidateAndPrepare() error {
 				return fmt.Errorf("failed to get columns for %s.%s on node %s: %w", t.Schema, t.Table, nodeName, err)
 			}
 			t.Cols = cols
+			castTypes, err := queries.GetCastTypes(t.Ctx, connPool, t.Schema, t.Table)
+			if err != nil {
+				return fmt.Errorf("failed to get cast types for %s.%s on node %s: %w", t.Schema, t.Table, nodeName, err)
+			}
 
 			pKey, err := queries.GetPrimaryKey(t.Ctx, connPool, t.Schema, t.Table)
 			if err != nil {
@@ -521,12 +516,14 @@ func (t *TableRepairTask) ValidateAndPrepare() error {
 				}
 			}
 
-			publicIP, _ := nodeInfo["PublicIP"].(string)
-			port, _ := nodeInfo["Port"].(string)
 			if t.ColTypes == nil {
 				t.ColTypes = make(map[string]map[string]string)
 			}
-			t.ColTypes[fmt.Sprintf("%s:%s", publicIP, port)] = colTypes
+			t.ColTypes[nodeName] = colTypes
+			if t.castTypes == nil {
+				t.castTypes = make(map[string]map[string]string)
+			}
+			t.castTypes[nodeName] = castTypes
 
 			if refColTypes == nil {
 				refColTypes = colTypes
@@ -571,17 +568,14 @@ func (t *TableRepairTask) ValidateAndPrepare() error {
 	if len(involvedNodeNames) == 0 {
 		return fmt.Errorf("failed to connect to any relevant node to verify schema or permissions")
 	}
+	// The diff found the rows by its key, so the entries name rows only if
+	// the table still has this key.
+	if !slices.Equal(t.Key, t.diff.key) {
+		return fmt.Errorf("diff result %s was made with the primary key (%s), but %s has the primary key (%s)",
+			t.DiffFilePath, strings.Join(t.diff.key, ", "), t.QualifiedTableName, strings.Join(t.Key, ", "))
+	}
 	if t.SourceOfTruth != "" && t.Pools[t.SourceOfTruth] == nil {
 		return fmt.Errorf("failed to establish a connection to the source_of_truth node: %s", t.SourceOfTruth)
-	}
-
-	// The stale check matches the keys of the report with keys read from the
-	// target now, so the report must have the current value form.
-	if t.RawDiffs.FormatVersion == 0 {
-		logger.Info("Diff file %s has no format version; reading it as version 0", t.DiffFilePath)
-	}
-	if err := utils.UpgradeDiffOutput(&t.RawDiffs, queries.NumericColumns(refColTypes)); err != nil {
-		return fmt.Errorf("diff file %s: %w", t.DiffFilePath, err)
 	}
 
 	logger.Debug("Table repair task validated and prepared successfully.")
@@ -883,7 +877,7 @@ func (t *TableRepairTask) runFixNulls(startTime time.Time) error {
 		if err := t.ensurePool(nodeName); err != nil {
 			return t.finishRepair(startTime, totalOps, []string{err.Error()})
 		}
-		colTypes, _, err := t.getColTypesForNode(nodeName)
+		colTypes, err := t.castTypesOf(nodeName)
 		if err != nil {
 			return t.finishRepair(startTime, totalOps, []string{err.Error()})
 		}
@@ -954,62 +948,37 @@ func (t *TableRepairTask) runFixNulls(startTime time.Time) error {
 func (t *TableRepairTask) buildNullUpdates() (map[string]map[string]*nullUpdate, error) {
 	updatesByNode := make(map[string]map[string]*nullUpdate)
 
-	for nodePair, diffs := range t.RawDiffs.NodeDiffs {
-		nodes := strings.Split(nodePair, "/")
-		if len(nodes) != 2 {
-			logger.Warn("Warning: Invalid node pair key '%s', skipping", nodePair)
-			continue
-		}
-		node1Name, node2Name := nodes[0], nodes[1]
-
-		node1Rows := diffs.Rows[node1Name]
-		node2Rows := diffs.Rows[node2Name]
-
-		node1Index, err := buildRowIndex(node1Rows, t.Key)
-		if err != nil {
-			return nil, fmt.Errorf("failed to index rows for %s: %w", node1Name, err)
-		}
-		node2Index, err := buildRowIndex(node2Rows, t.Key)
-		if err != nil {
-			return nil, fmt.Errorf("failed to index rows for %s: %w", node2Name, err)
-		}
-
-		// Build pk -> OrderedMap lookups for source row retrieval (only needed for preserve-origin)
-		var node1RawByPK, node2RawByPK map[string]types.OrderedMap
-		if t.PreserveOrigin {
-			node1RawByPK = make(map[string]types.OrderedMap, len(node1Rows))
-			for _, r := range node1Rows {
-				if pk, err := utils.StringifyOrderedMapKey(r, t.Key); err == nil {
-					node1RawByPK[pk] = r
-				}
-			}
-			node2RawByPK = make(map[string]types.OrderedMap, len(node2Rows))
-			for _, r := range node2Rows {
-				if pk, err := utils.StringifyOrderedMapKey(r, t.Key); err == nil {
-					node2RawByPK[pk] = r
-				}
-			}
-		}
-
-		for pkKey, row1 := range node1Index {
-			row2, ok := node2Index[pkKey]
-			if !ok {
+	for _, p := range t.diff.pairs {
+		for _, e := range p.entries {
+			// Only a row that both nodes have can have a NULL on one node
+			// and a value on the other.
+			if e.row1 == nil || e.row2 == nil {
 				continue
+			}
+			row1, err := newRowData(e.key, e.row1, t.Key)
+			if err != nil {
+				return nil, fmt.Errorf("row of %s: %w", p.node1, err)
+			}
+			row2, err := newRowData(e.key, e.row2, t.Key)
+			if err != nil {
+				return nil, fmt.Errorf("row of %s: %w", p.node2, err)
+			}
+			// The source row of a fix is needed only for its origin.
+			var src1, src2 types.OrderedMap
+			if t.PreserveOrigin {
+				src1, src2 = e.row1, e.row2
 			}
 
 			for _, col := range t.Cols {
-				isPk := slices.Contains(t.Key, col)
-				if isPk {
+				if slices.Contains(t.Key, col) {
 					continue
 				}
-
 				val1 := row1.data[col]
 				val2 := row2.data[col]
-
 				if val1 == nil && val2 != nil {
-					addNullUpdate(updatesByNode, node1Name, row1, col, val2, node2RawByPK[pkKey])
+					addNullUpdate(updatesByNode, p.node1, row1, col, val2, src2)
 				} else if val2 == nil && val1 != nil {
-					addNullUpdate(updatesByNode, node2Name, row2, col, val1, node1RawByPK[pkKey])
+					addNullUpdate(updatesByNode, p.node2, row2, col, val1, src1)
 				}
 			}
 		}
@@ -1018,35 +987,21 @@ func (t *TableRepairTask) buildNullUpdates() (map[string]map[string]*nullUpdate,
 	return updatesByNode, nil
 }
 
-func buildRowIndex(rows []types.OrderedMap, keyCols []string) (map[string]rowData, error) {
-	index := make(map[string]rowData, len(rows))
-	for _, row := range rows {
-		rowMap := utils.StripSpockMetadata(utils.OrderedMapToMap(row))
-
-		pkVals := make([]any, len(keyCols))
-		pkMap := make(map[string]any, len(keyCols))
-		for i, key := range keyCols {
-			val, ok := rowMap[key]
-			if !ok {
-				return nil, fmt.Errorf("primary key column %s not found in row", key)
-			}
-			pkVals[i] = val
-			pkMap[key] = val
+// newRowData returns the row of a diff entry without its spock metadata,
+// with its key.
+func newRowData(key string, row types.OrderedMap, keyCols []string) (rowData, error) {
+	rowMap := utils.StripSpockMetadata(utils.OrderedMapToMap(row))
+	pkVals := make([]any, len(keyCols))
+	pkMap := make(map[string]any, len(keyCols))
+	for i, col := range keyCols {
+		val, ok := rowMap[col]
+		if !ok {
+			return rowData{}, fmt.Errorf("primary key column %s not found in row", col)
 		}
-
-		pkKey, err := utils.StringifyKey(rowMap, keyCols)
-		if err != nil {
-			return nil, fmt.Errorf("failed to stringify primary key: %w", err)
-		}
-
-		index[pkKey] = rowData{
-			data:     rowMap,
-			pkValues: pkVals,
-			pkMap:    pkMap,
-			pkKey:    pkKey,
-		}
+		pkVals[i] = val
+		pkMap[col] = val
 	}
-	return index, nil
+	return rowData{data: rowMap, pkValues: pkVals, pkMap: pkMap, pkKey: key}, nil
 }
 
 func addNullUpdate(updates map[string]map[string]*nullUpdate, nodeName string, row rowData, col string, value any, sourceRow types.OrderedMap) {
@@ -1160,38 +1115,43 @@ func (t *TableRepairTask) populateFixNullsReport(nodeName string, nodeUpdates ma
 	t.report.Changes[nodeName].(map[string]any)[field] = rows
 }
 
-func convertValueForType(val any, colType string) (any, error) {
-	if val == nil {
-		return nil, nil
+// castTypesOf returns the cast types of the columns of the table on
+// nodeName: the types that a row operation casts a text value to.
+func (t *TableRepairTask) castTypesOf(nodeName string) (map[string]string, error) {
+	if types, ok := t.castTypes[nodeName]; ok {
+		return types, nil
 	}
-
-	if tVal, ok := val.(time.Time); ok {
-		// For "timestamp without time zone" columns, wrap in pgxv5type.Timestamp
-		// so pgx sends the value as "timestamp" instead of "timestamptz". This prevents
-		// PostgreSQL from applying a session-timezone conversion.
-		lower := strings.ToLower(colType)
-		if lower == "timestamp without time zone" || (strings.HasPrefix(lower, "timestamp") && !strings.Contains(lower, "with time zone")) {
-			return pgxv5type.Timestamp{Time: tVal, Valid: true}, nil
-		}
-		return tVal, nil
-	}
-
-	return utils.ConvertToPgxType(val, colType)
+	return nil, fmt.Errorf("could not find cast types for node %s", nodeName)
 }
 
-// getColTypesForNode returns the column types of the table on nodeName and
-// the host:port key of the node.
-func (t *TableRepairTask) getColTypesForNode(nodeName string) (map[string]string, string, error) {
-	for hostPort, mappedName := range t.HostMap {
-		if mappedName == nodeName {
-			if colTypes, ok := t.ColTypes[hostPort]; ok {
-				return colTypes, hostPort, nil
-			}
-			return nil, hostPort, fmt.Errorf("column types for target node '%s' (key: %s) not found", nodeName, hostPort)
+// newComparer returns the comparer of the values of a repair plan for the
+// rows of the node pair p. It compares on the first node of the pair that
+// repair could connect to, with the types of that node; the checks of the
+// task have made sure that the types are the same on every node. A pair
+// without such a node gets a comparer that fails only when a rule needs a
+// comparison, so a plan without comparisons still runs.
+func (t *TableRepairTask) newComparer(p *diffPair) *comparer {
+	node := ""
+	var types map[string]string
+	for _, n := range []string{p.node1, p.node2} {
+		if t.compareValues == nil && t.Pools[n] == nil {
+			continue
+		}
+		if nt, err := t.castTypesOf(n); err == nil {
+			node, types = n, nt
+			break
 		}
 	}
-
-	return nil, "", fmt.Errorf("could not find host:port key for target node %s to get col types", nodeName)
+	run := func(cmps []textComparison) ([]bool, error) {
+		if node == "" {
+			return nil, fmt.Errorf("cannot compare the values of %s: no connection to %s or %s", p.name, p.node1, p.node2)
+		}
+		if t.compareValues != nil {
+			return t.compareValues(node, cmps)
+		}
+		return runComparisons(t.Ctx, t.Pools[node], cmps)
+	}
+	return newComparer(types, run)
 }
 
 // runUnidirectionalRepair applies on each node the row operations of the
@@ -1220,7 +1180,7 @@ func (t *TableRepairTask) runUnidirectionalRepair(startTime time.Time) error {
 		if err := t.ensurePool(nodeName); err != nil {
 			return t.finishRepair(startTime, totalOps, []string{err.Error()})
 		}
-		colTypes, _, err := t.getColTypesForNode(nodeName)
+		colTypes, err := t.castTypesOf(nodeName)
 		if err != nil {
 			return t.finishRepair(startTime, totalOps, []string{err.Error()})
 		}
@@ -1392,49 +1352,19 @@ func (t *TableRepairTask) runBidirectionalRepair() error {
 	var repairErrors []string
 
 pairs:
-	for nodePairKey, diffs := range t.RawDiffs.NodeDiffs {
-		nodes := strings.Split(nodePairKey, "/")
-		if len(nodes) != 2 {
-			logger.Warn("Warning: Invalid node pair key '%s', skipping", nodePairKey)
-			continue
-		}
-		node1Name, node2Name := nodes[0], nodes[1]
+	for _, p := range t.diff.pairs {
+		nodePairKey, node1Name, node2Name := p.name, p.node1, p.node2
 		logger.Info("Processing node pair: %s/%s", node1Name, node2Name)
 
-		node1Rows := diffs.Rows[node1Name]
-		node2Rows := diffs.Rows[node2Name]
-
-		node1RowsByPKey := make(map[string]types.OrderedMap)
-		for _, row := range node1Rows {
-			pkeyStr, err := utils.StringifyOrderedMapKey(row, t.Key)
-			if err != nil {
-				repairErrors = append(repairErrors, fmt.Sprintf("stringify pkey failed for %s: %v", node1Name, err))
-				continue
-			}
-			node1RowsByPKey[pkeyStr] = row
-		}
-
-		node2RowsByPKey := make(map[string]types.OrderedMap)
-		for _, row := range node2Rows {
-			pkeyStr, err := utils.StringifyOrderedMapKey(row, t.Key)
-			if err != nil {
-				repairErrors = append(repairErrors, fmt.Sprintf("stringify pkey failed for %s: %v", node2Name, err))
-				continue
-			}
-			node2RowsByPKey[pkeyStr] = row
-		}
-
+		// A row that only one node has is inserted on the other node.
 		insertsForNode1 := make(map[string]map[string]any)
-		for pkey, row := range node2RowsByPKey {
-			if _, exists := node1RowsByPKey[pkey]; !exists {
-				insertsForNode1[pkey] = utils.StripSpockMetadata(utils.OrderedMapToMap(row))
-			}
-		}
-
 		insertsForNode2 := make(map[string]map[string]any)
-		for pkey, row := range node1RowsByPKey {
-			if _, exists := node2RowsByPKey[pkey]; !exists {
-				insertsForNode2[pkey] = utils.StripSpockMetadata(utils.OrderedMapToMap(row))
+		for _, e := range p.entries {
+			switch {
+			case e.row1 == nil:
+				insertsForNode1[e.key] = utils.StripSpockMetadata(utils.OrderedMapToMap(e.row2))
+			case e.row2 == nil:
+				insertsForNode2[e.key] = utils.StripSpockMetadata(utils.OrderedMapToMap(e.row1))
 			}
 		}
 
@@ -1487,45 +1417,21 @@ func (t *TableRepairTask) performBirectionalInserts(nodeName string, inserts map
 		return nil, fmt.Errorf("no connection pool for node %s", nodeName)
 	}
 
-	targetNodeHostPortKey := ""
-	for hostPort, mappedName := range t.HostMap {
-		if mappedName == nodeName {
-			targetNodeHostPortKey = hostPort
-			break
-		}
-	}
-	if targetNodeHostPortKey == "" {
-		return nil, fmt.Errorf("could not find host:port key for target node %s", nodeName)
-	}
-	targetNodeColTypes, ok := t.ColTypes[targetNodeHostPortKey]
-	if !ok {
-		return nil, fmt.Errorf("column types for target node '%s' (key: %s) not found", nodeName, targetNodeHostPortKey)
+	targetNodeColTypes, err := t.castTypesOf(nodeName)
+	if err != nil {
+		return nil, err
 	}
 
 	// Extract origin information from source rows for bidirectional repair
 	var originInfoMap map[string]*rowOriginInfo
 	if t.PreserveOrigin {
 		originInfoMap = make(map[string]*rowOriginInfo)
-		for nodePairKey, diffs := range t.RawDiffs.NodeDiffs {
-			nodes := strings.Split(nodePairKey, "/")
-			if len(nodes) != 2 {
+		for _, p := range t.diff.pairs {
+			sourceNode, ok := p.other(nodeName)
+			if !ok {
 				continue
 			}
-			var sourceNode string
-			if nodes[0] == nodeName {
-				sourceNode = nodes[1]
-			} else if nodes[1] == nodeName {
-				sourceNode = nodes[0]
-			} else {
-				continue
-			}
-
-			sourceRows := diffs.Rows[sourceNode]
-			for _, row := range sourceRows {
-				pkeyStr, err := utils.StringifyOrderedMapKey(row, t.Key)
-				if err != nil {
-					continue
-				}
+			for pkeyStr, row := range p.rowsOf(sourceNode) {
 				if _, exists := inserts[pkeyStr]; exists {
 					if originInfo := extractOriginInfoFromRow(row); originInfo != nil {
 						originInfoMap[pkeyStr] = originInfo
@@ -1747,19 +1653,9 @@ func (t *TableRepairTask) extractOriginInfoForNode(nodeName string, nodeUpserts 
 	}
 	originInfoMap := make(map[string]*rowOriginInfo)
 	logger.Debug("preserve-origin: extracting origin info for %d upserts on %s (SoT=%s)", len(nodeUpserts), nodeName, t.SourceOfTruth)
-	for nodePair, diffs := range t.RawDiffs.NodeDiffs {
-		nodes := strings.Split(nodePair, "/")
-		if len(nodes) != 2 {
-			continue
-		}
-		node1Name, node2Name := nodes[0], nodes[1]
-		for _, sourceNode := range []string{node1Name, node2Name} {
-			sourceRows := diffs.Rows[sourceNode]
-			for _, row := range sourceRows {
-				pkeyStr, err := utils.StringifyOrderedMapKey(row, t.Key)
-				if err != nil {
-					continue
-				}
+	for _, p := range t.diff.pairs {
+		for _, sourceNode := range []string{p.node1, p.node2} {
+			for pkeyStr, row := range p.rowsOf(sourceNode) {
 				if _, isBeingUpserted := nodeUpserts[pkeyStr]; !isBeingUpserted {
 					continue
 				}
@@ -1792,45 +1688,16 @@ func getDryRunOutput(task *TableRepairTask) (string, error) {
 		// TODO: Need to ensure that no more than 2 nodes are specified for bidirectional repair
 		// Or we just leave it as a footgun, but warn in the docs.
 		anyInserts := false
-		for nodePairKey, diffs := range task.RawDiffs.NodeDiffs {
-			nodes := strings.Split(nodePairKey, "/")
-			if len(nodes) != 2 {
-				continue
-			}
-			node1Name, node2Name := nodes[0], nodes[1]
-
-			node1Rows := diffs.Rows[node1Name]
-			node2Rows := diffs.Rows[node2Name]
-
-			node1RowsByPKey := make(map[string]types.OrderedMap)
-			for _, row := range node1Rows {
-				pkeyStr, err := utils.StringifyOrderedMapKey(row, task.Key)
-				if err != nil {
-					return "", fmt.Errorf("error stringifying pkey for row on %s: %w", node1Name, err)
-				}
-				node1RowsByPKey[pkeyStr] = row
-			}
-
-			node2RowsByPKey := make(map[string]types.OrderedMap)
-			for _, row := range node2Rows {
-				pkeyStr, err := utils.StringifyOrderedMapKey(row, task.Key)
-				if err != nil {
-					return "", fmt.Errorf("error stringifying pkey for row on %s: %w", node2Name, err)
-				}
-				node2RowsByPKey[pkeyStr] = row
-			}
-
+		for _, p := range task.diff.pairs {
+			nodePairKey, node1Name, node2Name := p.name, p.node1, p.node2
 			insertsForNode1 := make(map[string]types.OrderedMap)
-			for pkey, row := range node2RowsByPKey {
-				if _, exists := node1RowsByPKey[pkey]; !exists {
-					insertsForNode1[pkey] = row
-				}
-			}
-
 			insertsForNode2 := make(map[string]types.OrderedMap)
-			for pkey, row := range node1RowsByPKey {
-				if _, exists := node2RowsByPKey[pkey]; !exists {
-					insertsForNode2[pkey] = row
+			for _, e := range p.entries {
+				switch {
+				case e.row1 == nil:
+					insertsForNode1[e.key] = e.row2
+				case e.row2 == nil:
+					insertsForNode2[e.key] = e.row1
 				}
 			}
 
@@ -1980,11 +1847,12 @@ func calculateRepairSets(task *TableRepairTask) (sets *repairSets, skippedDelete
 	return sets, skippedDeletes, nil
 }
 
-// calculateRepairSetsWithSourceOfTruth matches the rows of each node pair
-// with the source of truth by key text. A row of the source that the target
-// also has is an update, a row of the source only is an insert, and a row of
-// the target only is a delete. Keys that the nodes hold as equal but print in
-// a different way are one insert and one delete of the same row.
+// calculateRepairSetsWithSourceOfTruth turns each entry of a node pair with
+// the source of truth into a row operation on the other node. A row that
+// both nodes have is an update, a row of the source only is an insert, and a
+// row of the target only is a delete. Keys that the nodes hold as equal but
+// print in a different way are two entries, so they give one insert and one
+// delete of the same row.
 func calculateRepairSetsWithSourceOfTruth(task *TableRepairTask) (*repairSets, error) {
 	sets := newRepairSets()
 
@@ -1992,51 +1860,20 @@ func calculateRepairSetsWithSourceOfTruth(task *TableRepairTask) (*repairSets, e
 		return nil, fmt.Errorf("source_of_truth must be set to calculate repair sets")
 	}
 
-	for nodePair, diffs := range task.RawDiffs.NodeDiffs {
-		nodes := strings.Split(nodePair, "/")
-		node1Name := nodes[0]
-		node2Name := nodes[1]
-
-		var sourceRows []types.OrderedMap
-		var targetRows []types.OrderedMap
-		var targetNode string
-
-		if node1Name == task.SourceOfTruth {
-			sourceRows = diffs.Rows[node1Name]
-			targetRows = diffs.Rows[node2Name]
-			targetNode = node2Name
-		} else if node2Name == task.SourceOfTruth {
-			sourceRows = diffs.Rows[node2Name]
-			targetRows = diffs.Rows[node1Name]
-			targetNode = node1Name
-		} else {
+	for _, p := range task.diff.pairs {
+		targetNode, ok := p.other(task.SourceOfTruth)
+		if !ok {
 			continue
 		}
-
-		targetRowsByPKey := make(map[string]map[string]any)
-		for _, row := range targetRows {
-			pkeyStr, err := utils.StringifyOrderedMapKey(row, task.Key)
-			if err != nil {
-				return nil, fmt.Errorf("error stringifying pkey for target row on %s: %w", targetNode, err)
+		for _, e := range p.entries {
+			source, target := e.row1, e.row2
+			if task.SourceOfTruth == p.node2 {
+				source, target = e.row2, e.row1
 			}
-			targetRowsByPKey[pkeyStr] = utils.StripSpockMetadata(utils.OrderedMapToMap(row))
-		}
-
-		sourceRowsByPKey := make(map[string]map[string]any)
-		for _, row := range sourceRows {
-			pkeyStr, err := utils.StringifyOrderedMapKey(row, task.Key)
-			if err != nil {
-				return nil, fmt.Errorf("error stringifying pkey for source row on %s: %w", task.SourceOfTruth, err)
-			}
-			cleanRow := utils.StripSpockMetadata(utils.OrderedMapToMap(row))
-			sourceRowsByPKey[pkeyStr] = cleanRow
-			_, onTarget := targetRowsByPKey[pkeyStr]
-			sets.write(targetNode, pkeyStr, cleanRow, onTarget)
-		}
-
-		for pkeyStr, row := range targetRowsByPKey {
-			if _, existsInSource := sourceRowsByPKey[pkeyStr]; !existsInSource {
-				sets.remove(targetNode, pkeyStr, row)
+			if source != nil {
+				sets.write(targetNode, e.key, utils.StripSpockMetadata(utils.OrderedMapToMap(source)), target != nil)
+			} else {
+				sets.remove(targetNode, e.key, utils.StripSpockMetadata(utils.OrderedMapToMap(target)))
 			}
 		}
 	}

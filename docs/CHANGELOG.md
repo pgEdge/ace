@@ -50,6 +50,67 @@ All notable changes to ACE will be captured in this document. This project follo
   operations on one node is not changed there; it is reported as a
   failed row with the operation `conflict`.
 
+- **Every value of a diff is the text that the server prints for it.**
+  `table-diff` and `mtree table-diff` read the rows that differ in the
+  text format of the protocol, and keep each value as the output of its
+  type. Every value of the table in the JSON report and in the block
+  files is a JSON string, or `null` for a NULL; a NULL and an empty
+  string stay different. Scripts that read numbers or booleans from the
+  report must parse the strings. The report format version is 3.
+  `table-repair` sends each value as this text and the server reads it
+  with the type of the column, without the type modifier, so a value is
+  never converted to a Go type and back: `numeric` `NaN` and
+  `Infinity`, `-0`, timestamps and dates with `infinity`, `bytea`,
+  arrays, ranges and the types of extensions reach the target as the
+  source printed them. A key finds a row only when the row prints its
+  key as this text. `--fix-nulls` fills a NULL with the text of the
+  other node.
+- **A repair plan gives keys as the server prints them.** The keys of
+  `pk_in.equals` and `row_overrides` and the values of `custom_row` are
+  the text of the YAML scalars: `1.50`, `007` and `true` are not
+  converted. A key matches a row when the texts are equal, byte for
+  byte. A `pk_in` range, the comparisons of `when` and `pick_freshest`
+  are computed on a node with the type of the column, so `<` on a
+  timestamp or a `numeric` column compares timestamps or numbers. A
+  `when` comparison of two literals is refused. The HTML report writes
+  the key text into the plans that it builds.
+- **A `custom` action of a repair plan cannot change the primary key.**
+  If `custom_row` sets a key column, the text of its value must be equal
+  to the key text of the diff row; a template such as `{{n1.id}}` gives
+  this text. Otherwise the plan is refused before any write. Before, the
+  row was written with the key of `custom_row`: repair could write over
+  another row with that key or add a new row, and the row of the diff
+  stayed as it was.
+- **`table-rerun` reads and writes a diff result directory.** It reads
+  the keys from the result directory of the diff, reads the rows of
+  these keys again by key text, compares them by row hash, and writes a
+  new result directory with the JSON report next to it, named as a
+  `table-diff` result. Before, it wrote a JSON file named
+  `<schema>_<table>_rerun-diffs-<timestamp>.json`. The rows are read with
+  the filter of the diff from its manifest (`--table-filter`,
+  `--against-origin`, `--until`); before, the rerun read them without it,
+  so a row outside the filter on one node turned into a changed row.
+  `mtree table-diff` now writes its `--until` filter into the summary.
+- **`table-repair` reads the diff result directory.** `--diff-file`, and
+  `diff_file` of the HTTP API, take the result directory or the JSON
+  report next to it, as `diff-report` does. Repair reads the entries from
+  the block files of the directory. An entry says whether a row is on
+  both nodes or on one node only, so repair no longer matches the rows of
+  the two nodes by key. A change made by hand in the JSON report has no
+  effect, and a JSON report without its directory cannot be repaired: run
+  the diff again. A result with more than one entry for a key of a node
+  pair, as a diff of an inheritance tree can give, is refused: repair
+  cannot tell such rows apart.
+- **A `numeric` value with other trailing zeros is a difference.** The
+  row hash no longer wraps a `numeric` column in `trim_scale()`, so `1.5`
+  and `1.50` give different hashes: the server prints them in a different
+  way. A diff report keeps a value with its scale, as the server prints
+  it, and repair writes it so. A `numeric` primary key stored as `1.50` on
+  one node and as `1.5` on the other is two rows, each on one node only.
+  A repair from a source of truth deletes the key of the target and then
+  inserts the key of the source, as for a `float` key `-0` and `0`. The
+  internal Merkle tree hash version is now 5,
+  so the next `mtree update` computes all leaf hashes again.
 - **`max_diff_rows` is one approximate limit for all node pairs of a run.**
   `table-diff` and `mtree table-diff` applied it to each node pair; now the
   differing rows of all pairs count against one limit. A block is compared
@@ -82,6 +143,10 @@ All notable changes to ACE will be captured in this document. This project follo
   task may use, or to `0` to let cutting and hashing use 8. The same
   applies to `--max-connections` in scripts, and to `max_connections` in
   HTTP requests and in scheduled jobs.
+- **Run the diff again before a repair or a rerun.** `table-repair` and
+  `table-rerun` do not read a diff report of an earlier ACE. A table with
+  a `numeric` column can show new differences: values that differ only in
+  their trailing zeros.
 - `compare_unit_size` (`--compare-unit-size` / `-u`, the HTTP API field,
   the scheduler job argument and `table_diff.compare_unit_size` in the
   settings file) is no longer used. ACE still accepts it, ignores it and
@@ -130,12 +195,9 @@ All notable changes to ACE will be captured in this document. This project follo
   If a diff of very wide rows fails with a block timeout after the
   upgrade, raise `table_diff.block_timeout` or set it to `0`.
 - Diff reports have a `format_version` field. `table-repair` and
-  `table-rerun` refuse a report with a version they do not know. A report
-  from an earlier ACE has no such field and is read as version 0.
-- `table-repair` and `table-rerun` read the numeric values of a version 0
-  report in the current form, without trailing zeros. The stale check of a
-  repair plan then finds their keys on the target, and the rerun counts a
-  row that the report holds under two keys once.
+  `table-rerun` refuse a report of another version: a report of a newer
+  ACE, and a report of an earlier ACE, which has no such field. Run the
+  diff again to get a report that they can read.
 - **A number of connections for each node.** The new `max_connections`
   section of `ace.yaml` sets a default and optional values for single
   nodes, named `<cluster>.<node>`:
@@ -189,12 +251,6 @@ All notable changes to ACE will be captured in this document. This project follo
   it, or to `-1` to leave the server's setting in place. A server that does
   not support the setting (before PostgreSQL 14, or on Windows) accepts the
   connection without it.
-- **A numeric value in a diff report has no trailing zeros.** The row fetch
-  now reads a numeric column with `trim_scale()`, as the row hash does, so
-  the report shows `7.5`, not `7.50`. Repair writes this form: a `numeric`
-  column without a fixed scale gets the value without the trailing zeros on
-  the target. A column with a fixed scale, such as `numeric(10,2)`, is not
-  affected.
 - **`table-diff` opens its connections at the start and keeps them.** It
   opens the connections for cutting and hashing to every node before any
   other work, and the pool no longer closes them because of their age or
@@ -225,6 +281,10 @@ All notable changes to ACE will be captured in this document. This project follo
   key.
 
 ### Fixed
+- **`coalesce_priority` of a repair plan took the value of the last node.**
+  With `coalesce_priority: [n1, n2]`, a column that was not NULL on both
+  nodes got the value of `n2`. Now the first node in the list that has a
+  value gives it.
 - **A key that two nodes print in a different way was reported as a
   changed row.** For example, `-0` and `0` in a `float8` key, or
   `'Alice'` and `'alice'` in a `citext` key: the server holds them as
@@ -262,18 +322,10 @@ All notable changes to ACE will be captured in this document. This project follo
   keys.** With `allow_stale_repairs: false`, repair overwrote such a row
   even when it had changed after the diff. The check now reads the keys in
   the form of the report.
-- **A numeric primary key stored with another scale on two nodes was
-  reported as two rows.** The diff reported the row `1.50` on one node and
-  the row `1.5` on the other as a row missing on each node, so a repair plan
-  applied the rules for missing rows to them, for example a `delete` rule.
-  Now they are one row.
 - **`table-diff` and the mtree commands failed on a column of an enum whose
   name starts with `numeric` or `decimal`.** ACE took such a type for a
   numeric type and wrapped the column in `trim_scale()`, which does not
-  exist for it. Now only `numeric` and `decimal` themselves are numeric
-  types. A column of a domain over numeric whose name starts with these words
-  is not wrapped in `trim_scale()` any more, so a Merkle tree of such a table
-  must be built again.
+  exist for it. ACE no longer wraps any column in `trim_scale()`.
 - **A slow node no longer makes `table-diff` slow on the other nodes.**
   The hash workers of all nodes took tasks from one queue, and a worker
   that waited for a busy node kept its slot, so the tasks of a node with

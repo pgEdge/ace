@@ -17,8 +17,6 @@ import (
 	"testing"
 	"text/template"
 	"time"
-
-	"github.com/stretchr/testify/require"
 )
 
 type mockRow struct {
@@ -164,7 +162,6 @@ func TestBlockHashSQL(t *testing.T) {
 		table             string
 		primaryKeyCols    []string
 		allCols           []string
-		colTypes          map[string]string
 		includeLower      bool
 		includeUpper      bool
 		filter            string
@@ -178,7 +175,6 @@ func TestBlockHashSQL(t *testing.T) {
 			table:          "events",
 			primaryKeyCols: []string{"event_id"},
 			allCols:        nil,
-			colTypes:       nil,
 			includeLower:   true,
 			includeUpper:   true,
 			filter:         "",
@@ -190,7 +186,6 @@ func TestBlockHashSQL(t *testing.T) {
 			table:          "events",
 			primaryKeyCols: []string{"event_id"},
 			allCols:        []string{"event_id", "name", "amount"},
-			colTypes:       map[string]string{"event_id": "integer", "name": "text", "amount": "numeric(10,2)"},
 			includeLower:   true,
 			includeUpper:   true,
 			filter:         "",
@@ -198,7 +193,7 @@ func TestBlockHashSQL(t *testing.T) {
 				`FROM "public"."events" AS _tbl_`,
 				`WHERE "event_id" >= $1 AND "event_id" < $2`,
 				`SELECT encode(` + BlockHashAggExpr + `, 'hex')`,
-				`SELECT ('x' || encode(sha256(convert_to(ROW(_tbl_."event_id", _tbl_."name", trim_scale(_tbl_."amount"))::text, 'UTF8')), 'hex'))::bit(256) AS _rh`,
+				`SELECT ('x' || encode(sha256(convert_to(ROW(_tbl_."event_id", _tbl_."name", _tbl_."amount")::text, 'UTF8')), 'hex'))::bit(256) AS _rh`,
 				`OFFSET 0`,
 			},
 			wantErr: false,
@@ -209,14 +204,13 @@ func TestBlockHashSQL(t *testing.T) {
 			table:          "line_items",
 			primaryKeyCols: []string{"order_id", "item_seq"},
 			allCols:        []string{"order_id", "item_seq", "price"},
-			colTypes:       map[string]string{"order_id": "integer", "item_seq": "integer", "price": "decimal"},
 			includeLower:   true,
 			includeUpper:   true,
 			filter:         "",
 			wantQueryContains: []string{
 				`FROM "commerce"."line_items" AS _tbl_`,
 				`WHERE ROW("order_id", "item_seq") >= ROW($1, $2) AND ROW("order_id", "item_seq") < ROW($3, $4)`,
-				`('x' || encode(sha256(convert_to(ROW(_tbl_."order_id", _tbl_."item_seq", trim_scale(_tbl_."price"))::text, 'UTF8')), 'hex'))::bit(256)`,
+				`('x' || encode(sha256(convert_to(ROW(_tbl_."order_id", _tbl_."item_seq", _tbl_."price")::text, 'UTF8')), 'hex'))::bit(256)`,
 			},
 			wantErr: false,
 		},
@@ -270,7 +264,7 @@ func TestBlockHashSQL(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			query, err := BlockHashSQL(tt.schema, tt.table, tt.primaryKeyCols, "TD_BLOCK_HASH" /* mode */, tt.includeLower, tt.includeUpper, tt.filter, tt.allCols, tt.colTypes)
+			query, err := BlockHashSQL(tt.schema, tt.table, tt.primaryKeyCols, "TD_BLOCK_HASH" /* mode */, tt.includeLower, tt.includeUpper, tt.filter, tt.allCols)
 
 			if (err != nil) != tt.wantErr {
 				t.Errorf("BlockHashSQL() error = %v, wantErr %v", err, tt.wantErr)
@@ -297,7 +291,7 @@ func TestBlockHashSQL(t *testing.T) {
 
 func TestBlockHashSQLLeafMode(t *testing.T) {
 	query, err := BlockHashSQL("public", "events", []string{"event_id"}, "MTREE_LEAF_HASH",
-		true, false, "", []string{"event_id", "name"}, nil)
+		true, false, "", []string{"event_id", "name"})
 	if err != nil {
 		t.Fatalf("BlockHashSQL() error = %v", err)
 	}
@@ -325,13 +319,12 @@ func TestBlockHashSQLLeafMode(t *testing.T) {
 // four sums, and it needs no row order.
 func TestBlockHashSQLHasNoWholeBlockString(t *testing.T) {
 	cols := []string{"id", "name", "amount"}
-	colTypes := map[string]string{"id": "integer", "name": "text", "amount": "numeric"}
 	for _, mode := range []string{"TD_BLOCK_HASH", "MTREE_LEAF_HASH"} {
 		for _, bounds := range []struct{ lower, upper bool }{{false, false}, {true, false}, {false, true}, {true, true}} {
 			for _, pk := range [][]string{{"id"}, {"id", "name"}} {
 				name := fmt.Sprintf("%s/lower=%v/upper=%v/pk=%d", mode, bounds.lower, bounds.upper, len(pk))
 				t.Run(name, func(t *testing.T) {
-					query, err := BlockHashSQL("public", "t", pk, mode, bounds.lower, bounds.upper, `"amount" > 0`, cols, colTypes)
+					query, err := BlockHashSQL("public", "t", pk, mode, bounds.lower, bounds.upper, `"amount" > 0`, cols)
 					if err != nil {
 						t.Fatalf("BlockHashSQL() error = %v", err)
 					}
@@ -350,36 +343,35 @@ func TestBlockHashSQLHasNoWholeBlockString(t *testing.T) {
 }
 
 func TestRowHashExpr(t *testing.T) {
-	mustExpr := func(t *testing.T, alias string, cols []string, colTypes map[string]string) string {
+	mustExpr := func(t *testing.T, alias string, cols []string) string {
 		t.Helper()
-		got, err := RowHashExpr(alias, cols, colTypes)
+		got, err := RowHashExpr(alias, cols)
 		if err != nil {
 			t.Fatalf("RowHashExpr() error = %v", err)
 		}
 		return got
 	}
 
-	t.Run("qualified columns and trim_scale", func(t *testing.T) {
-		got := mustExpr(t, "_tbl_", []string{"id", "Name", "price"},
-			map[string]string{"id": "integer", "Name": "text", "price": "numeric(10,2)"})
-		want := `sha256(convert_to(ROW(_tbl_."id", _tbl_."Name", trim_scale(_tbl_."price"))::text, 'UTF8'))`
+	t.Run("qualified columns, numeric as it is", func(t *testing.T) {
+		got := mustExpr(t, "_tbl_", []string{"id", "Name", "price"})
+		want := `sha256(convert_to(ROW(_tbl_."id", _tbl_."Name", _tbl_."price")::text, 'UTF8'))`
 		if got != want {
 			t.Errorf("RowHashExpr() = %q, want %q", got, want)
 		}
 	})
 
 	t.Run("empty alias gives unqualified columns", func(t *testing.T) {
-		got := mustExpr(t, "", []string{"id", "debit"}, map[string]string{"debit": "DECIMAL"})
-		want := `sha256(convert_to(ROW("id", trim_scale("debit"))::text, 'UTF8'))`
+		got := mustExpr(t, "", []string{"id", "debit"})
+		want := `sha256(convert_to(ROW("id", "debit")::text, 'UTF8'))`
 		if got != want {
 			t.Errorf("RowHashExpr() = %q, want %q", got, want)
 		}
 	})
 
 	t.Run("no columns is an error", func(t *testing.T) {
-		// The whole-row value would be a second encoding: no trim_scale,
-		// and the physical column order instead of the column list.
-		if got, err := RowHashExpr("_tbl_", nil, nil); err == nil {
+		// The whole-row value would list the columns in the physical order
+		// instead of the order of the column list.
+		if got, err := RowHashExpr("_tbl_", nil); err == nil {
 			t.Errorf("RowHashExpr() = %q, want an error", got)
 		}
 	})
@@ -387,7 +379,7 @@ func TestRowHashExpr(t *testing.T) {
 	t.Run("hash does not depend on encoding or byte order", func(t *testing.T) {
 		// convert_to makes the bytes UTF8 on every node; sha256 is defined
 		// on bytes, not on machine words.
-		got := mustExpr(t, "_tbl_", []string{"a"}, nil)
+		got := mustExpr(t, "_tbl_", []string{"a"})
 		for _, need := range []string{"convert_to(", "'UTF8'", "sha256("} {
 			if !strings.Contains(got, need) {
 				t.Errorf("RowHashExpr() = %q, want to contain %q", got, need)
@@ -401,19 +393,11 @@ func TestRowHashExpr(t *testing.T) {
 	t.Run("no NULL or separator handling in the encoding", func(t *testing.T) {
 		// ROW()::text keeps NULL and '' apart and quotes delimiters itself.
 		// COALESCE or a hand-made separator would bring the collisions back.
-		got := mustExpr(t, "_tbl_", []string{"a", "b"}, nil)
+		got := mustExpr(t, "_tbl_", []string{"a", "b"})
 		for _, bad := range []string{"COALESCE", "concat_ws", "'|'"} {
 			if strings.Contains(got, bad) {
 				t.Errorf("RowHashExpr() = %q, must not contain %q", got, bad)
 			}
-		}
-	})
-
-	t.Run("numeric array is not trimmed", func(t *testing.T) {
-		// trim_scale(numeric[]) does not exist.
-		got := mustExpr(t, "", []string{"id", "vals"}, map[string]string{"vals": "numeric(10,2)[]"})
-		if strings.Contains(got, "trim_scale") {
-			t.Errorf("RowHashExpr() = %q, must not trim an array", got)
 		}
 	})
 
@@ -424,7 +408,7 @@ func TestRowHashExpr(t *testing.T) {
 		for i := range cols {
 			cols[i] = fmt.Sprintf("col%d", i)
 		}
-		got := mustExpr(t, "_tbl_", cols, nil)
+		got := mustExpr(t, "_tbl_", cols)
 		if strings.Count(got, "ROW(") != 1 {
 			t.Errorf("expected one ROW() for 250 columns, got: %s", got)
 		}
@@ -438,24 +422,21 @@ func TestRowHashExpr(t *testing.T) {
 
 func TestColExpr(t *testing.T) {
 	tests := []struct {
-		alias, col, colType string
-		want                string
+		alias, col string
+		want       string
 	}{
-		{"", "id", "integer", `"id"`},
-		{"_tbl_", "id", "integer", `_tbl_."id"`},
-		{"", "Name", "text", `"Name"`},
-		{"", `we"ird`, "text", `"we""ird"`},
-		{"", "price", "numeric(10,2)", `trim_scale("price")`},
-		{"_tbl_", "price", "DECIMAL", `trim_scale(_tbl_."price")`},
-		// trim_scale has no array variant.
-		{"", "prices", "numeric[]", `"prices"`},
-		// Unknown type: the plain column.
-		{"", "c", "", `"c"`},
+		{"", "id", `"id"`},
+		{"_tbl_", "id", `_tbl_."id"`},
+		{"", "Name", `"Name"`},
+		{"", `we"ird`, `"we""ird"`},
+		// A numeric column is not wrapped in trim_scale(): 1.5 and 1.50
+		// are different values.
+		{"", "price", `"price"`},
 	}
 	for _, tt := range tests {
-		t.Run(tt.alias+"."+tt.col+":"+tt.colType, func(t *testing.T) {
-			if got := ColExpr(tt.alias, tt.col, tt.colType); got != tt.want {
-				t.Errorf("ColExpr(%q, %q, %q) = %q, want %q", tt.alias, tt.col, tt.colType, got, tt.want)
+		t.Run(tt.alias+"."+tt.col, func(t *testing.T) {
+			if got := ColExpr(tt.alias, tt.col); got != tt.want {
+				t.Errorf("ColExpr(%q, %q) = %q, want %q", tt.alias, tt.col, got, tt.want)
 			}
 		})
 	}
@@ -464,143 +445,17 @@ func TestColExpr(t *testing.T) {
 // The row hash must take each column in the same form as the row fetch.
 func TestRowHashExprUsesColExpr(t *testing.T) {
 	cols := []string{"id", "price", "prices", "Name"}
-	colTypes := map[string]string{"id": "integer", "price": "numeric", "prices": "numeric[]", "Name": "text"}
-	got, err := RowHashExpr("_tbl_", cols, colTypes)
+	got, err := RowHashExpr("_tbl_", cols)
 	if err != nil {
 		t.Fatalf("RowHashExpr() error = %v", err)
 	}
 	exprs := make([]string, len(cols))
 	for i, c := range cols {
-		exprs[i] = ColExpr("_tbl_", c, colTypes[c])
+		exprs[i] = ColExpr("_tbl_", c)
 	}
 	want := "sha256(convert_to(ROW(" + strings.Join(exprs, ", ") + ")::text, 'UTF8'))"
 	if got != want {
 		t.Errorf("RowHashExpr() = %q, want %q", got, want)
-	}
-}
-
-// Complex and unknown types are fetched as ::TEXT so their Postgres text form
-// round-trips through the diff report; known scalars stay native. A scalar
-// numeric is wrapped in trim_scale, as in the row hash.
-func TestSelectColExpr(t *testing.T) {
-	tests := []struct {
-		colType string
-		want    string
-	}{
-		{"integer", `"c"`},
-		{"timestamp without time zone", `"c"`},
-		{"timestamp(3) with time zone", `"c"`},
-		{"numeric(10,2)", `trim_scale("c") AS "c"`},
-		{"numeric", `trim_scale("c") AS "c"`},
-		{"numeric(10,2)[]", `"c"::TEXT AS "c"`},
-		{"date", `"c"`},
-		{"uuid", `"c"`},
-		{"integer[]", `"c"::TEXT AS "c"`},
-		{"jsonb", `"c"::TEXT AS "c"`},
-		{"bytea", `"c"::TEXT AS "c"`},
-		{"point", `"c"::TEXT AS "c"`},
-		{"int4range", `"c"::TEXT AS "c"`},
-		// "daterange" must not be mistaken for "date" (nor "datemultirange",
-		// nor a UDT that happens to share a scalar's name as a prefix).
-		{"daterange", `"c"::TEXT AS "c"`},
-		{"datemultirange", `"c"::TEXT AS "c"`},
-		{"date_status_enum", `"c"::TEXT AS "c"`},
-		{"mood_enum", `"c"::TEXT AS "c"`},
-		{"xml", `"c"::TEXT AS "c"`},
-		{"bit(8)", `"c"::TEXT AS "c"`},
-		{"inet", `"c"::TEXT AS "c"`},
-		{"time with time zone", `"c"::TEXT AS "c"`},
-	}
-	for _, tt := range tests {
-		t.Run(tt.colType, func(t *testing.T) {
-			require.Equal(t, tt.want, SelectColExpr("", "c", tt.colType))
-		})
-	}
-
-	// A qualified column must still give a result column with the name of the
-	// column, and the name must be quoted.
-	qualified := []struct {
-		colType string
-		want    string
-	}{
-		{"integer", `t."Name"`},
-		{"numeric", `trim_scale(t."Name") AS "Name"`},
-		{"jsonb", `t."Name"::TEXT AS "Name"`},
-	}
-	for _, tt := range qualified {
-		t.Run("qualified/"+tt.colType, func(t *testing.T) {
-			require.Equal(t, tt.want, SelectColExpr("t", "Name", tt.colType))
-		})
-	}
-}
-
-// The fetch must start from the expression of the row hash: a fetched value
-// is then the value that was hashed.
-func TestFetchColExprStartsFromColExpr(t *testing.T) {
-	for _, colType := range []string{"integer", "text", "numeric", "numeric(12,4)", "DECIMAL", "numeric[]", "jsonb", "inet", ""} {
-		t.Run(colType, func(t *testing.T) {
-			hashExpr := ColExpr("_tbl_", "c", colType)
-			require.True(t, strings.HasPrefix(FetchColExpr("_tbl_", "c", colType), hashExpr),
-				"FetchColExpr must start with %q", hashExpr)
-		})
-	}
-}
-
-func TestIsNumericType(t *testing.T) {
-	tests := []struct {
-		colType string
-		want    bool
-	}{
-		{"numeric", true},
-		{"numeric(10,2)", true},
-		{"NUMERIC", true},
-		{"decimal", true},
-		{"decimal(18,4)", true},
-		{"DECIMAL", true},
-		{"integer", false},
-		{"bigint", false},
-		{"text", false},
-		{"double precision", false},
-		{"real", false},
-		{"", false},
-		// trim_scale has no array variant.
-		{"numeric[]", false},
-		{"numeric(10,2)[]", false},
-		{"DECIMAL[]", false},
-		// A type whose name only starts like numeric, such as an enum.
-		{"numeric_level", false},
-		{"decimal_kind", false},
-		{"numericx", false},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.colType, func(t *testing.T) {
-			if got := isNumericType(tt.colType); got != tt.want {
-				t.Errorf("isNumericType(%q) = %v, want %v", tt.colType, got, tt.want)
-			}
-		})
-	}
-}
-
-func TestNumericColumns(t *testing.T) {
-	got := NumericColumns(map[string]string{
-		"id":     "integer",
-		"price":  "numeric(10,2)",
-		"amount": "DECIMAL",
-		"prices": "numeric[]",
-		"note":   "text",
-	})
-	want := map[string]bool{"price": true, "amount": true}
-	if len(got) != len(want) {
-		t.Fatalf("NumericColumns() = %v, want %v", got, want)
-	}
-	for col := range want {
-		if !got[col] {
-			t.Errorf("NumericColumns() = %v, want %v", got, want)
-		}
-	}
-	if got := NumericColumns(nil); got != nil {
-		t.Errorf("NumericColumns(nil) = %v, want nil", got)
 	}
 }
 

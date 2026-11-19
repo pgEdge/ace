@@ -29,6 +29,11 @@ const (
 	keyColAlias = "_ace_k"
 )
 
+// readServiceCols is the number of the columns before the columns of the
+// table in the row read: the key position, the row hash, the commit
+// timestamp and the origin.
+const readServiceCols = 4
+
 func (t Table) qualifiedName() string {
 	return pgx.Identifier{t.Schema}.Sanitize() + "." + pgx.Identifier{t.Name}.Sanitize()
 }
@@ -36,7 +41,7 @@ func (t Table) qualifiedName() string {
 // rowHashExpr is the first rowHashSize bytes of the row hash of the block
 // hash.
 func (t Table) rowHashExpr() (string, error) {
-	h, err := queries.RowHashExpr("", t.Cols, t.HashTypes)
+	h, err := queries.RowHashExpr("", t.Cols)
 	if err != nil {
 		return "", err
 	}
@@ -44,9 +49,8 @@ func (t Table) rowHashExpr() (string, error) {
 }
 
 // keyQuery returns the query that lists, for every row of the block, the text
-// of each key column and the row hash. A numeric key column goes through
-// trim_scale(), as in the row hash, so that 1.50 and 1.5 give the same text.
-// The query has no ORDER BY: the client does not need any order.
+// of each key column and the row hash. The query has no ORDER BY: the client
+// does not need any order.
 func (t Table) keyQuery(where string) (string, error) {
 	if len(t.Key) == 0 {
 		return "", fmt.Errorf("table %s has no primary key", t.qualifiedName())
@@ -57,7 +61,7 @@ func (t Table) keyQuery(where string) (string, error) {
 	}
 	exprs := make([]string, 0, len(t.Key)+1)
 	for _, k := range t.Key {
-		exprs = append(exprs, queries.ColExpr("", k, t.HashTypes[k]))
+		exprs = append(exprs, queries.ColExpr("", k))
 	}
 	exprs = append(exprs, h)
 	if strings.TrimSpace(where) == "" {
@@ -78,14 +82,36 @@ func (t Table) keyQueryFormats() pgx.QueryResultFormats {
 	return f
 }
 
+// readFormats asks for the service columns of the row read in the binary
+// format and for the columns of the table in the text format. The text
+// format gives the output of the type of each column, which ACE keeps as it
+// is.
+func (t Table) readFormats() pgx.QueryResultFormats {
+	f := make(pgx.QueryResultFormats, readServiceCols+len(t.Cols))
+	for i := range f {
+		f[i] = pgx.TextFormatCode
+		if i < readServiceCols {
+			f[i] = pgx.BinaryFormatCode
+		}
+	}
+	return f
+}
+
 // ReadQuery returns the query that reads the full rows for a list of keys.
 // Its parameters are one text[] for each key column, all of the same length:
-// element i of each array is the text of key i.
+// element i of each array is the text of key i. The result has the position
+// of the key, the row hash, the commit timestamp and the origin of the row,
+// and then every column of the table as it is: the row read asks for the
+// columns in the text format, so a value is the output of its type.
 //
-// Each key is cast back to the type of the column on this node and looked up
-// in a LATERAL subquery. OFFSET 0 stops the planner from turning the
-// subquery into a join, so the plan is a nested loop with one lookup for each
-// key, however many keys there are. The lookup has an equality on every
+// Each key is cast back to the type of the column on this node, without the
+// type modifier (castTypes), and looked up in a LATERAL subquery. A cast to
+// a type with a modifier could round or cut the key text of the other node,
+// for example when the column is varchar(10) there and varchar(5) here, and
+// then the lookup would find a row with another key or fail with an error.
+// OFFSET 0 stops the planner from turning the subquery into a join, so the
+// plan is a nested loop with one lookup for each key, however many keys
+// there are. The lookup has an equality on every
 // primary key column, so the planner reads it from the primary key index,
 // unless the table is so small that a scan of it costs less. With
 // Table.ScanChildren the keys are joined with the table instead, so that the
@@ -97,13 +123,12 @@ func (t Table) keyQueryFormats() pgx.QueryResultFormats {
 // equal but prints in a different way, such as -0 and 0 in a float column,
 // therefore never find the same row: each text finds only the row that
 // printed it, and the two rows are reported as rows of one node only.
-// The printed expression must be the same as in the key query, trim_scale()
-// included, or a numeric key never matches its own text. A ::text cast must
-// not replace format(): for bpchar, boolean and inet it is not the output of
-// the type.
+// The printed expression must be the same as in the key query, or a key
+// never matches its own text. A ::text cast must not replace format(): for
+// bpchar, boolean and inet it is not the output of the type.
 //
 // filter, if not empty, is added to the WHERE clause of the lookup as it is.
-func (t Table) ReadQuery(colTypes map[string]string, filter string) (string, error) {
+func (t Table) ReadQuery(castTypes map[string]string, filter string) (string, error) {
 	if len(t.Key) == 0 {
 		return "", fmt.Errorf("table %s has no primary key", t.qualifiedName())
 	}
@@ -116,9 +141,9 @@ func (t Table) ReadQuery(colTypes map[string]string, filter string) (string, err
 	keyCols := make([]string, len(t.Key))
 	conds := make([]string, 0, 2*len(t.Key)+1)
 	for i, k := range t.Key {
-		typ, ok := colTypes[k]
+		typ, ok := castTypes[k]
 		if !ok || strings.TrimSpace(typ) == "" {
-			return "", fmt.Errorf("no type for key column %s of %s", k, t.qualifiedName())
+			return "", fmt.Errorf("no cast type for key column %s of %s", k, t.qualifiedName())
 		}
 		alias := fmt.Sprintf("%s%d", keyColAlias, i+1)
 		params[i] = fmt.Sprintf("$%d::text[]", i+1)
@@ -127,7 +152,7 @@ func (t Table) ReadQuery(colTypes map[string]string, filter string) (string, err
 	}
 	for i, k := range t.Key {
 		conds = append(conds, fmt.Sprintf(`format('%%s', %s) COLLATE "C" = %s.%s%d`,
-			queries.ColExpr("", k, t.HashTypes[k]), keysAlias, keyColAlias, i+1))
+			queries.ColExpr("", k), keysAlias, keyColAlias, i+1))
 	}
 	if f := strings.TrimSpace(filter); f != "" {
 		conds = append(conds, "("+f+")")
@@ -139,7 +164,7 @@ func (t Table) ReadQuery(colTypes map[string]string, filter string) (string, err
 		"pg_xact_commit_timestamp("+tableAlias+".xmin) AS commit_ts",
 		"to_json(pg_xact_commit_timestamp_origin("+tableAlias+".xmin))->>'roident' AS node_origin")
 	for _, c := range t.Cols {
-		sel = append(sel, queries.SelectColExpr("", c, colTypes[c]))
+		sel = append(sel, queries.ColExpr("", c))
 	}
 
 	if t.ScanChildren {

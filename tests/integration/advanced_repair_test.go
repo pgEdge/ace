@@ -414,8 +414,8 @@ func hasStaleSkipEntry(entries []map[string]any, index int, operation, rule stri
 		if !ok {
 			continue
 		}
-		idx, ok := rawIdx.(float64)
-		if !ok || int(idx) != index {
+		// The key is the text of the diff.
+		if fmt.Sprint(rawIdx) != fmt.Sprint(index) {
 			continue
 		}
 		if reason, _ := entry["reason"].(string); reason != "target_row_newer_than_diff" {
