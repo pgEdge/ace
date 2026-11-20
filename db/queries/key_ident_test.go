@@ -72,15 +72,15 @@ func TestSplitQueriesQuoteKeyColumns(t *testing.T) {
 			return err
 		}, simple},
 		{"GetBlockRowCount/simple", func(db DBQuerier) error {
-			_, err := GetBlockRowCount(ctx, db, "public", "t", simple, types, []string{"1"}, []string{"9"})
+			_, err := GetBlockRowCount(ctx, db, "public", "t", simple, types, KeyRange{Lower: []string{"1"}, Upper: []string{"9"}})
 			return err
 		}, simple},
 		{"GetBlockRowCount/composite", func(db DBQuerier) error {
-			_, err := GetBlockRowCount(ctx, db, "public", "t", composite, types, []string{"1", "a"}, []string{"9", "z"})
+			_, err := GetBlockRowCount(ctx, db, "public", "t", composite, types, KeyRange{Lower: []string{"1", "a"}, Upper: []string{"9", "z"}})
 			return err
 		}, composite},
 		{"GetBulkSplitPoints/composite", func(db DBQuerier) error {
-			_, err := GetBulkSplitPoints(ctx, db, "public", "t", composite, types, []string{"1", "a"}, nil, 100)
+			_, err := GetBulkSplitPoints(ctx, db, "public", "t", composite, types, KeyRange{Lower: []string{"1", "a"}}, 100)
 			return err
 		}, composite},
 	}
@@ -107,8 +107,8 @@ func TestSplitQueriesQuoteKeyColumns(t *testing.T) {
 	}
 }
 
-// A nil bound is open: GetBlockRowCount puts no condition on that side. Both
-// bounds are in the range.
+// A nil bound is open: the row count of a range puts no condition on that
+// side.
 func TestGetBlockRowCountOpenBounds(t *testing.T) {
 	ctx := context.Background()
 	types := map[string]string{"id": "bigint", "a": "integer", "b": "text"}
@@ -132,7 +132,7 @@ func TestGetBlockRowCountOpenBounds(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			rec := &sqlRecorder{}
-			if _, err := GetBlockRowCount(ctx, rec, "public", "t", tc.key, types, tc.start, tc.end); err != nil && !errors.Is(err, pgx.ErrNoRows) {
+			if _, err := GetBlockRowCount(ctx, rec, "public", "t", tc.key, types, KeyRange{Lower: tc.start, Upper: tc.end, UpperClosed: true}); err != nil && !errors.Is(err, pgx.ErrNoRows) {
 				t.Fatalf("unexpected error: %v", err)
 			}
 			for _, w := range tc.want {

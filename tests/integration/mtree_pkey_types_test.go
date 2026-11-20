@@ -192,8 +192,10 @@ func TestMtreePkeyTypesFindDivergence(t *testing.T) {
 
 // leafKeyTypeCase is a key type for a tree whose leaves differ on the two
 // nodes. base makes the rows of both nodes from n = 1..2000; extra makes
-// one more row for each n in 600..899, which sorts next to the base row of
-// that n, and gives it n + 10000.
+// one more row for each n in 600..1899, which sorts next to the base row of
+// that n, and gives it n + 10000. For the text key these rows spread over
+// all leaves, so there must be enough of them for more than a sliver of
+// extra rows in each leaf.
 type leafKeyTypeCase struct {
 	name  string
 	setup []string
@@ -211,7 +213,7 @@ func leafKeyTypeCases() []leafKeyTypeCase {
 			name:  "text_en_us",
 			ddl:   `(id TEXT COLLATE "en_US.utf8" PRIMARY KEY, n int, v text)`,
 			base:  "SELECT " + text + ", g, 'v' FROM generate_series(1, 2000) g",
-			extra: "SELECT " + text + " || 'x', g + 10000, 'v' FROM generate_series(600, 899) g",
+			extra: "SELECT " + text + " || 'x', g + 10000, 'v' FROM generate_series(600, 1899) g",
 		},
 		{
 			name: "enum",
@@ -221,13 +223,13 @@ func leafKeyTypeCases() []leafKeyTypeCase {
 			},
 			ddl:   fmt.Sprintf("(c %s.leaf_color, n int, v text, PRIMARY KEY (c, n))", testSchema),
 			base:  fmt.Sprintf("SELECT (ARRAY['red', 'green', 'blue'])[1 + g / 700]::%s.leaf_color, g, 'v' FROM generate_series(1, 2000) g", testSchema),
-			extra: fmt.Sprintf("SELECT (ARRAY['red', 'green', 'blue'])[1 + g / 700]::%s.leaf_color, g + 10000, 'v' FROM generate_series(600, 899) g", testSchema),
+			extra: fmt.Sprintf("SELECT (ARRAY['red', 'green', 'blue'])[1 + g / 700]::%s.leaf_color, g + 10000, 'v' FROM generate_series(600, 1899) g", testSchema),
 		},
 		{
 			name:  "numeric",
 			ddl:   "(id numeric PRIMARY KEY, n int, v text)",
 			base:  "SELECT g * 1.5, g, 'v' FROM generate_series(1, 2000) g",
-			extra: "SELECT g * 1.5 + 0.001, g + 10000, 'v' FROM generate_series(600, 899) g",
+			extra: "SELECT g * 1.5 + 0.001, g + 10000, 'v' FROM generate_series(600, 1899) g",
 		},
 	}
 }
@@ -282,7 +284,7 @@ func TestMtreeKeyTypesWithDifferentLeaves(t *testing.T) {
 
 			nodeDiffs := diffPairs(t, task)[env.pairKey()]
 			require.Empty(t, extractDiffIDsByColumn(nodeDiffs.Rows[env.ServiceN1], "n"))
-			require.Equal(t, idRange(10600, 10899), extractDiffIDsByColumn(nodeDiffs.Rows[env.ServiceN2], "n"))
+			require.Equal(t, idRange(10600, 11899), extractDiffIDsByColumn(nodeDiffs.Rows[env.ServiceN2], "n"))
 		})
 	}
 }
