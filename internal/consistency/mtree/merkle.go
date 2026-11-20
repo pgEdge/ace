@@ -2044,7 +2044,11 @@ func (m *MerkleTreeTask) splitBlocks(tx pgx.Tx, castTypes map[string]string, blo
 			}
 		}
 
-		count, err := queries.GetBlockRowCount(m.Ctx, tx, m.Schema, m.Table, m.Key, castTypes, start, end)
+		// The stored range_end of a leaf is the first key of the next leaf
+		// and is not in this leaf. The largest key found for an open leaf is
+		// in it.
+		r := queries.KeyRange{Lower: start, Upper: end, UpperClosed: originallyUnbounded}
+		count, err := queries.GetBlockRowCount(m.Ctx, tx, m.Schema, m.Table, m.Key, castTypes, r)
 		if err != nil {
 			return nil, fmt.Errorf("failed to get block row count for block %d: %w", pos, err)
 		}
@@ -2053,14 +2057,16 @@ func (m *MerkleTreeTask) splitBlocks(tx pgx.Tx, castTypes map[string]string, blo
 			continue
 		}
 
-		splitPoints, err := queries.GetBulkSplitPoints(m.Ctx, tx, m.Schema, m.Table, m.Key, castTypes, start, end, m.BlockSize)
+		splitPoints, err := queries.GetBulkSplitPoints(m.Ctx, tx, m.Schema, m.Table, m.Key, castTypes, r, m.BlockSize)
 		if err != nil {
 			return nil, fmt.Errorf("failed to get bulk split points for block %d: %w", pos, err)
 		}
 
 		if len(splitPoints) > 0 {
 			lastSplitPoint := splitPoints[len(splitPoints)-1]
-			sliverCount, err := queries.GetBlockRowCount(m.Ctx, tx, m.Schema, m.Table, m.Key, castTypes, lastSplitPoint, end)
+			sliver := r
+			sliver.Lower = lastSplitPoint
+			sliverCount, err := queries.GetBlockRowCount(m.Ctx, tx, m.Schema, m.Table, m.Key, castTypes, sliver)
 			if err != nil {
 				return nil, fmt.Errorf("failed to get row count for sliver block: %w", err)
 			}

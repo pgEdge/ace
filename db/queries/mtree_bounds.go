@@ -403,10 +403,9 @@ func GetMinKey(ctx context.Context, db DBQuerier, schema, table string, key []st
 	return keys[0], nil
 }
 
-// GetBlockRowCount returns the number of rows between start and end, both
-// included. nil is an open side.
-func GetBlockRowCount(ctx context.Context, db DBQuerier, schema, table string, key []string, castTypes map[string]string, start, end []string) (int64, error) {
-	where, args, err := KeyRange{Lower: start, Upper: end, UpperClosed: true}.Cond("", key, castTypes, 1)
+// GetBlockRowCount returns the number of rows in r.
+func GetBlockRowCount(ctx context.Context, db DBQuerier, schema, table string, key []string, castTypes map[string]string, r KeyRange) (int64, error) {
+	where, args, err := r.Cond("", key, castTypes, 1)
 	if err != nil {
 		return 0, err
 	}
@@ -418,11 +417,11 @@ func GetBlockRowCount(ctx context.Context, db DBQuerier, schema, table string, k
 	return count, nil
 }
 
-// GetBulkSplitPoints returns every blockSize-th key between start and end,
-// both included, without the first key: the starts of the new leaves when the
-// range is cut into leaves of blockSize rows.
-func GetBulkSplitPoints(ctx context.Context, db DBQuerier, schema, table string, key []string, castTypes map[string]string, start, end []string, blockSize int) ([][]string, error) {
-	where, args, err := KeyRange{Lower: start, Upper: end, UpperClosed: true}.Cond("", key, castTypes, 1)
+// GetBulkSplitPoints returns every blockSize-th key in r without the first
+// key: the starts of the new leaves when r is cut into leaves of blockSize
+// rows.
+func GetBulkSplitPoints(ctx context.Context, db DBQuerier, schema, table string, key []string, castTypes map[string]string, r KeyRange, blockSize int) ([][]string, error) {
+	where, args, err := r.Cond("", key, castTypes, 1)
 	if err != nil {
 		return nil, err
 	}
