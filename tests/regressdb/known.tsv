@@ -1,0 +1,14 @@
+# Results of run.py that differ from the expected ones and are known.
+#
+# Columns, separated by tabs: case (old, new, mixed or *), command, object
+# (a table or a schema), connections, result, reason. Only the case column
+# can be *; the other columns name exactly one run. The result is written
+# as in results.tsv, with the number of differences where there is one (for
+# example diff:3). A line applies only when the result is exactly the one
+# listed. A panic, a timeout or a kill cannot be listed. Two lines with the
+# same selector are an error. A line that applies to nothing in a full run
+# (no --tables or --commands, all default --conns values) fails the run, so
+# remove a line when the cause is fixed.
+#
+# Only differences that are not problems of ACE belong here. A problem of
+# ACE fails the run until it is fixed.

@@ -1,0 +1,135 @@
+name: Regression database tests
+
+# ACE on two nodes that hold the regression database of PostgreSQL
+# (make installcheck). The nodes differ in server encoding, in the defaults
+# of the output settings and, in one case, in the major version. See
+# tests/regressdb/README.md.
+
+on:
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: regressdb-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # The oldest and the newest major version that ACE supports. ACE reads
+  # catalog columns that exist since PostgreSQL 15, such as the locale
+  # provider of a database.
+  PG_OLD: "15"
+  PG_NEW: "19"
+
+jobs:
+  versions:
+    runs-on: ubuntu-latest
+    outputs:
+      old: ${{ steps.v.outputs.old }}
+      new: ${{ steps.v.outputs.new }}
+    steps:
+    - uses: actions/checkout@v4
+    - id: v
+      # A failed lookup in a plain assignment stops the step; inside the
+      # argument of echo it would publish an empty version.
+      run: |
+        old=$(tests/regressdb/pg-version.sh "$PG_OLD")
+        new=$(tests/regressdb/pg-version.sh "$PG_NEW")
+        echo "old=$old" >> "$GITHUB_OUTPUT"
+        echo "new=$new" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: versions
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        which: [ old, new ]
+    env:
+      VERSION: ${{ matrix.which == 'old' && needs.versions.outputs.old || needs.versions.outputs.new }}
+    steps:
+    - uses: actions/checkout@v4
+
+    - id: cache
+      uses: actions/cache@v4
+      with:
+        path: ~/pg/${{ env.VERSION }}
+        key: pg-${{ env.VERSION }}-${{ runner.os }}-${{ hashFiles('tests/regressdb/build-pg.sh') }}
+
+    - name: Build PostgreSQL ${{ env.VERSION }}
+      if: steps.cache.outputs.cache-hit != 'true'
+      run: |
+        sudo apt-get update -qq
+        sudo apt-get install -y -qq bison flex libxml2-dev libicu-dev zlib1g-dev
+        tests/regressdb/build-pg.sh "$VERSION" ~/pg/"$VERSION"
+
+  test:
+    needs: [ versions, build ]
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - cell: old
+            n1: old
+            n2: old
+          - cell: new
+            n1: new
+            n2: new
+          - cell: mixed
+            n1: old
+            n2: new
+    name: test (${{ matrix.cell }})
+    env:
+      V1: ${{ matrix.n1 == 'old' && needs.versions.outputs.old || needs.versions.outputs.new }}
+      V2: ${{ matrix.n2 == 'old' && needs.versions.outputs.old || needs.versions.outputs.new }}
+    steps:
+    - uses: actions/checkout@v4
+
+    - uses: actions/setup-go@v5
+      with:
+        go-version-file: go.mod
+
+    - uses: actions/cache/restore@v4
+      with:
+        path: ~/pg/${{ env.V1 }}
+        key: pg-${{ env.V1 }}-${{ runner.os }}-${{ hashFiles('tests/regressdb/build-pg.sh') }}
+        fail-on-cache-miss: true
+
+    - uses: actions/cache/restore@v4
+      if: env.V2 != env.V1
+      with:
+        path: ~/pg/${{ env.V2 }}
+        key: pg-${{ env.V2 }}-${{ runner.os }}-${{ hashFiles('tests/regressdb/build-pg.sh') }}
+        fail-on-cache-miss: true
+
+    - name: Install packages
+      run: |
+        sudo apt-get update -qq
+        # The -dev packages bring the libraries that the cached build uses.
+        sudo apt-get install -y -qq libxml2-dev libicu-dev locales
+        # lc_monetary of node n2 (see setup-node.sh).
+        sudo locale-gen de_DE.UTF-8
+
+    - name: Build ACE
+      run: go build -o "$RUNNER_TEMP/ace" ./cmd/ace
+
+    - name: Run ACE on PostgreSQL ${{ env.V1 }} and ${{ env.V2 }}
+      run: |
+        tests/regressdb/run-cell.sh "${{ matrix.cell }}" ~/pg/"$V1" ~/pg/"$V2" \
+          "$RUNNER_TEMP/regressdb" "$RUNNER_TEMP/ace"
+
+    - name: Upload results
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: regressdb-${{ matrix.cell }}
+        path: |
+          ${{ runner.temp }}/regressdb/run/results.tsv
+          ${{ runner.temp }}/regressdb/run/logs
+          ${{ runner.temp }}/regressdb/*.log
+          ${{ runner.temp }}/regressdb/*.regress/regression.diffs
+        if-no-files-found: ignore
