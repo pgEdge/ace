@@ -12,18 +12,14 @@
 package mtree
 
 import (
-	"cmp"
 	"context"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"maps"
 	"math"
 	"os"
-	"reflect"
 	"slices"
 	"sort"
-	"strconv"
 	"strings"
 	"time"
 
@@ -112,6 +108,8 @@ type MerkleTreeTask struct {
 	// refNode.
 	castTypes    map[string]map[string]string
 	refCastTypes map[string]string
+	// refCollations are the collations of the columns on refNode.
+	refCollations map[string]string
 
 	TaskStore     *taskstore.Store
 	TaskStorePath string
@@ -160,31 +158,21 @@ type MerkleTreeTask struct {
 	rangesSkipped atomic.Bool
 	// compareErr is the first error of a range comparison. After it, no
 	// worker takes another work item. Guarded by diffMutex.
-	compareErr error
-	// boundarySortWarned keeps the "cannot sort these bounds" warning to one
-	// line per task. It is raised from inside a sort comparator, which runs
-	// O(n log n) times per block set and again for every leaf in
-	// intervalInUnion, so one unsupported key type would otherwise repeat the
-	// same line thousands of times and bury everything else in the log.
-	boundarySortWarned sync.Once
-	StartTime          time.Time
-	NodeOriginNames    map[string]map[string]string
+	compareErr      error
+	StartTime       time.Time
+	NodeOriginNames map[string]map[string]string
 
 	Ctx context.Context
 }
 
 // CompareRangesWorkItem is one key range of a node pair to compare row by
-// row. Range holds the lower and the upper bound; a nil or all-NULL bound
-// means no bound. Both bounds are inclusive, except that StartExclusive
-// leaves out the lower bound: the range before it in the list of the pair
-// ends at the same key, and the rows of that key are compared there. Seq is
-// the position of the range in the list of the pair, in key order.
+// row. The bounds of Range are the texts of the key columns. Seq is the
+// position of the range in the list of the pair, in key order.
 type CompareRangesWorkItem struct {
-	Node1          map[string]any
-	Node2          map[string]any
-	Range          [2][]any
-	StartExclusive bool
-	Seq            int
+	Node1 map[string]any
+	Node2 map[string]any
+	Range queries.KeyRange
+	Seq   int
 }
 
 type CompareRangesResult struct {
@@ -497,104 +485,22 @@ func (m *MerkleTreeTask) countDiffRows(n int) {
 // the keys that differ.
 func (m *MerkleTreeTask) processWorkItem(work CompareRangesWorkItem, pool1, pool2 *pgxpool.Pool) error {
 	logger.Debug("Processing range %d for %s and %s", work.Seq, work.Node1["Name"], work.Node2["Name"])
-	var whereClause string
-	var args []any
-	paramIndex := 1
-	var orClauses []string
-	lower := ">="
-	if work.StartExclusive {
-		lower = ">"
-	}
-
-	if m.SimplePrimaryKey {
-		sanitisedKey := pgx.Identifier{m.Key[0]}.Sanitize()
-		for _, r := range [][2][]any{work.Range} {
-			var andClauses []string
-			var startVal, endVal any
-			if len(r[0]) > 0 {
-				startVal = r[0][0]
-			}
-			if len(r[1]) > 0 {
-				endVal = r[1][0]
-			}
-
-			if startVal != nil {
-				andClauses = append(andClauses, fmt.Sprintf("%s %s $%d", sanitisedKey, lower, paramIndex))
-				args = append(args, startVal)
-				paramIndex++
-			}
-			if endVal != nil {
-				andClauses = append(andClauses, fmt.Sprintf("%s <= $%d", sanitisedKey, paramIndex))
-				args = append(args, endVal)
-				paramIndex++
-			}
-			if len(andClauses) > 0 {
-				orClauses = append(orClauses, "("+strings.Join(andClauses, " AND ")+")")
-			}
-		}
-	} else {
-		sanitisedKeys := make([]string, len(m.Key))
-		for i, k := range m.Key {
-			sanitisedKeys[i] = pgx.Identifier{k}.Sanitize()
-		}
-		pkeyColsStr := strings.Join(sanitisedKeys, ", ")
-
-		for _, r := range [][2][]any{work.Range} {
-			startVals := r[0]
-			endVals := r[1]
-
-			var andClauses []string
-
-			if !queries.AllNil(startVals) {
-				placeholders := make([]string, len(startVals))
-				for i, v := range startVals {
-					placeholders[i] = fmt.Sprintf("$%d", paramIndex)
-					args = append(args, v)
-					paramIndex++
-				}
-				andClauses = append(andClauses, fmt.Sprintf("ROW(%s) %s ROW(%s)", pkeyColsStr, lower, strings.Join(placeholders, ", ")))
-			}
-			if !queries.AllNil(endVals) {
-				placeholders := make([]string, len(endVals))
-				for i, v := range endVals {
-					placeholders[i] = fmt.Sprintf("$%d", paramIndex)
-					args = append(args, v)
-					paramIndex++
-				}
-				andClauses = append(andClauses, fmt.Sprintf("ROW(%s) <= ROW(%s)", pkeyColsStr, strings.Join(placeholders, ", ")))
-			}
-
-			if len(andClauses) > 0 {
-				orClauses = append(orClauses, "("+strings.Join(andClauses, " AND ")+")")
-			}
-		}
-	}
-
-	whereClause = strings.Join(orClauses, " OR ")
-	if whereClause == "" {
-		whereClause = "TRUE"
-	}
-
-	if f := queries.CommitTimestampFilter(m.untilTime); f != "" {
-		whereClause = fmt.Sprintf("(%s) AND %s", whereClause, f)
-	}
+	node1Name, _ := work.Node1["Name"].(string)
+	node2Name, _ := work.Node2["Name"].(string)
 
 	// Stable per-pair key: getNodePairs emits each pair once in a fixed order,
 	// so this is not canonicalised (unlike table_diff.pairKeyFor).
 	nodePairKey := fmt.Sprintf("%s/%s", work.Node1["Name"], work.Node2["Name"])
 
-	node1Name, _ := work.Node1["Name"].(string)
-	node2Name, _ := work.Node2["Name"].(string)
 	// The row read of each node casts the key texts to the types of that
-	// node; the checks of the task have made sure that the key types are the
-	// same on every node. The leaves have no row
-	// counts, so the first node is the build side, and the memory limit is
-	// checked only while the keys are read. mtree refuses inheritance
-	// parents, so there are no children to scan.
+	// node. The leaves have no row counts, so the first node is the build
+	// side, and the memory limit is checked only while the keys are read.
+	// mtree refuses inheritance parents, so there are no children to scan.
 	s1 := keydiff.Side{Name: node1Name, Conn: pool1, CastTypes: m.nodeCastTypes(node1Name)}
 	s2 := keydiff.Side{Name: node2Name, Conn: pool2, CastTypes: m.nodeCastTypes(node2Name)}
 	tbl := keydiff.Table{Schema: m.Schema, Name: m.Table, Key: m.Key, Cols: m.Cols}
-	block := keydiff.Block{Where: whereClause, Args: args, ReadFilter: queries.CommitTimestampFilter(m.untilTime)}
+	until := queries.CommitTimestampFilter(m.untilTime)
+	block := keydiff.Block{Range: work.Range, Filter: until, ReadFilter: until}
 	out := m.result.OpenBlock(nodePairKey, node1Name, node2Name, 0, work.Seq)
 	res, err := keydiff.Compare(m.Ctx, tbl, block, s1, s2, keydiff.Options{
 		MaxMemory: m.keyMapMaxMemory(),
@@ -698,154 +604,6 @@ func (m *MerkleTreeTask) loadNodeOriginNames() error {
 	return nil
 }
 
-// pkeyKind classifies a primary-key value that pgx decoded into an untyped
-// destination. It is the one list of what mtree can handle, and two things
-// have to agree with it: comparePkeyValues sorts these kinds and pkeyIdentity
-// renders them. Nothing in the language ties the three together, so
-// TestPkeyKindsAreFullySupported does.
-//
-// A kind is on the list only if Go can reproduce the Postgres btree order for
-// it, and if two different values always render differently. Adding a kind
-// without both properties brings back a silent wrong answer -- see
-// compareBoundaries' KNOWN GAP for the cases already on the list that only
-// hold under some collations.
-type pkeyKind int
-
-const (
-	pkeyUnsupported pkeyKind = iota
-	pkeyInt
-	pkeyUint
-	pkeyFloat
-	pkeyBool
-	pkeyString
-	pkeyTime
-	pkeyUUID  // pgx decodes uuid as [16]byte
-	pkeyBytes // bytea
-
-	// pkeyKindEnd is one past the last kind. It exists so
-	// TestPkeyKindsAreFullySupported can walk every kind: a new constant added
-	// above it fails that test until comparePkeyValues and pkeyIdentity handle
-	// it too. Keep it last.
-	pkeyKindEnd
-)
-
-func pkeyKindOf(v any) pkeyKind {
-	switch v.(type) {
-	case int, int8, int16, int32, int64:
-		return pkeyInt
-	case uint, uint8, uint16, uint32, uint64:
-		return pkeyUint
-	case float32, float64:
-		return pkeyFloat
-	case bool:
-		return pkeyBool
-	case string:
-		return pkeyString
-	case time.Time:
-		return pkeyTime
-	case [16]byte:
-		return pkeyUUID
-	case []byte:
-		return pkeyBytes
-	}
-	return pkeyUnsupported
-}
-
-// comparePkeyValues orders two primary-key values of the same Go type, the way
-// the server orders that type. ok is false for a kind pkeyKindOf does not
-// know, and for two values that did not decode to the same kind; the caller
-// has to decide what to do about it.
-func comparePkeyValues(val1, val2 any) (result int, ok bool) {
-	kind := pkeyKindOf(val1)
-	// Every branch below asserts or reflects on val2 as well, so a val2 of
-	// another kind would panic rather than return ok=false. The two sides come
-	// from the same column on two nodes and should always agree, but "should"
-	// is not a guarantee across a schema mismatch, and a panic inside a sort
-	// comparator takes down the whole run.
-	if pkeyKindOf(val2) != kind {
-		return 0, false
-	}
-
-	switch kind {
-	case pkeyInt:
-		return cmp.Compare(reflect.ValueOf(val1).Int(), reflect.ValueOf(val2).Int()), true
-	case pkeyUint:
-		// Postgres has no unsigned integers, so this is unreachable through a
-		// real pkey. It is here because reflect.Value.Int() panics on a uint
-		// kind, and lumping the two together used to risk exactly that.
-		return cmp.Compare(reflect.ValueOf(val1).Uint(), reflect.ValueOf(val2).Uint()), true
-	case pkeyFloat:
-		// Postgres sorts NaN above every number in a float btree; Go's
-		// cmp.Compare puts it below. NaN is a legal pkey value, so follow the
-		// server or the bounds around it come out inverted.
-		a, b := reflect.ValueOf(val1).Float(), reflect.ValueOf(val2).Float()
-		switch aNaN, bNaN := math.IsNaN(a), math.IsNaN(b); {
-		case aNaN && bNaN:
-			return 0, true
-		case aNaN:
-			return 1, true
-		case bNaN:
-			return -1, true
-		}
-		return cmp.Compare(a, b), true
-	case pkeyBool:
-		a, b := val1.(bool), val2.(bool)
-		if a == b {
-			return 0, true
-		}
-		if b {
-			return -1, true
-		}
-		return 1, true
-	case pkeyString:
-		return cmp.Compare(val1.(string), val2.(string)), true
-	case pkeyTime:
-		return val1.(time.Time).Compare(val2.(time.Time)), true
-	case pkeyUUID:
-		// uuid_cmp() and byteacmp() compare bytes, so compare bytes here too.
-		a, b := val1.([16]byte), val2.([16]byte)
-		return bytes.Compare(a[:], b[:]), true
-	case pkeyBytes:
-		return bytes.Compare(val1.([]byte), val2.([]byte)), true
-	}
-	return 0, false
-}
-
-// pkeyIdentity renders one primary-key value for use as a row key. The result
-// only has to be injective -- two different values must never render the same
-// -- and stable within a run, because both nodes render with this same code.
-//
-// It exists so that row identity does not depend on fmt: a %v of a driver
-// value is not part of any contract, it changes with the driver, and for a
-// type that prints a pointer it would make two runs disagree about which rows
-// are "the same". ok is false for a kind mtree does not support.
-func pkeyIdentity(v any) (string, bool) {
-	switch pkeyKindOf(v) {
-	case pkeyInt:
-		return strconv.FormatInt(reflect.ValueOf(v).Int(), 10), true
-	case pkeyUint:
-		return strconv.FormatUint(reflect.ValueOf(v).Uint(), 10), true
-	case pkeyFloat:
-		// 'x' is the exact hexadecimal form: no rounding, so no two distinct
-		// float values collide here. Add zero first: Postgres holds -0.0 = 0.0,
-		// but they have different bit patterns and would otherwise get two
-		// identities, splitting one row into two.
-		return strconv.FormatFloat(reflect.ValueOf(v).Float()+0, 'x', -1, 64), true
-	case pkeyBool:
-		return strconv.FormatBool(v.(bool)), true
-	case pkeyString:
-		return v.(string), true
-	case pkeyTime:
-		return v.(time.Time).UTC().Format("2006-01-02T15:04:05.999999999Z"), true
-	case pkeyUUID:
-		u := v.([16]byte)
-		return hex.EncodeToString(u[:]), true
-	case pkeyBytes:
-		return hex.EncodeToString(v.([]byte)), true
-	}
-	return "", false
-}
-
 // renumberBlockRanges sets the NodePosition of each block to its index in
 // ranges, and reports whether any position changed. The first block must be
 // at queries.FirstBlockPosition, or it gets a lower bound and rows below its
@@ -860,15 +618,6 @@ func renumberBlockRanges(ranges []types.BlockRange) bool {
 		}
 	}
 	return changed
-}
-
-// valueOrNil returns the value of a simple-key bound, or nil for an open bound
-// (see queries.AllNil).
-func valueOrNil(bound []any) interface{} {
-	if queries.AllNil(bound) {
-		return nil
-	}
-	return bound[0]
 }
 
 func (m *MerkleTreeTask) MtreeInit() (err error) {
@@ -1401,11 +1150,17 @@ func keyTypesMatch(key []string, refTypes, types map[string]string, refNode, nod
 
 // addNodeColTypes keeps the column types and the cast types of node. The
 // first node is the reference node. It returns an error if a key column of
-// node has another type than on the reference node.
-func (m *MerkleTreeTask) addNodeColTypes(node string, colTypes, castTypes map[string]string, key []string) error {
+// node has another type or another collation than on the reference node.
+//
+// The leaves of the tree are cut in the order of the key on the reference
+// node, and the diff sorts the bounds of two nodes in the order of one of
+// them. With another collation of the key, a range of keys holds other rows
+// on another node, and the diff can miss rows.
+func (m *MerkleTreeTask) addNodeColTypes(node string, colTypes, castTypes, collations map[string]string, key []string) error {
 	if m.refColTypes == nil {
 		m.refColTypes = colTypes
 		m.refCastTypes = castTypes
+		m.refCollations = collations
 		m.refNode = node
 	}
 	m.ColTypes[node] = colTypes
@@ -1413,9 +1168,21 @@ func (m *MerkleTreeTask) addNodeColTypes(node string, colTypes, castTypes map[st
 		m.castTypes = make(map[string]map[string]string)
 	}
 	m.castTypes[node] = castTypes
-	return keyTypesMatch(key, m.refColTypes, colTypes, m.refNode, node)
+	if err := keyTypesMatch(key, m.refColTypes, colTypes, m.refNode, node); err != nil {
+		return err
+	}
+	if col, a, b, ok := queries.KeyCollationMismatch(key, m.refCollations, collations); ok {
+		return fmt.Errorf("primary key column %q has %s on %s and %s on %s; "+
+			"mtree needs the same key collations on every node",
+			col, queries.CollationText(a), m.refNode, queries.CollationText(b), node)
+	}
+	return nil
 }
 
+// RunChecks connects to every node and checks that a tree can be built and
+// compared on the table: no partitioned table or inheritance parent, the same
+// columns and key, and the same types and collations of the key columns on
+// every node. With skipValidation the options are not validated first.
 func (m *MerkleTreeTask) RunChecks(skipValidation bool) error {
 	if !skipValidation {
 		if err := m.Validate(); err != nil {
@@ -1469,6 +1236,10 @@ func (m *MerkleTreeTask) RunChecks(skipValidation bool) error {
 		if err != nil {
 			return fmt.Errorf("failed to get cast types on node %s: %w", nodeInfo["Name"], err)
 		}
+		collations, err := queries.GetCollationOrders(m.Ctx, tx, m.Schema, m.Table)
+		if err != nil {
+			return fmt.Errorf("failed to get collations on node %s: %w", nodeInfo["Name"], err)
+		}
 		currentKeySlice, err := queries.GetPrimaryKey(m.Ctx, tx, m.Schema, m.Table)
 		if err != nil {
 			return fmt.Errorf("failed to get primary key on node %s: %w", nodeInfo["Name"], err)
@@ -1493,7 +1264,7 @@ func (m *MerkleTreeTask) RunChecks(skipValidation bool) error {
 		if strings.Join(currentColsSlice, ",") != strings.Join(localCols, ",") || strings.Join(currentKeySlice, ",") != strings.Join(localKey, ",") {
 			return fmt.Errorf("table schemas or primary keys do not match between nodes")
 		}
-		if err := m.addNodeColTypes(nodeName, colTypes, castTypes, localKey); err != nil {
+		if err := m.addNodeColTypes(nodeName, colTypes, castTypes, collations, localKey); err != nil {
 			return fmt.Errorf("'%s': %w", m.QualifiedTableName, err)
 		}
 	}
@@ -1542,6 +1313,9 @@ func joinQualified(rels []queries.RelationInfo) string {
 	return strings.Join(names, ", ")
 }
 
+// BuildMtree builds the tree of the table on every node. The leaves are cut on
+// the node with the most rows, or read from the ranges file, and hashed on
+// every node with the same bounds.
 func (m *MerkleTreeTask) BuildMtree() (err error) {
 	resultCtx := map[string]any{}
 	initialCtx := map[string]any{
@@ -1694,6 +1468,7 @@ func (m *MerkleTreeTask) BuildMtree() (err error) {
 			Schema:    m.Schema,
 			Table:     m.Table,
 			Key:       m.Key,
+			CastTypes: m.nodeCastTypes(refName),
 			BlockSize: m.BlockSize,
 			Workers:   cutWorkers,
 		}
@@ -1749,13 +1524,6 @@ func (m *MerkleTreeTask) BuildMtree() (err error) {
 		// Put the blocks in key order and number them.
 		order := slicer.KeyOrder(blocks)
 
-		numKeyCols := len(m.Key)
-		bound := func(vals []any) []any {
-			if vals == nil {
-				return make([]any, numKeyCols)
-			}
-			return vals
-		}
 		blockRanges = make([]types.BlockRange, len(blocks))
 		sorted := make(map[string]map[int][]byte, len(hashes))
 		for name := range hashes {
@@ -1764,8 +1532,8 @@ func (m *MerkleTreeTask) BuildMtree() (err error) {
 		for pos, idx := range order {
 			blockRanges[pos] = types.BlockRange{
 				NodePosition: int64(pos),
-				RangeStart:   bound(blocks[idx].Start),
-				RangeEnd:     bound(blocks[idx].End),
+				RangeStart:   blocks[idx].Start,
+				RangeEnd:     blocks[idx].End,
 			}
 			for name, h := range hashes {
 				sorted[name][pos] = h[idx]
@@ -1857,7 +1625,7 @@ func (m *MerkleTreeTask) BuildMtree() (err error) {
 			}
 
 			logger.Info("Inserting block ranges on %s...", name)
-			err = m.insertBlockRanges(tx, blockRanges)
+			err = m.insertBlockRanges(tx, m.nodeCastTypes(name), blockRanges)
 			if err != nil {
 				return fmt.Errorf("failed to insert block ranges on node %s: %w", name, err)
 			}
@@ -1933,6 +1701,9 @@ func (m *MerkleTreeTask) hashVersionError(version int, nodeName any, allowOlder 
 	return nil
 }
 
+// UpdateMtree updates the tree of every node: it applies the changes that CDC
+// recorded, splits and merges leaves, and hashes the dirty leaves and their
+// parents again.
 func (m *MerkleTreeTask) UpdateMtree(skipAllChecks bool) (err error) { //nolint:gocyclo // orchestrates per-node CDC drain + tree rehash/rebalance; cyclomatic complexity is inherent to the staged flow
 	resultCtx := map[string]any{
 		"rebalance":       m.Rebalance,
@@ -2097,17 +1868,6 @@ func (m *MerkleTreeTask) UpdateMtree(skipAllChecks bool) (err error) { //nolint:
 			return fmt.Errorf("failed to acquire connection: %w", err)
 		}
 		defer conn.Release()
-		var compositeTypeName string
-
-		if !m.SimplePrimaryKey {
-			compositeTypeIdentifier := pgx.Identifier{m.aceSchema(), fmt.Sprintf("%s_%s_key_type", m.Schema, m.Table)}
-			compositeTypeName = compositeTypeIdentifier.Sanitize()
-			dt, err := conn.Conn().LoadType(m.Ctx, compositeTypeName)
-			if err != nil {
-				return fmt.Errorf("failed to load composite type %s: %w", compositeTypeName, err)
-			}
-			conn.Conn().TypeMap().RegisterType(dt)
-		}
 
 		tx, err := conn.Begin(m.Ctx)
 		if err != nil {
@@ -2183,7 +1943,7 @@ func (m *MerkleTreeTask) UpdateMtree(skipAllChecks bool) (err error) { //nolint:
 
 		if len(blocksToSplit) > 0 {
 			fmt.Printf("Found %d blocks that may need splitting\n", len(blocksToSplit))
-			_, err := m.splitBlocks(tx, blocksToSplit)
+			_, err := m.splitBlocks(tx, m.nodeCastTypes(fmt.Sprint(nodeInfo["Name"])), blocksToSplit)
 			if err != nil {
 				return err
 			}
@@ -2201,7 +1961,7 @@ func (m *MerkleTreeTask) UpdateMtree(skipAllChecks bool) (err error) { //nolint:
 		}
 
 		if m.Rebalance {
-			if _, err := m.performMerges(tx); err != nil {
+			if _, err := m.performMerges(tx, m.nodeCastTypes(fmt.Sprint(nodeInfo["Name"]))); err != nil {
 				return err
 			}
 		}
@@ -2256,46 +2016,39 @@ func (m *MerkleTreeTask) UpdateMtree(skipAllChecks bool) (err error) { //nolint:
 	return nil
 }
 
-func (m *MerkleTreeTask) splitBlocks(tx pgx.Tx, blocksToSplit []types.BlockRange) ([]int64, error) {
+// splitBlocks cuts each leaf of blocksToSplit that holds more than the block
+// size into leaves of the block size. castTypes are the cast types of the
+// node of tx.
+func (m *MerkleTreeTask) splitBlocks(tx pgx.Tx, castTypes map[string]string, blocksToSplit []types.BlockRange) ([]int64, error) {
 	mtreeTableIdentifier := pgx.Identifier{m.aceSchema(), fmt.Sprintf("ace_mtree_%s_%s", m.Schema, m.Table)}
 	mtreeTableName := mtreeTableIdentifier.Sanitize()
-	isComposite := !m.SimplePrimaryKey
 	var modifiedPositions []int64
-
-	compositeTypeIdentifier := pgx.Identifier{m.aceSchema(), fmt.Sprintf("%s_%s_key_type", m.Schema, m.Table)}
-	compositeTypeName := compositeTypeIdentifier.Sanitize()
-
-	currentBlocks := make([]types.BlockRange, len(blocksToSplit))
-	copy(currentBlocks, blocksToSplit)
 
 	if err := queries.DeleteParentNodes(m.Ctx, tx, mtreeTableName); err != nil {
 		return nil, fmt.Errorf("failed to delete parent nodes: %w", err)
 	}
 
-	for _, blk := range currentBlocks {
+	for _, blk := range blocksToSplit {
 		pos := blk.NodePosition
-		start := blk.RangeStart
-		end := blk.RangeEnd
-		originallyUnbounded := queries.AllNil(end)
+		start := []string(blk.RangeStart)
+		end := []string(blk.RangeEnd)
+		originallyUnbounded := end == nil
 
 		if originallyUnbounded {
-			var maxVal []any
-			var err error
-			if isComposite {
-				maxVal, err = queries.GetMaxValComposite(m.Ctx, tx, m.Schema, m.Table, m.Key, start)
-			} else {
-				var simpleMaxVal any
-				simpleMaxVal, err = queries.GetMaxValSimple(m.Ctx, tx, m.Schema, m.Table, m.Key[0], valueOrNil(start))
-				if err == nil && simpleMaxVal != nil {
-					maxVal = []any{simpleMaxVal}
-				}
+			maxKey, err := queries.GetMaxKey(m.Ctx, tx, m.Schema, m.Table, m.Key, castTypes, start)
+			if err != nil {
+				return nil, fmt.Errorf("failed to get the largest key of block %d: %w", pos, err)
 			}
-			if err == nil && maxVal != nil {
-				end = maxVal
+			if maxKey != nil {
+				end = maxKey
 			}
 		}
 
-		count, err := queries.GetBlockRowCount(m.Ctx, tx, m.Schema, m.Table, m.Key, isComposite, start, end)
+		// The stored range_end of a leaf is the first key of the next leaf
+		// and is not in this leaf. The largest key found for an open leaf is
+		// in it.
+		r := queries.KeyRange{Lower: start, Upper: end, UpperClosed: originallyUnbounded}
+		count, err := queries.GetBlockRowCount(m.Ctx, tx, m.Schema, m.Table, m.Key, castTypes, r)
 		if err != nil {
 			return nil, fmt.Errorf("failed to get block row count for block %d: %w", pos, err)
 		}
@@ -2304,18 +2057,16 @@ func (m *MerkleTreeTask) splitBlocks(tx pgx.Tx, blocksToSplit []types.BlockRange
 			continue
 		}
 
-		pkeyType, err := queries.GetPkeyType(m.Ctx, tx, m.Schema, m.Table, m.Key[0])
-		if err != nil {
-			return nil, fmt.Errorf("failed to get pkey type: %w", err)
-		}
-		splitPoints, err := queries.GetBulkSplitPoints(m.Ctx, tx, m.Schema, m.Table, m.Key, pkeyType, isComposite, start, end, m.BlockSize)
+		splitPoints, err := queries.GetBulkSplitPoints(m.Ctx, tx, m.Schema, m.Table, m.Key, castTypes, r, m.BlockSize)
 		if err != nil {
 			return nil, fmt.Errorf("failed to get bulk split points for block %d: %w", pos, err)
 		}
 
 		if len(splitPoints) > 0 {
 			lastSplitPoint := splitPoints[len(splitPoints)-1]
-			sliverCount, err := queries.GetBlockRowCount(m.Ctx, tx, m.Schema, m.Table, m.Key, isComposite, lastSplitPoint, end)
+			sliver := r
+			sliver.Lower = lastSplitPoint
+			sliverCount, err := queries.GetBlockRowCount(m.Ctx, tx, m.Schema, m.Table, m.Key, castTypes, sliver)
 			if err != nil {
 				return nil, fmt.Errorf("failed to get row count for sliver block: %w", err)
 			}
@@ -2335,18 +2086,13 @@ func (m *MerkleTreeTask) splitBlocks(tx pgx.Tx, blocksToSplit []types.BlockRange
 		// first block must keep the smallest range_start: set it to the
 		// smallest key of the table.
 		if pos == queries.FirstBlockPosition {
-			if err := m.setFirstBlockStartToMin(tx, mtreeTableName, compositeTypeName); err != nil {
+			if err := m.setFirstBlockStartToMin(tx, mtreeTableName, castTypes); err != nil {
 				return nil, err
 			}
 		}
 
 		for _, sp := range splitPoints {
-			if isComposite {
-				err = queries.UpdateBlockRangeEndComposite(m.Ctx, tx, mtreeTableName, compositeTypeName, sp, pos)
-			} else {
-				err = queries.UpdateBlockRangeEnd(m.Ctx, tx, mtreeTableName, sp[0], pos)
-			}
-			if err != nil {
+			if err := queries.UpdateBlockRangeEnd(m.Ctx, tx, mtreeTableName, m.Key, castTypes, sp, pos); err != nil {
 				return nil, err
 			}
 
@@ -2354,32 +2100,18 @@ func (m *MerkleTreeTask) splitBlocks(tx pgx.Tx, blocksToSplit []types.BlockRange
 			if err != nil {
 				return nil, err
 			}
-			if isComposite {
-				err = queries.InsertCompositeBlockRanges(m.Ctx, tx, mtreeTableName, newPos, sp, nil)
-			} else {
-				err = queries.InsertBlockRanges(m.Ctx, tx, mtreeTableName, newPos, sp[0], nil)
-			}
-			if err != nil {
+			if err := queries.InsertBlockRange(m.Ctx, tx, mtreeTableName, m.Key, castTypes, newPos, sp, nil); err != nil {
 				return nil, err
 			}
 			modifiedPositions = append(modifiedPositions, newPos)
 			pos = newPos
 		}
 
+		last := end
 		if originallyUnbounded {
-			if isComposite {
-				err = queries.UpdateBlockRangeEndComposite(m.Ctx, tx, mtreeTableName, compositeTypeName, nil, pos)
-			} else {
-				err = queries.UpdateBlockRangeEnd(m.Ctx, tx, mtreeTableName, nil, pos)
-			}
-		} else {
-			if isComposite {
-				err = queries.UpdateBlockRangeEndComposite(m.Ctx, tx, mtreeTableName, compositeTypeName, end, pos)
-			} else {
-				err = queries.UpdateBlockRangeEnd(m.Ctx, tx, mtreeTableName, end[0], pos)
-			}
+			last = nil
 		}
-		if err != nil {
+		if err := queries.UpdateBlockRangeEnd(m.Ctx, tx, mtreeTableName, m.Key, castTypes, last, pos); err != nil {
 			return nil, err
 		}
 		modifiedPositions = append(modifiedPositions, pos)
@@ -2390,29 +2122,21 @@ func (m *MerkleTreeTask) splitBlocks(tx pgx.Tx, blocksToSplit []types.BlockRange
 
 // setFirstBlockStartToMin sets the stored range_start of the first block to
 // the smallest key of the table. It does nothing if the table is empty.
-func (m *MerkleTreeTask) setFirstBlockStartToMin(tx pgx.Tx, mtreeTableName, compositeTypeName string) error {
-	if m.SimplePrimaryKey {
-		minVal, err := queries.GetMinValSimple(m.Ctx, tx, m.Schema, m.Table, m.Key[0])
-		if err != nil {
-			return err
-		}
-		if minVal == nil {
-			return nil
-		}
-		return queries.UpdateBlockRangeStart(m.Ctx, tx, mtreeTableName, minVal, queries.FirstBlockPosition)
-	}
-
-	minVals, err := queries.GetMinValComposite(m.Ctx, tx, m.Schema, m.Table, m.Key)
+func (m *MerkleTreeTask) setFirstBlockStartToMin(tx pgx.Tx, mtreeTableName string, castTypes map[string]string) error {
+	minKey, err := queries.GetMinKey(m.Ctx, tx, m.Schema, m.Table, m.Key)
 	if err != nil {
 		return err
 	}
-	if queries.AllNil(minVals) {
+	if minKey == nil {
 		return nil
 	}
-	return queries.UpdateBlockRangeStartComposite(m.Ctx, tx, mtreeTableName, compositeTypeName, minVals, queries.FirstBlockPosition)
+	return queries.UpdateBlockRangeStart(m.Ctx, tx, mtreeTableName, m.Key, castTypes, minKey, queries.FirstBlockPosition)
 }
 
-func (m *MerkleTreeTask) performMerges(tx pgx.Tx) ([]int64, error) {
+// performMerges merges small leaves until no pass merges more, and returns
+// the positions of the changed leaves. castTypes are the cast types of the
+// node of tx.
+func (m *MerkleTreeTask) performMerges(tx pgx.Tx, castTypes map[string]string) ([]int64, error) {
 	var allModifiedPositions []int64
 	mtreeTableIdentifier := pgx.Identifier{m.aceSchema(), fmt.Sprintf("ace_mtree_%s_%s", m.Schema, m.Table)}
 	mtreeTableName := mtreeTableIdentifier.Sanitize()
@@ -2428,7 +2152,7 @@ func (m *MerkleTreeTask) performMerges(tx pgx.Tx) ([]int64, error) {
 		}
 		fmt.Printf("Found %d blocks that may need merging\n", len(blocksToMerge))
 
-		modified, err := m.mergeBlocks(tx, blocksToMerge)
+		modified, err := m.mergeBlocks(tx, castTypes, blocksToMerge)
 		if err != nil {
 			return nil, err
 		}
@@ -2463,6 +2187,9 @@ func getNodePairs(nodes []map[string]any) [][2]map[string]any {
 	return pairs
 }
 
+// DiffMtree updates the trees, compares the trees of every node pair and the
+// rows of the leaves that differ, and writes the diff result. With NoCDC the
+// update does not read the changes that CDC recorded.
 func (m *MerkleTreeTask) DiffMtree() (err error) {
 	initialCtx := map[string]any{
 		"output":          m.Output,
@@ -2542,7 +2269,7 @@ func (m *MerkleTreeTask) DiffMtree() (err error) {
 	type pairDiffWork struct {
 		node1     map[string]any
 		node2     map[string]any
-		batches   []pkeyBatch
+		batches   []queries.KeyRange
 		positions []int64
 		pool1     *pgxpool.Pool
 		pool2     *pgxpool.Pool
@@ -2648,7 +2375,7 @@ func (m *MerkleTreeTask) DiffMtree() (err error) {
 			positions = append(positions, pos)
 		}
 
-		batches, err := m.getPkeyBatches(pool1, pool2, positions)
+		batches, err := m.getPkeyBatches(pool1, pool2, node1["Name"].(string), positions)
 		if err != nil {
 			return fmt.Errorf("failed to get pkey batches: %w", err)
 		}
@@ -2676,11 +2403,10 @@ func (m *MerkleTreeTask) DiffMtree() (err error) {
 		entry := allNodePairBatches[pairKey]
 		for i, b := range entry.batches {
 			workItems = append(workItems, CompareRangesWorkItem{
-				Node1:          entry.node1,
-				Node2:          entry.node2,
-				Range:          [2][]any{b.start, b.end},
-				StartExclusive: b.startExclusive,
-				Seq:            i,
+				Node1: entry.node1,
+				Node2: entry.node2,
+				Range: b,
+				Seq:   i,
 			})
 		}
 	}
@@ -2931,18 +2657,16 @@ func (m *MerkleTreeTask) findMismatchedLeaves(pool1, pool2 *pgxpool.Pool, parent
 	return mismatched, nil
 }
 
-// pkeyBatch is one key range to compare. Both bounds are inclusive, except
-// that startExclusive leaves out the lower bound, because the range before
-// it ends at the same key.
-type pkeyBatch struct {
-	start, end     []any
-	startExclusive bool
-}
-
 // getPkeyBatches returns the key ranges that cover the mismatched leaves of
 // both nodes, in key order. Neighbour ranges share a bound; the rows at a
 // shared bound are compared only in the first of the two ranges.
-func (m *MerkleTreeTask) getPkeyBatches(pool1, pool2 *pgxpool.Pool, mismatchedPositions []int64) ([]pkeyBatch, error) {
+//
+// The leaves of the two nodes can have different bounds after an update, so
+// the ranges are built from the bounds of both. The server of the first
+// node sorts the bounds and builds the ranges, with the types and the
+// collations of the key columns there: the client never compares two key
+// values.
+func (m *MerkleTreeTask) getPkeyBatches(pool1, pool2 *pgxpool.Pool, node1 string, mismatchedPositions []int64) ([]queries.KeyRange, error) {
 	mtreeTableIdentifier := pgx.Identifier{m.aceSchema(), fmt.Sprintf("ace_mtree_%s_%s", m.Schema, m.Table)}
 	mtreeTableName := mtreeTableIdentifier.Sanitize()
 
@@ -2955,274 +2679,21 @@ func (m *MerkleTreeTask) getPkeyBatches(pool1, pool2 *pgxpool.Pool, mismatchedPo
 		return nil, err
 	}
 
+	collations, err := queries.GetCollations(m.Ctx, pool1, m.Schema, m.Table)
+	if err != nil {
+		return nil, err
+	}
 	allRanges := append(leafRanges1, leafRanges2...)
-	return m.pkeyBatchesFromRanges(allRanges), nil
+	return queries.MtreeDiffRanges(m.Ctx, pool1, m.Key, m.nodeCastTypes(node1), collations, allRanges)
 }
 
-// pkeyBatchesFromRanges builds the key ranges to compare from the leaf
-// ranges of both nodes, in key order.
-func (m *MerkleTreeTask) pkeyBatchesFromRanges(allRanges []types.LeafRange) []pkeyBatch {
-	// The last leaf has range_end = NULL, and the first leaf has no lower
-	// bound (GetLeafRanges returns a nil start for it, see
-	// queries.FirstBlockPosition). So the boundary set must track open sides
-	// explicitly — otherwise rows above the reference's largest key or below
-	// its smallest key are never queried.
-	// A NULL range_end comes as a nil slice (simple PK) or as
-	// []any{nil, nil, ...} (composite PK); queries.AllNil covers both.
-	boundaries := []any{}
-	hasOpenStart, hasOpenEnd := false, false
-	for _, r := range allRanges {
-		if queries.AllNil(r.RangeStart) {
-			hasOpenStart = true
-		} else {
-			boundaries = append(boundaries, r.RangeStart)
-		}
-		if queries.AllNil(r.RangeEnd) {
-			hasOpenEnd = true
-		} else {
-			boundaries = append(boundaries, r.RangeEnd)
-		}
-	}
-
-	uniqueBoundaries := make(map[string]any)
-	for _, b := range boundaries {
-		uniqueBoundaries[m.boundaryKey(b)] = b
-	}
-
-	sortedBoundaries := make([]any, 0, len(uniqueBoundaries))
-	for _, b := range uniqueBoundaries {
-		sortedBoundaries = append(sortedBoundaries, b)
-	}
-
-	sort.Slice(sortedBoundaries, func(i, j int) bool {
-		return m.compareBoundaries(sortedBoundaries[i], sortedBoundaries[j]) < 0
-	})
-
-	var slices [][2]any
-	if len(sortedBoundaries) > 0 && hasOpenStart {
-		slices = append(slices, [2]any{nil, sortedBoundaries[0]})
-	}
-	switch len(sortedBoundaries) {
-	case 0:
-		if hasOpenStart || hasOpenEnd {
-			slices = append(slices, [2]any{nil, nil})
-		}
-	case 1:
-		// Skip the single-point slice when an open-side slice below
-		// already subsumes it.
-		if !hasOpenStart && !hasOpenEnd {
-			s := sortedBoundaries[0]
-			slices = append(slices, [2]any{s, s})
-		}
-	default:
-		for i := 0; i < len(sortedBoundaries)-1; i++ {
-			s := sortedBoundaries[i]
-			e := sortedBoundaries[i+1]
-			if m.intervalInUnion(s, e, allRanges) {
-				slices = append(slices, [2]any{s, e})
-			}
-		}
-	}
-
-	if len(sortedBoundaries) > 0 && hasOpenEnd {
-		slices = append(slices, [2]any{sortedBoundaries[len(sortedBoundaries)-1], nil})
-	}
-
-	batches := make([]pkeyBatch, 0, len(slices))
-	for i, slice := range slices {
-		b := pkeyBatch{start: boundaryToSlice(slice[0]), end: boundaryToSlice(slice[1])}
-		// The slices are in key order, so a slice that starts where the one
-		// before it ends shares that bound with it. The bounds are compared
-		// as values: two spellings of one key (1.0 and 1.00) are one bound.
-		if i > 0 && slice[0] != nil && slices[i-1][1] != nil &&
-			m.compareBoundaries(slices[i-1][1], slice[0]) == 0 {
-			b.startExclusive = true
-		}
-		batches = append(batches, b)
-	}
-	return batches
-}
-
-// boundaryKey renders a block bound into the key that de-duplicates the cut
-// points before the ranges are rebuilt. Two bounds must share a key only if
-// they are the same bound: dropping a real cut point shifts the whole slice set
-// and can leave rows uncompared.
-//
-// fmt is not good enough for that. fmt.Sprint of the whole slice renders
-// []any{"a b","c"} and []any{"a","b c"} both as "[a b c]", and a per-component
-// %v renders two distinct uuids through the same []byte formatting. So each
-// component goes through pkeyIdentity, which is injective by contract, and the
-// components are joined by the encoder that keeps composites unambiguous.
-//
-// Each component carries a one-letter tag, so a NULL cannot be confused with a
-// value that renders as "nil" and a fmt fallback cannot be confused with an
-// identity that happens to look the same.
-func (m *MerkleTreeTask) boundaryKey(b any) string {
-	slice := boundaryToSlice(b)
-	parts := make([]string, len(slice))
-	for i, v := range slice {
-		switch {
-		case v == nil:
-			parts[i] = "n"
-		default:
-			if id, ok := pkeyIdentity(v); ok {
-				parts[i] = "v" + id
-			} else {
-				// The type is already the documented broken case: its bounds
-				// are ordered by their Go rendering too. Warn once and key it
-				// the only way left, rather than refuse a bound the sort
-				// itself still accepts.
-				m.warnBoundarySortFallback(v)
-				parts[i] = "f" + fmt.Sprintf("%v", v)
-			}
-		}
-	}
-	return utils.RowKeyFromStrings(parts)
-}
-
-// compareBoundaries sorts two block bounds.
-//
-// KNOWN GAP: this rebuilds the btree order of each pkey type in Go, while the
-// blocks themselves were cut by ORDER BY <pkey> in the database. The two agree
-// only where the Postgres order is also the byte order or the numeric order.
-// They do not agree for a text pkey in a collation other than C ('a' < 'B' in
-// en_US.UTF-8, the other way round here), nor for an enum (sorted by
-// enumsortorder, not by label), citext, or a domain over any of these -- all of
-// which arrive here as a plain string. Where the two orders differ, some of the
-// ranges built from these bounds come out the wrong way round, select no rows,
-// and those blocks are never compared: the diff then under-reports instead of
-// failing. Measured on PostgreSQL 17 with 9 differing rows, the pre-fix uuid
-// ordering found 6 of them and a text key in en_US.utf8 found 4.
-//
-// The fix is to sort the bounds in SQL, not to add more Go cases: more cases
-// only make more types look supported. See docs/design/merkle.md, "Primary Key
-// Types and the Postgres Type Boundary".
-func (m *MerkleTreeTask) compareBoundaries(b1, b2 any) int {
-	if b1 == nil && b2 == nil {
-		return 0
-	}
-	if b1 == nil {
-		return -1
-	}
-	if b2 == nil {
-		return 1
-	}
-
-	b1Slice := boundaryToSlice(b1)
-	b2Slice := boundaryToSlice(b2)
-
-	if b1Slice == nil && b2Slice == nil {
-		return 0
-	}
-	if b1Slice == nil {
-		return -1
-	}
-	if b2Slice == nil {
-		return 1
-	}
-
-	for k := range m.Key {
-		if k >= len(b1Slice) {
-			return -1
-		}
-		if k >= len(b2Slice) {
-			return 1
-		}
-		val1 := b1Slice[k]
-		val2 := b2Slice[k]
-
-		if val1 == nil && val2 == nil {
-			continue
-		}
-		if val1 == nil {
-			return -1
-		}
-		if val2 == nil {
-			return 1
-		}
-
-		c, ok := comparePkeyValues(val1, val2)
-		if !ok {
-			// Nothing rejects such a bound yet, so this is reachable: fall back
-			// to the Go rendering and say so. That order rarely matches the
-			// server's, which makes the ranges built from these bounds
-			// unreliable rather than merely odd.
-			m.warnBoundarySortFallback(val1)
-			s1 := fmt.Sprintf("%v", val1)
-			s2 := fmt.Sprintf("%v", val2)
-			if s1 < s2 {
-				return -1
-			}
-			if s1 > s2 {
-				return 1
-			}
-			continue
-		}
-		if c != 0 {
-			return c
-		}
-	}
-	if len(b1Slice) < len(b2Slice) {
-		return -1
-	}
-	if len(b1Slice) > len(b2Slice) {
-		return 1
-	}
-	return 0
-}
-
-// warnBoundarySortFallback reports, once per task, that block bounds are being
-// ordered by their Go rendering because comparePkeyValues does not know the
-// type. The caller is a sort comparator, so this must stay cheap on the second
-// and every later call.
-func (m *MerkleTreeTask) warnBoundarySortFallback(val any) {
-	m.boundarySortWarned.Do(func() {
-		logger.Warn("cannot sort merkle-tree block bounds of type %T for %s.%s the way "+
-			"the server does; falling back to their Go rendering, so the ranges built "+
-			"from them may be wrong", val, m.Schema, m.Table)
-	})
-}
-
-func (m *MerkleTreeTask) intervalInUnion(s, e any, intervals []types.LeafRange) bool {
-	for _, interval := range intervals {
-		start := interval.RangeStart
-		end := interval.RangeEnd
-
-		eBeforeOrEqualStart := false
-		if start != nil {
-			eBeforeOrEqualStart = m.compareBoundaries(e, start) <= 0
-		}
-
-		sAfterOrEqualEnd := false
-		if end != nil {
-			sAfterOrEqualEnd = m.compareBoundaries(s, end) >= 0
-		}
-
-		if !eBeforeOrEqualStart && !sAfterOrEqualEnd {
-			return true
-		}
-	}
-	return false
-}
-
-func boundaryToSlice(b any) []any {
-	if b == nil {
-		return nil
-	}
-	if slice, ok := b.([]any); ok {
-		return slice
-	}
-	return []any{b}
-}
-
-func (m *MerkleTreeTask) mergeBlocks(tx pgx.Tx, blocksToMerge []types.BlockRange) ([]int64, error) {
+// mergeBlocks merges each leaf of blocksToMerge with the next leaf when the
+// two hold few rows. castTypes are the cast types of the node of tx.
+func (m *MerkleTreeTask) mergeBlocks(tx pgx.Tx, castTypes map[string]string, blocksToMerge []types.BlockRange) ([]int64, error) {
 	mtreeTableIdentifier := pgx.Identifier{m.aceSchema(), fmt.Sprintf("ace_mtree_%s_%s", m.Schema, m.Table)}
 	mtreeTableName := mtreeTableIdentifier.Sanitize()
 	isComposite := !m.SimplePrimaryKey
 	var modifiedPositions []int64
-
-	compositeTypeIdentifier := pgx.Identifier{m.aceSchema(), fmt.Sprintf("%s_%s_key_type", m.Schema, m.Table)}
-	compositeTypeName := compositeTypeIdentifier.Sanitize()
 
 	if err := queries.DeleteParentNodes(m.Ctx, tx, mtreeTableName); err != nil {
 		return nil, fmt.Errorf("failed to delete parent nodes: %w", err)
@@ -3252,11 +2723,7 @@ func (m *MerkleTreeTask) mergeBlocks(tx pgx.Tx, blocksToMerge []types.BlockRange
 		}
 
 		if nextBlock != nil && (currentBlock.Count+nextBlock.Count < int64(float64(m.BlockSize)*1.5)) {
-			if isComposite {
-				err = queries.UpdateBlockRangeEndComposite(m.Ctx, tx, mtreeTableName, compositeTypeName, nextBlock.RangeEnd, currentBlock.NodePosition)
-			} else {
-				err = queries.UpdateBlockRangeEnd(m.Ctx, tx, mtreeTableName, valueOrNil(nextBlock.RangeEnd), currentBlock.NodePosition)
-			}
+			err = queries.UpdateBlockRangeEnd(m.Ctx, tx, mtreeTableName, m.Key, castTypes, nextBlock.RangeEnd, currentBlock.NodePosition)
 			if err != nil {
 				return nil, err
 			}
@@ -3378,6 +2845,8 @@ func (m *MerkleTreeTask) startLeafHashers(ctx context.Context, pools map[string]
 	return lh
 }
 
+// work hashes the leaves that cur gives on node name until the list ends. The
+// first error stops every worker.
 func (lh *leafHashers) work(name string, pool *pgxpool.Pool, cur *slicer.Cursor) {
 	defer lh.wg.Done()
 	m := lh.m
@@ -3386,9 +2855,9 @@ func (lh *leafHashers) work(name string, pool *pgxpool.Pool, cur *slicer.Cursor)
 		if !ok {
 			return
 		}
-		h, err := queries.ComputeLeafHashes(lh.ctx, pool, m.Schema, m.Table, m.SimplePrimaryKey, m.Key, b.Start, b.End, m.Cols)
+		h, err := queries.ComputeLeafHashes(lh.ctx, pool, m.Schema, m.Table, m.Key, m.nodeCastTypes(name), b.Start, b.End, m.Cols)
 		if err != nil {
-			lh.fail(fmt.Errorf("failed to compute leaf hash for block %v-%v on node %s: %w", b.Start, b.End, name, err))
+			lh.fail(fmt.Errorf("failed to compute leaf hash for block %q-%q on node %s: %w", b.Start, b.End, name, err))
 			return
 		}
 		lh.mu.Lock()
@@ -3458,20 +2927,11 @@ func (m *MerkleTreeTask) hashBlocksOnNodes(ctx context.Context, pools map[string
 	return lh.list.Blocks(), lh.hashes, nil
 }
 
-func (m *MerkleTreeTask) insertBlockRanges(conn queries.DBQuerier, ranges []types.BlockRange) error {
-	mtreeTableIdentifier := pgx.Identifier{m.aceSchema(), fmt.Sprintf("ace_mtree_%s_%s", m.Schema, m.Table)}
-
-	if m.SimplePrimaryKey {
-		if err := queries.InsertBlockRangesBatchSimple(m.Ctx, conn, mtreeTableIdentifier.Sanitize(), ranges); err != nil {
-			return err
-		}
-	} else {
-		if err := queries.InsertBlockRangesBatchComposite(m.Ctx, conn, mtreeTableIdentifier.Sanitize(), ranges, len(m.Key)); err != nil {
-			return err
-		}
-	}
-
-	return nil
+// insertBlockRanges adds the ranges of the leaves on a node with the cast
+// types castTypes.
+func (m *MerkleTreeTask) insertBlockRanges(conn queries.DBQuerier, castTypes map[string]string, ranges []types.BlockRange) error {
+	mtreeTable := pgx.Identifier{m.aceSchema(), fmt.Sprintf("ace_mtree_%s_%s", m.Schema, m.Table)}.Sanitize()
+	return queries.InsertBlockRanges(m.Ctx, conn, mtreeTable, m.Key, castTypes, ranges)
 }
 
 // dropLegacyXOROperators drops the # operator earlier ACE versions built on

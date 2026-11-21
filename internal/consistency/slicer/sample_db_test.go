@@ -48,6 +48,7 @@ func runSample(t *testing.T, pool *pgxpool.Pool, cfg Config) ([]Block, *Stats) {
 		close(done)
 	}()
 	ctx := context.Background()
+	cfg = typed(t, pool, cfg)
 	s, err := ReadSample(ctx, pool, cfg)
 	if err != nil {
 		close(out)
@@ -173,6 +174,7 @@ func TestSampleBlocksOnDB(t *testing.T) {
 
 	t.Run("filter is refused", func(t *testing.T) {
 		cfg := Config{Schema: "ace_slicer_test", Table: "s_empty", Key: []string{"id"}, BlockSize: 1000, Filter: "id > 1"}
+		cfg.CastTypes = map[string]string{"id": "integer"}
 		if _, err := ReadSample(context.Background(), pool, cfg); err == nil {
 			t.Error("the sample with a filter must fail")
 		}
@@ -196,7 +198,7 @@ func TestChooseOnDB(t *testing.T) {
 
 	choose := func(cfg Config, requested string) *Choice {
 		t.Helper()
-		c, err := Choose(ctx, pool, cfg, requested)
+		c, err := Choose(ctx, pool, typed(t, pool, cfg), requested)
 		if err != nil {
 			t.Fatalf("Choose: %v", err)
 		}
@@ -268,7 +270,7 @@ func TestSamplePageShareOnDB(t *testing.T) {
 		clustered bool
 	}{{"p_rand", false}, {"p_ord", true}, {"p_chunk", true}} {
 		cfg := Config{Schema: "ace_slicer_test", Table: c.table, Key: []string{"id"}, BlockSize: 1000}
-		s, err := ReadSample(ctx, pool, cfg)
+		s, err := ReadSample(ctx, pool, typed(t, pool, cfg))
 		if err != nil {
 			t.Fatalf("%s: %v", c.table, err)
 		}

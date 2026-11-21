@@ -219,6 +219,25 @@ All notable changes to ACE will be captured in this document. This project follo
   `mtree table-diff`.
 
 ### Changed
+- **mtree commands stop when a primary key column has another collation
+  on a node, and table-diff warns.** The collation decides the order of the
+  key, and the blocks are key ranges. mtree builds its leaves and the
+  ranges of the diff in the order of one node, so on a node with another
+  order a range can hold other rows, and the diff could miss rows. The
+  collations are compared by the settings that decide the order: the
+  provider, the determinism, the `LC_COLLATE` locale for libc, the locale
+  and the rules for ICU, the locale for the builtin provider, and for the
+  default collation these of the database. Spellings of one libc locale,
+  such as `en_US.UTF-8` and `en_US.utf8`, are the same locale; the library
+  version is not compared. A collation other
+  than the default one must also have the same schema-qualified name on
+  every node. A key type is compared by its name only, not by its
+  definition: the label order of an enum, the base type of a domain and
+  the fields of a composite type must be the same on every node, and this
+  is not checked. table-diff covers
+  every key on every node, but a key can fall into two blocks on a node,
+  so it can report rows that are the same on both nodes; it now logs a
+  warning that names the column, the collations and the nodes.
 - **mtree commands stop when a primary key column has another type on a
   node**, for example `varchar(3)` on one node and `text` on another. The
   diff looks up a row by its key cast to the key type, and such a cast can
@@ -274,6 +293,26 @@ All notable changes to ACE will be captured in this document. This project follo
   key.
 
 ### Fixed
+- **`table-diff` and `mtree` converted the bounds of the blocks to Go
+  values.** A key type that the driver did not know, or could not decode,
+  stopped the run with an error, and a value that the Go type could not
+  hold exactly moved the bound of a block to another key. Now the slicer,
+  the block hash and the Merkle tree read each bound as the text that the
+  server prints for it and send it back as text cast to the type of the
+  key column. The ranges file of `mtree build --write-ranges` holds each
+  bound as JSON strings. `--ranges-file` reads a file of an earlier
+  version only for a key of number, boolean, text, date or timestamp
+  types; for another key type, for example `bytea`, `uuid` or `interval`,
+  write the file again.
+- **`mtree table-diff` could miss differing rows for some primary key
+  types.** ACE sorted the bounds of the mismatched blocks in the client,
+  and this order was not the order of the server for a `text` key in a
+  collation other than `C`, an `enum`, a `citext` or a `numeric` key,
+  and for types that the driver did not know. A range of such bounds
+  then selected no rows, and the diff reported fewer differences than
+  there were. Now the server of the first node of a pair sorts the
+  bounds and builds the ranges, with the type and the collation of each
+  key column.
 - **`coalesce_priority` of a repair plan took the value of the last node.**
   With `coalesce_priority: [n1, n2]`, a column that was not NULL on both
   nodes got the value of `n2`. Now the first node in the list that has a

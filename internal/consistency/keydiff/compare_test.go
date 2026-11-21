@@ -187,7 +187,7 @@ func TestCompareBuildSideAndResult(t *testing.T) {
 
 	// n2 has fewer rows, so its keys go into the map: its key query is first.
 	var got collected
-	res, err := Compare(context.Background(), fakeTable, Block{Where: "TRUE"}, side(n1, 3, true), side(n2, 2, true), Options{BatchSize: 1}, got.sink())
+	res, err := Compare(context.Background(), fakeTable, Block{}, side(n1, 3, true), side(n2, 2, true), Options{BatchSize: 1}, got.sink())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -239,7 +239,7 @@ func TestCompareEmptyBuildSideIsNotQueried(t *testing.T) {
 	n1.keys = [][][]byte{keyRaw("a", 1)}
 	n1.stored = map[string][]fakeRow{"a": {{1, "a"}}}
 	var got collected
-	res, err := Compare(context.Background(), fakeTable, Block{Where: "TRUE"}, side(n1, 1, true), side(n2, 0, true), Options{}, got.sink())
+	res, err := Compare(context.Background(), fakeTable, Block{}, side(n1, 1, true), side(n2, 0, true), Options{}, got.sink())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -264,7 +264,7 @@ func TestCompareMemoryLimitError(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = Compare(context.Background(), fakeTable, Block{Where: "TRUE"}, side(n1, 2, true), side(n2, 3, true),
+	_, err = Compare(context.Background(), fakeTable, Block{}, side(n1, 2, true), side(n2, 3, true),
 		Options{MaxMemory: 2*keyCost(idA) + 1}, discard)
 	var me *MemoryLimitError
 	if !errors.As(err, &me) {
@@ -274,7 +274,7 @@ func TestCompareMemoryLimitError(t *testing.T) {
 		t.Fatalf("got %+v", me)
 	}
 	// The build side alone passes the limit: no probe node in the error.
-	_, err = Compare(context.Background(), fakeTable, Block{Where: "TRUE"}, side(n1, 2, true), side(n2, 3, true),
+	_, err = Compare(context.Background(), fakeTable, Block{}, side(n1, 2, true), side(n2, 3, true),
 		Options{MaxMemory: keyCost(idA)}, discard)
 	if !errors.As(err, &me) || me.ProbeNode != "" {
 		t.Fatalf("got %v, want a build-side MemoryLimitError", err)
@@ -301,7 +301,7 @@ func TestCompareBadKeyRows(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			n1, n2, _ := twoNodes()
 			n1.keys = [][][]byte{tt.row, keyRaw("b", 2)}
-			_, err := Compare(context.Background(), fakeTable, Block{Where: "TRUE"}, side(n1, 2, true), side(n2, 2, true), Options{}, discard)
+			_, err := Compare(context.Background(), fakeTable, Block{}, side(n1, 2, true), side(n2, 2, true), Options{}, discard)
 			if err == nil || !strings.Contains(err.Error(), tt.want) {
 				t.Fatalf("got %v, want an error with %q", err, tt.want)
 			}
@@ -321,7 +321,7 @@ func TestCompareKeyPrintedDifferently(t *testing.T) {
 	n2.keys = [][][]byte{keyRaw("0", 2)}
 	n1.stored = map[string][]fakeRow{"-0": {{1, "x"}}}
 	n2.stored = map[string][]fakeRow{"0": {{2, "x"}}}
-	res, err := Compare(context.Background(), fakeTable, Block{Where: "TRUE"}, side(n1, 1, true), side(n2, 1, true), Options{BatchSize: 1}, discard)
+	res, err := Compare(context.Background(), fakeTable, Block{}, side(n1, 1, true), side(n2, 1, true), Options{BatchSize: 1}, discard)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -338,7 +338,7 @@ func TestCompareSinkError(t *testing.T) {
 	n1.stored = map[string][]fakeRow{"a": {{1, "a"}}, "b": {{2, "b"}}}
 	stop := errors.New("disk full")
 	calls := 0
-	_, err := Compare(context.Background(), fakeTable, Block{Where: "TRUE"}, side(n1, 2, true), side(n2, 0, true), Options{BatchSize: 1},
+	_, err := Compare(context.Background(), fakeTable, Block{}, side(n1, 2, true), side(n2, 0, true), Options{BatchSize: 1},
 		func([]Entry) error {
 			calls++
 			return stop

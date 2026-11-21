@@ -81,6 +81,8 @@ On one node, compute ranges and start hashing and writing the ranges to a file:
 
 Then, copy the generated ranges file to other nodes (e.g., with scp).
 
+The file holds each block bound as the text of the key columns, as the server prints the values. Write the file and build the trees with the same version of ACE. A file of an earlier version can be used only for a key of number, boolean, text, date or timestamp types. For another key type, for example `bytea`, `uuid` or `interval`, write the file again: an earlier version wrote such a bound in another form, and a `bytea` bound is then read as other bytes without an error.
+
 On each other node, build using the shared ranges file, targeting only that node:
 
 ```bash

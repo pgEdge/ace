@@ -29,6 +29,7 @@ type Templates struct {
 	GetPrimaryKey        *template.Template
 	GetColumns           *template.Template
 	GetCastTypes         *template.Template
+	GetCollations        *template.Template
 	CheckUserPrivileges  *template.Template
 	SpockNodeAndSubInfo  *template.Template
 	SpockRepSetInfo      *template.Template
@@ -57,25 +58,20 @@ type Templates struct {
 	GetDatabaseLocale        *template.Template
 	QuoteIdentifiers         *template.Template
 
-	CreateMetadataTable             *template.Template
-	CreateSimpleMtreeTable          *template.Template
-	CreateIndex                     *template.Template
-	CreateCompositeType             *template.Template
-	DropCompositeType               *template.Template
-	CreateCompositeMtreeTable       *template.Template
-	InsertCompositeBlockRanges      *template.Template
-	CreateXORFunction               *template.Template
-	GetPkeyType                     *template.Template
-	UpdateMetadata                  *template.Template
-	InsertBlockRanges               *template.Template
-	InsertBlockRangesBatchSimple    *template.Template
-	InsertBlockRangesBatchComposite *template.Template
-	TDBlockHashSQL                  *template.Template
-	MtreeLeafHashSQL                *template.Template
-	UpdateLeafHashes                *template.Template
-	UpdateLeafHashesBatch           *template.Template
+	CreateMetadataTable       *template.Template
+	CreateSimpleMtreeTable    *template.Template
+	CreateIndex               *template.Template
+	CreateCompositeType       *template.Template
+	DropCompositeType         *template.Template
+	CreateCompositeMtreeTable *template.Template
+	CreateXORFunction         *template.Template
+	GetPkeyType               *template.Template
+	UpdateMetadata            *template.Template
+	TDBlockHashSQL            *template.Template
+	MtreeLeafHashSQL          *template.Template
+	UpdateLeafHashes          *template.Template
+	UpdateLeafHashesBatch     *template.Template
 
-	GetDirtyAndNewBlocks       *template.Template
 	ClearDirtyFlags            *template.Template
 	MarkLeavesDirtyByPositions *template.Template
 	BuildParentNodes           *template.Template
@@ -84,19 +80,12 @@ type Templates struct {
 	GetLeafRanges              *template.Template
 	GetLeafRangesExpanded      *template.Template
 	GetRowCountEstimate        *template.Template
-	GetMaxValComposite         *template.Template
-	UpdateMaxVal               *template.Template
-	GetMaxValSimple            *template.Template
-	GetCountComposite          *template.Template
-	GetCountSimple             *template.Template
 
 	DeleteParentNodes             *template.Template
 	GetMaxNodePosition            *template.Template
-	UpdateBlockRangeEnd           *template.Template
 	UpdateNodePositionsTemp       *template.Template
 	DeleteBlock                   *template.Template
 	UpdateNodePositionsSequential *template.Template
-	FindBlocksToSplit             *template.Template
 	FindBlocksToMerge             *template.Template
 	FindBlocksToMergeExpanded     *template.Template
 	GetBlockSizeFromMetadata      *template.Template
@@ -108,19 +97,13 @@ type Templates struct {
 	DropOperator                     *template.Template
 	DropMetadataTable                *template.Template
 	DropMtreeTable                   *template.Template
-	GetBlockRowCount                 *template.Template
 	GetBlockWithCount                *template.Template
 	GetBlockWithCountExpanded        *template.Template
 	UpdateNodePosition               *template.Template
-	UpdateBlockRangeStart            *template.Template
-	GetMinValComposite               *template.Template
-	GetMinValSimple                  *template.Template
 	GetDirtyAndNewBlocksExpanded     *template.Template
 	FindBlocksToSplitExpanded        *template.Template
 	ResetPositionsByStartFromTemp    *template.Template
 	GetBulkSplitPoints               *template.Template
-	UpdateBlockRangeStartComposite   *template.Template
-	UpdateBlockRangeEndComposite     *template.Template
 	UpdateAllLeafNodePositionsToTemp *template.Template
 	CreateCDCMetadataTable           *template.Template
 	UpdateCDCMetadata                *template.Template
@@ -445,6 +428,47 @@ var SQLTemplates = Templates{
 			JOIN pg_catalog.pg_type t ON t.oid = b.typ
 			JOIN pg_catalog.pg_namespace tn ON tn.oid = t.typnamespace
 		ORDER BY b.attnum, b.depth DESC;
+	`)),
+	// GetCollations takes the collation of the column itself, which is also
+	// the collation of the primary key index on the column. For the default
+	// collation the provider, the locale and the ICU rules are these of the
+	// database. The fields are read through to_jsonb, because their names
+	// differ by server version.
+	GetCollations: template.Must(template.New("getCollations").Parse(`
+		SELECT
+			a.attname,
+			pg_catalog.quote_ident(cn.nspname) || '.' || pg_catalog.quote_ident(co.collname),
+			dflt.is_default,
+			coalesce(CASE WHEN dflt.is_default THEN db.j->>'datlocprovider'
+				ELSE cj.j->>'collprovider' END, ''),
+			coalesce(CASE WHEN dflt.is_default THEN db.j->>'datcollate'
+				ELSE cj.j->>'collcollate' END, ''),
+			coalesce(CASE WHEN dflt.is_default
+				THEN coalesce(db.j->>'datlocale', db.j->>'daticulocale')
+				ELSE coalesce(cj.j->>'colllocale', cj.j->>'colliculocale') END, ''),
+			coalesce(CASE WHEN dflt.is_default THEN db.j->>'daticurules'
+				ELSE cj.j->>'collicurules' END, ''),
+			co.collisdeterministic
+		FROM
+			pg_catalog.pg_attribute a
+			JOIN pg_catalog.pg_class c ON a.attrelid = c.oid
+			JOIN pg_catalog.pg_namespace n ON c.relnamespace = n.oid
+			JOIN pg_catalog.pg_collation co ON co.oid = a.attcollation
+			JOIN pg_catalog.pg_namespace cn ON co.collnamespace = cn.oid
+			CROSS JOIN LATERAL (
+				SELECT co.collname = 'default' AND cn.nspname = 'pg_catalog' AS is_default
+			) dflt
+			CROSS JOIN LATERAL (SELECT pg_catalog.to_jsonb(co) AS j) cj
+			CROSS JOIN (
+				SELECT pg_catalog.to_jsonb(d) AS j
+				FROM pg_catalog.pg_database d
+				WHERE d.datname = pg_catalog.current_database()
+			) db
+		WHERE
+			n.nspname = $1
+			AND c.relname = $2
+			AND a.attnum > 0
+			AND NOT a.attisdropped
 	`)),
 	CheckUserPrivileges: template.Must(template.New("checkUserPrivileges").Parse(`
 		WITH params AS (
@@ -1207,12 +1231,6 @@ var SQLTemplates = Templates{
 			PRIMARY KEY (node_level, node_position)
 		)`),
 	),
-	InsertCompositeBlockRanges: template.Must(template.New("insertCompositeBlockRanges").Parse(`
-		INSERT INTO
-			{{.MtreeTable}} (node_level, node_position, range_start, range_end)
-		VALUES
-			(0, $1, {{.StartExpr}}, {{.EndExpr}});
-	`)),
 	CreateXORFunction: template.Must(template.New("createXORFunction").Funcs(aceTemplateFuncs).Parse(`
 		CREATE
 		OR REPLACE FUNCTION {{aceSchema}}.bytea_xor(a bytea, b bytea) RETURNS bytea AS $$
@@ -1298,32 +1316,6 @@ var SQLTemplates = Templates{
 	DeleteMetadata: template.Must(template.New("deleteMetadata").Funcs(aceTemplateFuncs).Parse(`
 		DELETE FROM {{aceSchema}}.ace_mtree_metadata WHERE schema_name = $1 AND table_name = $2
 	`)),
-	InsertBlockRanges: template.Must(template.New("insertBlockRanges").Parse(`
-		INSERT INTO
-			{{.MtreeTable}} (
-				node_level,
-				node_position,
-				range_start,
-				range_end,
-				last_modified
-			)
-		VALUES
-			(0, $1, $2, $3, current_timestamp)
-	`)),
-	InsertBlockRangesBatchSimple: template.Must(template.New("insertBlockRangesBatchSimple").Parse(`
-        INSERT INTO {{.MtreeTable}} (node_level, node_position, range_start, range_end, last_modified)
-        VALUES
-        {{- range $i, $r := .Rows}}{{if $i}},{{end}}
-        (0, {{$r.NodePos}}, {{$r.Start}}, {{$r.End}}, current_timestamp)
-        {{- end }}
-    `)),
-	InsertBlockRangesBatchComposite: template.Must(template.New("insertBlockRangesBatchComposite").Parse(`
-        INSERT INTO {{.MtreeTable}} (node_level, node_position, range_start, range_end, last_modified)
-        VALUES
-        {{- range $i, $r := .Rows}}{{if $i}},{{end}}
-        (0, {{$r.NodePos}}, ROW({{$r.StartList}}), ROW({{$r.EndList}}), current_timestamp)
-        {{- end }}
-    `)),
 	// The block hash is a multiset hash of the row hashes; see
 	// BlockHashAggExpr. The inner query computes each row hash once, as
 	// bit(256). OFFSET 0 keeps the planner from pulling the subquery up: the
@@ -1370,22 +1362,6 @@ var SQLTemplates = Templates{
 		WHERE
 			node_position = $2
 			AND mt.node_level = 0
-	`)),
-	GetDirtyAndNewBlocks: template.Must(template.New("getDirtyAndNewBlocks").Parse(`
-		SELECT
-			node_position,
-			range_start,
-			range_end
-		FROM
-			{{.MtreeTable}}
-		WHERE
-			node_level = 0
-			AND (
-				dirty = true
-				OR leaf_hash IS NULL
-			)
-		ORDER BY
-			node_position
 	`)),
 	ClearDirtyFlags: template.Must(template.New("clearDirtyFlags").Parse(`
 		UPDATE
@@ -1511,68 +1487,6 @@ var SQLTemplates = Templates{
 			schema_name = $1
 			AND table_name = $2
 	`)),
-	GetMaxValComposite: template.Must(template.New("getMaxValComposite").Parse(`
-		SELECT
-			{{.PkeyCols}}
-		FROM
-			{{.SchemaIdent}}.{{.TableIdent}}
-		{{- if .HasStart}}
-		WHERE
-			({{.PkeyCols}}) >= ({{.PkeyValues}})
-		{{- end}}
-		ORDER BY
-			({{.PkeyCols}}) DESC
-		LIMIT
-			1
-	`)),
-	UpdateMaxVal: template.Must(template.New("updateMaxVal").Parse(`
-		UPDATE
-			{{.MtreeTable}}
-		SET
-			range_end = $1
-		WHERE
-			node_level = 0
-			AND node_position = $2
-	`)),
-	GetMaxValSimple: template.Must(template.New("getMaxValSimple").Parse(`
-		SELECT
-			{{.Key}}
-		FROM
-			{{.SchemaIdent}}.{{.TableIdent}}
-		{{- if .HasStart}}
-		WHERE
-			{{.Key}} >= $1
-		{{- end}}
-		ORDER BY
-			{{.Key}} DESC
-		LIMIT
-			1
-	`)),
-	GetCountComposite: template.Must(template.New("getCountComposite").Parse(`
-		SELECT
-			count(*)
-		FROM
-			{{.SchemaIdent}}.{{.TableIdent}}
-		WHERE
-			{{.WhereClause}}
-	`)),
-	GetCountSimple: template.Must(template.New("getCountSimple").Parse(`
-		SELECT
-			count(*)
-		FROM
-			{{.SchemaIdent}}.{{.TableIdent}}
-		WHERE
-			{{.Key}} >= $1
-			AND (
-				{{.Key}} < $2
-				OR $2::{{.PkeyType}} IS NULL
-			)
-	`)),
-	GetBlockRowCount: template.Must(template.New("getBlockRowCount").Parse(`
-		SELECT count(*)
-		FROM {{.SchemaIdent}}.{{.TableIdent}}
-		WHERE {{.WhereClause}}
-	`)),
 	DeleteParentNodes: template.Must(template.New("deleteParentNodes").Parse(`
 		DELETE FROM
 			{{.MtreeTable}}
@@ -1586,17 +1500,6 @@ var SQLTemplates = Templates{
 			{{.MtreeTable}}
 		WHERE
 			node_level = 0
-	`)),
-	UpdateBlockRangeEnd: template.Must(template.New("updateBlockRangeEnd").Parse(`
-		UPDATE
-			{{.MtreeTable}}
-		SET
-			range_end = {{.RangeEndExpr}},
-			dirty = true,
-			last_modified = current_timestamp
-		WHERE
-			node_level = 0
-			AND node_position = {{.NodePosition}}
 	`)),
 	UpdateNodePositionsTemp: template.Must(template.New("updateNodePositionsTemp").Parse(`
 		UPDATE
@@ -1636,18 +1539,6 @@ var SQLTemplates = Templates{
 		WHERE
 			{{.MtreeTable}}.node_position = seq.node_position
 			AND node_level = 0
-	`)),
-	FindBlocksToSplit: template.Must(template.New("findBlocksToSplit").Parse(`
-		SELECT
-			node_position,
-			range_start,
-			range_end
-		FROM
-			{{.MtreeTable}}
-		WHERE
-			node_level = 0
-			AND inserts_since_tree_update >= $1
-			AND node_position = ANY($2)
 	`)),
 	// Row counts of leaf blocks. The first leaf (node_position = 0) also owns
 	// the keys under its range_start, see FirstBlockPosition. A separate
@@ -1819,37 +1710,6 @@ var SQLTemplates = Templates{
 		SET node_position = $1
 		WHERE node_position = $2
 	`)),
-	UpdateBlockRangeStart: template.Must(template.New("updateBlockRangeStart").Parse(`
-			UPDATE
-				{{.MtreeTable}}
-			SET
-				range_start = {{.RangeStartExpr}},
-				dirty = true,
-				last_modified = current_timestamp
-			WHERE
-				node_level = 0
-				AND node_position = {{.NodePosition}}
-		`)),
-	GetMinValComposite: template.Must(template.New("getMinValComposite").Parse(`
-			SELECT
-				{{.PkeyCols}}
-			FROM
-				{{.SchemaIdent}}.{{.TableIdent}}
-			ORDER BY
-				({{.PkeyCols}}) ASC
-			LIMIT
-				1
-		`)),
-	GetMinValSimple: template.Must(template.New("getMinValSimple").Parse(`
-			SELECT
-				{{.Key}}
-			FROM
-				{{.SchemaIdent}}.{{.TableIdent}}
-			ORDER BY
-				{{.Key}} ASC
-			LIMIT
-				1
-		`)),
 	GetDirtyAndNewBlocksExpanded: template.Must(template.New("getDirtyAndNewBlocksExpanded").Parse(`
 			SELECT
 				node_position,
@@ -1895,20 +1755,6 @@ var SQLTemplates = Templates{
 			(rn - 1) % {{.BlockSizePlaceholder}} = 0 AND rn > 1
 		ORDER BY
 			{{.PkeyColsStr}}
-	`)),
-	UpdateBlockRangeStartComposite: template.Must(template.New("updateBlockRangeStartComposite").Parse(`
-		UPDATE {{.MtreeTable}}
-		SET range_start = {{if .IsNull}}NULL{{else}}ROW({{.Placeholders}})::{{.CompositeTypeName}}{{end}},
-			dirty = true,
-			last_modified = current_timestamp
-		WHERE node_position = {{.NodePositionPlaceholder}} AND node_level = 0
-	`)),
-	UpdateBlockRangeEndComposite: template.Must(template.New("updateBlockRangeEndComposite").Parse(`
-		UPDATE {{.MtreeTable}}
-		SET range_end = {{if .IsNull}}NULL{{else}}ROW({{.Placeholders}})::{{.CompositeTypeName}}{{end}},
-			dirty = true,
-			last_modified = current_timestamp
-		WHERE node_position = {{.NodePositionPlaceholder}} AND node_level = 0
 	`)),
 	UpdateAllLeafNodePositionsToTemp: template.Must(template.New("updateAllLeafNodePositionsToTemp").Parse(`
 		UPDATE {{.MtreeTable}} SET node_position = node_position + $1 WHERE node_level = 0

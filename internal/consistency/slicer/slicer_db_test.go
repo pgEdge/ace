@@ -23,6 +23,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/pgedge/ace/db/queries"
 )
 
 // These tests need a PostgreSQL server. Set ACE_SLICER_TEST_DSN to a
@@ -52,11 +53,23 @@ func exec(t *testing.T, pool *pgxpool.Pool, sql string, args ...any) {
 	}
 }
 
+// typed returns cfg with the cast types of its table.
+func typed(t *testing.T, pool *pgxpool.Pool, cfg Config) Config {
+	t.Helper()
+	types, err := queries.GetCastTypes(context.Background(), pool, cfg.Schema, cfg.Table)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.CastTypes = types
+	return cfg
+}
+
 // runSlicer plans and cuts the table and returns the plan and the blocks in
 // key order.
 func runSlicer(t *testing.T, pool *pgxpool.Pool, cfg Config) (*Plan, []Block, *Stats) {
 	t.Helper()
 	ctx := context.Background()
+	cfg = typed(t, pool, cfg)
 	plan, err := PlanParts(ctx, pool, cfg)
 	if err != nil {
 		t.Fatalf("PlanParts: %v", err)
@@ -120,23 +133,14 @@ func cutConns(t *testing.T, pool *pgxpool.Pool, n int) ([]Querier, func(int, err
 // countRange counts the rows of [start, end) that match the filter.
 func countRange(t *testing.T, pool *pgxpool.Pool, cfg Config, b Block) int64 {
 	t.Helper()
-	var where []string
-	var args []any
-	if b.Start != nil {
-		where = append(where, fmt.Sprintf("%s >= %s", cfg.keyExpr(), placeholders(len(args)+1, len(cfg.Key))))
-		args = append(args, b.Start...)
+	if cfg.CastTypes == nil {
+		cfg = typed(t, pool, cfg)
 	}
-	if b.End != nil {
-		where = append(where, fmt.Sprintf("%s < %s", cfg.keyExpr(), placeholders(len(args)+1, len(cfg.Key))))
-		args = append(args, b.End...)
+	where, args, err := queries.BlockWhere(cfg.Key, cfg.CastTypes, queries.KeyRange{Lower: b.Start, Upper: b.End}, cfg.Filter)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if cfg.Filter != "" {
-		where = append(where, "("+cfg.Filter+")")
-	}
-	sql := "SELECT count(*) FROM " + cfg.tableIdent()
-	if len(where) > 0 {
-		sql += " WHERE " + strings.Join(where, " AND ")
-	}
+	sql := "SELECT count(*) FROM " + cfg.tableIdent() + " WHERE " + where
 	var n int64
 	if err := pool.QueryRow(context.Background(), sql, args...).Scan(&n); err != nil {
 		t.Fatalf("%s: %v", sql, err)
@@ -494,7 +498,8 @@ func TestCutPlanUsesIndex(t *testing.T) {
 	exec(t, pool, `ANALYZE ace_slicer_test.pl`)
 	t.Cleanup(func() { exec(t, pool, `DROP TABLE IF EXISTS ace_slicer_test.pl`) })
 
-	cfg := &Config{Schema: "ace_slicer_test", Table: "pl", Key: []string{"id"}, Filter: "n = 3", BlockSize: 100}
+	typedCfg := typed(t, pool, Config{Schema: "ace_slicer_test", Table: "pl", Key: []string{"id"}, Filter: "n = 3", BlockSize: 100})
+	cfg := &typedCfg
 	tx, err := pool.Begin(ctx)
 	if err != nil {
 		t.Fatal(err)
@@ -507,7 +512,7 @@ func TestCutPlanUsesIndex(t *testing.T) {
 	if _, err := tx.Exec(ctx, chunkPlanGuard); err != nil {
 		t.Fatal(err)
 	}
-	rows, err := tx.Query(ctx, "EXPLAIN (COSTS OFF) "+chunkSQL(cfg, false), int64(1), int64(100), int64(10_000))
+	rows, err := tx.Query(ctx, "EXPLAIN (COSTS OFF) "+chunkSQL(cfg, false), "1", int64(100), int64(10_000))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -537,7 +542,7 @@ func TestCutOneSnapshot(t *testing.T) {
 	exec(t, pool, `ANALYZE ace_slicer_test.s`)
 	t.Cleanup(func() { exec(t, pool, `DROP TABLE IF EXISTS ace_slicer_test.s`) })
 
-	cfg := Config{Schema: "ace_slicer_test", Table: "s", Key: []string{"id"}, BlockSize: 10, ChunkRows: 20, Workers: 1}
+	cfg := typed(t, pool, Config{Schema: "ace_slicer_test", Table: "s", Key: []string{"id"}, BlockSize: 10, ChunkRows: 20, Workers: 1})
 	plan, err := PlanParts(ctx, pool, cfg)
 	if err != nil {
 		t.Fatal(err)
@@ -591,7 +596,7 @@ func TestCutCancel(t *testing.T) {
 	exec(t, pool, `INSERT INTO ace_slicer_test.c SELECT g FROM generate_series(1, 10000) g`)
 	t.Cleanup(func() { exec(t, pool, `DROP TABLE IF EXISTS ace_slicer_test.c`) })
 
-	cfg := Config{Schema: "ace_slicer_test", Table: "c", Key: []string{"id"}, BlockSize: 10, Workers: 2}
+	cfg := typed(t, pool, Config{Schema: "ace_slicer_test", Table: "c", Key: []string{"id"}, BlockSize: 10, Workers: 2})
 	ctx, cancel := context.WithCancel(context.Background())
 	plan, err := PlanParts(ctx, pool, cfg)
 	if err != nil {

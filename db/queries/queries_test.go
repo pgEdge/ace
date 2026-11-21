@@ -15,7 +15,6 @@ import (
 	"fmt"
 	"strings"
 	"testing"
-	"text/template"
 	"time"
 )
 
@@ -155,6 +154,30 @@ func normalizeSQLWhitespace(s string) string {
 	return s
 }
 
+// blockHashSQL builds the block hash query of a block with or without each
+// bound, in the same way as table-diff builds it. Every key column has the
+// cast type bigint.
+func blockHashSQL(schema, table string, key []string, mode string, lower, upper bool, filter string, cols []string) (string, error) {
+	types := make(map[string]string, len(key))
+	bound := make([]string, len(key))
+	for i, k := range key {
+		types[k] = "bigint"
+		bound[i] = "1"
+	}
+	var r KeyRange
+	if lower {
+		r.Lower = bound
+	}
+	if upper {
+		r.Upper = bound
+	}
+	where, _, err := BlockWhere(key, types, r, filter)
+	if err != nil {
+		return "", err
+	}
+	return BlockHashSQL(schema, table, mode, where, cols)
+}
+
 func TestBlockHashSQL(t *testing.T) {
 	tests := []struct {
 		name              string
@@ -191,7 +214,7 @@ func TestBlockHashSQL(t *testing.T) {
 			filter:         "",
 			wantQueryContains: []string{
 				`FROM "public"."events" AS _tbl_`,
-				`WHERE "event_id" >= $1 AND "event_id" < $2`,
+				`WHERE "event_id" >= $1::bigint AND "event_id" < $2::bigint`,
 				`SELECT encode(` + BlockHashAggExpr + `, 'hex')`,
 				`SELECT ('x' || encode(sha256(convert_to(ROW(_tbl_."event_id", _tbl_."name", _tbl_."amount")::text, 'UTF8')), 'hex'))::bit(256) AS _rh`,
 				`OFFSET 0`,
@@ -209,7 +232,7 @@ func TestBlockHashSQL(t *testing.T) {
 			filter:         "",
 			wantQueryContains: []string{
 				`FROM "commerce"."line_items" AS _tbl_`,
-				`WHERE ROW("order_id", "item_seq") >= ROW($1, $2) AND ROW("order_id", "item_seq") < ROW($3, $4)`,
+				`WHERE ROW("order_id", "item_seq") >= ROW($1::bigint, $2::bigint) AND ROW("order_id", "item_seq") < ROW($3::bigint, $4::bigint)`,
 				`('x' || encode(sha256(convert_to(ROW(_tbl_."order_id", _tbl_."item_seq", _tbl_."price")::text, 'UTF8')), 'hex'))::bit(256)`,
 			},
 			wantErr: false,
@@ -227,14 +250,6 @@ func TestBlockHashSQL(t *testing.T) {
 			schema:         "public",
 			table:          "events 123",
 			primaryKeyCols: []string{"event_id"},
-			filter:         "",
-			wantErr:        true,
-		},
-		{
-			name:           "invalid primary key column identifier",
-			schema:         "public",
-			table:          "events",
-			primaryKeyCols: []string{"event-id"},
 			filter:         "",
 			wantErr:        true,
 		},
@@ -264,7 +279,7 @@ func TestBlockHashSQL(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			query, err := BlockHashSQL(tt.schema, tt.table, tt.primaryKeyCols, "TD_BLOCK_HASH" /* mode */, tt.includeLower, tt.includeUpper, tt.filter, tt.allCols)
+			query, err := blockHashSQL(tt.schema, tt.table, tt.primaryKeyCols, "TD_BLOCK_HASH" /* mode */, tt.includeLower, tt.includeUpper, tt.filter, tt.allCols)
 
 			if (err != nil) != tt.wantErr {
 				t.Errorf("BlockHashSQL() error = %v, wantErr %v", err, tt.wantErr)
@@ -290,7 +305,7 @@ func TestBlockHashSQL(t *testing.T) {
 }
 
 func TestBlockHashSQLLeafMode(t *testing.T) {
-	query, err := BlockHashSQL("public", "events", []string{"event_id"}, "MTREE_LEAF_HASH",
+	query, err := blockHashSQL("public", "events", []string{"event_id"}, "MTREE_LEAF_HASH",
 		true, false, "", []string{"event_id", "name"})
 	if err != nil {
 		t.Fatalf("BlockHashSQL() error = %v", err)
@@ -307,7 +322,7 @@ func TestBlockHashSQLLeafMode(t *testing.T) {
 	if strings.HasPrefix(strings.TrimSpace(query), "SELECT encode(") {
 		t.Errorf("leaf hash must not be hex-encoded: %q", query)
 	}
-	if !strings.Contains(query, `WHERE "event_id" >= $1`) || strings.Contains(query, "<") {
+	if !strings.Contains(query, `WHERE "event_id" >= $1::bigint`) || strings.Contains(query, "<") {
 		t.Errorf("expected only a lower bound: %q", query)
 	}
 }
@@ -324,7 +339,7 @@ func TestBlockHashSQLHasNoWholeBlockString(t *testing.T) {
 			for _, pk := range [][]string{{"id"}, {"id", "name"}} {
 				name := fmt.Sprintf("%s/lower=%v/upper=%v/pk=%d", mode, bounds.lower, bounds.upper, len(pk))
 				t.Run(name, func(t *testing.T) {
-					query, err := BlockHashSQL("public", "t", pk, mode, bounds.lower, bounds.upper, `"amount" > 0`, cols)
+					query, err := blockHashSQL("public", "t", pk, mode, bounds.lower, bounds.upper, `"amount" > 0`, cols)
 					if err != nil {
 						t.Fatalf("BlockHashSQL() error = %v", err)
 					}
@@ -456,36 +471,5 @@ func TestRowHashExprUsesColExpr(t *testing.T) {
 	want := "sha256(convert_to(ROW(" + strings.Join(exprs, ", ") + ")::text, 'UTF8'))"
 	if got != want {
 		t.Errorf("RowHashExpr() = %q, want %q", got, want)
-	}
-}
-
-// A block with no lower bound reaches the max-value queries with no start key.
-// They must then look at the whole table, not compare the key with NULL.
-func TestGetMaxValOpenStart(t *testing.T) {
-	cases := []struct {
-		name     string
-		tmpl     *template.Template
-		data     map[string]any
-		hasWhere bool
-	}{
-		{"simple/open", SQLTemplates.GetMaxValSimple,
-			map[string]any{"SchemaIdent": `"public"`, "TableIdent": `"t"`, "Key": `"id"`, "HasStart": false}, false},
-		{"simple/bounded", SQLTemplates.GetMaxValSimple,
-			map[string]any{"SchemaIdent": `"public"`, "TableIdent": `"t"`, "Key": `"id"`, "HasStart": true}, true},
-		{"composite/open", SQLTemplates.GetMaxValComposite,
-			map[string]any{"SchemaIdent": `"public"`, "TableIdent": `"t"`, "PkeyCols": `"a", "b"`, "PkeyValues": "ROW()", "HasStart": false}, false},
-		{"composite/bounded", SQLTemplates.GetMaxValComposite,
-			map[string]any{"SchemaIdent": `"public"`, "TableIdent": `"t"`, "PkeyCols": `"a", "b"`, "PkeyValues": "ROW($1, $2)", "HasStart": true}, true},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			sql, err := RenderSQL(tc.tmpl, tc.data)
-			if err != nil {
-				t.Fatalf("render: %v", err)
-			}
-			if got := strings.Contains(sql, "WHERE"); got != tc.hasWhere {
-				t.Errorf("WHERE present = %v, want %v:\n%s", got, tc.hasWhere, sql)
-			}
-		})
 	}
 }

@@ -61,11 +61,6 @@ func (e *NoSelectPrivilegeError) Error() string {
 		e.User, e.Table, e.Node, e.Hint)
 }
 
-type Range struct {
-	Start any
-	End   any
-}
-
 type TableDiffTask struct {
 	types.Task
 	types.DerivedFields
@@ -110,7 +105,9 @@ type TableDiffTask struct {
 
 	Pools map[string]*pgxpool.Pool
 
-	blockHashSQLCache map[hashBoundsKey]string
+	// blockHashSQLCache holds the block hash queries by their WHERE
+	// clause: a query is built once for each node and each form of bounds.
+	blockHashSQLCache map[string]string
 	blockHashSQLMu    sync.Mutex
 
 	NodeOriginNames map[string]map[string]string
@@ -387,11 +384,6 @@ type HashResult struct {
 	err  error
 }
 
-type hashBoundsKey struct {
-	hasLower bool
-	hasUpper bool
-}
-
 func extractPlanRowEstimate(planJSON []byte) (int64, error) {
 	var plans []map[string]any
 	if err := json.Unmarshal(planJSON, &plans); err != nil {
@@ -451,28 +443,23 @@ func (t *TableDiffTask) ensureFilterHasRows(pool *pgxpool.Pool, nodeName string)
 
 type RangeResults map[string]HashResult
 
-// getBlockHashSQL returns the block hash query for a range with or without a
-// lower bound and an upper bound. Each of the four queries is built once and
-// kept for the run.
-func (t *TableDiffTask) getBlockHashSQL(hasLower, hasUpper bool) (string, error) {
-	key := hashBoundsKey{hasLower: hasLower, hasUpper: hasUpper}
-
+// getBlockHashSQL returns the block hash query for the block condition
+// where: the condition on the key range and the filter.
+func (t *TableDiffTask) getBlockHashSQL(where string) (string, error) {
 	t.blockHashSQLMu.Lock()
 	defer t.blockHashSQLMu.Unlock()
 
 	if t.blockHashSQLCache == nil {
-		t.blockHashSQLCache = make(map[hashBoundsKey]string)
+		t.blockHashSQLCache = make(map[string]string)
 	}
-
-	if sql, ok := t.blockHashSQLCache[key]; ok {
+	if sql, ok := t.blockHashSQLCache[where]; ok {
 		return sql, nil
 	}
-
-	query, err := queries.BlockHashSQL(t.Schema, t.Table, t.Key, "TD_BLOCK_HASH" /* mode */, hasLower, hasUpper, t.EffectiveFilter, t.Cols)
+	query, err := queries.BlockHashSQL(t.Schema, t.Table, "TD_BLOCK_HASH" /* mode */, where, t.Cols)
 	if err != nil {
 		return "", err
 	}
-	t.blockHashSQLCache[key] = query
+	t.blockHashSQLCache[where] = query
 	return query, nil
 }
 
@@ -486,7 +473,7 @@ func NewTableDiffTask() *TableDiffTask {
 		Mode:              "diff",
 		InvokeMethod:      "cli",
 		DiffSummary:       make(map[string]string),
-		blockHashSQLCache: make(map[hashBoundsKey]string),
+		blockHashSQLCache: make(map[string]string),
 		DerivedFields: types.DerivedFields{
 			HostMap: make(map[string]string),
 		},
@@ -677,6 +664,37 @@ func (t *TableDiffTask) Validate() error {
 	return nil
 }
 
+// namedCollations are the collations of the columns of the table on one node.
+type namedCollations struct {
+	node  string
+	colls map[string]string
+}
+
+// warnKeyCollations logs a warning for each node whose key columns have
+// other collations than on the first node. The blocks are cut in the order
+// of the key on one node and hashed in the order of the key on each node.
+// With another order a key can fall into two blocks on a node, so the diff
+// can report rows that are the same on both nodes; it does not miss rows.
+func warnKeyCollations(table string, key []string, nodes []namedCollations) {
+	if len(nodes) < 2 {
+		return
+	}
+	ref := nodes[0]
+	for _, n := range nodes[1:] {
+		if col, a, b, ok := queries.KeyCollationMismatch(key, ref.colls, n.colls); ok {
+			logger.Warn("table %s: primary key column %q has %s on %s and %s on %s; "+
+				"the nodes order the key in other ways, and the diff can report rows "+
+				"that are the same on both nodes",
+				table, col, queries.CollationText(a), ref.node, queries.CollationText(b), n.node)
+		}
+	}
+}
+
+// RunChecks connects to every node and checks that the table can be compared:
+// the privileges of the user, the same columns and key on every node. It reads
+// the column types, the cast types and the collations of every node and warns
+// about key collations that differ. With skipValidation the options are not
+// validated first.
 func (t *TableDiffTask) RunChecks(skipValidation bool) (err error) {
 	if !skipValidation {
 		if err = t.Validate(); err != nil {
@@ -688,6 +706,7 @@ func (t *TableDiffTask) RunChecks(skipValidation bool) (err error) {
 	var refHostname string
 	var refNodeInfo map[string]any
 	hostMap := make(map[string]string)
+	var nodeCollations []namedCollations
 
 	schema := t.Schema
 	table := t.Table
@@ -763,6 +782,11 @@ func (t *TableDiffTask) RunChecks(skipValidation bool) (err error) {
 			if err != nil {
 				return fmt.Errorf("failed to get cast types for table %s.%s on node %s: %w", schema, table, hostname, err)
 			}
+			collations, err := queries.GetCollationOrders(t.Ctx, conn, schema, table)
+			if err != nil {
+				return fmt.Errorf("failed to get collations for table %s.%s on node %s: %w", schema, table, hostname, err)
+			}
+			nodeCollations = append(nodeCollations, namedCollations{node: hostname, colls: collations})
 
 			currKey, err := queries.GetPrimaryKey(t.Ctx, conn, schema, table)
 			if err != nil {
@@ -807,6 +831,7 @@ func (t *TableDiffTask) RunChecks(skipValidation bool) (err error) {
 	}
 
 	logger.Info("Connections successful to nodes in cluster")
+	warnKeyCollations(t.QualifiedTableName, key, nodeCollations)
 
 	t.HostMap = hostMap
 	t.Cols = cols
@@ -1259,7 +1284,7 @@ func (t *TableDiffTask) ExecuteTask() (err error) {
 	t.EffectiveFilter = effectiveFilter
 	t.DiffSummary["effective_filter"] = effectiveFilter
 
-	if _, err = t.getBlockHashSQL(true, true); err != nil {
+	if _, err = t.getBlockHashSQL(""); err != nil {
 		return fmt.Errorf("failed to build block-hash SQL: %w", err)
 	}
 
@@ -1335,10 +1360,15 @@ func (t *TableDiffTask) ExecuteTask() (err error) {
 	// about BlockSize rows; its cost does not depend on the visibility map.
 	anchorPool := pools[maxNode]
 	cutWorkers := slicer.CutWorkers(limits[maxNode].opened)
+	anchorTypes, err := t.nodeCastTypes(maxNode)
+	if err != nil {
+		return err
+	}
 	sliceCfg := slicer.Config{
 		Schema:    t.Schema,
 		Table:     t.Table,
 		Key:       t.Key,
+		CastTypes: anchorTypes,
 		Filter:    t.EffectiveFilter,
 		BlockSize: t.BlockSize,
 		Workers:   cutWorkers,
@@ -1540,7 +1570,7 @@ func (t *TableDiffTask) ExecuteTask() (err error) {
 
 	for _, rangeIdx := range slicer.KeyOrder(blocks) {
 		block := blocks[rangeIdx]
-		currentRange := t.rangeFromBlock(block)
+		currentRange := rangeFromBlock(block)
 		for i := 0; i < len(nodeNames); i++ {
 			node1 := nodeNames[i]
 			for j := i + 1; j < len(nodeNames); j++ {
@@ -1550,14 +1580,14 @@ func (t *TableDiffTask) ExecuteTask() (err error) {
 				r2, r2ok := resultsMap[rangeIdx][node2]
 
 				if !r1ok || !r2ok || r1.err != nil || r2.err != nil {
-					logger.Info("ERROR: Cannot compare range %d (%v-%v) for %s/%s due to missing initial hash or error. N1OK: %t, N2OK: %t, N1Err: %v, N2Err: %v",
-						rangeIdx, currentRange.Start, currentRange.End, node1, node2, r1ok, r2ok, r1.err, r2.err)
+					logger.Info("ERROR: Cannot compare range %d (%q-%q) for %s/%s due to missing initial hash or error. N1OK: %t, N2OK: %t, N1Err: %v, N2Err: %v",
+						rangeIdx, currentRange.Lower, currentRange.Upper, node1, node2, r1ok, r2ok, r1.err, r2.err)
 					continue
 				}
 
 				if r1.hash != r2.hash {
-					logger.Debug("%s Mismatch in initial range %d (%v-%v) for %s vs %s. Hashes: %s... / %s...",
-						utils.CrossMark, rangeIdx, currentRange.Start, currentRange.End, node1, node2, utils.SafeCut(r1.hash, 8), utils.SafeCut(r2.hash, 8))
+					logger.Debug("%s Mismatch in initial range %d (%q-%q) for %s vs %s. Hashes: %s... / %s...",
+						utils.CrossMark, rangeIdx, currentRange.Lower, currentRange.Upper, node1, node2, utils.SafeCut(r1.hash, 8), utils.SafeCut(r2.hash, 8))
 					mismatchedTasks = append(mismatchedTasks, mismatchTask{
 						node1: node1,
 						node2: node2,
@@ -1569,7 +1599,7 @@ func (t *TableDiffTask) ExecuteTask() (err error) {
 					})
 
 				} else {
-					logger.Debug("%s Match in initial range %d (%v-%v) for %s vs %s", utils.CheckMark, rangeIdx, currentRange.Start, currentRange.End, node1, node2)
+					logger.Debug("%s Match in initial range %d (%q-%q) for %s vs %s", utils.CheckMark, rangeIdx, currentRange.Lower, currentRange.Upper, node1, node2)
 				}
 			}
 		}
@@ -1712,15 +1742,15 @@ type rowQuerier interface {
 	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
 }
 
-// hashRangeOn runs the block hash query (queries.BlockHashSQL) for the range
-// r of node on q, a connection to that node. It returns the hash as hex text
-// and the number of rows in the range. A bound of r that is nil, or all NULL
-// for a composite key, leaves the range open on that side.
+// hashRangeOn runs the block hash query for the range r of node on q, a
+// connection to that node. It returns the hash as hex text and the number of
+// rows in the range. The bounds of r are cast to the types of the key columns
+// on node.
 func (t *TableDiffTask) hashRangeOn(
 	ctx context.Context,
 	q rowQuerier,
 	node string,
-	r Range,
+	r queries.KeyRange,
 ) (string, int64, error) {
 	startTime := time.Now()
 	var (
@@ -1728,101 +1758,41 @@ func (t *TableDiffTask) hashRangeOn(
 		rows int64
 	)
 
-	args, hasLower, hasUpper, err := rangeArgs(r, len(t.Key))
+	castTypes, err := t.nodeCastTypes(node)
 	if err != nil {
 		return "", 0, err
 	}
-
-	query, err := t.getBlockHashSQL(hasLower, hasUpper)
+	where, args, err := queries.BlockWhere(t.Key, castTypes, r, t.EffectiveFilter)
+	if err != nil {
+		return "", 0, err
+	}
+	query, err := t.getBlockHashSQL(where)
 	if err != nil {
 		return "", 0, fmt.Errorf("failed to build block-hash SQL: %w", err)
 	}
 
-	logger.Debug("[%s] Hashing range: Start=%v, End=%v. SQL: %s, Args: %v", node, r.Start, r.End, query, args)
+	logger.Debug("[%s] Hashing range: Start=%q, End=%q. SQL: %s, Args: %v", node, r.Lower, r.Upper, query, args)
 
 	err = q.QueryRow(ctx, query, args...).Scan(&hash, &rows)
 
 	if err != nil {
 		duration := time.Since(startTime)
-		logger.Debug("[%s] ERROR after %v for range Start=%v, End=%v (using query: '%s', args: %v): %v", node, duration, r.Start, r.End, query, args, err)
-		return "", 0, fmt.Errorf("BlockHash query failed for %s range %v-%v: %w", node, r.Start, r.End, err)
+		logger.Debug("[%s] ERROR after %v for range Start=%q, End=%q (using query: '%s', args: %v): %v", node, duration, r.Lower, r.Upper, query, args, err)
+		return "", 0, fmt.Errorf("BlockHash query failed for %s range %q-%q: %w", node, r.Lower, r.Upper, err)
 	}
 
 	duration := time.Since(startTime)
 	if duration > 10000*time.Millisecond {
-		logger.Debug("[%s] Slow query? Range Start=%v, End=%v took %v", node, r.Start, r.End, duration)
+		logger.Debug("[%s] Slow query? Range Start=%q, End=%q took %v", node, r.Lower, r.Upper, duration)
 	} else {
-		logger.Debug("[%s] Range Start=%v, End=%v took %v", node, r.Start, r.End, duration)
+		logger.Debug("[%s] Range Start=%q, End=%q took %v", node, r.Lower, r.Upper, duration)
 	}
 	return hash, rows, nil
 }
 
-// rangeArgs returns the query arguments for the bounds of r: the values of
-// the lower bound, then the values of the upper bound. hasLower and hasUpper
-// say which bounds r has.
-func rangeArgs(r Range, numPKCols int) (args []any, hasLower, hasUpper bool, err error) {
-	startVals, hasLower, err := extractRangeBoundValues(r.Start, numPKCols)
-	if err != nil {
-		return nil, false, false, err
-	}
-	endVals, hasUpper, err := extractRangeBoundValues(r.End, numPKCols)
-	if err != nil {
-		return nil, false, false, err
-	}
-	args = make([]any, 0, len(startVals)+len(endVals))
-	if hasLower {
-		args = append(args, startVals...)
-	}
-	if hasUpper {
-		args = append(args, endVals...)
-	}
-	return args, hasLower, hasUpper, nil
-}
-
-func extractRangeBoundValues(bound any, numPKCols int) ([]any, bool, error) {
-	if bound == nil {
-		return nil, false, nil
-	}
-	if numPKCols == 1 {
-		return []any{bound}, true, nil
-	}
-
-	processSlice := func(vals []any) ([]any, bool, error) {
-		if len(vals) != numPKCols {
-			return nil, false, fmt.Errorf("range bound expected %d values, got %d", numPKCols, len(vals))
-		}
-		if queries.AllNil(vals) {
-			return nil, false, nil
-		}
-		return vals, true, nil
-	}
-
-	if vals, ok := bound.([]any); ok {
-		return processSlice(vals)
-	}
-	if valsIface, ok := bound.([]interface{}); ok {
-		vals := make([]any, len(valsIface))
-		copy(vals, valsIface)
-		return processSlice(vals)
-	}
-
-	return nil, false, fmt.Errorf("unsupported range bound type %T", bound)
-}
-
-// rangeFromBlock converts a slicer block into a Range: a simple key uses the
-// value itself, a composite key uses a []any of all key values. nil means no
-// bound.
-func (t *TableDiffTask) rangeFromBlock(b slicer.Block) Range {
-	conv := func(vals []any) any {
-		if vals == nil {
-			return nil
-		}
-		if len(t.Key) == 1 {
-			return vals[0]
-		}
-		return vals
-	}
-	return Range{Start: conv(b.Start), End: conv(b.End)}
+// rangeFromBlock converts a slicer block into a key range [Start, End).
+func rangeFromBlock(b slicer.Block) queries.KeyRange {
+	return queries.KeyRange{Lower: b.Start, Upper: b.End}
 }
 
 var compareUnitSizeWarning sync.Once
@@ -1841,7 +1811,7 @@ func warnCompareUnitSize() {
 // the part.
 type mismatchTask struct {
 	node1, node2 string
-	r            Range
+	r            queries.KeyRange
 	part, seq    int
 	rows1, rows2 int64
 }
@@ -1926,14 +1896,8 @@ func (t *TableDiffTask) compareMismatch(ctx context.Context, task mismatchTask) 
 		if errors.As(err, &me) {
 			err = fmt.Errorf("%w; raise %s or use smaller blocks", err, keyMapMaxMemorySetting)
 		}
-		t.recordError(fmt.Errorf("compare rows of %s in range %v-%v on %s and %s: %w",
-			t.QualifiedTableName, task.r.Start, task.r.End, task.node1, task.node2, err))
-	}
-
-	args, hasLower, hasUpper, err := rangeArgs(task.r, len(t.Key))
-	if err != nil {
-		fail(err)
-		return
+		t.recordError(fmt.Errorf("compare rows of %s in range %q-%q on %s and %s: %w",
+			t.QualifiedTableName, task.r.Lower, task.r.Upper, task.node1, task.node2, err))
 	}
 
 	side := func(node string, rows int64) (keydiff.Side, error) {
@@ -1965,8 +1929,8 @@ func (t *TableDiffTask) compareMismatch(ctx context.Context, task mismatchTask) 
 
 	tbl := keydiff.Table{Schema: t.Schema, Name: t.Table, Key: t.Key, Cols: t.Cols, ScanChildren: t.scanChildren}
 	block := keydiff.Block{
-		Where:      queries.BlockWhereClause(t.Key, hasLower, hasUpper, t.EffectiveFilter),
-		Args:       args,
+		Range:      task.r,
+		Filter:     t.EffectiveFilter,
 		ReadFilter: t.EffectiveFilter,
 	}
 	out := t.result.OpenBlock(pairKey, task.node1, task.node2, task.part, task.seq)
@@ -1980,8 +1944,8 @@ func (t *TableDiffTask) compareMismatch(ctx context.Context, task mismatchTask) 
 		fail(err)
 		return
 	}
-	logger.Debug("[%s vs %s] range %v-%v: %d differing keys (map on %s), %d only on %s, %d only on %s, %d changed",
-		task.node1, task.node2, task.r.Start, task.r.End, res.DiffKeys, res.BuildNode,
+	logger.Debug("[%s vs %s] range %q-%q: %d differing keys (map on %s), %d only on %s, %d only on %s, %d changed",
+		task.node1, task.node2, task.r.Lower, task.r.Upper, res.DiffKeys, res.BuildNode,
 		res.Only1, task.node1, res.Only2, task.node2, res.Changed)
 	if n := res.Count(); n > 0 {
 		t.diffMutex.Lock()

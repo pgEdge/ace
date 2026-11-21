@@ -4,20 +4,13 @@ package integration
 // per type.
 //
 // The property is the whole promise of mtree: if N rows differ between two
-// nodes, the diff must report exactly those N. It holds only if ACE can
-// reproduce the Postgres order of the key type outside the database, because
-// the block bounds it builds in Go are sent back as range conditions. When the
-// two orders disagree, a range selects nothing, the block is never compared,
-// and the diff reports a match it never checked.
-//
-// The known instances -- uuid, bytea, numeric, and the text
-// collation gap -- is one instance of that. Each was found by hand, one at a
-// time, after it reached production. This test looks for the next one.
-//
-// The failures are partial, not total: restoring the pre-fix uuid and bytea
-// ordering makes the diff report 6 of 9 differing rows, and the text collation
-// case reports 4 of 9. A wrong order does not always empty a range -- often it
-// only widens one -- which is why this misses rows quietly instead of erroring.
+// nodes, the diff must report exactly those N. The diff builds the key ranges
+// to compare from the bounds of the mismatched leaves. If the bounds were
+// ordered in another way than the server orders the key type, a range would
+// select nothing, the block would never be compared, and the diff would report
+// a match it never checked. A wrong order does not always empty a range --
+// often it only widens one -- so such a defect misses rows quietly instead of
+// failing.
 //
 // Three things about the setup are load-bearing. The divergence has to span
 // many blocks: with a single differing row there is one mismatched leaf, two
@@ -35,11 +28,11 @@ package integration
 import (
 	"context"
 	"fmt"
-	"strings"
 	"testing"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/pgedge/ace/pkg/config"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -50,12 +43,6 @@ type pkeyTypeCase struct {
 	name      string
 	pkType    string
 	valuesSQL string
-	// skipReason, when the check returns a non-empty string, skips the case.
-	skipReason func(t *testing.T, ctx context.Context, pool *pgxpool.Pool) string
-	// knownGap marks a case that reproduces an open defect. It is skipped so
-	// the suite stays green; deleting the field is the acceptance criterion
-	// for the fix.
-	knownGap string
 }
 
 const (
@@ -72,6 +59,8 @@ const (
 	pkeyTypeDivergedRows = (pkeyTypeDivergeTo-pkeyTypeDivergeFrom)/pkeyTypeDivergeEvery + 1
 )
 
+// pkeyTypeCases returns the key types to test, with pkeyTypeRowCount rows of
+// each.
 func pkeyTypeCases() []pkeyTypeCase {
 	g := fmt.Sprintf("generate_series(1, %d) g", pkeyTypeRowCount)
 	return []pkeyTypeCase{
@@ -100,17 +89,12 @@ func pkeyTypeCases() []pkeyTypeCase {
 			valuesSQL: "SELECT CASE WHEN g % 2 = 0 THEN upper(md5(g::text)) ELSE md5(g::text) END FROM " + g,
 		},
 		{
-			// Reproduces the collation gap, and it is a real one: measured on
-			// PostgreSQL 17 the diff reported 4 of the 9 differing rows. The
-			// same collation with md5 values passes, so what matters is not the
-			// collation by itself but how far its order drifts from the byte
-			// order. Here the first character alternates case: byte order puts
-			// every uppercase before every lowercase, en_US interleaves them.
+			// The first character alternates case: the byte order puts
+			// every uppercase before every lowercase, en_US interleaves
+			// them. An order of the bounds by bytes loses rows here.
 			name:      "text_en_us_collation",
 			pkType:    `TEXT COLLATE "en_US.utf8"`,
 			valuesSQL: "SELECT CASE WHEN g % 2 = 0 THEN chr(65 + g % 26) ELSE chr(97 + g % 26) END || md5(g::text) FROM " + g,
-			knownGap: "mtree orders text bounds byte by byte while the server uses the column collation; " +
-				"fix is to order the bounds in SQL -- see Merkle Tree Architecture, \"Primary Key Types\"",
 		},
 		{
 			name:      "timestamptz",
@@ -126,24 +110,6 @@ func pkeyTypeCases() []pkeyTypeCase {
 			name:      "text_database_collation",
 			pkType:    "TEXT",
 			valuesSQL: "SELECT CASE WHEN g % 2 = 0 THEN upper(md5(g::text)) ELSE md5(g::text) END FROM " + g,
-			skipReason: func(t *testing.T, ctx context.Context, pool *pgxpool.Pool) string {
-				// pg_database, not current_setting('lc_collate'): that GUC was
-				// removed in PostgreSQL 16.
-				var collation string
-				require.NoError(t, pool.QueryRow(ctx,
-					"SELECT datcollate FROM pg_database WHERE datname = current_database()").Scan(&collation))
-				switch strings.ToUpper(collation) {
-				case "C", "POSIX", "C.UTF-8", "C.UTF8":
-					return ""
-				}
-				// Not a passing case dressed up as a skip: mtree sorts text
-				// bounds byte by byte, so under this collation it can order
-				// them differently than the server did and miss the row. The
-				// fix is to sort the bounds in SQL; until then the run is
-				// skipped rather than expected to pass.
-				return fmt.Sprintf("database collation is %s, not byte-ordered; "+
-					"see Merkle Tree Architecture, \"Primary Key Types\"", collation)
-			},
 		},
 	}
 }
@@ -155,15 +121,6 @@ func TestMtreePkeyTypesFindDivergence(t *testing.T) {
 
 	for _, tc := range pkeyTypeCases() {
 		t.Run(tc.name, func(t *testing.T) {
-			if tc.knownGap != "" {
-				t.Skip(tc.knownGap)
-			}
-			if tc.skipReason != nil {
-				if reason := tc.skipReason(t, ctx, env.N1Pool); reason != "" {
-					t.Skip(reason)
-				}
-			}
-
 			tableName := "mtree_pkey_" + tc.name
 			qualified := fmt.Sprintf("%s.%s", testSchema, tableName)
 			safe := pgx.Identifier{testSchema, tableName}.Sanitize()
@@ -231,4 +188,139 @@ func TestMtreePkeyTypesFindDivergence(t *testing.T) {
 					"than on the server", pkeyTypeDivergedRows)
 		})
 	}
+}
+
+// leafKeyTypeCase is a key type for a tree whose leaves differ on the two
+// nodes. base makes the rows of both nodes from n = 1..2000; extra makes
+// one more row for each n in 600..1899, which sorts next to the base row of
+// that n, and gives it n + 10000. For the text key these rows spread over
+// all leaves, so there must be enough of them for more than a sliver of
+// extra rows in each leaf.
+type leafKeyTypeCase struct {
+	name  string
+	setup []string
+	ddl   string
+	base  string
+	extra string
+}
+
+// leafKeyTypeCases returns the key types to test with leaves that differ on
+// the two nodes.
+func leafKeyTypeCases() []leafKeyTypeCase {
+	text := "CASE WHEN g % 2 = 0 THEN chr(65 + g % 26) ELSE chr(97 + g % 26) END || lpad(g::text, 6, '0')"
+	return []leafKeyTypeCase{
+		{
+			name:  "text_en_us",
+			ddl:   `(id TEXT COLLATE "en_US.utf8" PRIMARY KEY, n int, v text)`,
+			base:  "SELECT " + text + ", g, 'v' FROM generate_series(1, 2000) g",
+			extra: "SELECT " + text + " || 'x', g + 10000, 'v' FROM generate_series(600, 1899) g",
+		},
+		{
+			name: "enum",
+			setup: []string{
+				fmt.Sprintf("DROP TYPE IF EXISTS %s.leaf_color CASCADE", testSchema),
+				fmt.Sprintf("CREATE TYPE %s.leaf_color AS ENUM ('red', 'green', 'blue')", testSchema),
+			},
+			ddl:   fmt.Sprintf("(c %s.leaf_color, n int, v text, PRIMARY KEY (c, n))", testSchema),
+			base:  fmt.Sprintf("SELECT (ARRAY['red', 'green', 'blue'])[1 + g / 700]::%s.leaf_color, g, 'v' FROM generate_series(1, 2000) g", testSchema),
+			extra: fmt.Sprintf("SELECT (ARRAY['red', 'green', 'blue'])[1 + g / 700]::%s.leaf_color, g + 10000, 'v' FROM generate_series(600, 1899) g", testSchema),
+		},
+		{
+			name:  "numeric",
+			ddl:   "(id numeric PRIMARY KEY, n int, v text)",
+			base:  "SELECT g * 1.5, g, 'v' FROM generate_series(1, 2000) g",
+			extra: "SELECT g * 1.5 + 0.001, g + 10000, 'v' FROM generate_series(600, 1899) g",
+		},
+	}
+}
+
+// After rows are added on one node only, mtree update splits the leaves of
+// that node, and the two trees have different leaf bounds. The diff builds
+// its ranges from the bounds of both nodes, sorted by the server in the
+// order of the key type, and must report exactly the added rows.
+func TestMtreeKeyTypesWithDifferentLeaves(t *testing.T) {
+	ctx := context.Background()
+	for _, tc := range leafKeyTypeCases() {
+		t.Run(tc.name, func(t *testing.T) {
+			env := newSpockEnv()
+			for _, pool := range env.pools() {
+				for _, sql := range tc.setup {
+					_, err := pool.Exec(ctx, sql) // nosemgrep
+					require.NoError(t, err, sql)
+				}
+			}
+			tableName := "mtree_leaves_" + tc.name
+			qualified, safe := newUnreplicatedTable(t, env, tableName, tc.ddl)
+			for _, pool := range env.pools() {
+				_, err := pool.Exec(ctx, "INSERT INTO "+safe+" "+tc.base) // nosemgrep
+				require.NoError(t, err)
+			}
+			analyzeTable(t, env, safe)
+
+			task := env.newMerkleTreeTask(t, qualified, []string{env.ServiceN1, env.ServiceN2})
+			task.BlockSize = 100
+			task.OverrideBlockSize = true
+			require.NoError(t, task.RunChecks(false))
+			require.NoError(t, task.MtreeInit())
+			t.Cleanup(func() { assert.NoError(t, task.MtreeTeardown()) })
+			require.NoError(t, task.BuildMtree())
+			t.Cleanup(func() { removeDiffResults(t, qualified) })
+
+			_, err := env.N2Pool.Exec(ctx, "INSERT INTO "+safe+" "+tc.extra) // nosemgrep
+			require.NoError(t, err)
+			require.NoError(t, task.DiffMtree())
+
+			mtreeTable := pgx.Identifier{
+				config.Cfg.MTree.Schema,
+				fmt.Sprintf("ace_mtree_%s_%s", testSchema, tableName),
+			}.Sanitize()
+			leaves := func(pool *pgxpool.Pool) int {
+				var n int
+				require.NoError(t, pool.QueryRow(ctx,
+					"SELECT count(*) FROM "+mtreeTable+" WHERE node_level = 0").Scan(&n)) // nosemgrep
+				return n
+			}
+			require.Greater(t, leaves(env.N2Pool), leaves(env.N1Pool), "only n2 should have split leaves")
+
+			nodeDiffs := diffPairs(t, task)[env.pairKey()]
+			require.Empty(t, extractDiffIDsByColumn(nodeDiffs.Rows[env.ServiceN1], "n"))
+			require.Equal(t, idRange(10600, 11899), extractDiffIDsByColumn(nodeDiffs.Rows[env.ServiceN2], "n"))
+		})
+	}
+}
+
+// A key column with another collation on one node orders the key in another
+// way there. mtree builds its leaves and the ranges of the diff in the order
+// of one node, so it refuses such a table; table-diff still compares it.
+func TestKeyCollationDiffersByNode(t *testing.T) {
+	ctx := context.Background()
+	env := newSpockEnv()
+	tableName := "key_collation_by_node"
+	qualified := fmt.Sprintf("%s.%s", testSchema, tableName)
+	safe := pgx.Identifier{testSchema, tableName}.Sanitize()
+	for i, pool := range env.pools() {
+		coll := `"C"`
+		if i == 1 {
+			coll = `"en_US.utf8"`
+		}
+		_, err := pool.Exec(ctx, fmt.Sprintf( // nosemgrep
+			"CREATE TABLE %s (id text COLLATE %s PRIMARY KEY, v text)", safe, coll))
+		require.NoError(t, err)
+		t.Cleanup(func() {
+			execOK(t, context.Background(), pool, "DROP TABLE IF EXISTS "+safe+" CASCADE") // nosemgrep
+		})
+		_, err = pool.Exec(ctx, "INSERT INTO "+safe+" VALUES ('a', 'x'), ('B', 'x'), ('c', 'x')") // nosemgrep
+		require.NoError(t, err)
+	}
+
+	task := env.newMerkleTreeTask(t, qualified, []string{env.ServiceN1, env.ServiceN2})
+	err := task.RunChecks(false)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), `primary key column "id" has collation`)
+	require.Contains(t, err.Error(), "mtree needs the same key collations on every node")
+
+	t.Cleanup(func() { removeDiffResults(t, qualified) })
+	td := newTestTableDiffTask(t, qualified, []string{env.ServiceN1, env.ServiceN2})
+	require.NoError(t, td.RunChecks(false))
+	require.NoError(t, td.ExecuteTask())
 }
