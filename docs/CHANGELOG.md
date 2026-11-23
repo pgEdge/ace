@@ -5,6 +5,13 @@ All notable changes to ACE will be captured in this document. This project follo
 ## [Unreleased]
 
 ### ⚠️ Breaking Change
+- **ACE needs PostgreSQL 15 or later on every node.** The documentation
+  now gives this minimum. On PostgreSQL 14, the database has no locale
+  provider, so the new check of the key collation sees a different
+  collation on a PostgreSQL 14 node and on a node of a later version, even
+  when both use the same locale. Earlier versions fail with SQL errors,
+  for example in `table-diff` on the first block that differs. ACE does
+  not check the server version when it connects.
 - **`--max-connections` (`-M`) of `table-diff`, `repset-diff` and
   `schema-diff` has a new meaning.** It was an upper bound for the
   connection pool of each node, and `0` meant "compute from the number of
@@ -260,9 +267,9 @@ All notable changes to ACE will be captured in this document. This project follo
   Before, the backend ran the query to the end and held its snapshot, and
   so held back vacuum on that node.
   Set `postgres.client_connection_check_interval` in `ace.yaml` to change
-  it, or to `-1` to leave the server's setting in place. A server that does
-  not support the setting (before PostgreSQL 14, or on Windows) accepts the
-  connection without it.
+  it, or to `-1` to leave the server's setting in place. A server on
+  Windows does not support the setting; ACE keeps the connection to such a
+  server without it.
 - **`table-diff` opens its connections at the start and keeps them.** It
   opens the connections for cutting and hashing to every node before any
   other work, and the pool no longer closes them because of their age or

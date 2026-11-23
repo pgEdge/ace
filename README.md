@@ -14,6 +14,8 @@
 
 The Active Consistency Engine (ACE) is a tool designed to ensure eventual consistency between nodes in a cluster.
 
+ACE needs PostgreSQL 15 or later on every node of the cluster (see [Requirements](./docs/install.md#requirements)).
+
 ## Building ACE
 
 Before building ACE, you need to install Go (version 1.26.10 or higher).
