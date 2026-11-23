@@ -13,6 +13,7 @@ package schema
 
 import (
 	"fmt"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -394,37 +395,73 @@ func compareRangeObject(name, nodeA, nodeB string, aProps, bProps []Property) []
 	return out
 }
 
-// compareCompositeObject diffs a composite type's attributes. Property
-// Names already carry the attnum-order index, so a union-by-Name comparison
-// is naturally in declaration order and reports an added/removed/retyped/
-// recollated attribute as one line: a missing attribute on one side simply
-// has "" there, matching the absent-value convention used elsewhere.
+// compareCompositeObject diffs a composite type's attributes. Attributes are
+// matched by name, so an added, removed, retyped or recollated attribute is
+// one line: a missing attribute on one side simply has "" there, matching
+// the absent-value convention used elsewhere.
+//
+// The order of the attributes is compared on its own, and only for the
+// attributes that both nodes have. An attribute that one node does not have
+// is already reported above, so it does not also make the order differ.
 func compareCompositeObject(name, nodeA, nodeB string, aProps, bProps []Property) []Divergence {
 	var out []Divergence
-	names := unionSorted(propNames(aProps, "attr:"), propNames(bProps, "attr:"))
-	for _, key := range names {
+	aKeys, bKeys := propNames(aProps, "attr:"), propNames(bProps, "attr:")
+	for _, key := range unionSorted(aKeys, bKeys) {
 		av, bv := getProp(aProps, key), getProp(bProps, key)
 		if av == bv {
 			continue
 		}
 		rank, side := classifyAttr(av, bv, nodeA, nodeB)
 
-		// The property key is "attr:0007:city" and its value is a packed
-		// "ns.name/typmod/collation" string — neither fit for display. The
-		// paired attrtext property carries the same attribute as PostgreSQL
-		// prints it.
-		ord, attr := splitAttrKey(key)
-		suffix := strings.TrimPrefix(key, "attr:")
+		// The value is a packed "ns.name/typmod/collation" string, not fit
+		// for display. The paired attrtext property carries the same
+		// attribute as PostgreSQL prints it.
+		attr := strings.TrimPrefix(key, "attr:")
 		out = append(out, Divergence{
 			Object: name, Kind: "composite",
-			Property: fmt.Sprintf("attribute %d (%s)", ord, attr),
+			Property: fmt.Sprintf("attribute (%s)", attr),
 			NodeA:    nodeA, NodeB: nodeB,
-			ValueOnA: displayOrRaw(getProp(aProps, "attrtext:"+suffix), av),
-			ValueOnB: displayOrRaw(getProp(bProps, "attrtext:"+suffix), bv),
+			ValueOnA: displayOrRaw(getProp(aProps, "attrtext:"+attr), av),
+			ValueOnB: displayOrRaw(getProp(bProps, "attrtext:"+attr), bv),
 			Rank:     rank, NarrowSide: side,
 		})
 	}
+
+	if !slices.Equal(commonInOrder(aKeys, bKeys), commonInOrder(bKeys, aKeys)) {
+		out = append(out, Divergence{
+			Object: name, Kind: "composite", Property: "attribute order",
+			NodeA: nodeA, NodeB: nodeB,
+			ValueOnA: attributeList(aKeys), ValueOnB: attributeList(bKeys),
+			Rank: RankIncompatible,
+			Note: "the same row literal maps its values to other attributes on the two nodes",
+		})
+	}
 	return out
+}
+
+// commonInOrder returns the keys of a that are also in b, in the order of a.
+func commonInOrder(a, b []string) []string {
+	inB := make(map[string]bool, len(b))
+	for _, k := range b {
+		inB[k] = true
+	}
+	out := make([]string, 0, len(a))
+	for _, k := range a {
+		if inB[k] {
+			out = append(out, k)
+		}
+	}
+	return out
+}
+
+// attributeList prints the attribute names behind "attr:" keys as a row
+// type would list them: "(city, zip)".
+func attributeList(keys []string) string {
+	names := make([]string, len(keys))
+	for i, k := range keys {
+		names[i] = strings.TrimPrefix(k, "attr:")
+	}
+	return "(" + strings.Join(names, ", ") + ")"
 }
 
 // classifyAttr ranks a difference between two composite attributes.
@@ -473,23 +510,6 @@ func classifyAttr(packedA, packedB, nodeA, nodeB string) (rank, narrowSide strin
 		return RankIncompatible, ""
 	}
 	return rank, side
-}
-
-// splitAttrKey turns collect.go's "attr:0007:city" back into (7, "city").
-// The number is the attribute's own attnum, so it is printed as it stands —
-// it matches what \d+ on the type shows, gaps from dropped attributes
-// included.
-func splitAttrKey(key string) (int, string) {
-	rest := strings.TrimPrefix(key, "attr:")
-	idx, attr, found := strings.Cut(rest, ":")
-	if !found {
-		return 0, rest
-	}
-	ord, err := strconv.Atoi(idx)
-	if err != nil {
-		return 0, attr
-	}
-	return ord, attr
 }
 
 // displayOrRaw prefers the display text collect.go paired with an

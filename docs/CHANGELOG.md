@@ -300,6 +300,15 @@ All notable changes to ACE will be captured in this document. This project follo
   nodes with the same schema almost always have different values. Now
   the structure comparison leaves this key out. Other column options,
   such as `n_distinct`, are still compared.
+- **`schema-diff --compare=structure` reported the same composite type as
+  different when one node had dropped an attribute.** `DROP ATTRIBUTE`
+  leaves a gap in the attribute numbers, and a dump and restore of the
+  type, as in the structure sync of Spock, has no gap. The comparison used
+  these numbers, so it reported each attribute after the gap as absent on
+  one node and present on the other. Now the attributes are matched by
+  name, and their order is compared on its own: the same attributes in
+  another order are one finding, `attribute order`. A finding on an
+  attribute is now named `attribute (name)`, without a number.
 - **`table-diff` and `mtree` converted the bounds of the blocks to Go
   values.** A key type that the driver did not know, or could not decode,
   stopped the run with an error, and a value that the Go type could not

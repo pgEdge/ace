@@ -215,7 +215,7 @@ func TestSchemaDiffStructure_ColumnAndTypeDriftIsReported(t *testing.T) {
 	// The composite attribute is named for a reader, with its value shown
 	// as PostgreSQL prints the type. int4 -> int8 is a narrowing here too,
 	// the same as it is for a table column (see colType above).
-	addr := findDivergenceFor(t, divs, structureSchema+".addr", "attribute 2 (zip)")
+	addr := findDivergenceFor(t, divs, structureSchema+".addr", "attribute (zip)")
 	require.Equal(t, schema.RankNarrowed, addr.Rank)
 	require.Equal(t, serviceN1, addr.NarrowSide, "int4 is the narrow side")
 	require.Equal(t, "integer", addr.ValueOnA)
@@ -567,6 +567,48 @@ func TestSchemaDiffStructure_ColumnVersionIsNotADifference(t *testing.T) {
 	divs := compareStructureForTest(t)
 	require.Empty(t, divs,
 		"a different pg_attver value is not a difference: %+v", divs)
+}
+
+// TestSchemaDiffStructure_CompositeAttributeNumberIsNotADifference: DROP
+// ATTRIBUTE leaves a gap in the attnum values of a composite type, and a
+// dump and restore of the same type has no gap. Two nodes with the same
+// attributes in the same order must not report a difference.
+func TestSchemaDiffStructure_CompositeAttributeNumberIsNotADifference(t *testing.T) {
+	setupStructureSchema(t)
+	ctx := context.Background()
+
+	node1 := []string{
+		fmt.Sprintf(`CREATE TYPE %s.gap AS (x int, dropped int, y text)`, structureSchema),
+		fmt.Sprintf(`ALTER TYPE %s.gap DROP ATTRIBUTE dropped`, structureSchema),
+	}
+	node2 := []string{
+		fmt.Sprintf(`CREATE TYPE %s.gap AS (x int, y text)`, structureSchema),
+	}
+	addColumn := fmt.Sprintf(`ALTER TABLE %s.%s ADD COLUMN g %s.gap`,
+		structureSchema, structureTable, structureSchema)
+	for _, stmt := range append(node1, addColumn) {
+		_, err := pgCluster.Node1Pool.Exec(ctx, stmt)
+		require.NoError(t, err, "node1: %s", stmt)
+	}
+	for _, stmt := range append(node2, addColumn) {
+		_, err := pgCluster.Node2Pool.Exec(ctx, stmt)
+		require.NoError(t, err, "node2: %s", stmt)
+	}
+
+	// The premise: attribute y has another attnum on each node.
+	const q = `SELECT a.attnum FROM pg_attribute a
+	           JOIN pg_type t ON t.typrelid = a.attrelid
+	           JOIN pg_namespace n ON n.oid = t.typnamespace
+	           WHERE n.nspname = $1 AND t.typname = 'gap' AND a.attname = 'y'`
+	var num1, num2 int
+	require.NoError(t, pgCluster.Node1Pool.QueryRow(ctx, q, structureSchema).Scan(&num1))
+	require.NoError(t, pgCluster.Node2Pool.QueryRow(ctx, q, structureSchema).Scan(&num2))
+	require.NotEqual(t, num1, num2,
+		"this test needs the two nodes to give attribute y different attnums")
+
+	divs := compareStructureForTest(t)
+	require.Empty(t, divs,
+		"a different attnum of the same attribute is not a difference: %+v", divs)
 }
 
 // TestSchemaDiffStructure_TableDroppedBeforeCollectionIsOneFinding: a table

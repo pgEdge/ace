@@ -936,17 +936,15 @@ var SQLTemplates = Templates{
 	`)),
 	// GetCompositeAttributes reads a composite type's (typtype='c') own
 	// attributes, one row per attribute, ordered by attnum: a composite
-	// type's attnum order is its wire/row-literal layout, fixed at
-	// CREATE TYPE time.
+	// type's attnum order is its wire/row-literal layout. The attnum value
+	// itself is not returned. DROP ATTRIBUTE leaves a gap in it, and a dump
+	// and restore of the same type has no gap, so the value differs between
+	// nodes that hold the same type.
 	GetCompositeAttributes: template.Must(template.New("getCompositeAttributes").Parse(`
 		SELECT
 			t.oid,
 			n.nspname,
 			t.typname,
-			-- attnum, not a dense 1..n counter: DROP ATTRIBUTE leaves gaps,
-			-- and an ordinal that renumbers after a gap makes every later
-			-- attribute look changed when only one was dropped.
-			a.attnum,
 			a.attname,
 			an.nspname                                       AS attr_type_namespace,
 			at.typname                                       AS attr_type_name,

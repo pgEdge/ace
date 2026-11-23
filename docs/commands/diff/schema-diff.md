@@ -88,7 +88,10 @@ separate `initdb` runs give different OIDs to the same user-defined type, so
 matching by OID would either miss a real difference or report one that does
 not exist.
 
-Values that depend on the history of each node are not compared either. In
+Values that depend on the history of each node are not compared either. The
+attributes of a composite type are matched by name, and their order is
+compared, but their numbers in `pg_attribute` are not: `DROP ATTRIBUTE` leaves
+a gap in the numbers, and a dump and restore of the same type has no gap. In
 the column options, the `pg_attver` key that the server adds by itself is not
 compared: its value comes from the WAL position of each node.
 
