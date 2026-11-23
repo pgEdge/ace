@@ -15,6 +15,7 @@ import (
 	"context"
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -281,4 +282,49 @@ func TestCDCReplicaIdentityFull(t *testing.T) {
 			require.Contains(t, err.Error(), "replica identity")
 		})
 	}
+}
+
+// TestCDCListenStopsOnError checks that a continuous listener returns on
+// its own when a change stops it with an error, and does not wait for its
+// context to be cancelled.
+func TestCDCListenStopsOnError(t *testing.T) {
+	ctx := context.Background()
+	env := newSpockEnv()
+	table := "cdc_key_listen_error"
+	qualified := testSchema + "." + table
+	ident := pgx.Identifier{testSchema, table}.Sanitize()
+	dropOnBoth(t, ctx, env, "TABLE IF EXISTS "+ident)
+	for _, pool := range env.pools() {
+		keydiffExec(t, ctx, env, pool,
+			fmt.Sprintf("CREATE TABLE %s (id int PRIMARY KEY, v text)", ident),
+			fmt.Sprintf("ALTER TABLE %s REPLICA IDENTITY FULL", ident),
+			fmt.Sprintf("INSERT INTO %s SELECT g, 'old' FROM generate_series(1, 10) g", ident))
+	}
+	cdcKeyTree(t, qualified)
+
+	_, err := pgCluster.Node1Pool.Exec(ctx, fmt.Sprintf("INSERT INTO %s VALUES (11, 'new')", ident)) // nosemgrep
+	require.NoError(t, err)
+
+	// The listener must return because of the replica identity error, not
+	// because of another error before the change.
+	returned := false
+	out := captureLog(t, func() {
+		listenCtx, cancel := context.WithCancel(ctx)
+		defer cancel()
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			cdc.ListenForChanges(listenCtx, pgCluster.ClusterNodes[0])
+		}()
+		select {
+		case <-done:
+			returned = true
+		case <-time.After(2 * time.Minute):
+			cancel()
+			<-done
+		}
+	})
+	require.True(t, returned, "the listener did not return after the error")
+	require.Contains(t, out, "stopped")
+	require.Contains(t, out, "replica identity")
 }

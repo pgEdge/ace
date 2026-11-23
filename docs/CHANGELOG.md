@@ -312,6 +312,10 @@ All notable changes to ACE will be captured in this document. This project follo
   than the primary key columns now, for example after a RENAME COLUMN of
   a key column. A change of the primary key columns needs a new
   `mtree build`.
+- **`mtree listen` hung without a message after an error.** When a change
+  stopped the listener of a node with an error, the listener waited until
+  the user stopped ACE, and the error was not reported. Now the listener
+  of the node stops at once and logs the error.
 - **`table-diff` and `mtree` converted the bounds of the blocks to Go
   values.** A key type that the driver did not know, or could not decode,
   stopped the run with an error, and a value that the Go type could not

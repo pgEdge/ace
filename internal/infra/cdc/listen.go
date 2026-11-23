@@ -82,9 +82,13 @@ type tableKey struct {
 
 // ListenForChanges runs a continuous (unbounded) CDC drain for a node, applying
 // changes to its Merkle tree until ctx is cancelled. It is the long-running
-// counterpart to UpdateFromCDC.
+// counterpart to UpdateFromCDC. An error stops the drain of this node and is
+// logged; the caller gets no error, so the log is the only report of it. The
+// error of a cancelled ctx is the normal stop and is not logged.
 func ListenForChanges(ctx context.Context, nodeInfo map[string]any) {
-	processReplicationStream(ctx, nodeInfo, true)
+	if err := processReplicationStream(ctx, nodeInfo, true); err != nil && ctx.Err() == nil {
+		logger.Error("CDC listener on node %v stopped: %v", nodeInfo["Name"], err)
+	}
 }
 
 // UpdateFromCDC runs one bounded CDC drain for a node: it catches the node's
@@ -486,6 +490,12 @@ func processReplicationStream(ctx context.Context, nodeInfo map[string]any, cont
 		txChanges[currentXID] = c[:0]
 	}
 
+	// The metadata flusher and its write in progress stop when the receive
+	// loop ends, not only when ctx is cancelled: on an error the loop ends
+	// while ctx is still alive, and the wait for the flusher must not block
+	// the return of the error.
+	metaCtx, stopMeta := context.WithCancel(ctx)
+	defer stopMeta()
 	var metaWg sync.WaitGroup
 	if continuous {
 		metaWg.Add(1)
@@ -495,12 +505,12 @@ func processReplicationStream(ctx context.Context, nodeInfo map[string]any, cont
 			defer ticker.Stop()
 			for {
 				select {
-				case <-ctx.Done():
+				case <-metaCtx.Done():
 					return
 				case <-ticker.C:
 					current := pglogrepl.LSN(lastLSNVal.Load())
 					if current > lastFlushedLSN {
-						if err := flushMetadata(ctx, pool, publication, slotName, current, tables); err != nil {
+						if err := flushMetadata(metaCtx, pool, publication, slotName, current, tables); err != nil {
 							logger.Warn("failed to periodically flush CDC metadata: %v", err)
 						} else {
 							lastFlushedLSN = current
@@ -804,6 +814,7 @@ func processReplicationStream(ctx context.Context, nodeInfo map[string]any, cont
 	}
 
 	wg.Wait()
+	stopMeta()
 	metaWg.Wait()
 
 	if processingErr == nil {
