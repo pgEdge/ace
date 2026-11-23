@@ -317,6 +317,12 @@ All notable changes to ACE will be captured in this document. This project follo
   type, for example `mood[]`, on both sides. Now an array type is named by
   its element type, for a column, a composite attribute, the base type of
   a domain and the subtype of a range.
+- **`schema-diff --compare=structure` reported the default of a `serial`
+  column when its sequence had another name on a node.** `serial` adds a
+  number to the name of the sequence when the name is taken, and a renamed
+  table keeps the old name of its sequence. Now a sequence that the column
+  owns is shown as `<owned sequence>` in the default. A default that uses a
+  sequence the column does not own still shows and compares its name.
 - **`table-diff` and `mtree` converted the bounds of the blocks to Go
   values.** A key type that the driver did not know, or could not decode,
   stopped the run with an error, and a value that the Go type could not

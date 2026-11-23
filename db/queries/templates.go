@@ -835,7 +835,21 @@ var SQLTemplates = Templates{
 			-- catches the common case; this field only catches a node whose
 			-- catalog was refreshed against a different library.
 			COALESCE(co.collversion, '')                     AS collversion,
-			COALESCE(pg_catalog.pg_get_expr(ad.adbin, ad.adrelid), '') AS default_expr
+			-- A sequence owned by the column, as serial makes it, is
+			-- written as <owned sequence> in the default. Its name depends
+			-- on the history of the node: serial adds a number when the
+			-- name is taken, and a renamed table keeps the old name of its
+			-- sequence. Sequences are not compared, and the name does not
+			-- change the values of the column. A sequence that the column
+			-- does not own keeps its name.
+			COALESCE(CASE
+				WHEN own.seq IS NULL THEN pg_catalog.pg_get_expr(ad.adbin, ad.adrelid)
+				ELSE pg_catalog.replace(
+					pg_catalog.pg_get_expr(ad.adbin, ad.adrelid),
+					'''' || pg_catalog.replace(own.seq::pg_catalog.regclass::text, '''', '''''')
+						|| '''::regclass',
+					'<owned sequence>')
+			END, '')                                         AS default_expr
 		FROM pg_catalog.pg_class c
 		JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
 		JOIN pg_catalog.pg_attribute a ON a.attrelid = c.oid
@@ -844,6 +858,26 @@ var SQLTemplates = Templates{
 		LEFT JOIN pg_catalog.pg_type et
 			ON t.typtype = 'b' AND et.oid = t.typelem AND et.typarray = t.oid
 		LEFT JOIN pg_catalog.pg_attrdef ad ON ad.adrelid = a.attrelid AND ad.adnum = a.attnum
+		-- The sequence that the column owns (deptype 'a') and that its
+		-- default uses.
+		LEFT JOIN LATERAL (
+			SELECT own_dep.objid AS seq
+			FROM pg_catalog.pg_depend own_dep
+			JOIN pg_catalog.pg_class s
+				ON s.oid = own_dep.objid AND s.relkind = 'S'
+			JOIN pg_catalog.pg_depend use_dep
+				ON use_dep.classid = 'pg_catalog.pg_attrdef'::pg_catalog.regclass
+				AND use_dep.objid = ad.oid
+				AND use_dep.refclassid = 'pg_catalog.pg_class'::pg_catalog.regclass
+				AND use_dep.refobjid = own_dep.objid
+			WHERE own_dep.classid = 'pg_catalog.pg_class'::pg_catalog.regclass
+				AND own_dep.refclassid = 'pg_catalog.pg_class'::pg_catalog.regclass
+				AND own_dep.refobjid = a.attrelid
+				AND own_dep.refobjsubid = a.attnum
+				AND own_dep.deptype = 'a'
+			ORDER BY own_dep.objid
+			LIMIT 1
+		) own ON true
 		LEFT JOIN pg_catalog.pg_collation co ON co.oid = a.attcollation
 		LEFT JOIN pg_catalog.pg_namespace cn ON cn.oid = co.collnamespace
 		WHERE n.nspname = $1

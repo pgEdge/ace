@@ -656,6 +656,54 @@ func TestSchemaDiffStructure_ArrayTypeNameIsNotADifference(t *testing.T) {
 		"another name of the same array type is not a difference: %+v", divs)
 }
 
+// TestSchemaDiffStructure_OwnedSequenceNameIsNotADifference: serial adds a
+// number to the name of its sequence when the name is taken. The default of
+// a column that owns its sequence must compare equal on two nodes whatever
+// the sequence is called. A default that uses a sequence the column does not
+// own keeps the name of the sequence, so another name there is still found.
+func TestSchemaDiffStructure_OwnedSequenceNameIsNotADifference(t *testing.T) {
+	setupStructureSchema(t)
+	ctx := context.Background()
+
+	node1 := []string{
+		// Takes the name "t_sid_seq" while the serial column is added.
+		fmt.Sprintf(`CREATE TABLE %s.t_sid_seq (i int)`, structureSchema),
+		fmt.Sprintf(`ALTER TABLE %s.%s ADD COLUMN sid serial`, structureSchema, structureTable),
+		fmt.Sprintf(`DROP TABLE %s.t_sid_seq`, structureSchema),
+		fmt.Sprintf(`CREATE SEQUENCE %s.shared_one`, structureSchema),
+		fmt.Sprintf(`ALTER TABLE %s.%s ADD COLUMN other bigint DEFAULT nextval('%s.shared_one')`,
+			structureSchema, structureTable, structureSchema),
+	}
+	node2 := []string{
+		fmt.Sprintf(`ALTER TABLE %s.%s ADD COLUMN sid serial`, structureSchema, structureTable),
+		fmt.Sprintf(`CREATE SEQUENCE %s.shared_two`, structureSchema),
+		fmt.Sprintf(`ALTER TABLE %s.%s ADD COLUMN other bigint DEFAULT nextval('%s.shared_two')`,
+			structureSchema, structureTable, structureSchema),
+	}
+	for _, stmt := range node1 {
+		_, err := pgCluster.Node1Pool.Exec(ctx, stmt)
+		require.NoError(t, err, "node1: %s", stmt)
+	}
+	for _, stmt := range node2 {
+		_, err := pgCluster.Node2Pool.Exec(ctx, stmt)
+		require.NoError(t, err, "node2: %s", stmt)
+	}
+
+	// The premise: the serial column uses another sequence name on each node.
+	q := fmt.Sprintf(`SELECT pg_get_serial_sequence('%s.%s', 'sid')`, structureSchema, structureTable)
+	var seq1, seq2 string
+	require.NoError(t, pgCluster.Node1Pool.QueryRow(ctx, q).Scan(&seq1))
+	require.NoError(t, pgCluster.Node2Pool.QueryRow(ctx, q).Scan(&seq2))
+	require.NotEqual(t, seq1, seq2,
+		"this test needs the serial sequence to have another name on each node")
+
+	divs := compareStructureForTest(t)
+	require.Len(t, divs, 1, "only the default with a sequence the column does not own: %+v", divs)
+	d := findDivergenceFor(t, divs, fmt.Sprintf("%s.%s.other", structureSchema, structureTable), "default")
+	require.Contains(t, d.ValueOnA, "shared_one")
+	require.Contains(t, d.ValueOnB, "shared_two")
+}
+
 // TestSchemaDiffStructure_TableDroppedBeforeCollectionIsOneFinding: a table
 // that disappears before CollectSnapshot reads the catalog is one finding,
 // on the table. Until the table Object was gated on the table existing,
