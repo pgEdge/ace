@@ -2,8 +2,9 @@ name: Regression database tests
 
 # ACE on two nodes that hold the regression database of PostgreSQL
 # (make installcheck). The nodes differ in server encoding, in the defaults
-# of the output settings and, in one case, in the major version. See
-# tests/regressdb/README.md.
+# of the output settings and, in one case, in the major version. A second
+# run compares node n1 with a copy of a regression database that is
+# restored from a dump on node n2. See tests/regressdb/README.md.
 
 on:
   pull_request:
@@ -131,8 +132,10 @@ jobs:
       with:
         name: regressdb-${{ matrix.cell }}
         path: |
-          ${{ runner.temp }}/regressdb/run/results.tsv
-          ${{ runner.temp }}/regressdb/run/logs
+          ${{ runner.temp }}/regressdb/run*/results.tsv
+          ${{ runner.temp }}/regressdb/run*/logs
+          ${{ runner.temp }}/regressdb/dump/*.log
+          ${{ runner.temp }}/regressdb/dump/dump.diff
           ${{ runner.temp }}/regressdb/*.log
           ${{ runner.temp }}/regressdb/*.regress/regression.diffs
         if-no-files-found: ignore

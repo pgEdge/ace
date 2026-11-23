@@ -12,6 +12,14 @@ The GitHub workflow `.github/workflows/regressdb.yml` runs it on each pull reque
 
 In each case node n1 is a UTF8 server with default settings, and node n2 is a LATIN1 server with other defaults for `DateStyle`, `IntervalStyle`, `TimeZone`, `extra_float_digits`, `bytea_output`, `lc_monetary`, `search_path` and `xmloption` (set with `ALTER DATABASE` after the regression tests). Each node runs the regression tests of its own version. The oldest and the newest version are set in the workflow (`PG_OLD`, `PG_NEW`).
 
+### Second run on a restored database
+
+After the first run, the regression database on node n2 is replaced with a copy made by `pg_dump` and `pg_restore` (`dump-restore.sh`), and the same checks run again. In the cases `old` and `new`, the copy is the database of node n1; in the case `mixed`, it is the database that node n2 had before the first run. The dump is made before the first run, so it has no deleted rows. The copy keeps the encoding, the locale and the database settings of its source.
+
+A restored database has the same objects as its source, but not the same history: the objects get new OIDs from a counter that the regression tests on node n2 have already moved, they are created in the order of the dump, and a table or a composite type has no dropped columns. ACE must not report a difference because of this.
+
+The copy must be complete. Roles that node n2 does not have are created first, and the rest of `pg_dumpall --globals-only` is loaded after them. Any error of `pg_restore` stops the case. The restored database is dumped again, and this dump must have the same lines as the first one. The only difference allowed is the column order of a table with inherited columns: `pg_dump` does not keep it, and the restored table has the inherited columns first. So in the second run such tables can have their columns in another order on the two nodes. In `known.tsv` and in the output, the second run has the case name with `-restored` at the end, for example `old-restored`.
+
 ## What is checked
 
 `run.py` computes a reference result for each table with plain SQL and checks the result of each ACE command against it:
@@ -35,4 +43,4 @@ go build -o /tmp/ace ./cmd/ace
 tests/regressdb/run-cell.sh mixed ~/pg/15 ~/pg/19 /tmp/regressdb /tmp/ace
 ```
 
-`RUN_ARGS` passes options to `run.py`, for example `RUN_ARGS='--tables ^public\.gtest --commands table-diff'`. `--tables`, `--commands` and `--conns` are for repeating a part of the run by hand. Such a limited run checks each command it runs in the same way as a full run, but it does not check `known.tsv` for unused lines, and with `--tables` it skips the data mode of `schema-diff`, which always compares the whole schema. The results are in `<workdir>/run/results.tsv`, and the full output of each failed command is in `<workdir>/run/logs`.
+`RUN_ARGS` passes options to `run.py`, for example `RUN_ARGS='--tables ^public\.gtest --commands table-diff'`. `--tables`, `--commands` and `--conns` are for repeating a part of the run by hand. Such a limited run checks each command it runs in the same way as a full run, but it does not check `known.tsv` for unused lines, and with `--tables` it skips the data mode of `schema-diff`, which always compares the whole schema. The results are in `<workdir>/run/results.tsv` for the first run and in `<workdir>/run-restored/results.tsv` for the second run, and the full output of each failed command is in the `logs` directory next to them. The dump files and the logs of `pg_dump` and `pg_restore` are in `<workdir>/dump`.

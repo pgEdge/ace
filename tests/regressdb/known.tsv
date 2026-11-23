@@ -1,6 +1,7 @@
 # Results of run.py that differ from the expected ones and are known.
 #
-# Columns, separated by tabs: case (old, new, mixed or *), command, object
+# Columns, separated by tabs: case (old, new, mixed, old-restored,
+# new-restored, mixed-restored or *), command, object
 # (a table or a schema), connections, result, reason. Only the case column
 # can be *; the other columns name exactly one run. The result is written
 # as in results.tsv, with the number of differences where there is one (for
