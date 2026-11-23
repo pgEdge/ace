@@ -15,6 +15,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -57,13 +58,26 @@ type cdcMsg struct {
 	operation string
 	schema    string
 	table     string
-	relation  *pglogrepl.RelationMessage
-	// pks holds the primary-key value(s) extracted from the change tuple at
-	// receive time. The Merkle tree update only needs the PK (to mark the
-	// containing leaf block dirty and bump its counters); the rest of the row is
-	// recomputed from the live table at hash time. Keeping only the PK -- rather
-	// than the whole tuple -- bounds per-change memory to the key, not the row.
-	pks []string
+	// pkey is the primary key of the table at the time of the change.
+	pkey *tableKey
+	// key holds the text of each primary key column of the changed row, as
+	// pgoutput sends it, in the order of the primary key. The Merkle tree
+	// update only needs the key (to mark the containing leaf block dirty and
+	// bump its counters); the rest of the row is recomputed from the live
+	// table at hash time. Keeping only the key -- rather than the whole tuple
+	// -- bounds per-change memory to the key, not the row.
+	key []string
+}
+
+// tableKey is the primary key of a published table and the way to take it
+// from a change.
+type tableKey struct {
+	// pos is the position of each primary key column, in the order of the
+	// primary key, among the columns of the relation message.
+	pos []int
+	// castTypes is the cast type of each primary key column, in the order of
+	// the primary key.
+	castTypes []string
 }
 
 // ListenForChanges runs a continuous (unbounded) CDC drain for a node, applying
@@ -87,10 +101,10 @@ func UpdateFromCDC(ctx context.Context, nodeInfo map[string]any) error {
 // and freeing them, rather than holding a whole transaction's worth until its
 // commit is decoded (proto_version '1' streams nothing until commit). Flushing
 // sub-batches lets a single very large transaction drain with bounded memory.
-// Only primary keys are buffered (see cdcMsg.pks), so per-change memory scales
-// with the key size, not the row width; this knob mainly trades flush
-// round-trips against per-flush array size. The cdc_flush_batch_size config key
-// overrides this default. It is a package var so tests can adjust it.
+// Only primary keys are buffered, so per-change memory scales with the key
+// size, not the row width; this knob mainly trades flush round-trips against
+// per-flush array size. The cdc_flush_batch_size config key overrides this
+// default. It is a package var so tests can adjust it.
 var FlushBatchSize = 10_000
 
 // processReplicationStream drains a node's logical-replication slot and applies
@@ -288,6 +302,14 @@ func processReplicationStream(ctx context.Context, nodeInfo map[string]any, cont
 	}
 
 	relations := make(map[uint32]*pglogrepl.RelationMessage)
+	// tableKeys holds the primary key of each relation in relations. It is
+	// read from the catalog when the relation message comes, before any
+	// change of the relation, so a table whose replica identity is not its
+	// primary key stops the stream also on a change that needs no key, such
+	// as a TRUNCATE or an UPDATE after the adaptive drain marks all leaves.
+	// pgoutput sends a new relation message after a change of the table, so
+	// the key is read again for it.
+	tableKeys := make(map[uint32]*tableKey)
 	nextStandbyMessageDeadline := time.Now().Add(10 * time.Second)
 
 	txChanges := make(map[uint32][]cdcMsg)
@@ -298,57 +320,6 @@ func processReplicationStream(ctx context.Context, nodeInfo map[string]any, cont
 	// standby update may confirm past the commit -- permanently skipping the
 	// transaction and leaving the Merkle tree stale.
 	inTx := false
-
-	// bufferChange records one decoded change for the bounded drain.
-	// Escalation applies to UPDATEs ONLY: an update never changes a row's
-	// block membership, so mark-all-dirty fully covers its effect on leaf
-	// hashes, and skipping its per-PK tracking is pure savings. INSERTs and
-	// DELETEs are always tracked per-PK regardless of escalation -- their
-	// per-block counters drive block split/merge maintenance, and discarding
-	// them would leave the tree structurally unbalanced until a full rebuild
-	// (regression: the MerkleTree Split* suites fail if inserts are dropped).
-	// Returns a terminal error only if the escalation's mark-all-dirty write
-	// fails: proceeding without either per-PK marks or the bulk mark would
-	// silently miss divergence.
-	bufferChange := func(op string, rel *pglogrepl.RelationMessage, tup *pglogrepl.TupleData) error {
-		if esc != nil && op == "UPDATE" {
-			if esc.isEscalated(rel.Namespace, rel.RelationName) {
-				return nil
-			}
-			if esc.noteChange(rel.Namespace, rel.RelationName) {
-				// Keepalive before the blocking write, like the sub-batch
-				// flush below, so a slow mark-all cannot trip wal_sender_timeout.
-				if conn != nil {
-					if err := pglogrepl.SendStandbyStatusUpdate(ctx, conn, pglogrepl.StandbyStatusUpdate{WALWritePosition: lastLSN}); err != nil {
-						logger.Warn("standby status update before adaptive-drain escalation failed: %v", err)
-					} else {
-						nextStandbyMessageDeadline = time.Now().Add(10 * time.Second)
-					}
-				}
-				// Sanitized: the mtree table is created quoted/case-preserved.
-				mtreeTable := pgx.Identifier{mtreeSchema, fmt.Sprintf("ace_mtree_%s_%s", rel.Namespace, rel.RelationName)}.Sanitize()
-				// processingCtx so the write survives the drain deadline,
-				// like every other apply here.
-				marked, err := queries.MarkAllLeavesDirty(processingCtx, pool, mtreeTable)
-				if err != nil {
-					return fmt.Errorf("adaptive drain: failed to mark all leaves dirty for %s: %w", mtreeTable, err)
-				}
-				esc.markEscalated(rel.Namespace, rel.RelationName)
-				purgeTableChanges(txChanges, rel.Namespace, rel.RelationName)
-				logger.Info("adaptive drain: %s.%s crossed %d buffered UPDATE changes; marked all %d blocks dirty and skipping its per-update tracking for the rest of this drain (inserts/deletes still tracked for block splits/merges)",
-					rel.Namespace, rel.RelationName, esc.threshold(rel.Namespace, rel.RelationName), marked)
-				return nil
-			}
-		}
-		txChanges[currentXID] = append(txChanges[currentXID], cdcMsg{
-			operation: op,
-			schema:    rel.Namespace,
-			table:     rel.RelationName,
-			relation:  rel,
-			pks:       getPKs(rel, tup),
-		})
-		return nil
-	}
 
 	// markTableTruncated reacts to a decoded TRUNCATE for one relation.
 	// pgoutput publishes a truncate as a single message carrying only relation
@@ -392,6 +363,65 @@ func processReplicationStream(ctx context.Context, nodeInfo map[string]any, cont
 		return nil
 	}
 
+	// bufferChange records one decoded change for the bounded drain.
+	// Escalation applies to UPDATEs ONLY: an update never changes a row's
+	// block membership, so mark-all-dirty fully covers its effect on leaf
+	// hashes, and skipping its per-PK tracking is pure savings. INSERTs and
+	// DELETEs are always tracked per-PK regardless of escalation -- their
+	// per-block counters drive block split/merge maintenance, and discarding
+	// them would leave the tree structurally unbalanced until a full rebuild
+	// (regression: the MerkleTree Split* suites fail if inserts are dropped).
+	// Returns a terminal error only if the escalation's mark-all-dirty write
+	// fails: proceeding without either per-PK marks or the bulk mark would
+	// silently miss divergence.
+	bufferChange := func(op string, rel *pglogrepl.RelationMessage, tup *pglogrepl.TupleData) error {
+		if rel == nil {
+			return fmt.Errorf("%s of a relation with no relation message", op)
+		}
+		pkey := tableKeys[rel.RelationID]
+		if esc != nil && op == "UPDATE" {
+			if esc.isEscalated(rel.Namespace, rel.RelationName) {
+				return nil
+			}
+			if esc.noteChange(rel.Namespace, rel.RelationName) {
+				// Keepalive before the blocking write, like the sub-batch
+				// flush below, so a slow mark-all cannot trip wal_sender_timeout.
+				if conn != nil {
+					if err := pglogrepl.SendStandbyStatusUpdate(ctx, conn, pglogrepl.StandbyStatusUpdate{WALWritePosition: lastLSN}); err != nil {
+						logger.Warn("standby status update before adaptive-drain escalation failed: %v", err)
+					} else {
+						nextStandbyMessageDeadline = time.Now().Add(10 * time.Second)
+					}
+				}
+				// Sanitized: the mtree table is created quoted/case-preserved.
+				mtreeTable := pgx.Identifier{mtreeSchema, fmt.Sprintf("ace_mtree_%s_%s", rel.Namespace, rel.RelationName)}.Sanitize()
+				// processingCtx so the write survives the drain deadline,
+				// like every other apply here.
+				marked, err := queries.MarkAllLeavesDirty(processingCtx, pool, mtreeTable)
+				if err != nil {
+					return fmt.Errorf("adaptive drain: failed to mark all leaves dirty for %s: %w", mtreeTable, err)
+				}
+				esc.markEscalated(rel.Namespace, rel.RelationName)
+				purgeTableChanges(txChanges, rel.Namespace, rel.RelationName)
+				logger.Info("adaptive drain: %s.%s crossed %d buffered UPDATE changes; marked all %d blocks dirty and skipping its per-update tracking for the rest of this drain (inserts/deletes still tracked for block splits/merges)",
+					rel.Namespace, rel.RelationName, esc.threshold(rel.Namespace, rel.RelationName), marked)
+				return nil
+			}
+		}
+		key, err := keyOfChange(rel, pkey, tup)
+		if err != nil {
+			return fmt.Errorf("%s on %s.%s: %w", op, rel.Namespace, rel.RelationName, err)
+		}
+		txChanges[currentXID] = append(txChanges[currentXID], cdcMsg{
+			operation: op,
+			schema:    rel.Namespace,
+			table:     rel.RelationName,
+			pkey:      pkey,
+			key:       key,
+		})
+		return nil
+	}
+
 	var wg sync.WaitGroup
 	errCh := make(chan error, 1)
 	stopStreaming := false
@@ -401,14 +431,6 @@ func processReplicationStream(ctx context.Context, nodeInfo map[string]any, cont
 		maxWorkers = 4
 	}
 	workerSem := make(chan struct{}, maxWorkers)
-
-	// typeCache memoizes PK type-name lookups (OID -> typname) for this drain.
-	// processChanges runs once per flush, so without this a large transaction
-	// would re-query pg_type for the same key type on every sub-batch. Scoped to
-	// this stream (one node), so per-node OID differences for custom types can't
-	// leak across nodes; a sync.Map because continuous-mode workers run it
-	// concurrently.
-	var typeCache sync.Map
 
 	// applyChanges applies a batch of buffered changes to the Merkle tree. In
 	// continuous mode it dispatches to a worker goroutine for throughput. In a
@@ -429,7 +451,7 @@ func processReplicationStream(ctx context.Context, nodeInfo map[string]any, cont
 				defer wg.Done()
 				workerSem <- struct{}{}
 				defer func() { <-workerSem }()
-				if err := processChanges(processingCtx, pool, c, mtreeSchema, &typeCache); err != nil {
+				if err := processChanges(processingCtx, pool, c, mtreeSchema); err != nil {
 					select {
 					case errCh <- err:
 					default:
@@ -438,7 +460,7 @@ func processReplicationStream(ctx context.Context, nodeInfo map[string]any, cont
 			}(c)
 			return
 		}
-		if err := processChanges(processingCtx, pool, c, mtreeSchema, &typeCache); err != nil {
+		if err := processChanges(processingCtx, pool, c, mtreeSchema); err != nil {
 			processingErr = err
 			stopStreaming = true
 		}
@@ -669,7 +691,14 @@ func processReplicationStream(ctx context.Context, nodeInfo map[string]any, cont
 					}
 					inTx = false
 				case *pglogrepl.RelationMessage:
+					pkey, err := loadTableKey(processingCtx, pool, logicalMsg)
+					if err != nil {
+						processingErr = err
+						stopStreaming = true
+						break
+					}
 					relations[logicalMsg.RelationID] = logicalMsg
+					tableKeys[logicalMsg.RelationID] = pkey
 				case *pglogrepl.InsertMessage:
 					rel := relations[logicalMsg.RelationID]
 					if err := bufferChange("INSERT", rel, logicalMsg.Tuple); err != nil {
@@ -913,24 +942,18 @@ func flushMetadata(ctx context.Context, pool *pgxpool.Pool, publication, slotNam
 	return nil
 }
 
-// A map of PostgreSQL type OIDs that should be quoted in SQL literals.
-var quotedOIDs = map[uint32]bool{
-	16:   true, // bool
-	17:   true, // bytea
-	25:   true, // text
-	1042: true, // character
-	1043: true, // varchar
-	1082: true, // date
-	1114: true, // timestamp
-	1184: true, // timestamptz
-	2950: true, // uuid
+// mtreeOps maps the operation of a change to the operation of the counters of
+// the tree.
+var mtreeOps = map[string]string{
+	"INSERT": queries.MtreeOpInsert,
+	"UPDATE": queries.MtreeOpUpdate,
+	"DELETE": queries.MtreeOpDelete,
 }
 
 // processChanges applies a batch of buffered CDC changes to the Merkle tree in a
 // single transaction: it marks each change's leaf block dirty and bumps its
-// insert/delete counters. typeCache memoises primary-key type-name lookups so a
-// multi-flush drain does not re-query pg_type per sub-batch.
-func processChanges(ctx context.Context, pool *pgxpool.Pool, changes []cdcMsg, mtreeSchema string, typeCache *sync.Map) error {
+// insert/delete counters.
+func processChanges(ctx context.Context, pool *pgxpool.Pool, changes []cdcMsg, mtreeSchema string) error {
 	logger.Debug("processChanges called with %d changes", len(changes))
 	tx, err := pool.Begin(ctx)
 	if err != nil {
@@ -938,84 +961,38 @@ func processChanges(ctx context.Context, pool *pgxpool.Pool, changes []cdcMsg, m
 	}
 	defer tx.Rollback(ctx)
 
-	tables := make(map[string][]cdcMsg)
-	for _, change := range changes {
-		key := fmt.Sprintf("%s.%s", change.schema, change.table)
-		tables[key] = append(tables[key], change)
+	// The changes of a table are grouped by its primary key as well: a change
+	// of the table in the middle of a batch can give it another key.
+	type group struct {
+		schema string
+		table  string
+		pkey   *tableKey
 	}
-	logger.Debug("Processing changes for %d tables", len(tables))
-
-	for _, tableChanges := range tables {
-		if len(tableChanges) > 0 {
-			firstChange := tableChanges[0]
-			schema := firstChange.schema
-			table := firstChange.table
-			mtreeTable := fmt.Sprintf("%s.ace_mtree_%s_%s", mtreeSchema, schema, table)
-
-			logger.Debug("Processing %d changes for table %s.%s (mtree: %s)", len(tableChanges), schema, table, mtreeTable)
-
-			var inserts, deletes, updates []string
-			relation := firstChange.relation
-			isComposite := len(getPrimaryKeyColumns(relation)) > 1
-			compositeTypeName := fmt.Sprintf("%s.%s_%s_key_type", mtreeSchema, schema, table)
-			var pkeyType string
-			if !isComposite {
-				for _, col := range relation.Columns {
-					if col.Flags == 1 {
-						if v, ok := typeCache.Load(col.DataType); ok {
-							pkeyType = v.(string)
-						} else {
-							typeName, err := getTypeNameFromOID(ctx, pool, col.DataType)
-							if err != nil {
-								return fmt.Errorf("failed to get type name for oid %d: %w", col.DataType, err)
-							}
-							typeCache.Store(col.DataType, typeName)
-							pkeyType = typeName
-						}
-						break
-					}
-				}
-			}
-
-			for _, change := range tableChanges {
-				pks := change.pks
-				if len(pks) == 0 {
-					// No key columns were extractable from the change tuple --
-					// pgoutput flags no key column under REPLICA IDENTITY FULL or
-					// NOTHING. Without a PK we cannot locate the change's leaf block,
-					// so fail loud rather than silently drop it and miss divergence
-					// (ACE-190). The operator must give the table a PK-bearing
-					// replica identity (DEFAULT, or USING INDEX over the PK).
-					return fmt.Errorf("no primary key extracted for a %s on %s.%s; the "+
-						"table's REPLICA IDENTITY must expose its primary key (use REPLICA "+
-						"IDENTITY DEFAULT or an index covering the PK)", change.operation, schema, table)
-				}
-				var pkVal string
-				if isComposite {
-					// Formatting it as a record literal, e.g., "(123, 'abc')"
-					// TODO: This is a bit of a hack; need to find a better way
-					pkVal = "(" + strings.Join(pks, ",") + ")"
-				} else {
-					pkVal = pks[0]
-				}
-
-				switch change.operation {
-				case "INSERT":
-					inserts = append(inserts, pkVal)
-				case "UPDATE":
-					updates = append(updates, pkVal)
-				case "DELETE":
-					deletes = append(deletes, pkVal)
-				}
-			}
-
-			logger.Debug("Calling UpdateMtreeCounters: inserts=%d, updates=%d, deletes=%d", len(inserts), len(updates), len(deletes))
-			err := queries.UpdateMtreeCounters(ctx, tx, mtreeTable, isComposite, compositeTypeName, pkeyType, inserts, deletes, updates)
-			if err != nil {
-				return fmt.Errorf("failed to update mtree counters for %s: %w", mtreeTable, err)
-			}
-			logger.Debug("Successfully updated mtree counters for %s", mtreeTable)
+	var order []group
+	groups := make(map[group][]queries.MtreeKeyChange)
+	for _, change := range changes {
+		op, ok := mtreeOps[change.operation]
+		if !ok {
+			return fmt.Errorf("unknown operation %q of a change on %s.%s", change.operation, change.schema, change.table)
 		}
+		g := group{schema: change.schema, table: change.table, pkey: change.pkey}
+		if _, ok := groups[g]; !ok {
+			order = append(order, g)
+		}
+		groups[g] = append(groups[g], queries.MtreeKeyChange{Op: op, Key: change.key})
+	}
+	logger.Debug("Processing changes for %d tables", len(order))
+
+	for _, g := range order {
+		// Sanitized: the mtree table and its key type are created quoted.
+		mtreeTable := pgx.Identifier{mtreeSchema, fmt.Sprintf("ace_mtree_%s_%s", g.schema, g.table)}.Sanitize()
+		keyType := pgx.Identifier{mtreeSchema, fmt.Sprintf("%s_%s_key_type", g.schema, g.table)}.Sanitize()
+		tableChanges := groups[g]
+		logger.Debug("Processing %d changes for table %s.%s (mtree: %s)", len(tableChanges), g.schema, g.table, mtreeTable)
+		if err := queries.UpdateMtreeCounters(ctx, tx, mtreeTable, keyType, g.pkey.castTypes, tableChanges); err != nil {
+			return fmt.Errorf("failed to update mtree counters for %s: %w", mtreeTable, err)
+		}
+		logger.Debug("Successfully updated mtree counters for %s", mtreeTable)
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("failed to commit CDC changes: %w", err)
@@ -1024,61 +1001,114 @@ func processChanges(ctx context.Context, pool *pgxpool.Pool, changes []cdcMsg, m
 	return nil
 }
 
-// getPKs extracts the primary-key value(s) from a change tuple using the
-// relation's key-column flags. It returns nil when no key column is exposed
-// (e.g. REPLICA IDENTITY FULL or NOTHING), which the caller treats as an error.
-func getPKs(rel *pglogrepl.RelationMessage, tup *pglogrepl.TupleData) []string {
-	var pks []string
-	if tup == nil || rel == nil {
-		return pks
+// loadTableKey reads the primary key of the table of rel and the cast types
+// of its columns from the catalog, and finds the key columns among the
+// columns of rel.
+//
+// The replica identity of the table must have the columns of the primary key
+// and no others: REPLICA IDENTITY DEFAULT, or USING INDEX on an index with
+// the same columns. A DELETE sends only the replica identity columns, so
+// without a key column the leaf of the row cannot be found. Other replica
+// identities, such as FULL, are not supported. FULL is checked by its mode:
+// with FULL every column is an identity column, so on a table that has only
+// key columns the check of the columns passes.
+func loadTableKey(ctx context.Context, db queries.DBQuerier, rel *pglogrepl.RelationMessage) (*tableKey, error) {
+	if rel.ReplicaIdentity == 'f' {
+		return nil, fmt.Errorf("the replica identity of %s.%s is FULL, which is not supported; "+
+			"use REPLICA IDENTITY DEFAULT, or USING INDEX on an index with exactly the columns of the primary key",
+			rel.Namespace, rel.RelationName)
 	}
-
-	for i := range rel.Columns {
-		if rel.Columns[i].Flags == 1 { // Primary key
-			pks = append(pks, tupleValueToString(tup.Columns[i], rel.Columns[i]))
-		}
-	}
-	return pks
-}
-
-// getPrimaryKeyColumns returns the names of a relation's primary-key columns, in
-// column order.
-func getPrimaryKeyColumns(rel *pglogrepl.RelationMessage) []string {
-	var pks []string
-	if rel == nil {
-		return pks
-	}
-
-	for _, col := range rel.Columns {
-		if col.Flags == 1 { // Primary key
-			pks = append(pks, col.Name)
-		}
-	}
-	return pks
-}
-
-// tupleValueToString renders a single tuple column value as the string used to
-// build a primary-key literal, applying type-specific formatting.
-func tupleValueToString(tupCol *pglogrepl.TupleDataColumn, relCol *pglogrepl.RelationMessageColumn) string {
-	switch tupCol.DataType {
-	case 'n': // null
-		return "NULL"
-	case 'u': // unchanged toast
-		logger.Warn("unchanged toast value for PK column %s", relCol.Name)
-		return ""
-	case 't': // text formatted value
-		return string(tupCol.Data)
-	default:
-		return string(tupCol.Data)
-	}
-}
-
-// getTypeNameFromOID looks up the SQL type name for a type OID via pg_type.
-func getTypeNameFromOID(ctx context.Context, pool *pgxpool.Pool, oid uint32) (string, error) {
-	var typeName string
-	err := pool.QueryRow(ctx, "SELECT typname FROM pg_type WHERE oid = $1", oid).Scan(&typeName) // nosemgrep
+	pk, err := queries.GetPrimaryKey(ctx, db, rel.Namespace, rel.RelationName)
 	if err != nil {
-		return "", err
+		return nil, fmt.Errorf("primary key of %s.%s: %w", rel.Namespace, rel.RelationName, err)
 	}
-	return typeName, nil
+	if len(pk) == 0 {
+		return nil, fmt.Errorf("%s.%s has no primary key", rel.Namespace, rel.RelationName)
+	}
+	castTypes, err := queries.GetCastTypes(ctx, db, rel.Namespace, rel.RelationName)
+	if err != nil {
+		return nil, fmt.Errorf("cast types of %s.%s: %w", rel.Namespace, rel.RelationName, err)
+	}
+	return matchTableKey(rel, pk, castTypes)
+}
+
+// matchTableKey finds the primary key columns pk among the columns of rel by
+// name. pk and castTypes come from the catalog now; castTypes has the cast
+// type of every column.
+//
+// The identity columns of rel must be exactly the columns of pk, or the
+// result is an error. rel describes the table at the commit of the change,
+// so the check also fails when the names of the key columns changed after
+// that commit.
+//
+// XXX: rel is trusted to describe the same table as the tree. A change of the
+// primary key columns that keeps their names, such as a key column dropped
+// and added again, is not seen here.
+func matchTableKey(rel *pglogrepl.RelationMessage, pk []string, castTypes map[string]string) (*tableKey, error) {
+	var identity []string
+	for _, col := range rel.Columns {
+		if col.Flags&1 != 0 {
+			identity = append(identity, col.Name)
+		}
+	}
+	if !sameColumns(identity, pk) {
+		return nil, fmt.Errorf("the replica identity of %s.%s has the columns (%s) in the change, but its primary key has the columns (%s); "+
+			"use REPLICA IDENTITY DEFAULT, or USING INDEX on an index with exactly the columns of the primary key; "+
+			"after a change of the primary key columns, run mtree teardown, mtree init, and mtree build for every table that had a tree",
+			rel.Namespace, rel.RelationName, strings.Join(identity, ", "), strings.Join(pk, ", "))
+	}
+
+	k := &tableKey{pos: make([]int, len(pk)), castTypes: make([]string, len(pk))}
+	for i, name := range pk {
+		typ := castTypes[name]
+		if typ == "" {
+			return nil, fmt.Errorf("no cast type for the primary key column %s of %s.%s", name, rel.Namespace, rel.RelationName)
+		}
+		k.pos[i] = slices.IndexFunc(rel.Columns, func(c *pglogrepl.RelationMessageColumn) bool { return c.Name == name })
+		k.castTypes[i] = typ
+	}
+	return k, nil
+}
+
+// sameColumns reports whether a and b have the same column names, in any
+// order. The names of the columns of a table are unique.
+func sameColumns(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for _, name := range a {
+		if !slices.Contains(b, name) {
+			return false
+		}
+	}
+	return true
+}
+
+// keyOfChange returns the text of each primary key column of the row of a
+// change, in the order of the primary key. A key column must come in the
+// text format: a NULL, an unchanged TOAST value or a binary value is an
+// error, because the leaf of the row cannot be found for it.
+func keyOfChange(rel *pglogrepl.RelationMessage, pkey *tableKey, tup *pglogrepl.TupleData) ([]string, error) {
+	if tup == nil {
+		return nil, fmt.Errorf("the change has no row")
+	}
+	key := make([]string, len(pkey.pos))
+	for i, j := range pkey.pos {
+		if j >= len(tup.Columns) {
+			return nil, fmt.Errorf("the row has %d columns, the relation has %d", len(tup.Columns), len(rel.Columns))
+		}
+		col := tup.Columns[j]
+		name := rel.Columns[j].Name
+		switch col.DataType {
+		case pglogrepl.TupleDataTypeText:
+			key[i] = string(col.Data)
+		case pglogrepl.TupleDataTypeNull:
+			return nil, fmt.Errorf("the primary key column %s is NULL", name)
+		case pglogrepl.TupleDataTypeToast:
+			return nil, fmt.Errorf("the primary key column %s is an unchanged TOAST value", name)
+		default:
+			return nil, fmt.Errorf("the primary key column %s has the data type %q, not text", name, col.DataType)
+		}
+	}
+	return key, nil
 }

@@ -33,6 +33,24 @@ The second command creates the Merkle metadata table and triggers for the target
 
 Building the per-table Merkle tree is typically a one-time operation. After that, ACE tracks changes and updates the tree automatically during diffs (or via `mtree listen` / `mtree update`).
 
+ACE finds the leaf of a changed row by its primary key, so the replica identity of the table must be its primary key: `REPLICA IDENTITY DEFAULT`, or `USING INDEX` on an index with exactly the columns of the primary key and no other columns. With another replica identity, for example `FULL`, change tracking stops with an error, also when the table has only primary key columns.
+
+Like logical replication, Merkle tree change tracking does not follow schema changes. A tree is built for the primary key that the table has at build time, and a change of the primary key columns (a rename, a drop, a new type or a new primary key) makes the tree invalid. ACE checks only that the replica identity columns of each change have the names of the primary key columns now, so it does not detect every such change. A change of the table that is made before the primary key change must not wait in the replication slot after the primary key change. To change the primary key columns of a table with a tree:
+
+1. Stop `mtree listen` and any other mtree command on the nodes, so that no other consumer holds the replication slot of a node.
+2. Pause writes to the table.
+3. Run `mtree update`. Check that its summary lists no skipped nodes (`cdc_skipped_nodes`); if a node is skipped, run `mtree update` again.
+4. Change the primary key columns.
+5. Build the tree again with `mtree build --recreate-objects`.
+6. Resume writes to the table and start `mtree listen` again.
+
+If change tracking stops with an error about the replica identity of a change (`FULL`, or columns that are not the primary key columns), the changes with this identity stay in the replication slot, and change tracking stops at them again. To recover:
+
+1. Make the replica identity of the table its primary key, if it is not: `REPLICA IDENTITY DEFAULT`, or `USING INDEX` on an index with exactly the columns of the primary key. Otherwise the new slot gets changes with the wrong identity again.
+2. Stop `mtree listen` and any other mtree command on the nodes.
+3. Run `mtree teardown`, then `mtree init`.
+4. Run `mtree build` for every table that had a tree before the teardown. `mtree teardown` drops the slot and the list of tracked tables, so a table that you do not build again is no longer tracked, and its tree does not get later changes.
+
 Because Merkle mode is designed for very large tables, ACE uses probabilistic estimates (row counts, primary key ranges, etc.). For best results, ensure your table has fresh statistics with the Postgres `ANALYZE` command. You can pass `--analyse=true` during build, but on very large tables you may prefer to run `ANALYZE` manually at a more convenient time.
 
 Then, invoke ACE to compare Merkle trees across nodes and write a diff report (and optional HTML):

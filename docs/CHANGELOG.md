@@ -293,6 +293,25 @@ All notable changes to ACE will be captured in this document. This project follo
   key.
 
 ### Fixed
+- **The CDC of `mtree` counted a change for a wrong leaf, or stopped with
+  an error, for some keys.** ACE built the key of a changed row in the
+  client: a composite key as a record literal without quotes, and a simple
+  key cast to the bare name of its type. A key text with a comma, a double
+  quote, a parenthesis or a backslash gave an error or another key, an
+  empty text gave NULL, a primary key in another order than the columns of
+  the table gave another key, and a key type out of the `search_path` or
+  with a name that needs quotes gave an error. With another key
+  the leaf of the row stayed clean, and a later `mtree table-diff` could
+  miss the change. Now ACE sends the text of each key column as it is, in
+  the order of the primary key, and the server builds the key with the
+  cast type of each column. A NULL or an unchanged TOAST value in a key
+  column stops CDC with an error. CDC also stops with an error when the
+  replica identity of a table is not its primary key, for example
+  `REPLICA IDENTITY FULL`: before, it took all columns as the key. It
+  stops in the same way when the key columns of a change have other names
+  than the primary key columns now, for example after a RENAME COLUMN of
+  a key column. A change of the primary key columns needs a new
+  `mtree build`.
 - **`table-diff` and `mtree` converted the bounds of the blocks to Go
   values.** A key type that the driver did not know, or could not decode,
   stopped the run with an error, and a value that the Go type could not
