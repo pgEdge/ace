@@ -81,13 +81,24 @@ tail -n 3 "$data.regress/run.log"
 # each connection, and the run checks that a node with other defaults
 # gives the same result.
 if [ "$profile" = changed ]; then
+	# The locale of lc_monetary must have the encoding of the database. The
+	# server converts the currency symbol from the encoding of the locale
+	# to the encoding of the database, and a symbol that the database
+	# encoding does not have (the euro sign in LATIN1) makes the output of
+	# every money value fail.
+	case "$encoding" in
+	UTF8) codeset=utf8 ;;
+	LATIN1) codeset=iso88591 ;;
+	*) codeset= ;;
+	esac
 	monetary=C
-	for loc in de_DE.UTF-8 de_DE.utf8 en_US.UTF-8 en_US.utf8; do
-		if locale -a 2>/dev/null | grep -qix "${loc/UTF-8/utf8}"; then
-			monetary=$loc
+	for lang in de_DE en_US; do
+		if [ -n "$codeset" ] && locale -a 2>/dev/null | grep -qix "$lang.$codeset"; then
+			monetary=$lang.$codeset
 			break
 		fi
 	done
+	echo "lc_monetary = $monetary"
 	"$bin/psql" -X -q -h 127.0.0.1 -p "$port" -U postgres -d regression \
 		-v ON_ERROR_STOP=1 <<EOF
 ALTER DATABASE regression SET DateStyle = 'SQL, DMY';
@@ -99,4 +110,7 @@ ALTER DATABASE regression SET lc_monetary = '$monetary';
 ALTER DATABASE regression SET search_path = public, pg_catalog;
 ALTER DATABASE regression SET xmloption = 'document';
 EOF
+	# A new session gets the new defaults; it must print a money value.
+	"$bin/psql" -X -q -A -t -h 127.0.0.1 -p "$port" -U postgres -d regression \
+		-v ON_ERROR_STOP=1 -c 'SELECT 1234.5::money'
 fi
