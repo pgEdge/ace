@@ -49,5 +49,6 @@ In an eventually consistent multi-master system, nodes may potentially diverge d
 
 ## Known Limitations
 
+* ACE needs PostgreSQL 15 or later on every node of the cluster (see [Requirements](install.md#requirements)).
 * ACE cannot be used on a table without a primary key, because primary keys are the basis for range partitioning, hash calculations, and other critical functions in ACE.
 * ACE does not match catalog objects between nodes. A value of type `oid` or of a reg* type (`regclass`, `regtype`, `regproc`, `regnamespace` and the others) refers to an object of one node. ACE compares and repairs such a value as the text that the server prints, like any other value: an `oid` as a number, which differs between nodes for the same object, and a reg* value as the name of the object. The server prints this name without the schema when the object is visible in the `search_path` of the session, and the node that gets the value reads the name with its own `search_path`. So the same text can name different objects on two nodes. ACE does not check this; keep the schemas of the nodes equal (see schema-diff).

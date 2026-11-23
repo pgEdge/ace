@@ -9,6 +9,12 @@ Reports written by earlier Windows builds keep their Windows ACLs, even
 after you move ACE to WSL. Other local users may be able to read the
 table rows in them. Delete these reports, or restrict their ACLs by hand.
 
+## Requirements
+
+ACE needs PostgreSQL 15 or later on every node of the cluster. ACE does not check the server version when it connects. On an older server, a command can fail with an SQL error in the middle of a run, or report differences that do not exist.
+
+## Choosing an Installation Method
+
 Choose the option that fits your environment:
 
 - Go install (fastest if you have Go toolchains)
