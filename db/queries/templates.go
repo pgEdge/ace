@@ -807,11 +807,15 @@ var SQLTemplates = Templates{
 			-- attoptions keeps the order the options were applied in, so the
 			-- same options set in a different order would compare unequal.
 			-- Sorted here as GetDomainDescriptors sorts a domain's CHECKs.
-			-- Entries are keyword=value from a fixed set, so none holds a
-			-- comma.
+			-- Entries are keyword=value from a fixed set of keywords.
+			-- The server adds the pg_attver key by itself. Its value comes
+			-- from the WAL position of each node, so two nodes with the
+			-- same column almost always hold different values. A user
+			-- cannot set it, so it is not part of the structure.
 			COALESCE((
 				SELECT string_agg(opt, ',' ORDER BY opt)
 				FROM pg_catalog.unnest(a.attoptions) AS opt
+				WHERE NOT pg_catalog.starts_with(opt, 'pg_attver=')
 			), '')                                           AS options,
 			-- A collation's identity is (namespace, name), for the same
 			-- reason a type's is: two schemas can each hold a collation

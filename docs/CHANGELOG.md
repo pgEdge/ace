@@ -293,6 +293,13 @@ All notable changes to ACE will be captured in this document. This project follo
   key.
 
 ### Fixed
+- **`schema-diff --compare=structure` reported a difference in the
+  options of every column on current PostgreSQL releases.** The server
+  stores a version of each column in `attoptions` under the key
+  `pg_attver`. Its value comes from the WAL position of the node, so two
+  nodes with the same schema almost always have different values. Now
+  the structure comparison leaves this key out. Other column options,
+  such as `n_distinct`, are still compared.
 - **`table-diff` and `mtree` converted the bounds of the blocks to Go
   values.** A key type that the driver did not know, or could not decode,
   stopped the run with an error, and a value that the Go type could not

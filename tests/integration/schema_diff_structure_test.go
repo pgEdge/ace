@@ -519,6 +519,54 @@ func TestSchemaDiffStructure_ColumnOptionValueDriftIsStillReported(t *testing.T)
 	d := findDivergenceFor(t, divs, fmt.Sprintf("%s.%s.n", structureSchema, structureTable), "options")
 	require.Contains(t, d.ValueOnA, "-0.5")
 	require.Contains(t, d.ValueOnB, "-0.9")
+	require.NotContains(t, d.ValueOnA, "pg_attver")
+	require.NotContains(t, d.ValueOnB, "pg_attver")
+}
+
+// requireColumnVersionsDiffer pins the premise of the test below: the server
+// stores a pg_attver key for the column, and its value is not the same on
+// the two nodes. A server that does not store the key skips the test.
+func requireColumnVersionsDiffer(t *testing.T, column string) {
+	t.Helper()
+	ctx := context.Background()
+	const q = `SELECT COALESCE((
+	               SELECT opt FROM pg_catalog.unnest(a.attoptions) AS opt
+	               WHERE pg_catalog.starts_with(opt, 'pg_attver=')), '')
+	           FROM pg_attribute a
+	           JOIN pg_class c ON c.oid = a.attrelid
+	           JOIN pg_namespace ns ON ns.oid = c.relnamespace
+	           WHERE ns.nspname = $1 AND c.relname = $2 AND a.attname = $3`
+
+	var v1, v2 string
+	require.NoError(t, pgCluster.Node1Pool.QueryRow(ctx, q, structureSchema, structureTable, column).Scan(&v1))
+	require.NoError(t, pgCluster.Node2Pool.QueryRow(ctx, q, structureSchema, structureTable, column).Scan(&v2))
+	if v1 == "" || v2 == "" {
+		t.Skip("the server does not store pg_attver in attoptions")
+	}
+	require.NotEqual(t, v1, v2,
+		"this test needs the two nodes to hold different pg_attver values")
+}
+
+// TestSchemaDiffStructure_ColumnVersionIsNotADifference: the server keeps a
+// pg_attver key in attoptions, and its value depends on the WAL position of
+// each node. Two nodes with the same column and the same user options must
+// not report a difference.
+func TestSchemaDiffStructure_ColumnVersionIsNotADifference(t *testing.T) {
+	setupStructureSchema(t)
+	ctx := context.Background()
+
+	stmt := fmt.Sprintf(`ALTER TABLE %s.%s ALTER COLUMN n SET (n_distinct = -0.5)`,
+		structureSchema, structureTable)
+	for _, pool := range []*pgxpool.Pool{pgCluster.Node1Pool, pgCluster.Node2Pool} {
+		_, err := pool.Exec(ctx, stmt)
+		require.NoError(t, err)
+	}
+
+	requireColumnVersionsDiffer(t, "n")
+
+	divs := compareStructureForTest(t)
+	require.Empty(t, divs,
+		"a different pg_attver value is not a difference: %+v", divs)
 }
 
 // TestSchemaDiffStructure_TableDroppedBeforeCollectionIsOneFinding: a table

@@ -1049,7 +1049,7 @@ type ColumnDescriptor struct {
 	NotNull       bool
 	Identity      string // '' | 'a' (always) | 'd' (by default)
 	Generated     string // '' | 's' (stored)
-	Options       string // attoptions, sorted and comma-joined so apply order cannot differ; opaque to this layer
+	Options       string // attoptions without pg_attver, sorted and comma-joined so apply order cannot differ; opaque to this layer
 	CollNamespace string
 	CollName      string
 	CollProvider  string
