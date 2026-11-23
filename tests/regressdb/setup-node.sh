@@ -76,6 +76,20 @@ if [ "$rc" -gt 1 ]; then
 fi
 tail -n 3 "$data.regress/run.log"
 
+# A table with a primary key and a column that its parent got after the
+# table was created: the column order is a, id, x. pg_dump creates the
+# table again with the inherited columns first (a, x, id), so a restored
+# copy has the same columns in another order. The regression tests leave
+# such tables only without a primary key.
+"$bin/psql" -X -q -h 127.0.0.1 -p "$port" -U postgres -d regression \
+	-v ON_ERROR_STOP=1 <<EOF
+CREATE TABLE regressdb_inh_parent (a int);
+CREATE TABLE regressdb_inh_child (id int PRIMARY KEY) INHERITS (regressdb_inh_parent);
+ALTER TABLE regressdb_inh_parent ADD COLUMN x int;
+INSERT INTO regressdb_inh_child (id, a, x)
+SELECT g, g % 7, g * 10 FROM generate_series(1, 100) g;
+EOF
+
 # Other defaults for the settings that change how the server prints
 # values or resolves names. ACE sets its own values for most of them on
 # each connection, and the run checks that a node with other defaults

@@ -159,18 +159,25 @@ def list_tables(node):
 
 
 # Every row of a table as (key text, row text). The server builds the COPY
-# command from the catalog and runs it with \gexec. ROW(t.*) reads the
-# whole row even when the table has a column named t.
+# command from the catalog and runs it with \gexec. The row text has the
+# columns in the order of their names, so two nodes that have the same
+# columns in another order give the same text for the same row. Each
+# column is qualified with t, so a column named t is read as a column.
 REFERENCE_SQL = r"""
-SELECT format('COPY (SELECT ROW(%s)::text, ROW(t.*)::text FROM %s t) TO STDOUT',
-              string_agg(format('t.%I', a.attname), ', ' ORDER BY k.ord),
-              p.conrelid::regclass)
-FROM pg_constraint p,
-     unnest(p.conkey) WITH ORDINALITY AS k(attnum, ord),
-     pg_attribute a
-WHERE p.conrelid = :'table'::regclass AND p.contype = 'p'
-  AND a.attrelid = p.conrelid AND a.attnum = k.attnum
-GROUP BY p.conrelid
+SELECT format('COPY (SELECT ROW(%s)::text, ROW(%s)::text FROM %s t) TO STDOUT',
+              (SELECT string_agg(format('t.%I', a.attname), ', ' ORDER BY k.ord)
+               FROM pg_constraint p,
+                    unnest(p.conkey) WITH ORDINALITY AS k(attnum, ord),
+                    pg_attribute a
+               WHERE p.conrelid = c.oid AND p.contype = 'p'
+                 AND a.attrelid = c.oid AND a.attnum = k.attnum),
+              (SELECT string_agg(format('t.%I', a.attname), ', ' ORDER BY a.attname COLLATE "C")
+               FROM pg_attribute a
+               WHERE a.attrelid = c.oid AND a.attnum > 0 AND NOT a.attisdropped),
+              c.oid::regclass)
+FROM pg_class c
+WHERE c.oid = :'table'::regclass
+  AND EXISTS (SELECT 1 FROM pg_constraint p WHERE p.conrelid = c.oid AND p.contype = 'p')
 \gexec
 """
 
@@ -230,10 +237,11 @@ def reference(nodes, name, t1, t2):
         return Ref(refusals[0], None, 0, note, tuple(refusals[1:]))
     if t1.key != t2.key:
         return Ref("schema-mismatch", None, 0, "the primary keys differ")
-    if t1.columns != t2.columns:
-        # ACE compares rows only when both nodes have the same columns in
-        # the same order.
+    if sorted(t1.columns) != sorted(t2.columns):
         return Ref("schema-mismatch", None, 0, "the columns differ")
+    # The same columns in another order are the same table: ACE must match
+    # the columns by name and compare the rows.
+    order = "" if t1.columns == t2.columns else "the column order differs"
     r1 = reference_rows(nodes[0], name)
     r2 = reference_rows(nodes[1], name)
     if isinstance(r1, str) or isinstance(r2, str):
@@ -246,10 +254,10 @@ def reference(nodes, name, t1, t2):
         # compared as a multiset; the number of differences is not defined
         # for such a key, so it is not checked.
         same = all(sorted(r1.get(k, [])) == sorted(r2.get(k, [])) for k in set(r1) | set(r2))
-        note = "the key is not unique with child tables"
+        note = "; ".join(n for n in ("the key is not unique with child tables", order) if n)
         return Ref("match", 0, rows, note) if same else Ref("diff", None, rows, note)
     diffs = sum(1 for k in set(r1) | set(r2) if r1.get(k) != r2.get(k))
-    return Ref("match", 0, rows, "") if diffs == 0 else Ref("diff", diffs, rows, "")
+    return Ref("match", 0, rows, order) if diffs == 0 else Ref("diff", diffs, rows, order)
 
 
 def make_differences(node, t1, t2):
@@ -643,7 +651,7 @@ def main():
     # on both nodes, with the same primary key and columns (see reference()).
     if "mtree" in commands and not any(
             n in t1 and n in t2 and t1[n].key and t1[n].key == t2[n].key
-            and t1[n].columns == t2[n].columns for n in names):
+            and sorted(t1[n].columns) == sorted(t2[n].columns) for n in names):
         sys.exit("mtree: no selected table with the same primary key and columns is on both nodes")
     # The rows are deleted in the same tables whatever --tables selects, so
     # that a run on some tables sees the same data as a full run.
