@@ -611,6 +611,51 @@ func TestSchemaDiffStructure_CompositeAttributeNumberIsNotADifference(t *testing
 		"a different attnum of the same attribute is not a difference: %+v", divs)
 }
 
+// TestSchemaDiffStructure_ArrayTypeNameIsNotADifference: the server names an
+// array type by itself and adds underscores when the name is taken. Two
+// nodes with the same enum and the same array column must not report a
+// difference when the array type got another name on one of them.
+func TestSchemaDiffStructure_ArrayTypeNameIsNotADifference(t *testing.T) {
+	setupStructureSchema(t)
+	ctx := context.Background()
+
+	node1 := []string{
+		// Takes the name "_mood2" while mood2 is created, then frees it.
+		fmt.Sprintf(`CREATE TYPE %s._mood2 AS (x int)`, structureSchema),
+		fmt.Sprintf(`CREATE TYPE %s.mood2 AS ENUM ('a', 'b')`, structureSchema),
+		fmt.Sprintf(`DROP TYPE %s._mood2`, structureSchema),
+	}
+	node2 := []string{
+		fmt.Sprintf(`CREATE TYPE %s.mood2 AS ENUM ('a', 'b')`, structureSchema),
+	}
+	addColumn := fmt.Sprintf(`ALTER TABLE %s.%s ADD COLUMN ma %s.mood2[]`,
+		structureSchema, structureTable, structureSchema)
+	for _, stmt := range append(node1, addColumn) {
+		_, err := pgCluster.Node1Pool.Exec(ctx, stmt)
+		require.NoError(t, err, "node1: %s", stmt)
+	}
+	for _, stmt := range append(node2, addColumn) {
+		_, err := pgCluster.Node2Pool.Exec(ctx, stmt)
+		require.NoError(t, err, "node2: %s", stmt)
+	}
+
+	// The premise: the array type has another name on each node.
+	const q = `SELECT t.typname FROM pg_attribute a
+	           JOIN pg_type t ON t.oid = a.atttypid
+	           JOIN pg_class c ON c.oid = a.attrelid
+	           JOIN pg_namespace n ON n.oid = c.relnamespace
+	           WHERE n.nspname = $1 AND c.relname = $2 AND a.attname = 'ma'`
+	var name1, name2 string
+	require.NoError(t, pgCluster.Node1Pool.QueryRow(ctx, q, structureSchema, structureTable).Scan(&name1))
+	require.NoError(t, pgCluster.Node2Pool.QueryRow(ctx, q, structureSchema, structureTable).Scan(&name2))
+	require.NotEqual(t, name1, name2,
+		"this test needs the array type to have another name on each node")
+
+	divs := compareStructureForTest(t)
+	require.Empty(t, divs,
+		"another name of the same array type is not a difference: %+v", divs)
+}
+
 // TestSchemaDiffStructure_TableDroppedBeforeCollectionIsOneFinding: a table
 // that disappears before CollectSnapshot reads the catalog is one finding,
 // on the table. Until the table Object was gated on the table existing,

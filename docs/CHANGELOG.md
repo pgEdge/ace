@@ -309,6 +309,14 @@ All notable changes to ACE will be captured in this document. This project follo
   name, and their order is compared on its own: the same attributes in
   another order are one finding, `attribute order`. A finding on an
   attribute is now named `attribute (name)`, without a number.
+- **`schema-diff --compare=structure` reported an array column as
+  incompatible when the array type had another name on a node.** The
+  server names an array type by itself and adds underscores when the name
+  is taken, and `pg_dump` does not dump array types, so the same array
+  type can have another name on each node. The report showed the same
+  type, for example `mood[]`, on both sides. Now an array type is named by
+  its element type, for a column, a composite attribute, the base type of
+  a domain and the subtype of a range.
 - **`table-diff` and `mtree` converted the bounds of the blocks to Go
   values.** A key type that the driver did not know, or could not decode,
   stopped the run with an error, and a value that the Go type could not

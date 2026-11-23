@@ -799,7 +799,11 @@ var SQLTemplates = Templates{
 			a.atttypmod,
 			pg_catalog.format_type(a.atttypid, a.atttypmod) AS type_text,
 			tn.nspname                                       AS type_namespace,
-			t.typname                                        AS type_name,
+			-- An array type is named by its element type plus "[]". The
+			-- server chooses the name of an array type by itself, and adds
+			-- underscores to it when the name is taken, so the same array
+			-- type can have another name on another node.
+			COALESCE(et.typname || '[]', t.typname)          AS type_name,
 			t.typtype::text                                  AS type_kind,
 			a.attnotnull,
 			a.attidentity::text,
@@ -837,6 +841,8 @@ var SQLTemplates = Templates{
 		JOIN pg_catalog.pg_attribute a ON a.attrelid = c.oid
 		JOIN pg_catalog.pg_type t ON t.oid = a.atttypid
 		JOIN pg_catalog.pg_namespace tn ON tn.oid = t.typnamespace
+		LEFT JOIN pg_catalog.pg_type et
+			ON t.typtype = 'b' AND et.oid = t.typelem AND et.typarray = t.oid
 		LEFT JOIN pg_catalog.pg_attrdef ad ON ad.adrelid = a.attrelid AND ad.adnum = a.attnum
 		LEFT JOIN pg_catalog.pg_collation co ON co.oid = a.attcollation
 		LEFT JOIN pg_catalog.pg_namespace cn ON cn.oid = co.collnamespace
@@ -871,7 +877,8 @@ var SQLTemplates = Templates{
 			n.nspname,
 			t.typname,
 			bn.nspname                                            AS base_namespace,
-			bt.typname                                            AS base_name,
+			-- An array type is named by its element type plus "[]".
+			COALESCE(bet.typname || '[]', bt.typname)             AS base_name,
 			-- typtype belongs to the base type's identity: dropping an enum
 			-- and recreating the name as a domain leaves (namespace, name)
 			-- untouched, so without this the substitution is invisible.
@@ -891,6 +898,8 @@ var SQLTemplates = Templates{
 		JOIN pg_catalog.pg_namespace n ON n.oid = t.typnamespace
 		JOIN pg_catalog.pg_type bt ON bt.oid = t.typbasetype
 		JOIN pg_catalog.pg_namespace bn ON bn.oid = bt.typnamespace
+		LEFT JOIN pg_catalog.pg_type bet
+			ON bt.typtype = 'b' AND bet.oid = bt.typelem AND bet.typarray = bt.oid
 		LEFT JOIN LATERAL (
 			SELECT array_agg(pg_catalog.pg_get_constraintdef(ct.oid, true) ORDER BY pg_catalog.pg_get_constraintdef(ct.oid, true) COLLATE "C") AS defs
 			FROM pg_catalog.pg_constraint ct
@@ -909,7 +918,8 @@ var SQLTemplates = Templates{
 			n.nspname,
 			t.typname,
 			sn.nspname                                       AS subtype_namespace,
-			st.typname                                       AS subtype_name,
+			-- An array type is named by its element type plus "[]".
+			COALESCE(ste.typname || '[]', st.typname)       AS subtype_name,
 			-- See base_kind in GetDomainDescriptors.
 			st.typtype::text                                 AS subtype_kind,
 			-- Collation and operator class are named (namespace, name) for
@@ -928,6 +938,8 @@ var SQLTemplates = Templates{
 		JOIN pg_catalog.pg_range r ON r.rngtypid = t.oid
 		JOIN pg_catalog.pg_type st ON st.oid = r.rngsubtype
 		JOIN pg_catalog.pg_namespace sn ON sn.oid = st.typnamespace
+		LEFT JOIN pg_catalog.pg_type ste
+			ON st.typtype = 'b' AND ste.oid = st.typelem AND ste.typarray = st.oid
 		LEFT JOIN pg_catalog.pg_collation co ON co.oid = r.rngcollation
 		LEFT JOIN pg_catalog.pg_namespace con ON con.oid = co.collnamespace
 		LEFT JOIN pg_catalog.pg_opclass oc ON oc.oid = r.rngsubopc
@@ -947,7 +959,8 @@ var SQLTemplates = Templates{
 			t.typname,
 			a.attname,
 			an.nspname                                       AS attr_type_namespace,
-			at.typname                                       AS attr_type_name,
+			-- An array type is named by its element type plus "[]".
+			COALESCE(aet.typname || '[]', at.typname)        AS attr_type_name,
 			-- See base_kind in GetDomainDescriptors.
 			at.typtype::text                                 AS attr_type_kind,
 			a.atttypmod,
@@ -961,6 +974,8 @@ var SQLTemplates = Templates{
 		JOIN pg_catalog.pg_attribute a ON a.attrelid = t.typrelid
 		JOIN pg_catalog.pg_type at ON at.oid = a.atttypid
 		JOIN pg_catalog.pg_namespace an ON an.oid = at.typnamespace
+		LEFT JOIN pg_catalog.pg_type aet
+			ON at.typtype = 'b' AND aet.oid = at.typelem AND aet.typarray = at.oid
 		LEFT JOIN pg_catalog.pg_collation co ON co.oid = a.attcollation
 		LEFT JOIN pg_catalog.pg_namespace cn ON cn.oid = co.collnamespace
 		WHERE t.oid = ANY($1::oid[]) AND t.typtype = 'c'
