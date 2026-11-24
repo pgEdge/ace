@@ -124,6 +124,11 @@ All notable changes to ACE will be captured in this document. This project follo
   the repair with an error.
 
 ### Upgrading
+- **Run `mtree build` again for every table with a Merkle tree.** A tree
+  now records the primary key, the replica identity and the columns of
+  the table it was built for. A tree built by an earlier ACE does not have
+  this record, so `mtree update` and `mtree table-diff` mark it as not
+  valid and stop with an error that asks for `mtree build`.
 - **Check `table_diff.max_connections` in `ace.yaml`.** It is now the old
   name of `max_connections.default`, so its value has a new meaning. It
   was an upper bound: the pool opened a connection only when a worker
@@ -293,6 +298,31 @@ All notable changes to ACE will be captured in this document. This project follo
   key.
 
 ### Fixed
+- **`mtree` used a tree after a change of the primary key of the table.**
+  `mtree update` and `mtree table-diff` read the current primary key at
+  each run, and CDC took the key of a change from the current replica
+  identity; both used it with a tree that was cut in the order of the old
+  key. With other key columns of the same type, or the same columns in
+  another order, changes were counted for wrong leaves without an error,
+  and a later diff could miss them. Now the tree records the key it was
+  built for, and `mtree update` and `mtree table-diff` compare it with the
+  table on each node first. A change of the key or of the replica identity
+  marks the tree as not valid, and the commands stop with an error that
+  says what changed and asks for `mtree build`.
+- **`mtree` did not see a change of a non-key column.** A type change can
+  rewrite the stored values (for example, round them) with no row change
+  in the CDC stream, and so can a new expression of a generated column; a
+  new or dropped column changes the hashed row.
+  The leaf hashes stayed as before, so two nodes could look equal while
+  their rows differed. Now `mtree update` and `mtree table-diff` find such
+  a change and compute all leaf hashes of that node again.
+- **`mtree build` accepted any replica identity.** With `FULL`, `NOTHING`,
+  or `USING INDEX` on other columns, CDC could not find the leaf of a
+  change, and with `NOTHING` every `UPDATE` and `DELETE` on the table
+  failed once the table was in the CDC publication. Now `mtree build`
+  accepts only `REPLICA IDENTITY DEFAULT`, or `USING INDEX` on an index
+  with exactly the primary key columns, the same on every node, and checks
+  it before the table goes into the publication.
 - **`table-diff` and `mtree` converted the bounds of the blocks to Go
   values.** A key type that the driver did not know, or could not decode,
   stopped the run with an error, and a value that the Go type could not

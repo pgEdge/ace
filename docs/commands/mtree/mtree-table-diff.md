@@ -13,6 +13,12 @@ under-reported; the skipped nodes are listed in the diff summary
 (`cdc_skipped_nodes`). Ensure no `mtree listen` or other mtree operation is
 holding the node's slot, then re-run, if you need a guaranteed-current drain.
 
+Before the comparison, `table-diff` checks the table against what each tree
+recorded at `mtree build`. A tree whose primary key or replica identity
+changed is not valid, and `table-diff` stops; a change of the other columns
+makes it compute all leaf hashes of that node again. See
+[Changes of the table](mtree-update.md#changes-of-the-table).
+
 **Usage**
 
 ```

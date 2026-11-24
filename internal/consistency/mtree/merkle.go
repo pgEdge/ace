@@ -1168,6 +1168,12 @@ func (m *MerkleTreeTask) addNodeColTypes(node string, colTypes, castTypes, colla
 		m.castTypes = make(map[string]map[string]string)
 	}
 	m.castTypes[node] = castTypes
+	return m.keyMatchesRef(node, colTypes, collations, key)
+}
+
+// keyMatchesRef returns an error if a key column has another type or another
+// collation in colTypes and collations of node than on the reference node.
+func (m *MerkleTreeTask) keyMatchesRef(node string, colTypes, collations map[string]string, key []string) error {
 	if err := keyTypesMatch(key, m.refColTypes, colTypes, m.refNode, node); err != nil {
 		return err
 	}
@@ -1425,11 +1431,20 @@ func (m *MerkleTreeTask) BuildMtree() (err error) {
 		nodeNames = append(nodeNames, nodeInfo["Name"].(string))
 	}
 
+	// The shape of the table on every node at the start, checked before the
+	// table goes into the publication.
+	startShapes, err := m.buildShapes(pools, nodeNames)
+	if err != nil {
+		return err
+	}
+
 	// Add the table to the publication on every node before any leaf is
 	// hashed. A later change is then in the leaf hash, in the CDC stream
 	// that mtree update reads, or in both; an earlier one could be in
-	// neither.
+	// neither. CDC changes at or after the WAL position read here apply to
+	// the tree.
 	publicationName := cfg.PublicationName
+	validFrom := make(map[string]string, len(nodeNames))
 	for _, name := range nodeNames {
 		err := queries.AlterPublicationAddTable(m.Ctx, pools[name], publicationName, m.QualifiedTableName)
 		if err != nil {
@@ -1442,6 +1457,11 @@ func (m *MerkleTreeTask) BuildMtree() (err error) {
 		} else {
 			logger.Info("Added table %s to publication %s on node %s", m.QualifiedTableName, publicationName, name)
 		}
+		lsn, err := queries.CurrentWalInsertLSN(m.Ctx, pools[name])
+		if err != nil {
+			return fmt.Errorf("failed to read the WAL position on node %s: %w", name, err)
+		}
+		validFrom[name] = lsn
 	}
 
 	// Leaf hashes of every node, keyed by node name and then by the index of
@@ -1597,6 +1617,26 @@ func (m *MerkleTreeTask) BuildMtree() (err error) {
 			}
 			defer pool.Close()
 
+			// The leaves were hashed for the table as it was at the start. A
+			// change of the table since then would be recorded as a shape
+			// that the leaves do not have. The shape is read in its own
+			// REPEATABLE READ transaction: under READ COMMITTED its
+			// statements could see two states of the catalog. A change after
+			// this read is seen by the next run, which compares the recorded
+			// shape with the table.
+			var shape queries.TableShape
+			err := m.readShape(pool, func(tx pgx.Tx) error {
+				var err error
+				shape, err = queries.GetTableShape(m.Ctx, tx, m.Schema, m.Table)
+				return err
+			})
+			if err != nil {
+				return fmt.Errorf("failed to read the table on node %s: %w", name, err)
+			}
+			if change := shapeChange(startShapes[name], shape); change != "" {
+				return fmt.Errorf("%s changed on node %s during mtree build: %s; run mtree build again", m.QualifiedTableName, name, change)
+			}
+
 			tx, err := pool.Begin(m.Ctx)
 			if err != nil {
 				return fmt.Errorf("failed to begin transaction on node %s: %w", name, err)
@@ -1619,7 +1659,7 @@ func (m *MerkleTreeTask) BuildMtree() (err error) {
 			logger.Info("Updated CDC metadata for table %s on node %s", m.QualifiedTableName, name)
 
 			logger.Info("Creating Merkle Tree objects on %s...", name)
-			err = m.createMtreeObjects(tx, maxRows, numBlocks)
+			err = m.createMtreeObjects(tx, maxRows, numBlocks, shape, validFrom[name])
 			if err != nil {
 				return fmt.Errorf("failed to create mtree objects on node %s: %w", name, err)
 			}
@@ -1740,6 +1780,12 @@ func (m *MerkleTreeTask) UpdateMtree(skipAllChecks bool) (err error) { //nolint:
 	// full replication-stream drain.
 	var blockSize int
 	var foundBlockSize bool
+	// The shape of the table now, for the nodes where the non-key columns
+	// changed or the table was rewritten since the shape was recorded. It
+	// is recorded when all leaves are hashed again; if the table changes
+	// once more meanwhile, the next run sees it, also when the change is
+	// undone: the table is then stored in another file.
+	columnsChangedOn := make(map[string]queries.TableShape)
 	for _, nodeInfo := range m.ClusterNodes {
 		pool, err := auth.GetClusterNodeConnection(m.Ctx, nodeInfo, m.connOpts())
 		if err != nil {
@@ -1752,6 +1798,10 @@ func (m *MerkleTreeTask) UpdateMtree(skipAllChecks bool) (err error) { //nolint:
 			if isMissingTreeErr(err) {
 				return m.missingTreeError(nodeInfo["Name"], err)
 			}
+			return fmt.Errorf("error migrating metadata schema on node %s: %w", nodeInfo["Name"], err)
+		}
+		if err := queries.EnsureTreeStateColumns(m.Ctx, pool); err != nil {
+			pool.Close()
 			return fmt.Errorf("error migrating metadata schema on node %s: %w", nodeInfo["Name"], err)
 		}
 
@@ -1770,6 +1820,19 @@ func (m *MerkleTreeTask) UpdateMtree(skipAllChecks bool) (err error) { //nolint:
 		if err := m.checkHashVersion(pool, nodeInfo["Name"], true /* allowOlder */); err != nil {
 			pool.Close()
 			return err
+		}
+
+		// Refuse a tree that no longer fits the table before any CDC work.
+		// A change of the non-key columns or a rewrite of the table only
+		// makes the leaf hashes stale; they are all computed again below.
+		nodeName := fmt.Sprint(nodeInfo["Name"])
+		cur, columnsChanged, err := m.checkTreeShape(pool, nodeName)
+		if err != nil {
+			pool.Close()
+			return err
+		}
+		if columnsChanged {
+			columnsChangedOn[nodeName] = cur
 		}
 
 		pool.Close()
@@ -1890,14 +1953,21 @@ func (m *MerkleTreeTask) UpdateMtree(skipAllChecks bool) (err error) { //nolint:
 			return err
 		}
 		hashVersionUpgraded := false
+		newShape, columnsChanged := columnsChangedOn[fmt.Sprint(nodeInfo["Name"])]
 		// commitNode commits the work on this node. After an upgrade it
 		// first writes the current version: every leaf was marked dirty, and
 		// a leaf stops being dirty only when its hash is computed again, so
-		// no leaf of the older algorithm is left.
+		// no leaf of the older algorithm is left. After a change of the
+		// columns or a rewrite it writes the new shape for the same reason.
 		commitNode := func() error {
 			if hashVersionUpgraded {
 				if err := queries.UpdateHashVersion(m.Ctx, tx, m.Schema, m.Table, queries.CurrentHashVersion); err != nil {
 					return fmt.Errorf("error updating hash version on node %s: %w", nodeInfo["Name"], err)
+				}
+			}
+			if columnsChanged {
+				if err := queries.UpdateTreeShape(m.Ctx, tx, m.Schema, m.Table, newShape); err != nil {
+					return fmt.Errorf("error writing the table shape on node %s: %w", nodeInfo["Name"], err)
 				}
 			}
 			if err := tx.Commit(m.Ctx); err != nil {
@@ -1913,6 +1983,14 @@ func (m *MerkleTreeTask) UpdateMtree(skipAllChecks bool) (err error) { //nolint:
 			fmt.Printf("Hash algorithm upgraded (v%d -> v%d): marked %d blocks for recomputation on %s\n",
 				hashVersion, queries.CurrentHashVersion, marked, nodeInfo["Name"])
 			hashVersionUpgraded = true
+		}
+		if columnsChanged {
+			marked, err := queries.MarkAllLeavesDirty(m.Ctx, tx, mtreeTableName)
+			if err != nil {
+				return fmt.Errorf("error marking all leaves dirty after a change or a rewrite of the table on node %s: %w", nodeInfo["Name"], err)
+			}
+			fmt.Printf("The columns of %s changed or the table was rewritten on %s: marked %d blocks for recomputation\n",
+				m.QualifiedTableName, nodeInfo["Name"], marked)
 		}
 
 		blocksToUpdate, err := queries.GetDirtyAndNewBlocks(m.Ctx, tx, mtreeTableName, m.SimplePrimaryKey, m.Key)
@@ -2225,7 +2303,7 @@ func (m *MerkleTreeTask) DiffMtree() (err error) {
 	if err = m.UpdateMtree(true); err != nil {
 		// A missing tree already carries a complete, actionable message;
 		// prefixing it with update-failure context only buries the fix.
-		if errors.Is(err, ErrMtreeNotFound) {
+		if errors.Is(err, ErrMtreeNotFound) || errors.Is(err, ErrMtreeInvalid) {
 			return err
 		}
 		return fmt.Errorf("failed to update merkle tree before diff: %w", err)
@@ -2985,7 +3063,10 @@ func (m *MerkleTreeTask) dropLegacyXOROperators(tx pgx.Tx, nodeName any) error {
 	return nil
 }
 
-func (m *MerkleTreeTask) createMtreeObjects(tx pgx.Tx, totalRows int64, numBlocks int) error {
+// createMtreeObjects creates the metadata row and the tree table of the
+// table in tx. shape is the table shape the leaves were hashed for, and the
+// tree is valid for changes from validFromLSN on.
+func (m *MerkleTreeTask) createMtreeObjects(tx pgx.Tx, totalRows int64, numBlocks int, shape queries.TableShape, validFromLSN string) error {
 
 	// Schema and the bytea_xor function are created by MtreeInit's Phase A
 	// and are required for BuildMtree to make sense (build needs the CDC
@@ -3001,8 +3082,11 @@ func (m *MerkleTreeTask) createMtreeObjects(tx pgx.Tx, totalRows int64, numBlock
 	if err != nil {
 		return fmt.Errorf("failed to create metadata table: %w", err)
 	}
+	if err := queries.EnsureTreeStateColumns(m.Ctx, tx); err != nil {
+		return err
+	}
 
-	err = queries.UpdateMetadata(m.Ctx, tx, m.Schema, m.Table, totalRows, m.BlockSize, numBlocks, !m.SimplePrimaryKey, queries.CurrentHashVersion)
+	err = queries.UpdateMetadata(m.Ctx, tx, m.Schema, m.Table, totalRows, m.BlockSize, numBlocks, !m.SimplePrimaryKey, queries.CurrentHashVersion, shape, validFromLSN)
 	if err != nil {
 		return fmt.Errorf("failed to update metadata: %w", err)
 	}

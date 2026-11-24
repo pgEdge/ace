@@ -47,19 +47,35 @@ func isMissingTreeErr(err error) bool {
 // row, undefined table) keep the build-only suggestion, since build creates
 // the metadata table when the schema already exists.
 func (m *MerkleTreeTask) missingTreeError(nodeName any, cause error) error {
-	dbnameFlag := ""
-	if m.DBName != "" {
-		dbnameFlag = " --dbname " + m.DBName
-	}
-	buildCmd := fmt.Sprintf("ace mtree build %s %s%s", m.ClusterName, m.QualifiedTableName, dbnameFlag)
+	buildCmd := m.buildCommand()
 
 	var pgErr *pgconn.PgError
 	if errors.As(cause, &pgErr) && pgErr.Code == "3F000" {
-		initCmd := fmt.Sprintf("ace mtree init %s%s", m.ClusterName, dbnameFlag)
+		initCmd := fmt.Sprintf("ace mtree init %s%s", m.ClusterName, m.dbnameFlag())
 		return fmt.Errorf("%w for %s on node %v: run '%s' and then '%s' first",
 			ErrMtreeNotFound, m.QualifiedTableName, nodeName, initCmd, buildCmd)
 	}
 
 	return fmt.Errorf("%w for %s on node %v: run '%s' first",
 		ErrMtreeNotFound, m.QualifiedTableName, nodeName, buildCmd)
+}
+
+// dbnameFlag returns the --dbname flag of the task for a command in a
+// message, or "".
+func (m *MerkleTreeTask) dbnameFlag() string {
+	if m.DBName == "" {
+		return ""
+	}
+	return " --dbname " + m.DBName
+}
+
+// buildCommand returns the mtree build command for the table of the task.
+func (m *MerkleTreeTask) buildCommand() string {
+	return fmt.Sprintf("ace mtree build %s %s%s", m.ClusterName, m.QualifiedTableName, m.dbnameFlag())
+}
+
+// teardownTableCommand returns the mtree teardown-table command for the
+// table of the task.
+func (m *MerkleTreeTask) teardownTableCommand() string {
+	return fmt.Sprintf("ace mtree teardown-table %s %s%s", m.ClusterName, m.QualifiedTableName, m.dbnameFlag())
 }
