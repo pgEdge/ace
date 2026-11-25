@@ -88,6 +88,18 @@ separate `initdb` runs give different OIDs to the same user-defined type, so
 matching by OID would either miss a real difference or report one that does
 not exist.
 
+Values that depend on the history of each node are not compared either. The
+attributes of a composite type are matched by name, and their order is
+compared, but their numbers in `pg_attribute` are not: `DROP ATTRIBUTE` leaves
+a gap in the numbers, and a dump and restore of the same type has no gap. In
+the column options, the `pg_attver` key that the server adds by itself is not
+compared: its value comes from the WAL position of each node. An array type is
+named by its element type, such as `mood[]`, because the server chooses the
+name of an array type by itself. In a column default, a sequence that the
+column owns, as `serial` creates it, is shown as `<owned sequence>`: its name
+can differ between nodes, for example after a table rename. A sequence that the
+column does not own keeps its name in the default.
+
 **Findings and exit code.** Each difference found gets one of five ranks. The
 process exits with the code of the single worst rank found in the whole run:
 

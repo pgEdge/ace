@@ -799,7 +799,11 @@ var SQLTemplates = Templates{
 			a.atttypmod,
 			pg_catalog.format_type(a.atttypid, a.atttypmod) AS type_text,
 			tn.nspname                                       AS type_namespace,
-			t.typname                                        AS type_name,
+			-- An array type is named by its element type plus "[]". The
+			-- server chooses the name of an array type by itself, and adds
+			-- underscores to it when the name is taken, so the same array
+			-- type can have another name on another node.
+			COALESCE(et.typname || '[]', t.typname)          AS type_name,
 			t.typtype::text                                  AS type_kind,
 			a.attnotnull,
 			a.attidentity::text,
@@ -807,11 +811,15 @@ var SQLTemplates = Templates{
 			-- attoptions keeps the order the options were applied in, so the
 			-- same options set in a different order would compare unequal.
 			-- Sorted here as GetDomainDescriptors sorts a domain's CHECKs.
-			-- Entries are keyword=value from a fixed set, so none holds a
-			-- comma.
+			-- Entries are keyword=value from a fixed set of keywords.
+			-- The server adds the pg_attver key by itself. Its value comes
+			-- from the WAL position of each node, so two nodes with the
+			-- same column almost always hold different values. A user
+			-- cannot set it, so it is not part of the structure.
 			COALESCE((
 				SELECT string_agg(opt, ',' ORDER BY opt)
 				FROM pg_catalog.unnest(a.attoptions) AS opt
+				WHERE NOT pg_catalog.starts_with(opt, 'pg_attver=')
 			), '')                                           AS options,
 			-- A collation's identity is (namespace, name), for the same
 			-- reason a type's is: two schemas can each hold a collation
@@ -827,13 +835,49 @@ var SQLTemplates = Templates{
 			-- catches the common case; this field only catches a node whose
 			-- catalog was refreshed against a different library.
 			COALESCE(co.collversion, '')                     AS collversion,
-			COALESCE(pg_catalog.pg_get_expr(ad.adbin, ad.adrelid), '') AS default_expr
+			-- A sequence owned by the column, as serial makes it, is
+			-- written as <owned sequence> in the default. Its name depends
+			-- on the history of the node: serial adds a number when the
+			-- name is taken, and a renamed table keeps the old name of its
+			-- sequence. Sequences are not compared, and the name does not
+			-- change the values of the column. A sequence that the column
+			-- does not own keeps its name.
+			COALESCE(CASE
+				WHEN own.seq IS NULL THEN pg_catalog.pg_get_expr(ad.adbin, ad.adrelid)
+				ELSE pg_catalog.replace(
+					pg_catalog.pg_get_expr(ad.adbin, ad.adrelid),
+					'''' || pg_catalog.replace(own.seq::pg_catalog.regclass::text, '''', '''''')
+						|| '''::regclass',
+					'<owned sequence>')
+			END, '')                                         AS default_expr
 		FROM pg_catalog.pg_class c
 		JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
 		JOIN pg_catalog.pg_attribute a ON a.attrelid = c.oid
 		JOIN pg_catalog.pg_type t ON t.oid = a.atttypid
 		JOIN pg_catalog.pg_namespace tn ON tn.oid = t.typnamespace
+		LEFT JOIN pg_catalog.pg_type et
+			ON t.typtype = 'b' AND et.oid = t.typelem AND et.typarray = t.oid
 		LEFT JOIN pg_catalog.pg_attrdef ad ON ad.adrelid = a.attrelid AND ad.adnum = a.attnum
+		-- The sequence that the column owns (deptype 'a') and that its
+		-- default uses.
+		LEFT JOIN LATERAL (
+			SELECT own_dep.objid AS seq
+			FROM pg_catalog.pg_depend own_dep
+			JOIN pg_catalog.pg_class s
+				ON s.oid = own_dep.objid AND s.relkind = 'S'
+			JOIN pg_catalog.pg_depend use_dep
+				ON use_dep.classid = 'pg_catalog.pg_attrdef'::pg_catalog.regclass
+				AND use_dep.objid = ad.oid
+				AND use_dep.refclassid = 'pg_catalog.pg_class'::pg_catalog.regclass
+				AND use_dep.refobjid = own_dep.objid
+			WHERE own_dep.classid = 'pg_catalog.pg_class'::pg_catalog.regclass
+				AND own_dep.refclassid = 'pg_catalog.pg_class'::pg_catalog.regclass
+				AND own_dep.refobjid = a.attrelid
+				AND own_dep.refobjsubid = a.attnum
+				AND own_dep.deptype = 'a'
+			ORDER BY own_dep.objid
+			LIMIT 1
+		) own ON true
 		LEFT JOIN pg_catalog.pg_collation co ON co.oid = a.attcollation
 		LEFT JOIN pg_catalog.pg_namespace cn ON cn.oid = co.collnamespace
 		WHERE n.nspname = $1
@@ -867,7 +911,8 @@ var SQLTemplates = Templates{
 			n.nspname,
 			t.typname,
 			bn.nspname                                            AS base_namespace,
-			bt.typname                                            AS base_name,
+			-- An array type is named by its element type plus "[]".
+			COALESCE(bet.typname || '[]', bt.typname)             AS base_name,
 			-- typtype belongs to the base type's identity: dropping an enum
 			-- and recreating the name as a domain leaves (namespace, name)
 			-- untouched, so without this the substitution is invisible.
@@ -887,6 +932,8 @@ var SQLTemplates = Templates{
 		JOIN pg_catalog.pg_namespace n ON n.oid = t.typnamespace
 		JOIN pg_catalog.pg_type bt ON bt.oid = t.typbasetype
 		JOIN pg_catalog.pg_namespace bn ON bn.oid = bt.typnamespace
+		LEFT JOIN pg_catalog.pg_type bet
+			ON bt.typtype = 'b' AND bet.oid = bt.typelem AND bet.typarray = bt.oid
 		LEFT JOIN LATERAL (
 			SELECT array_agg(pg_catalog.pg_get_constraintdef(ct.oid, true) ORDER BY pg_catalog.pg_get_constraintdef(ct.oid, true) COLLATE "C") AS defs
 			FROM pg_catalog.pg_constraint ct
@@ -905,7 +952,8 @@ var SQLTemplates = Templates{
 			n.nspname,
 			t.typname,
 			sn.nspname                                       AS subtype_namespace,
-			st.typname                                       AS subtype_name,
+			-- An array type is named by its element type plus "[]".
+			COALESCE(ste.typname || '[]', st.typname)       AS subtype_name,
 			-- See base_kind in GetDomainDescriptors.
 			st.typtype::text                                 AS subtype_kind,
 			-- Collation and operator class are named (namespace, name) for
@@ -924,6 +972,8 @@ var SQLTemplates = Templates{
 		JOIN pg_catalog.pg_range r ON r.rngtypid = t.oid
 		JOIN pg_catalog.pg_type st ON st.oid = r.rngsubtype
 		JOIN pg_catalog.pg_namespace sn ON sn.oid = st.typnamespace
+		LEFT JOIN pg_catalog.pg_type ste
+			ON st.typtype = 'b' AND ste.oid = st.typelem AND ste.typarray = st.oid
 		LEFT JOIN pg_catalog.pg_collation co ON co.oid = r.rngcollation
 		LEFT JOIN pg_catalog.pg_namespace con ON con.oid = co.collnamespace
 		LEFT JOIN pg_catalog.pg_opclass oc ON oc.oid = r.rngsubopc
@@ -932,20 +982,19 @@ var SQLTemplates = Templates{
 	`)),
 	// GetCompositeAttributes reads a composite type's (typtype='c') own
 	// attributes, one row per attribute, ordered by attnum: a composite
-	// type's attnum order is its wire/row-literal layout, fixed at
-	// CREATE TYPE time.
+	// type's attnum order is its wire/row-literal layout. The attnum value
+	// itself is not returned. DROP ATTRIBUTE leaves a gap in it, and a dump
+	// and restore of the same type has no gap, so the value differs between
+	// nodes that hold the same type.
 	GetCompositeAttributes: template.Must(template.New("getCompositeAttributes").Parse(`
 		SELECT
 			t.oid,
 			n.nspname,
 			t.typname,
-			-- attnum, not a dense 1..n counter: DROP ATTRIBUTE leaves gaps,
-			-- and an ordinal that renumbers after a gap makes every later
-			-- attribute look changed when only one was dropped.
-			a.attnum,
 			a.attname,
 			an.nspname                                       AS attr_type_namespace,
-			at.typname                                       AS attr_type_name,
+			-- An array type is named by its element type plus "[]".
+			COALESCE(aet.typname || '[]', at.typname)        AS attr_type_name,
 			-- See base_kind in GetDomainDescriptors.
 			at.typtype::text                                 AS attr_type_kind,
 			a.atttypmod,
@@ -959,6 +1008,8 @@ var SQLTemplates = Templates{
 		JOIN pg_catalog.pg_attribute a ON a.attrelid = t.typrelid
 		JOIN pg_catalog.pg_type at ON at.oid = a.atttypid
 		JOIN pg_catalog.pg_namespace an ON an.oid = at.typnamespace
+		LEFT JOIN pg_catalog.pg_type aet
+			ON at.typtype = 'b' AND aet.oid = at.typelem AND aet.typarray = at.oid
 		LEFT JOIN pg_catalog.pg_collation co ON co.oid = a.attcollation
 		LEFT JOIN pg_catalog.pg_namespace cn ON cn.oid = co.collnamespace
 		WHERE t.oid = ANY($1::oid[]) AND t.typtype = 'c'

@@ -396,28 +396,29 @@ func buildReferencedTypeObjects(
 		for _, a := range d.Attributes {
 			props = append(props,
 				Property{
-					// The attribute's own attnum, not its position in the
-					// slice: dropping one attribute must not renumber the
-					// ones after it, or a single DROP ATTRIBUTE on one node
-					// makes every later attribute look changed too.
-					Name: fmt.Sprintf("attr:%04d:%s", a.AttNum, a.Name),
+					// Keyed by the attribute name only. A position would
+					// shift every later attribute after one DROP ATTRIBUTE
+					// on one node, and attnum differs between nodes that
+					// hold the same type: DROP ATTRIBUTE leaves a gap in it,
+					// and a dump and restore has no gap.
+					Name: "attr:" + a.Name,
 					// Packed (see packAttr) so compareCompositeObject can
 					// split it apart and classify the type the same way a
 					// column's type is classified (e.g. int4 -> int8 as
 					// RankNarrowed, not a blanket incompatible).
 					Value: packAttr(a.TypeNamespace, a.TypeName, a.TypeKind, a.TypeMod, a.Collation),
 				},
-				// Display only; paired with the property above by attnum and
-				// attribute name.
+				// Display only; paired with the property above by attribute
+				// name.
 				Property{
-					Name:  fmt.Sprintf("attrtext:%04d:%s", a.AttNum, a.Name),
+					Name:  "attrtext:" + a.Name,
 					Value: attributeText(a.TypeText, a.Collation),
 				},
 			)
 		}
 		// Not sorted: attribute order is part of a composite type's
-		// structural identity, so the "%04d" attnum keeps this Object's
-		// property order attnum-stable.
+		// structural identity, and the order of the "attr:" properties is
+		// the order of the attributes. The comparison checks this order.
 		objects[TypeID("composite", d.Namespace, d.Name)] = Object{Kind: "composite", Name: qualified, Properties: props}
 	}
 
