@@ -14,6 +14,7 @@ package queries
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"regexp"
@@ -1595,13 +1596,21 @@ func GetPkeyType(ctx context.Context, db DBQuerier, schema, table, pkey string) 
 	return pkeyType, nil
 }
 
-func UpdateMetadata(ctx context.Context, db DBQuerier, schema, table string, totalRows int64, blockSize, numBlocks int, isComposite bool, hashVersion int) error {
+// UpdateMetadata writes the metadata row of a tree that was just built and
+// marks it as valid. shape is the table shape the leaves were hashed for,
+// and validFromLSN is the WAL position from which CDC changes apply to the
+// tree.
+func UpdateMetadata(ctx context.Context, db DBQuerier, schema, table string, totalRows int64, blockSize, numBlocks int, isComposite bool, hashVersion int, shape TableShape, validFromLSN string) error {
 	sql, err := RenderSQL(SQLTemplates.UpdateMetadata, nil)
 	if err != nil {
 		return fmt.Errorf("failed to render UpdateMetadata SQL: %w", err)
 	}
+	shapeJSON, err := json.Marshal(shape)
+	if err != nil {
+		return fmt.Errorf("failed to encode the table shape of '%s.%s': %w", schema, table, err)
+	}
 
-	_, err = db.Exec(ctx, sql, schema, table, totalRows, blockSize, numBlocks, isComposite, hashVersion)
+	_, err = db.Exec(ctx, sql, schema, table, totalRows, blockSize, numBlocks, isComposite, hashVersion, string(shapeJSON), validFromLSN)
 	if err != nil {
 		return fmt.Errorf("query to update metadata for '%s.%s' failed: %w", schema, table, err)
 	}

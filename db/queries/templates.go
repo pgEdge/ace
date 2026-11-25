@@ -133,6 +133,12 @@ type Templates struct {
 	EnsureHashVersionColumn          *template.Template
 	DropHashVersionDefault           *template.Template
 	GetHashVersion                   *template.Template
+	GetTableShapeColumns             *template.Template
+	CountTreeStateColumns            *template.Template
+	EnsureTreeStateColumns           *template.Template
+	GetTreeState                     *template.Template
+	SetTreeInvalid                   *template.Template
+	UpdateTreeShape                  *template.Template
 	MarkAllLeavesDirty               *template.Template
 	UpdateHashVersion                *template.Template
 	GetReplicationOriginByName       *template.Template
@@ -160,6 +166,10 @@ var SQLTemplates = Templates{
 			is_composite boolean NOT NULL DEFAULT false,
 			hash_version int NOT NULL,
 			last_updated timestamptz,
+			table_shape jsonb,
+			valid_from_lsn pg_lsn,
+			state text NOT NULL DEFAULT 'valid',
+			invalid_reason text,
 			PRIMARY KEY (schema_name, table_name)
 		)`),
 	),
@@ -1290,7 +1300,11 @@ var SQLTemplates = Templates{
 				num_blocks,
 				is_composite,
 				hash_version,
-				last_updated
+				last_updated,
+				table_shape,
+				valid_from_lsn,
+				state,
+				invalid_reason
 			)
 		VALUES
 			(
@@ -1301,7 +1315,11 @@ var SQLTemplates = Templates{
 				$5,
 				$6,
 				$7,
-				current_timestamp
+				current_timestamp,
+				$8::jsonb,
+				$9::pg_lsn,
+				'valid',
+				NULL
 			)
 		ON CONFLICT (schema_name, table_name) DO
 		UPDATE
@@ -1311,7 +1329,11 @@ var SQLTemplates = Templates{
 			num_blocks = EXCLUDED.num_blocks,
 			is_composite = EXCLUDED.is_composite,
 			hash_version = EXCLUDED.hash_version,
-			last_updated = EXCLUDED.last_updated
+			last_updated = EXCLUDED.last_updated,
+			table_shape = EXCLUDED.table_shape,
+			valid_from_lsn = EXCLUDED.valid_from_lsn,
+			state = EXCLUDED.state,
+			invalid_reason = EXCLUDED.invalid_reason
 	`)),
 	DeleteMetadata: template.Must(template.New("deleteMetadata").Funcs(aceTemplateFuncs).Parse(`
 		DELETE FROM {{aceSchema}}.ace_mtree_metadata WHERE schema_name = $1 AND table_name = $2
@@ -1801,6 +1823,77 @@ var SQLTemplates = Templates{
 			 WHERE schema_name = $1 AND table_name = $2),
 			1
 		)
+	`)),
+	// One row per live column in attnum order. key_position is the place of
+	// the column in the primary key, from 1, or NULL. gen_expr is the md5 of
+	// the expression of a generated column, or NULL.
+	GetTableShapeColumns: template.Must(template.New("getTableShapeColumns").Parse(`
+		SELECT
+			a.attname,
+			a.attnum,
+			a.atttypid,
+			a.atttypmod,
+			pg_catalog.format_type(a.atttypid, a.atttypmod),
+			a.attcollation,
+			a.attgenerated::text,
+			CASE WHEN a.attgenerated <> ''
+				THEN pg_catalog.md5(pg_catalog.pg_get_expr(d.adbin, d.adrelid))
+			END AS gen_expr,
+			k.ord AS key_position,
+			c.relfilenode
+		FROM pg_catalog.pg_attribute a
+		JOIN pg_catalog.pg_class c ON c.oid = a.attrelid
+		JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+		LEFT JOIN pg_catalog.pg_attrdef d
+			ON d.adrelid = a.attrelid AND d.adnum = a.attnum
+		LEFT JOIN pg_catalog.pg_constraint con
+			ON con.conrelid = c.oid AND con.contype = 'p'
+		LEFT JOIN LATERAL unnest(con.conkey) WITH ORDINALITY AS k(attnum, ord)
+			ON k.attnum = a.attnum
+		WHERE n.nspname = $1
+			AND c.relname = $2
+			AND a.attnum > 0
+			AND NOT a.attisdropped
+		ORDER BY a.attnum
+	`)),
+	CountTreeStateColumns: template.Must(template.New("countTreeStateColumns").Parse(`
+		SELECT count(*)
+		FROM pg_catalog.pg_attribute a
+		JOIN pg_catalog.pg_class c ON c.oid = a.attrelid
+		JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+		WHERE n.nspname = $1
+			AND c.relname = 'ace_mtree_metadata'
+			AND a.attname IN ('table_shape', 'valid_from_lsn', 'state', 'invalid_reason')
+			AND NOT a.attisdropped
+	`)),
+	// A row written before these columns existed has no table_shape and
+	// gets the state 'valid'; the missing shape marks it as a tree of an
+	// older ACE.
+	EnsureTreeStateColumns: template.Must(template.New("ensureTreeStateColumns").Funcs(aceTemplateFuncs).Parse(`
+		ALTER TABLE {{aceSchema}}.ace_mtree_metadata
+			ADD COLUMN IF NOT EXISTS table_shape jsonb,
+			ADD COLUMN IF NOT EXISTS valid_from_lsn pg_lsn,
+			ADD COLUMN IF NOT EXISTS state text NOT NULL DEFAULT 'valid',
+			ADD COLUMN IF NOT EXISTS invalid_reason text
+	`)),
+	GetTreeState: template.Must(template.New("getTreeState").Funcs(aceTemplateFuncs).Parse(`
+		SELECT
+			table_shape::text,
+			valid_from_lsn::text,
+			state,
+			invalid_reason
+		FROM {{aceSchema}}.ace_mtree_metadata
+		WHERE schema_name = $1 AND table_name = $2
+	`)),
+	SetTreeInvalid: template.Must(template.New("setTreeInvalid").Funcs(aceTemplateFuncs).Parse(`
+		UPDATE {{aceSchema}}.ace_mtree_metadata
+		SET state = $1, invalid_reason = $2
+		WHERE schema_name = $3 AND table_name = $4
+	`)),
+	UpdateTreeShape: template.Must(template.New("updateTreeShape").Funcs(aceTemplateFuncs).Parse(`
+		UPDATE {{aceSchema}}.ace_mtree_metadata
+		SET table_shape = $1::jsonb
+		WHERE schema_name = $2 AND table_name = $3
 	`)),
 	MarkAllLeavesDirty: template.Must(template.New("markAllLeavesDirty").Parse(`
 		UPDATE {{.MtreeTable}}
