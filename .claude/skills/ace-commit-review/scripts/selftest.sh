@@ -27,7 +27,10 @@ cat > "$STUB_PROMPT"
 snap="$(sed -n 's/^Repository snapshot: \([^ ]*\) .*/\1/p' "$STUB_PROMPT")"
 [ -f "$snap/a.txt" ] && cp "$snap/a.txt" "$STUB_PROMPT.a.txt"
 [ -f "$snap/big.csv" ] && cp "$snap/big.csv" "$STUB_PROMPT.big.csv"
-[ -f "$(dirname "$snap")/removed/gone.txt" ] && cp "$(dirname "$snap")/removed/gone.txt" "$STUB_PROMPT.gone.txt"
+bef="$(dirname "$snap")/before"
+[ -f "$bef/gone.txt" ] && cp "$bef/gone.txt" "$STUB_PROMPT.gone.txt"
+[ -f "$bef/a.txt" ] && cp "$bef/a.txt" "$STUB_PROMPT.before.a.txt"
+[ -f "$bef/kind.txt" ] && cp "$bef/kind.txt" "$STUB_PROMPT.before.kind.txt"
 if [ -L "$snap/out.link" ] || [ -e "$snap/out.link" ]; then touch "$STUB_PROMPT.link"; fi
 [ -n "${STUB_SLEEP:-}" ] && sleep "$STUB_SLEEP"
 case "${STUB_VERDICT:-APPROVE}" in
@@ -263,20 +266,39 @@ git add a.txt
 COMMIT_REVIEW_MAX_DIFF_BYTES=10 STUB_VERDICT=APPROVE git commit -q -m 'Budget.' >/dev/null 2>&1 || fail "over-budget commit refused"
 grep -q '^+budget$' "$STUB_PROMPT" && fail "over-budget diff was included"
 grep -q 'not included' "$STUB_PROMPT" || fail "over-budget file was not listed"
-grep -q '^a.txt$' "$STUB_PROMPT" || fail "over-budget file name missing from the list"
-pass "a diff over the budget is listed for reading instead"
+grep -Fxq 'a.txt (pre-image under before/)' "$STUB_PROMPT" || fail "over-budget file name missing from the list"
+[ "$(cat "$STUB_PROMPT.before.a.txt" 2>/dev/null)" = y ] || fail "pre-image of the modified file not available under before/"
+pass "a diff over the budget is listed for reading, with the version it replaces under before/"
+
+# An added file over the budget has no pre-image and is read from the
+# snapshot; a file that becomes a symbolic link keeps its old content.
+printf 'regular content\n' > kind.txt
+git add kind.txt
+rm -f "$STUB_PROMPT.before.kind.txt"
+COMMIT_REVIEW_MAX_DIFF_BYTES=10 STUB_VERDICT=APPROVE git commit -q -m 'Add kind.' >/dev/null 2>&1 || fail "over-budget addition refused"
+grep -Fxq 'kind.txt' "$STUB_PROMPT" || fail "over-budget addition not listed plainly"
+[ ! -e "$STUB_PROMPT.before.kind.txt" ] || fail "an added file got a pre-image"
+rm -f kind.txt
+ln -s a.txt kind.txt
+git add kind.txt
+COMMIT_REVIEW_MAX_DIFF_BYTES=10 STUB_VERDICT=APPROVE git commit -q -m 'Link kind.' >/dev/null 2>&1 || fail "type change commit refused"
+grep -Fxq 'kind.txt (pre-image under before/)' "$STUB_PROMPT" || fail "type change not listed with a pre-image"
+[ "$(cat "$STUB_PROMPT.before.kind.txt" 2>/dev/null)" = 'regular content' ] || fail "content replaced by a symbolic link not kept under before/"
+git rm -q kind.txt
+STUB_VERDICT=APPROVE git commit -q -m 'Drop kind.' >/dev/null 2>&1 || fail "commit removing the link refused"
+pass "an over-budget addition has no pre-image, and a file turned into a link keeps its old content"
 
 # A deletion whose diff is over the budget: the snapshot cannot hold the gone
-# file, so its pre-image is written under removed/ for the reviewer to read.
+# file, so its pre-image is written under before/ for the reviewer to read.
 printf 'secret line one\nsecret line two\n' > gone.txt
 git add gone.txt
 STUB_VERDICT=APPROVE git commit -q -m 'Add gone.' >/dev/null 2>&1 || fail "setup commit for deletion refused"
 git rm -q gone.txt
 COMMIT_REVIEW_MAX_DIFF_BYTES=10 STUB_VERDICT=APPROVE git commit -q -m 'Remove gone.' >/dev/null 2>&1 || fail "deletion commit refused"
-grep -q '^gone.txt (deleted; removed content under removed/)$' "$STUB_PROMPT" || fail "deleted file not listed as recoverable"
+grep -q '^gone.txt (deleted; pre-image under before/)$' "$STUB_PROMPT" || fail "deleted file not listed as recoverable"
 [ "$(cat "$STUB_PROMPT.gone.txt" 2>/dev/null)" = "$(printf 'secret line one\nsecret line two')" ] \
-    || fail "pre-image of the deleted file not available under removed/"
-pass "a deletion over budget leaves its pre-image under removed/"
+    || fail "pre-image of the deleted file not available under before/"
+pass "a deletion over budget leaves its pre-image under before/"
 
 # A binary deletion: its pre-image is written too, listed as binary.
 printf 'OBJ\000\001\002GONE-BIN\000\n' > gone.bin
@@ -284,9 +306,9 @@ git add gone.bin
 STUB_VERDICT=APPROVE git commit -q -m 'Add gone.bin.' >/dev/null 2>&1 || fail "setup commit for binary deletion refused"
 git rm -q gone.bin
 STUB_VERDICT=APPROVE git commit -q -m 'Remove gone.bin.' >/dev/null 2>&1 || fail "binary deletion commit refused"
-grep -q '^gone.bin (deleted, binary; pre-image under removed/)$' "$STUB_PROMPT" || fail "binary deletion not listed"
+grep -q '^gone.bin (deleted, binary; pre-image under before/)$' "$STUB_PROMPT" || fail "binary deletion not listed"
 grep -q 'GONE-BIN' "$STUB_PROMPT" && fail "binary pre-image bytes reached the prompt"
-pass "a binary deletion is listed with its pre-image kept under removed/"
+pass "a binary deletion is listed with its pre-image kept under before/"
 
 # A symbolic link in the index is not written into the snapshot, where the
 # reviewer's tools would follow it out; it is listed with its target.
@@ -302,6 +324,22 @@ git rm -q out.link
 STUB_VERDICT=APPROVE git commit -q -m 'Unlink.' >/dev/null 2>&1 || fail "commit removing the symlink refused"
 pass "a symbolic link is left out of the snapshot and listed with its target"
 
+# A scan for links that fails refuses the commit: the reviewer must not
+# start on a snapshot that may still hold one.
+mkdir -p "$T/nofind"
+printf '#!/bin/sh\nexit 1\n' > "$T/nofind/find"
+chmod +x "$T/nofind/find"
+printf 'nofind\n' > a.txt
+git add a.txt
+rm -f "$STUB_PROMPT"
+if out="$(PATH="$T/nofind:$PATH" STUB_VERDICT=APPROVE git commit -q -m 'Nofind.' 2>&1)"; then
+    fail "commit went through although the scan for links failed"
+fi
+echo "$out" | grep -q 'symbolic links could not be removed' || fail "refused for another reason: $out"
+[ ! -e "$STUB_PROMPT" ] || fail "the reviewer ran although the scan for links failed"
+STUB_VERDICT=APPROVE git commit -q -m 'Nofind.' >/dev/null 2>&1 || fail "commit refused once the scan works"
+pass "a failed scan for symbolic links refuses the commit"
+
 # A staged path that spells a grep option is matched as a name, so the
 # files after it are still diffed.
 printf 'DASH\000BIN\000\n' > ./-n
@@ -312,7 +350,7 @@ grep -q '^-n (binary)$' "$STUB_PROMPT" || fail "the path named -n is not listed 
 grep -q '^+after-dash$' "$STUB_PROMPT" || fail "a path named -n dropped the diffs after it"
 git rm -q -- ./-n
 STUB_VERDICT=APPROVE git commit -q -m 'Undash.' >/dev/null 2>&1 || fail "commit removing the path named -n refused"
-grep -q '^-n (deleted, binary; pre-image under removed/)$' "$STUB_PROMPT" || fail "deletion of the path named -n not listed"
+grep -q '^-n (deleted, binary; pre-image under before/)$' "$STUB_PROMPT" || fail "deletion of the path named -n not listed"
 pass "a path that spells a grep option hides no later diff"
 
 # Two verdict lines refuse the commit, so does a verdict that only starts
@@ -376,16 +414,25 @@ grep -l SKIPPED "$R/.git/$NAME-reviews"/*.md >/dev/null || fail "skip not record
 pass "$SKIP_VAR=skip bypasses and is recorded"
 
 # A refusal and the skip that follows it within the same second each keep
-# their own report.
+# their own report.  The clock is fixed for the two attempts by a date stub,
+# so the names differ only by what the hook adds to the timestamp.
+real_date="$(command -v date)"
+mkdir -p "$T/fixdate"
+cat > "$T/fixdate/date" <<FIXDATE
+#!/bin/sh
+case "\${1:-}" in +%Y%m%d-%H%M%S) echo 20000101-000000 ;; *) exec "$real_date" "\$@" ;; esac
+FIXDATE
+chmod +x "$T/fixdate/date"
 before="$(ls "$R/.git/$NAME-reviews"/*.md | wc -l | tr -d ' ')"
 printf 'again\n' > a.txt
 git add a.txt
-if STUB_VERDICT=REJECT git commit -q -m 'Again.' >/dev/null 2>&1; then
+if PATH="$T/fixdate:$PATH" STUB_VERDICT=REJECT git commit -q -m 'Again.' >/dev/null 2>&1; then
     fail "rejected commit went through"
 fi
-env "$SKIP_VAR=skip" git commit -q -m 'Again.' >/dev/null 2>&1 || fail "skip after a refusal did not commit"
+env PATH="$T/fixdate:$PATH" "$SKIP_VAR=skip" git commit -q -m 'Again.' >/dev/null 2>&1 || fail "skip after a refusal did not commit"
 after="$(ls "$R/.git/$NAME-reviews"/*.md | wc -l | tr -d ' ')"
 [ "$after" -eq $((before + 2)) ] || fail "a report was overwritten: $before before, $after after"
+[ "$(ls "$R/.git/$NAME-reviews"/20000101-000000-*.md | wc -l | tr -d ' ')" -eq 2 ] || fail "the fixed clock was not used for both reports"
 pass "two attempts in quick succession write separate reports"
 
 # A repository with another name is not reviewed.
