@@ -59,10 +59,8 @@ func TestFirstBlockTemplatesHaveNoLowerBound(t *testing.T) {
 		data map[string]any
 		want string
 	}{
-		{"UpdateMtreeCounters/simple", SQLTemplates.UpdateMtreeCounters,
-			base(map[string]any{"IsComposite": false}), "mt.node_position = 0 OR"},
-		{"UpdateMtreeCounters/composite", SQLTemplates.UpdateMtreeCounters,
-			base(map[string]any{"IsComposite": true}), "mt.node_position = 0 OR"},
+		{"UpdateMtreeCounters", SQLTemplates.UpdateMtreeCounters,
+			base(updateCountersData), "mt.node_position = 0 OR"},
 		{"FindBlocksToMerge/simple", SQLTemplates.FindBlocksToMerge,
 			base(map[string]any{"SimplePrimaryKey": true, "Key": simpleKey}), "WHEN t1.node_position = 0"},
 		{"FindBlocksToMerge/composite", SQLTemplates.FindBlocksToMerge,
@@ -93,20 +91,25 @@ func TestFirstBlockTemplatesHaveNoLowerBound(t *testing.T) {
 // The first block has no lower bound, so CDC must not change its
 // range_start: a key below it already belongs to the first block.
 func TestUpdateMtreeCountersKeepsRangeStart(t *testing.T) {
-	for _, composite := range []bool{false, true} {
-		sql, err := RenderSQL(SQLTemplates.UpdateMtreeCounters, map[string]any{
-			"MtreeTable":        `"ace"."ace_mtree_public_t"`,
-			"IsComposite":       composite,
-			"PkeyType":          "integer",
-			"CompositeTypeName": `"ace"."public_t_key_type"`,
-		})
-		if err != nil {
-			t.Fatalf("render: %v", err)
-		}
-		if strings.Contains(sql, "range_start =") || strings.Contains(sql, "MIN(") {
-			t.Errorf("composite=%v: template still changes range_start:\n%s", composite, sql)
-		}
+	data := map[string]any{"MtreeTable": `"ace"."ace_mtree_public_t"`}
+	for k, v := range updateCountersData {
+		data[k] = v
 	}
+	sql, err := RenderSQL(SQLTemplates.UpdateMtreeCounters, data)
+	if err != nil {
+		t.Fatalf("render: %v", err)
+	}
+	if strings.Contains(sql, "range_start =") || strings.Contains(sql, "MIN(") {
+		t.Errorf("template still changes range_start:\n%s", sql)
+	}
+}
+
+// updateCountersData is the data of the UpdateMtreeCounters template for a
+// composite key of two columns and one change.
+var updateCountersData = map[string]any{
+	"KeyValue":   `ROW(k.k1, k.k2)::"ace"."public_t_key_type"`,
+	"KeyColumns": "k1, k2",
+	"Values":     "('insert', $1::integer, $2::text)",
 }
 
 // Leaves with the same range_start must keep their old order when they are

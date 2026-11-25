@@ -2271,30 +2271,96 @@ func CurrentWalInsertLSN(ctx context.Context, db DBQuerier) (string, error) {
 	return lsn, nil
 }
 
-func UpdateMtreeCounters(ctx context.Context, db DBQuerier, mtreeTable string, isComposite bool, compositeTypeName string, pkeyType string, inserts, deletes, updates []string) error {
-	sql, err := RenderSQL(SQLTemplates.UpdateMtreeCounters, struct {
-		MtreeTable        string
-		IsComposite       bool
-		CompositeTypeName string
-		PkeyType          string
-	}{
-		MtreeTable:        mtreeTable,
-		IsComposite:       isComposite,
-		CompositeTypeName: compositeTypeName,
-		PkeyType:          pkeyType,
-	})
-	if err != nil {
-		return err
-	}
+// Operations of an MtreeKeyChange.
+const (
+	MtreeOpInsert = "insert"
+	MtreeOpUpdate = "update"
+	MtreeOpDelete = "delete"
+)
 
-	args := pgx.NamedArgs{
-		"inserts": inserts,
-		"deletes": deletes,
-		"updates": updates,
-	}
+// MtreeKeyChange is a change of one row for the counters of the tree. Key
+// holds the text of each key column, the output of its type, in the order of
+// the primary key.
+type MtreeKeyChange struct {
+	Op  string
+	Key []string
+}
 
-	_, err = db.Exec(ctx, sql, args)
-	return err
+// UpdateMtreeCounters marks dirty the leaves of mtreeTable that hold the keys
+// of changes and adds the inserts and deletes to the counters of the leaves.
+// castTypes holds the cast type of each key column, in the order of the
+// primary key. keyType is the composite key type of the tree; a simple key
+// does not use it.
+//
+// The client does not read or build key values. Each key column of each
+// change is a parameter written as $n::type, which the server reads with the
+// input function of the type, and the server builds the key from the
+// columns. A cast from text must not be used: a type can have its own cast
+// from text, which takes the place of the input function.
+func UpdateMtreeCounters(ctx context.Context, db DBQuerier, mtreeTable string, keyType string, castTypes []string, changes []MtreeKeyChange) error {
+	n := len(castTypes)
+	if n == 0 {
+		return fmt.Errorf("update counters of %s: no key columns", mtreeTable)
+	}
+	names := make([]string, n)
+	refs := make([]string, n)
+	for i := range names {
+		names[i] = fmt.Sprintf("k%d", i+1)
+		refs[i] = "k." + names[i]
+	}
+	keyValue := refs[0]
+	if n > 1 {
+		if keyType == "" {
+			return fmt.Errorf("update counters of %s: no key type for a composite key", mtreeTable)
+		}
+		keyValue = "ROW(" + strings.Join(refs, ", ") + ")::" + keyType
+	}
+	keyColumns := strings.Join(names, ", ")
+
+	// Each key column of each change is a parameter, and a query can have at
+	// most 65535.
+	batchSize := max(1, min(1000, 65535/n))
+	for start := 0; start < len(changes); start += batchSize {
+		batch := changes[start:min(start+batchSize, len(changes))]
+		args := make([]any, 0, n*len(batch))
+		vals := make([]string, len(batch))
+		for j, ch := range batch {
+			switch ch.Op {
+			case MtreeOpInsert, MtreeOpUpdate, MtreeOpDelete:
+			default:
+				return fmt.Errorf("update counters of %s: unknown operation %q", mtreeTable, ch.Op)
+			}
+			if len(ch.Key) != n {
+				return fmt.Errorf("update counters of %s: a key has %d values for %d key columns", mtreeTable, len(ch.Key), n)
+			}
+			var v strings.Builder
+			fmt.Fprintf(&v, "('%s'", ch.Op)
+			for i, text := range ch.Key {
+				args = append(args, text)
+				fmt.Fprintf(&v, ", %s", TextParam(len(args), castTypes[i]))
+			}
+			v.WriteString(")")
+			vals[j] = v.String()
+		}
+		sql, err := RenderSQL(SQLTemplates.UpdateMtreeCounters, struct {
+			MtreeTable string
+			KeyValue   string
+			KeyColumns string
+			Values     string
+		}{
+			MtreeTable: mtreeTable,
+			KeyValue:   keyValue,
+			KeyColumns: keyColumns,
+			Values:     strings.Join(vals, ", "),
+		})
+		if err != nil {
+			return err
+		}
+		if _, err := db.Exec(ctx, sql, args...); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func CreateSchema(ctx context.Context, db DBQuerier, schemaName string) error {

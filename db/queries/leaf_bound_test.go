@@ -49,10 +49,8 @@ func TestLeafTemplatesExcludeRangeEnd(t *testing.T) {
 		tmpl *template.Template
 		data map[string]any
 	}{
-		{"UpdateMtreeCounters/simple", SQLTemplates.UpdateMtreeCounters,
-			data(map[string]any{"IsComposite": false})},
-		{"UpdateMtreeCounters/composite", SQLTemplates.UpdateMtreeCounters,
-			data(map[string]any{"IsComposite": true})},
+		{"UpdateMtreeCounters", SQLTemplates.UpdateMtreeCounters,
+			data(updateCountersData)},
 		{"FindBlocksToMerge/simple", SQLTemplates.FindBlocksToMerge,
 			data(map[string]any{"SimplePrimaryKey": true, "Key": simpleKey})},
 		{"FindBlocksToMerge/composite", SQLTemplates.FindBlocksToMerge,

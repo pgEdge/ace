@@ -301,13 +301,13 @@ var SQLTemplates = Templates{
 	// FirstBlockPosition. A key below its range_start belongs to it.
 	// range_end is exclusive, as in BlockHashSQL: it is the range_start of the
 	// next leaf, so a key equal to it belongs to the next leaf only.
+	//
+	// Values is a VALUES list of (op, key columns); KeyColumns names its
+	// columns, and KeyValue builds the key of the tree from them.
 	UpdateMtreeCounters: template.Must(template.New("updateMtreeCounters").Parse(`
 		WITH pkeys_to_update AS (
-			SELECT unnest(@inserts::text[]) AS pkey, 'insert' AS op
-			UNION ALL
-			SELECT unnest(@deletes::text[]) AS pkey, 'delete' AS op
-			UNION ALL
-			SELECT unnest(@updates::text[]) AS pkey, 'update' AS op
+			SELECT k.op, {{.KeyValue}} AS pkey
+			FROM (VALUES {{.Values}}) AS k(op, {{.KeyColumns}})
 		),
 		blocks_to_update AS (
 			SELECT
@@ -318,13 +318,8 @@ var SQLTemplates = Templates{
 				{{.MtreeTable}} mt
 			JOIN
 				pkeys_to_update p ON
-					{{if .IsComposite}}
-						(mt.node_position = 0 OR p.pkey::{{.CompositeTypeName}} >= mt.range_start)
-						AND (mt.range_end IS NULL OR p.pkey::{{.CompositeTypeName}} < mt.range_end)
-					{{else}}
-						(mt.node_position = 0 OR p.pkey::{{.PkeyType}} >= mt.range_start)
-						AND (mt.range_end IS NULL OR p.pkey::{{.PkeyType}} < mt.range_end)
-					{{end}}
+					(mt.node_position = 0 OR p.pkey >= mt.range_start)
+					AND (mt.range_end IS NULL OR p.pkey < mt.range_end)
 			WHERE
 				mt.node_level = 0
 			GROUP BY
