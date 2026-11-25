@@ -137,7 +137,13 @@ for hook in $HOOK_NAMES; do
     printf '%s\n' "$HOOKS_DIR/previous" > "$HOOKS_DIR/previous-hooks-path"
     echo "moved $f to $HOOKS_DIR/previous/"
 done
-cat > "$HOOKS_DIR/commit-review-dispatch" <<DISPATCH
+# The dispatcher is written beside its final name and renamed into place.
+# Every hook on the machine runs through this one file and sh reads a script
+# as it runs it, so rewriting it in place could hand a hook that is running
+# during a reinstall half of the new text.
+dispatch_tmp="$HOOKS_DIR/.commit-review-dispatch.$$"
+trap 'rm -f "$dispatch_tmp"' EXIT
+cat > "$dispatch_tmp" <<DISPATCH
 #!/bin/sh
 # Global git hook dispatcher, installed by the <name>-commit-review skills and
 # linked under every additive hook name.
@@ -191,7 +197,8 @@ if [ "\$hook" = commit-msg ]; then
 fi
 exit 0
 DISPATCH
-chmod +x "$HOOKS_DIR/commit-review-dispatch"
+chmod +x "$dispatch_tmp"
+mv -f "$dispatch_tmp" "$HOOKS_DIR/commit-review-dispatch"
 
 for hook in $HOOK_NAMES; do
     ln -sf commit-review-dispatch "$HOOKS_DIR/$hook"
@@ -207,3 +214,6 @@ if [ -n "$local_path" ]; then
 fi
 echo "skill installed: $SKILL_HOME"
 echo "hooks installed: $HOOKS_DIR (core.hooksPath set globally)"
+echo "per-commit review is opt-in and off by default; enable it with:"
+echo "    git config --global ${SKILL_NAME%-commit-review}.commitReview true"
+echo "or run it on demand with /$SKILL_NAME, or read REVIEW.md"
