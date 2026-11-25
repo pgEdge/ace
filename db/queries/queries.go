@@ -457,6 +457,12 @@ func GetSimplePrimaryKey(ctx context.Context, db DBQuerier, schema, table string
 
 // GetColumns returns the column names of a table in column order, and the
 // type of each column. A missing table returns no columns and no error.
+//
+// Generated columns are left out. Their values are computed from the other
+// columns, so they are not compared, not hashed and not written by a repair:
+// the target node computes them itself. A table whose primary key has a
+// generated column returns an error: ACE could not find its rows by the
+// key without that column.
 func GetColumns(ctx context.Context, db DBQuerier, schema, table string) ([]string, map[string]string, error) {
 	sql, err := RenderSQL(SQLTemplates.GetColumns, nil)
 	if err != nil {
@@ -473,8 +479,16 @@ func GetColumns(ctx context.Context, db DBQuerier, schema, table string) ([]stri
 	types := make(map[string]string)
 	for rows.Next() {
 		var columnName, dataType string
-		if err := rows.Scan(&columnName, &dataType); err != nil {
+		var generated, inKey bool
+		if err := rows.Scan(&columnName, &dataType, &generated, &inKey); err != nil {
 			return nil, nil, fmt.Errorf("failed to scan column: %w", err)
+		}
+		if generated && inKey {
+			return nil, nil, fmt.Errorf("the primary key of %s.%s has the generated column %s: "+
+				"ACE does not compare generated columns, so it does not support such a key", schema, table, columnName)
+		}
+		if generated {
+			continue
 		}
 		columns = append(columns, columnName)
 		types[columnName] = dataType

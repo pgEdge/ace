@@ -380,7 +380,13 @@ var SQLTemplates = Templates{
 	GetColumns: template.Must(template.New("getColumns").Parse(`
 		SELECT
 			a.attname AS column_name,
-			pg_catalog.format_type(a.atttypid, a.atttypmod) AS data_type
+			pg_catalog.format_type(a.atttypid, a.atttypmod) AS data_type,
+			a.attgenerated <> '' AS generated,
+			EXISTS (
+				SELECT 1 FROM pg_catalog.pg_constraint con
+				WHERE con.conrelid = c.oid AND con.contype = 'p'
+					AND a.attnum = ANY (con.conkey)
+			) AS in_key
 		FROM
 			pg_catalog.pg_attribute a
 			JOIN pg_catalog.pg_class c ON a.attrelid = c.oid
