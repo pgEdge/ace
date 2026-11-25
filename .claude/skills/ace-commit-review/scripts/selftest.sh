@@ -27,6 +27,8 @@ cat > "$STUB_PROMPT"
 snap="$(sed -n 's/^Repository snapshot: \([^ ]*\) .*/\1/p' "$STUB_PROMPT")"
 [ -f "$snap/a.txt" ] && cp "$snap/a.txt" "$STUB_PROMPT.a.txt"
 [ -f "$snap/big.csv" ] && cp "$snap/big.csv" "$STUB_PROMPT.big.csv"
+[ -f "$(dirname "$snap")/removed/gone.txt" ] && cp "$(dirname "$snap")/removed/gone.txt" "$STUB_PROMPT.gone.txt"
+if [ -L "$snap/out.link" ] || [ -e "$snap/out.link" ]; then touch "$STUB_PROMPT.link"; fi
 [ -n "${STUB_SLEEP:-}" ] && sleep "$STUB_SLEEP"
 case "${STUB_VERDICT:-APPROVE}" in
     TWO) printf 'VERDICT: APPROVE\n\nVERDICT: REJECT\n' ;;
@@ -64,6 +66,16 @@ sh "$SKILL_DIR/scripts/install-hook.sh" >/dev/null
 [ "$(cat "$HOME/.config/git/hooks/previous-hooks-path")" = "$HOME/../oldhooks" ] || fail "previous hooks path not recorded or not expanded"
 pass "install records the previous global hooks path with tilde expanded"
 
+# The dispatcher is renamed into place, so a reinstall gives it a new inode
+# and a hook that is running keeps the file it started with; no temporary
+# copy is left behind.
+ino="$(ls -i "$HOME/.config/git/hooks/commit-review-dispatch" | awk '{print $1}')"
+sh "$SKILL_DIR/scripts/install-hook.sh" >/dev/null
+[ "$(ls -i "$HOME/.config/git/hooks/commit-review-dispatch" | awk '{print $1}')" != "$ino" ] || fail "the dispatcher was rewritten in place"
+[ -x "$HOME/.config/git/hooks/commit-review-dispatch" ] || fail "the dispatcher is not executable after a reinstall"
+ls "$HOME/.config/git/hooks"/.commit-review-dispatch.* >/dev/null 2>&1 && fail "a temporary dispatcher was left behind"
+pass "a reinstall replaces the dispatcher by rename"
+
 # Repository named after the skill, with its own pre-commit and commit-msg.
 R="$T/$NAME"
 git init -q "$R"
@@ -80,6 +92,10 @@ out="$(STUB_VERDICT=APPROVE git commit -q -m 'Zero.' 2>&1)" || fail "first commi
 echo "$out" | grep -q OLD-GLOBAL-PRE-COMMIT || fail "previous global pre-commit did not run"
 echo "$out" | grep -q LOCAL-PRE-COMMIT || fail "local pre-commit did not run"
 pass "the previous global hooks directory is chained"
+
+# Per-commit review is opt-in; turn it on for the checks that follow.  The
+# default-off behaviour is checked at the end.
+git config --global "$NAME.commitReview" true
 
 # A hook file sitting in the hooks directory itself is moved aside and kept,
 # and a relative symlink there still resolves after the move.
@@ -135,13 +151,41 @@ grep -q '^+one$' "$STUB_PROMPT" || fail "prompt has no diff"
 grep -q 'EXTERNAL-DIFF' "$STUB_PROMPT" && fail "the committer's external diff reached the prompt"
 pass "APPROVE commits, local and kept hooks run, prompt carries message and diff, reviewer sees the index"
 git checkout -q -- a.txt
+grep -q '^# Reviewing a change' "$STUB_PROMPT" && fail "a repository without REVIEW.md got a checklist from somewhere"
+
+# REVIEW.md at the root reaches the prompt once it is committed, and the
+# committed copy is used: a staged edit to it shows only in the diff.
+printf '# Reviewing a change\n\nREVIEW-GUIDE-ONE\n' > REVIEW.md
+git add REVIEW.md
+STUB_VERDICT=APPROVE git commit -q -m 'Guide.' >/dev/null 2>&1 || fail "commit adding REVIEW.md refused"
+grep -q '^REVIEW-GUIDE-ONE$' "$STUB_PROMPT" && fail "the index copy of REVIEW.md was used before it was committed"
+printf '# Reviewing a change\n\nREVIEW-GUIDE-TWO\n' > REVIEW.md
+git add REVIEW.md
+STUB_VERDICT=APPROVE git commit -q -m 'Guide two.' >/dev/null 2>&1 || fail "commit editing REVIEW.md refused"
+grep -q '^REVIEW-GUIDE-ONE$' "$STUB_PROMPT" || fail "the committed REVIEW.md is missing from the prompt"
+grep -q '^REVIEW-GUIDE-TWO$' "$STUB_PROMPT" && fail "the staged REVIEW.md replaced the committed one"
+grep -q '^+REVIEW-GUIDE-TWO$' "$STUB_PROMPT" || fail "the staged edit to REVIEW.md is missing from the diff"
+pass "the committed REVIEW.md is appended to the prompt and a staged edit to it is only diffed"
+
+# The first commit of a repository has no HEAD, so the staged REVIEW.md is
+# the only copy and is used.
+F="$T/first/$NAME"
+git init -q "$F"
+cd "$F"
+git remote add origin "https://github.invalid/someone/$NAME.git"
+printf '# Reviewing a change\n\nREVIEW-GUIDE-FIRST\n' > REVIEW.md
+git add REVIEW.md
+STUB_VERDICT=APPROVE git commit -q -m 'Initial.' >/dev/null 2>&1 || fail "initial commit refused"
+grep -q '^REVIEW-GUIDE-FIRST$' "$STUB_PROMPT" || fail "the staged REVIEW.md was not used for the initial commit"
+pass "an initial commit uses the staged REVIEW.md"
+cd "$R"
 
 printf 'two\n' > a.txt
 git add a.txt
 if STUB_VERDICT=REJECT git commit -q -m 'Second.' >/dev/null 2>&1; then
     fail "rejected commit went through"
 fi
-[ "$(git log --oneline | wc -l | tr -d ' ')" = 2 ] || fail "rejected commit landed"
+[ "$(git log --oneline | wc -l | tr -d ' ')" = 4 ] || fail "rejected commit landed"
 ls "$R/.git/$NAME-reviews"/*.md >/dev/null 2>&1 || fail "no report written"
 pass "REJECT refuses the commit and writes a report"
 
@@ -222,6 +266,55 @@ grep -q 'not included' "$STUB_PROMPT" || fail "over-budget file was not listed"
 grep -q '^a.txt$' "$STUB_PROMPT" || fail "over-budget file name missing from the list"
 pass "a diff over the budget is listed for reading instead"
 
+# A deletion whose diff is over the budget: the snapshot cannot hold the gone
+# file, so its pre-image is written under removed/ for the reviewer to read.
+printf 'secret line one\nsecret line two\n' > gone.txt
+git add gone.txt
+STUB_VERDICT=APPROVE git commit -q -m 'Add gone.' >/dev/null 2>&1 || fail "setup commit for deletion refused"
+git rm -q gone.txt
+COMMIT_REVIEW_MAX_DIFF_BYTES=10 STUB_VERDICT=APPROVE git commit -q -m 'Remove gone.' >/dev/null 2>&1 || fail "deletion commit refused"
+grep -q '^gone.txt (deleted; removed content under removed/)$' "$STUB_PROMPT" || fail "deleted file not listed as recoverable"
+[ "$(cat "$STUB_PROMPT.gone.txt" 2>/dev/null)" = "$(printf 'secret line one\nsecret line two')" ] \
+    || fail "pre-image of the deleted file not available under removed/"
+pass "a deletion over budget leaves its pre-image under removed/"
+
+# A binary deletion: its pre-image is written too, listed as binary.
+printf 'OBJ\000\001\002GONE-BIN\000\n' > gone.bin
+git add gone.bin
+STUB_VERDICT=APPROVE git commit -q -m 'Add gone.bin.' >/dev/null 2>&1 || fail "setup commit for binary deletion refused"
+git rm -q gone.bin
+STUB_VERDICT=APPROVE git commit -q -m 'Remove gone.bin.' >/dev/null 2>&1 || fail "binary deletion commit refused"
+grep -q '^gone.bin (deleted, binary; pre-image under removed/)$' "$STUB_PROMPT" || fail "binary deletion not listed"
+grep -q 'GONE-BIN' "$STUB_PROMPT" && fail "binary pre-image bytes reached the prompt"
+pass "a binary deletion is listed with its pre-image kept under removed/"
+
+# A symbolic link in the index is not written into the snapshot, where the
+# reviewer's tools would follow it out; it is listed with its target.
+printf 'OUTSIDE-SECRET\n' > "$T/outside"
+ln -s "$T/outside" out.link
+git add out.link
+rm -f "$STUB_PROMPT.link"
+STUB_VERDICT=APPROVE git commit -q -m 'Link.' >/dev/null 2>&1 || fail "symlink commit refused"
+[ ! -e "$STUB_PROMPT.link" ] || fail "a symbolic link reached the snapshot"
+grep -Fxq "out.link -> $T/outside" "$STUB_PROMPT" || fail "the symbolic link is not listed with its target"
+grep -q 'OUTSIDE-SECRET' "$STUB_PROMPT" && fail "the link's target content reached the prompt"
+git rm -q out.link
+STUB_VERDICT=APPROVE git commit -q -m 'Unlink.' >/dev/null 2>&1 || fail "commit removing the symlink refused"
+pass "a symbolic link is left out of the snapshot and listed with its target"
+
+# A staged path that spells a grep option is matched as a name, so the
+# files after it are still diffed.
+printf 'DASH\000BIN\000\n' > ./-n
+printf 'after-dash\n' > a.txt
+git add -- ./-n a.txt
+STUB_VERDICT=APPROVE git commit -q -m 'Dash.' >/dev/null 2>&1 || fail "commit with a path named -n refused"
+grep -q '^-n (binary)$' "$STUB_PROMPT" || fail "the path named -n is not listed as binary"
+grep -q '^+after-dash$' "$STUB_PROMPT" || fail "a path named -n dropped the diffs after it"
+git rm -q -- ./-n
+STUB_VERDICT=APPROVE git commit -q -m 'Undash.' >/dev/null 2>&1 || fail "commit removing the path named -n refused"
+grep -q '^-n (deleted, binary; pre-image under removed/)$' "$STUB_PROMPT" || fail "deletion of the path named -n not listed"
+pass "a path that spells a grep option hides no later diff"
+
 # Two verdict lines refuse the commit, so does a verdict that only starts
 # with APPROVE; a timeout refuses it and is recorded.
 printf 'two\n' > a.txt
@@ -282,6 +375,19 @@ env "$SKIP_VAR=skip" git commit -q -m 'Skip.' >/dev/null 2>&1 || fail "skip did 
 grep -l SKIPPED "$R/.git/$NAME-reviews"/*.md >/dev/null || fail "skip not recorded"
 pass "$SKIP_VAR=skip bypasses and is recorded"
 
+# A refusal and the skip that follows it within the same second each keep
+# their own report.
+before="$(ls "$R/.git/$NAME-reviews"/*.md | wc -l | tr -d ' ')"
+printf 'again\n' > a.txt
+git add a.txt
+if STUB_VERDICT=REJECT git commit -q -m 'Again.' >/dev/null 2>&1; then
+    fail "rejected commit went through"
+fi
+env "$SKIP_VAR=skip" git commit -q -m 'Again.' >/dev/null 2>&1 || fail "skip after a refusal did not commit"
+after="$(ls "$R/.git/$NAME-reviews"/*.md | wc -l | tr -d ' ')"
+[ "$after" -eq $((before + 2)) ] || fail "a report was overwritten: $before before, $after after"
+pass "two attempts in quick succession write separate reports"
+
 # A repository with another name is not reviewed.
 O="$T/other"
 git init -q "$O"
@@ -293,5 +399,29 @@ git add o.txt
 git commit -q -m 'Other.' >/dev/null 2>&1 || fail "other repository commit refused"
 [ ! -e "$STUB_PROMPT" ] || fail "other repository was reviewed"
 pass "a repository with another name is not reviewed"
+
+# Opt-in default: with the review turned off, even a REJECT verdict does not
+# block the commit and the reviewer is not run.  A local setting of false
+# overrides the global true the rest of the test enabled.
+cd "$R"
+git config "$NAME.commitReview" false
+rm -f "$STUB_PROMPT"
+printf 'off\n' > a.txt
+git add a.txt
+out="$(STUB_VERDICT=REJECT git commit -q -m 'Off.' 2>&1)" || fail "commit blocked while review is off: $out"
+[ ! -e "$STUB_PROMPT" ] || fail "the reviewer ran while review is off"
+echo "$out" | grep -q 'per-commit review is off by default' || fail "no opt-in-off note printed: $out"
+# With it off, <NAME>_REVIEW=on and COMMIT_REVIEW=on each review one commit.
+printf 'on\n' > a.txt
+git add a.txt
+if env "$SKIP_VAR=on" STUB_VERDICT=REJECT git commit -q -m 'On.' >/dev/null 2>&1; then
+    fail "$SKIP_VAR=on did not run the review"
+fi
+if COMMIT_REVIEW=on STUB_VERDICT=REJECT git commit -q -m 'On.' >/dev/null 2>&1; then
+    fail "COMMIT_REVIEW=on did not run the review"
+fi
+env "$SKIP_VAR=on" STUB_VERDICT=APPROVE git commit -q -m 'On.' >/dev/null 2>&1 || fail "$SKIP_VAR=on refused an approved commit"
+git config --unset "$NAME.commitReview"
+pass "per-commit review is off by default, and $SKIP_VAR=on or COMMIT_REVIEW=on turns it on for one commit"
 
 echo "all passed"
