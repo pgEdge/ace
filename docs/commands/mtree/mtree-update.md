@@ -31,8 +31,11 @@ Manually applies changes to a table’s Merkle tree (also supports rebalancing).
 **Hash version**
 
 The metadata of every tree stores the version of the hash algorithm that
-computed its leaves. When the stored version is older than the version of
-this ACE, `mtree update` computes all leaf hashes again. When it is newer,
+computed its leaves and the basis encoding of the hashes. When the stored
+version is older than the version of this ACE, or the nodes now need another
+basis encoding (for example, a node with another database encoding joined
+the cluster), `mtree update` computes all leaf hashes again, and `mtree
+table-diff` stops with an error until the update is done. When it is newer,
 the tree was written by a newer ACE: `mtree update` and `mtree table-diff`
 stop with an error and change nothing. Use the newer ACE, or rebuild the tree
 with `mtree build`. ACE does not support a tree that holds hashes of two

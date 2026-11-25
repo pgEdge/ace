@@ -17,10 +17,9 @@ import (
 )
 
 // rowHashSize is the number of bytes of the row hash that the key query
-// returns: the first 8 bytes of the sha256 of the row. Row hashes are only
-// compared for the same key, so a changed row is missed only if its two
-// versions agree in these 64 bits, with a probability of 2^-64; a shorter
-// hash makes the key stream of every mismatched block smaller.
+// returns: the 64-bit row hash of the block hash as a big-endian bigint. Row
+// hashes are only compared for the same key, so a changed row is missed only
+// if its two versions agree in these 64 bits, with a probability of 2^-64.
 const rowHashSize = 8
 
 // RowHash is the short row hash that the key query returns for every row.

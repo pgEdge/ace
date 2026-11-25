@@ -592,7 +592,7 @@ func TestKeyDiffReadUsesIndex(t *testing.T) {
 				ScanChildren: tc.scanChildren}
 			cast1, err := queries.GetCastTypes(ctx, env.N1Pool, testSchema, table)
 			require.NoError(t, err)
-			q, err := tbl.ReadQuery(cast1, "", keys)
+			q, err := tbl.ReadQuery(cast1, "", keys, queries.HashFormBytes)
 			require.NoError(t, err)
 
 			// One key column: a parameter for each key.

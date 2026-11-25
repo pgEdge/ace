@@ -110,6 +110,11 @@ type MerkleTreeTask struct {
 	refCastTypes map[string]string
 	// refCollations are the collations of the columns on refNode.
 	refCollations map[string]string
+	// hashBasis is the basis encoding of the leaf hashes for the nodes of
+	// the cluster, and hashForms holds, by node name, the way each node
+	// computes the row hash.
+	hashBasis string
+	hashForms map[string]queries.HashForm
 
 	TaskStore     *taskstore.Store
 	TaskStorePath string
@@ -496,8 +501,8 @@ func (m *MerkleTreeTask) processWorkItem(work CompareRangesWorkItem, pool1, pool
 	// node. The leaves have no row counts, so the first node is the build
 	// side, and the memory limit is checked only while the keys are read.
 	// mtree refuses inheritance parents, so there are no children to scan.
-	s1 := keydiff.Side{Name: node1Name, Conn: pool1, CastTypes: m.nodeCastTypes(node1Name)}
-	s2 := keydiff.Side{Name: node2Name, Conn: pool2, CastTypes: m.nodeCastTypes(node2Name)}
+	s1 := keydiff.Side{Name: node1Name, Conn: pool1, CastTypes: m.nodeCastTypes(node1Name), HashForm: m.hashForms[node1Name]}
+	s2 := keydiff.Side{Name: node2Name, Conn: pool2, CastTypes: m.nodeCastTypes(node2Name), HashForm: m.hashForms[node2Name]}
 	tbl := keydiff.Table{Schema: m.Schema, Name: m.Table, Key: m.Key, Cols: m.Cols}
 	until := queries.CommitTimestampFilter(m.untilTime)
 	block := keydiff.Block{Range: work.Range, Filter: until, ReadFilter: until}
@@ -1192,6 +1197,7 @@ func (m *MerkleTreeTask) RunChecks(skipValidation bool) error {
 	var localCols, localKey []string
 	m.ColTypes = make(map[string]map[string]string)
 	m.refColTypes, m.refNode = nil, ""
+	encodings := make(map[string]string)
 
 	for _, nodeInfo := range m.ClusterNodes {
 		nodeName, _ := nodeInfo["Name"].(string)
@@ -1267,7 +1273,21 @@ func (m *MerkleTreeTask) RunChecks(skipValidation bool) error {
 		if err := m.addNodeColTypes(nodeName, colTypes, castTypes, collations, localKey); err != nil {
 			return fmt.Errorf("'%s': %w", m.QualifiedTableName, err)
 		}
+		enc, err := queries.ServerEncoding(m.Ctx, tx)
+		if err != nil {
+			return fmt.Errorf("failed to get the server encoding on node %s: %w", nodeName, err)
+		}
+		encodings[nodeName] = enc
 	}
+
+	basis, forms, warnings, err := queries.HashForms(encodings)
+	if err != nil {
+		return err
+	}
+	for _, w := range warnings {
+		logger.Warn("%s", w)
+	}
+	m.hashBasis, m.hashForms = basis, forms
 
 	m.Cols = localCols
 	m.Key = localKey
@@ -1662,13 +1682,30 @@ func (m *MerkleTreeTask) BuildMtree() (err error) {
 }
 
 // checkHashVersion reads the hash version of the stored tree on one node and
-// returns hashVersionError for it.
+// returns hashVersionError for it. Unless allowOlder is true, a tree whose
+// leaves were hashed in another basis encoding is an error too: its leaves
+// cannot be compared with the leaves of the other nodes.
 func (m *MerkleTreeTask) checkHashVersion(db queries.DBQuerier, nodeName any, allowOlder bool) error {
 	version, err := queries.GetHashVersion(m.Ctx, db, m.Schema, m.Table)
 	if err != nil {
 		return fmt.Errorf("error getting hash version on node %s: %w", nodeName, err)
 	}
-	return m.hashVersionError(version, nodeName, allowOlder)
+	if err := m.hashVersionError(version, nodeName, allowOlder); err != nil {
+		return err
+	}
+	if allowOlder || version != queries.CurrentHashVersion {
+		return nil
+	}
+	enc, err := queries.GetHashEncoding(m.Ctx, db, m.Schema, m.Table)
+	if err != nil {
+		return fmt.Errorf("error getting hash encoding on node %s: %w", nodeName, err)
+	}
+	if enc != m.hashBasis {
+		return fmt.Errorf("the Merkle tree of %s.%s on node %s was hashed in the basis encoding %q, but the nodes now need %q; "+
+			"run 'mtree update' first to recompute all its leaves",
+			m.Schema, m.Table, nodeName, enc, m.hashBasis)
+	}
+	return nil
 }
 
 // hashVersionError checks the hash version of the stored tree on a node
@@ -1889,14 +1926,19 @@ func (m *MerkleTreeTask) UpdateMtree(skipAllChecks bool) (err error) { //nolint:
 		if err := m.hashVersionError(hashVersion, nodeInfo["Name"], true /* allowOlder */); err != nil {
 			return err
 		}
+		hashEncoding, err := queries.GetHashEncoding(m.Ctx, tx, m.Schema, m.Table)
+		if err != nil {
+			return fmt.Errorf("error getting hash encoding on node %s: %w", nodeInfo["Name"], err)
+		}
 		hashVersionUpgraded := false
 		// commitNode commits the work on this node. After an upgrade it
-		// first writes the current version: every leaf was marked dirty, and
-		// a leaf stops being dirty only when its hash is computed again, so
-		// no leaf of the older algorithm is left.
+		// first writes the current version and basis encoding: every leaf
+		// was marked dirty, and a leaf stops being dirty only when its hash
+		// is computed again, so no leaf of the older algorithm or of another
+		// basis encoding is left.
 		commitNode := func() error {
 			if hashVersionUpgraded {
-				if err := queries.UpdateHashVersion(m.Ctx, tx, m.Schema, m.Table, queries.CurrentHashVersion); err != nil {
+				if err := queries.UpdateHashVersion(m.Ctx, tx, m.Schema, m.Table, queries.CurrentHashVersion, m.hashBasis); err != nil {
 					return fmt.Errorf("error updating hash version on node %s: %w", nodeInfo["Name"], err)
 				}
 			}
@@ -1905,13 +1947,18 @@ func (m *MerkleTreeTask) UpdateMtree(skipAllChecks bool) (err error) { //nolint:
 			}
 			return nil
 		}
-		if hashVersion < queries.CurrentHashVersion {
+		if hashVersion < queries.CurrentHashVersion || hashEncoding != m.hashBasis {
 			marked, err := queries.MarkAllLeavesDirty(m.Ctx, tx, mtreeTableName)
 			if err != nil {
 				return fmt.Errorf("error marking all leaves dirty for hash upgrade on node %s: %w", nodeInfo["Name"], err)
 			}
-			fmt.Printf("Hash algorithm upgraded (v%d -> v%d): marked %d blocks for recomputation on %s\n",
-				hashVersion, queries.CurrentHashVersion, marked, nodeInfo["Name"])
+			if hashVersion < queries.CurrentHashVersion {
+				fmt.Printf("Hash algorithm upgraded (v%d -> v%d): marked %d blocks for recomputation on %s\n",
+					hashVersion, queries.CurrentHashVersion, marked, nodeInfo["Name"])
+			} else {
+				fmt.Printf("Basis encoding of the hashes changed (%q -> %q): marked %d blocks for recomputation on %s\n",
+					hashEncoding, m.hashBasis, marked, nodeInfo["Name"])
+			}
 			hashVersionUpgraded = true
 		}
 
@@ -2518,13 +2565,14 @@ func (m *MerkleTreeTask) resultManifest() utils.DiffResultManifest {
 		cols = append(cols, utils.DiffResultColumn{Name: c, Type: refTypes[c]})
 	}
 	return utils.DiffResultManifest{
-		HashVersion: queries.CurrentHashVersion,
-		Schema:      m.Schema,
-		Table:       m.Table,
-		PrimaryKey:  m.Key,
-		Columns:     cols,
-		Nodes:       m.NodeList,
-		Summary:     m.DiffResult.Summary,
+		HashVersion:  queries.CurrentHashVersion,
+		HashEncoding: m.hashBasis,
+		Schema:       m.Schema,
+		Table:        m.Table,
+		PrimaryKey:   m.Key,
+		Columns:      cols,
+		Nodes:        m.NodeList,
+		Summary:      m.DiffResult.Summary,
 	}
 }
 
@@ -2855,7 +2903,7 @@ func (lh *leafHashers) work(name string, pool *pgxpool.Pool, cur *slicer.Cursor)
 		if !ok {
 			return
 		}
-		h, err := queries.ComputeLeafHashes(lh.ctx, pool, m.Schema, m.Table, m.Key, m.nodeCastTypes(name), b.Start, b.End, m.Cols)
+		h, err := queries.ComputeLeafHashes(lh.ctx, pool, m.Schema, m.Table, m.Key, m.nodeCastTypes(name), b.Start, b.End, m.Cols, m.hashForms[name])
 		if err != nil {
 			lh.fail(fmt.Errorf("failed to compute leaf hash for block %q-%q on node %s: %w", b.Start, b.End, name, err))
 			return
@@ -2985,6 +3033,10 @@ func (m *MerkleTreeTask) dropLegacyXOROperators(tx pgx.Tx, nodeName any) error {
 	return nil
 }
 
+// createMtreeObjects writes the metadata row of the tree in tx, with the
+// current hash version and the basis encoding of the run, and creates the
+// tree table and its parent nodes. A tree table and a key type of the table
+// that already exist are dropped first.
 func (m *MerkleTreeTask) createMtreeObjects(tx pgx.Tx, totalRows int64, numBlocks int) error {
 
 	// Schema and the bytea_xor function are created by MtreeInit's Phase A
@@ -3002,7 +3054,14 @@ func (m *MerkleTreeTask) createMtreeObjects(tx pgx.Tx, totalRows int64, numBlock
 		return fmt.Errorf("failed to create metadata table: %w", err)
 	}
 
-	err = queries.UpdateMetadata(m.Ctx, tx, m.Schema, m.Table, totalRows, m.BlockSize, numBlocks, !m.SimplePrimaryKey, queries.CurrentHashVersion)
+	// A metadata table made by an older ACE lacks the hash version and
+	// basis encoding columns that the metadata row needs.
+	err = queries.EnsureHashVersionColumn(m.Ctx, tx)
+	if err != nil {
+		return fmt.Errorf("failed to migrate metadata table: %w", err)
+	}
+
+	err = queries.UpdateMetadata(m.Ctx, tx, m.Schema, m.Table, totalRows, m.BlockSize, numBlocks, !m.SimplePrimaryKey, queries.CurrentHashVersion, m.hashBasis)
 	if err != nil {
 		return fmt.Errorf("failed to update metadata: %w", err)
 	}

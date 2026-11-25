@@ -17,6 +17,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"text/template"
@@ -24,6 +25,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/pgedge/ace/pkg/config"
 	"github.com/pgedge/ace/pkg/types"
 )
 
@@ -45,40 +47,149 @@ import (
 //	   The first leaf has no lower bound (see FirstBlockPosition).
 //	5: no trim_scale() on numeric columns: 1.5 and 1.50 give different
 //	   hashes, as the server prints them in a different way.
-const CurrentHashVersion = 5
+//	6: each column is hashed by the bytes of its value::text in the basis
+//	   encoding of the nodes, with its position in the order of
+//	   the column names as the seed; the row hash has 64 bits; the block
+//	   hash is the sha256 of the row count and the sum of the row hashes;
+//	   generated columns are left out. The basis encoding is stored with a
+//	   tree, and a tree with another basis is computed again.
+const CurrentHashVersion = 6
 
-// rowHashBitsCol is the column of the inner block hash query that holds the
-// row hash as bit(256).
-const rowHashBitsCol = "_rh"
+// blockHashExpr returns the aggregate that combines the row hashes of a
+// block, rowHash, into the 32-byte block hash: the sha256 of
+// the text "count,sum", where sum is the exact sum of the row hashes.
+// sum(bigint) gives a numeric, so the sum does not overflow, and it must not
+// be cast back to bigint.
+//
+// This is a multiset hash: it does not depend on the order of the rows, and
+// a row that appears twice counts twice. A XOR of the row hashes does not
+// have the second property: two equal rows cancel each other out, so two
+// nodes with different pairs of equal rows (a broken unique index on both
+// nodes, or the same row in a parent and in a child of an inheritance tree)
+// would give the same block hash.
+//
+// The aggregate state is one count and one sum, whatever the number and the
+// width of the rows, so a block of any size stays far below the 1 GB limit
+// on one value.
+//
+// An empty block hashes to 32 zero bytes. A parent node of the tree is the
+// XOR of its children, so an empty leaf does not change it.
+func blockHashExpr(rowHash string) string {
+	return `CASE WHEN count(*) = 0 THEN decode(repeat('00', 32), 'hex') ` +
+		`ELSE sha256(convert_to(count(*)::text || ',' || sum(` + rowHash + `)::text, 'UTF8')) END`
+}
 
-// BlockHashAggExpr is the aggregate that combines the row hashes of a block
-// (RowHashExpr, as bit(256) in rowHashBitsCol) into the 32-byte block hash.
-//
-// The row hash is split into four 64-bit words, read as signed big-endian
-// integers. The block hash is the sha256 of the text
-// "count,sum1,sum2,sum3,sum4", where sumN is the exact sum of word N over all
-// rows. sum(bigint) gives a numeric, so the sums do not overflow.
-//
-// This is a multiset hash: it does not depend on the order of the rows, and a
-// row that appears twice counts twice. A XOR of the row hashes does not have
-// the second property: two equal rows cancel each other out. This happens in
-// an inheritance tree, because the primary key of the parent does not stop a
-// child table from having a row with the same key. Then a block with the row
-// in the parent and in the child would hash the same as a block without the
-// row.
-//
-// The aggregate state is one count and four sums, whatever the number and the
-// width of the rows, so a block of any size stays far below the 1 GB limit on
-// one value.
-//
-// An empty block hashes to 32 zero bytes, as before. A parent node of the
-// tree is the XOR of its children, so an empty leaf does not change it.
-const BlockHashAggExpr = `CASE WHEN count(*) = 0 THEN decode(repeat('00', 32), 'hex') ` +
-	`ELSE sha256(convert_to(concat_ws(',', count(*), ` +
-	`sum(substring(` + rowHashBitsCol + ` FROM 1 FOR 64)::bigint), ` +
-	`sum(substring(` + rowHashBitsCol + ` FROM 65 FOR 64)::bigint), ` +
-	`sum(substring(` + rowHashBitsCol + ` FROM 129 FOR 64)::bigint), ` +
-	`sum(substring(` + rowHashBitsCol + ` FROM 193 FOR 64)::bigint)), 'UTF8')) END`
+// HashForm is the way a node computes the hash of a value in the row hash.
+// All forms give the same hash for the same value; they differ in cost.
+type HashForm int
+
+const (
+	// HashFormBytes hashes the bytes of value::text as the node stores
+	// them. A node uses it when its encoding is the basis encoding, or
+	// SQL_ASCII.
+	HashFormBytes HashForm = iota
+	// HashFormUTF8 converts value::text to UTF8 before it hashes the bytes.
+	// A node uses it when its encoding is not the basis encoding; the basis
+	// is then UTF8. It is slower than the bytes form.
+	HashFormUTF8
+)
+
+const (
+	encodingSQLASCII = "SQL_ASCII"
+	encodingUTF8     = "UTF8"
+)
+
+// HashBasis returns the basis encoding of the row hash for nodes with the
+// given server encodings: the encoding whose bytes of value::text the hash
+// uses. It is SQL_ASCII if all nodes are SQL_ASCII; else the encoding of the
+// nodes that are not SQL_ASCII, if they all have the same one; else UTF8.
+// The bytes of a SQL_ASCII node are taken as they are, as bytes of the
+// basis encoding.
+func HashBasis(encodings []string) string {
+	basis := ""
+	for _, e := range encodings {
+		e = strings.ToUpper(strings.TrimSpace(e))
+		if e == encodingSQLASCII {
+			continue
+		}
+		if basis != "" && basis != e {
+			return encodingUTF8
+		}
+		basis = e
+	}
+	if basis == "" {
+		return encodingSQLASCII
+	}
+	return basis
+}
+
+// HashFormFor returns the form of the row hash for a node with the server
+// encoding enc when the basis encoding is basis. It returns an error when the
+// node cannot give the bytes of the basis encoding: the basis is not UTF8
+// and the node has another encoding, which never happens when the basis
+// is computed from the encodings of the same nodes.
+func HashFormFor(enc, basis string) (HashForm, error) {
+	enc = strings.ToUpper(strings.TrimSpace(enc))
+	basis = strings.ToUpper(strings.TrimSpace(basis))
+	switch {
+	case enc == basis || enc == encodingSQLASCII:
+		return HashFormBytes, nil
+	case basis == encodingUTF8:
+		return HashFormUTF8, nil
+	default:
+		return 0, fmt.Errorf("a node with server encoding %s cannot hash values in the basis encoding %s", enc, basis)
+	}
+}
+
+// HashForms returns the basis encoding of the row hash for nodes with the
+// given server encodings, by node name, the hash form of each node, and a
+// warning for each node that has to convert its values to UTF8.
+func HashForms(encodings map[string]string) (string, map[string]HashForm, []string, error) {
+	nodes := make([]string, 0, len(encodings))
+	for n := range encodings {
+		nodes = append(nodes, n)
+	}
+	sort.Strings(nodes)
+	list := make([]string, len(nodes))
+	for i, n := range nodes {
+		list[i] = encodings[n]
+	}
+	basis := HashBasis(list)
+	forms := make(map[string]HashForm, len(nodes))
+	var warnings []string
+	for _, n := range nodes {
+		form, err := HashFormFor(encodings[n], basis)
+		if err != nil {
+			return "", nil, nil, fmt.Errorf("node %s: %w", n, err)
+		}
+		if form == HashFormUTF8 {
+			warnings = append(warnings, fmt.Sprintf("node %s: server_encoding is %s, not UTF8. "+
+				"Values are converted to UTF8 before hashing, so hashing on this node is slower.", n, encodings[n]))
+		}
+		forms[n] = form
+	}
+	return basis, forms, warnings, nil
+}
+
+// ServerEncoding returns the server encoding of the database.
+func ServerEncoding(ctx context.Context, db DBQuerier) (string, error) {
+	var enc string
+	if err := db.QueryRow(ctx, "SELECT pg_catalog.current_setting('server_encoding')").Scan(&enc); err != nil {
+		return "", fmt.Errorf("query to get the server encoding failed: %w", err)
+	}
+	return enc, nil
+}
+
+// nullMark returns the hash of a NULL in the column at position i of the row
+// hash: a constant of the position, splitmix64(i) read as a signed number.
+// The constants are a part of the hash version.
+func nullMark(i int) int64 {
+	z := uint64(i) * 0x9E3779B97F4A7C15
+	z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9
+	z = (z ^ (z >> 27)) * 0x94D049BB133111EB
+	z ^= z >> 31
+	return int64(z)
+}
 
 // FirstBlockPosition is the node_position of the first leaf block. This block
 // has no lower bound: it covers every key up to its range_end, also the keys
@@ -304,9 +415,6 @@ func CreateCompositeMtreeTable(ctx context.Context, db DBQuerier, mtreeTable, co
 
 // ColExpr returns the SQL expression that stands for one column wherever ACE
 // reads its value: in the row hash, in the key text and in the row fetch.
-// The column is taken as it is, so its text is the output of its type, and
-// two values are equal only if the server prints them in the same way: 1.5
-// and 1.50 are different values of a numeric column.
 //
 // col is the column name, not quoted. tableAlias may be empty; the column is
 // then not qualified.
@@ -318,40 +426,83 @@ func ColExpr(tableAlias, col string) string {
 	return ref
 }
 
-// RowHashExpr returns a SQL expression for the sha256 hash of one row, as a
-// 32-byte bytea. The mtree leaf hash, the table-diff block hash and the row
-// hashes of the mtree diff all use it. If they used different row encodings,
-// a leaf could differ while every row hash matches, and the diff would not
-// fetch the rows of that block.
+// TextExpr returns the text of a column as ACE compares values: value::text.
+// Two values are identical when their texts are identical, under the output
+// settings that every connection pins. For a type without a cast to text,
+// the text is the output of the type. For a type with a cast to text, it is
+// that cast, as the author of the type defined it: bpchar 'a' and 'a  ' give
+// the same text and are identical, while numeric 1.5 and 1.50 give different
+// texts and are different.
+func TextExpr(tableAlias, col string) string {
+	return ColExpr(tableAlias, col) + "::text"
+}
+
+// KeyMatchCond returns the condition that the key column col of a row is
+// identical to value, an expression of the type of the column, such as a
+// parameter $n::type. Together with an equality on the column, which lets
+// the server read the primary key index, it finds the row whose key text is
+// the text of value. The "C" collation compares the bytes.
+func KeyMatchCond(tableAlias, col, value string) string {
+	return fmt.Sprintf(`%s COLLATE "C" = (%s)::text`, TextExpr(tableAlias, col), value)
+}
+
+// RowHashExpr returns a SQL expression for the 64-bit hash of one row, as a
+// bigint. The mtree leaf hash, the table-diff block hash and the row hashes
+// of the block diff all use it. If they used different expressions, a leaf
+// could differ while every row hash matches, and the diff would not fetch
+// the rows of that block.
 //
-// The row is encoded as ROW(col1, col2, ...)::text, each column as the output
-// of its type, which is also the text that the row read keeps. This text is unambiguous: a NULL prints as
-// nothing, an empty string as "", and a value with a comma, a quote, a
-// parenthesis, a backslash or a space is quoted.
+// Each column is hashed by the bytes of its value::text, the text that
+// decides whether two values are identical, with its position i as the seed.
+// The positions follow the order of the column names, so nodes whose columns
+// have another physical order give the same hash. In the bytes form a
+// value gives hashtextextended(c::text COLLATE "C", i); in the UTF8 form it
+// gives hash_record_extended(ROW(convert_to(c::text, 'UTF8')), i). Both are
+// hash_any_extended of the same bytes when the basis encoding is UTF8: a
+// record with one field hashes to the hash of that field, and the hash of a
+// bytea, or of a text in the "C" collation, is hash_any_extended of its
+// bytes. The "C" collation also makes a column with a nondeterministic
+// collation hash its bytes. A NULL gives a constant of its position. The
+// UTF8 form tests value::text for NULL, not the value: IS NOT NULL is false
+// for a composite value with a NULL field, but such a value has a text.
 //
-// The text is converted to UTF8 before it is hashed, so nodes with different
-// database encodings give the same hash for the same row. sha256 works on
-// bytes, so the hash does not depend on the byte order of the server.
+// The hashes of the columns are combined with XOR and hashed once more with
+// hashint8extended. The XOR is its seed and the hash version its value:
+// hashint8extended folds its value to 32 bits, while it mixes all 64 bits
+// of the seed, so the row hash keeps 64 bits. The seed of a column
+// makes a swap of values between two columns, and equal values in two
+// columns, change the hash. The last hash makes the row hash depend on the
+// whole row and not on a XOR of independent parts, so a value of one column
+// swapped between two rows of a block changes the sum of their hashes.
 //
-// tableAlias may be empty; the column names are then not qualified. allCols
-// must not be empty: the whole-row value would list the columns in the
-// physical order, not in the order of allCols.
-func RowHashExpr(tableAlias string, allCols []string) (string, error) {
-	if len(allCols) == 0 {
+// tableAlias may be empty; the column names are then not qualified. cols
+// must not be empty.
+func RowHashExpr(tableAlias string, cols []string, form HashForm) (string, error) {
+	if len(cols) == 0 {
 		return "", fmt.Errorf("row hash needs at least one column")
 	}
-	exprs := make([]string, len(allCols))
-	for i, col := range allCols {
-		exprs[i] = ColExpr(tableAlias, col)
+	sorted := SortColumns(cols)
+	parts := make([]string, len(sorted))
+	for i, col := range sorted {
+		text := TextExpr(tableAlias, col)
+		var h string
+		switch form {
+		case HashFormBytes:
+			h = fmt.Sprintf(`hashtextextended(%s COLLATE "C", %d)`, text, i+1)
+		case HashFormUTF8:
+			h = fmt.Sprintf(`CASE WHEN %s IS NOT NULL THEN hash_record_extended(ROW(convert_to(%s, 'UTF8')), %d) END`,
+				text, text, i+1)
+		default:
+			return "", fmt.Errorf("unknown hash form %d", form)
+		}
+		parts[i] = fmt.Sprintf("COALESCE(%s, %d)", h, nullMark(i+1))
 	}
-	// ROW() is not a function call, so the limit of 100 arguments does not
-	// apply to it.
-	record := fmt.Sprintf("ROW(%s)::text", strings.Join(exprs, ", "))
-	return fmt.Sprintf(`sha256(convert_to(%s, 'UTF8'))`, record), nil
+	return fmt.Sprintf("hashint8extended(%d, %s)", CurrentHashVersion, strings.Join(parts, " # ")), nil
 }
 
 // BlockHashSQL returns the query that computes the hash of one block of
-// schema.table: BlockHashAggExpr over the row hashes (RowHashExpr) of allCols.
+// schema.table from the row hashes of allCols in the form of the node that
+// runs it.
 //
 // mode selects the result type. "TD_BLOCK_HASH" gives the hash as hex text
 // and the number of rows in the block for table-diff; "MTREE_LEAF_HASH"
@@ -360,7 +511,7 @@ func RowHashExpr(tableAlias string, allCols []string) (string, error) {
 //
 // where is the condition of the block on the key range and the filter; the
 // caller must make sure that it is safe.
-func BlockHashSQL(schema, table, mode, where string, allCols []string) (string, error) {
+func BlockHashSQL(schema, table, mode, where string, allCols []string, form HashForm) (string, error) {
 	if err := SanitiseIdentifier(schema); err != nil {
 		return "", err
 	}
@@ -381,17 +532,17 @@ func BlockHashSQL(schema, table, mode, where string, allCols []string) (string, 
 		return "", fmt.Errorf("invalid mode: %s", mode)
 	}
 
-	rowHash, err := RowHashExpr("_tbl_", allCols)
+	rowHash, err := RowHashExpr("_tbl_", allCols, form)
 	if err != nil {
 		return "", err
 	}
 
 	data := map[string]any{
-		"SchemaIdent": pgx.Identifier{schema}.Sanitize(),
-		"TableIdent":  pgx.Identifier{table}.Sanitize(),
-		"TableAlias":  "_tbl_",
-		"WhereClause": where,
-		"RowHashExpr": rowHash,
+		"SchemaIdent":   pgx.Identifier{schema}.Sanitize(),
+		"TableIdent":    pgx.Identifier{table}.Sanitize(),
+		"TableAlias":    "_tbl_",
+		"WhereClause":   where,
+		"BlockHashExpr": blockHashExpr(rowHash),
 	}
 	return RenderSQL(tmpl, data)
 }
@@ -455,8 +606,31 @@ func GetSimplePrimaryKey(ctx context.Context, db DBQuerier, schema, table string
 	return len(keys) == 1, nil
 }
 
-// GetColumns returns the column names of a table in column order, and the
-// type of each column. A missing table returns no columns and no error.
+// SortColumns returns a copy of cols in the order that ACE uses for the
+// columns of a table on every node: by name, in byte order of the UTF8
+// names. The position of a column in the table is not part of the data:
+// nodes may have the same columns in another order, for example after
+// pg_dump of a table that inherits columns, and logical replication
+// matches columns by name. The sort is done here and not by the server,
+// so it does not depend on the server encoding or collation.
+func SortColumns(cols []string) []string {
+	sorted := append([]string(nil), cols...)
+	sort.Strings(sorted)
+	return sorted
+}
+
+// GetColumns returns the column names of a table sorted by name, and the
+// type of each column. All nodes with the same set of columns return the
+// same list, whatever the position of the columns in the table, so the
+// lists of two nodes are compared with plain equality, and rows are read,
+// hashed, reported and written in one column order on all nodes. A
+// missing table returns no columns and no error.
+//
+// Generated columns are left out. Their values are computed from the other
+// columns, so they are not compared, not hashed and not written by a repair:
+// the target node computes them itself. A table whose primary key has a
+// generated column returns an error: ACE could not find its rows by the
+// key without that column.
 func GetColumns(ctx context.Context, db DBQuerier, schema, table string) ([]string, map[string]string, error) {
 	sql, err := RenderSQL(SQLTemplates.GetColumns, nil)
 	if err != nil {
@@ -473,8 +647,16 @@ func GetColumns(ctx context.Context, db DBQuerier, schema, table string) ([]stri
 	types := make(map[string]string)
 	for rows.Next() {
 		var columnName, dataType string
-		if err := rows.Scan(&columnName, &dataType); err != nil {
+		var generated, inKey bool
+		if err := rows.Scan(&columnName, &dataType, &generated, &inKey); err != nil {
 			return nil, nil, fmt.Errorf("failed to scan column: %w", err)
+		}
+		if generated && inKey {
+			return nil, nil, fmt.Errorf("the primary key of %s.%s has the generated column %s: "+
+				"ACE does not compare generated columns, so it does not support such a key", schema, table, columnName)
+		}
+		if generated {
+			continue
 		}
 		columns = append(columns, columnName)
 		types[columnName] = dataType
@@ -488,7 +670,7 @@ func GetColumns(ctx context.Context, db DBQuerier, schema, table string) ([]stri
 		return nil, nil, nil
 	}
 
-	return columns, types, nil
+	return SortColumns(columns), types, nil
 }
 
 func GetColumnTypes(ctx context.Context, db DBQuerier, schema, table string) (map[string]string, error) {
@@ -1595,13 +1777,16 @@ func GetPkeyType(ctx context.Context, db DBQuerier, schema, table, pkey string) 
 	return pkeyType, nil
 }
 
-func UpdateMetadata(ctx context.Context, db DBQuerier, schema, table string, totalRows int64, blockSize, numBlocks int, isComposite bool, hashVersion int) error {
+// UpdateMetadata writes the metadata row of the tree of schema.table. The
+// hash version and the basis encoding name the way its leaves are hashed;
+// a tree whose row names others is computed again.
+func UpdateMetadata(ctx context.Context, db DBQuerier, schema, table string, totalRows int64, blockSize, numBlocks int, isComposite bool, hashVersion int, hashEncoding string) error {
 	sql, err := RenderSQL(SQLTemplates.UpdateMetadata, nil)
 	if err != nil {
 		return fmt.Errorf("failed to render UpdateMetadata SQL: %w", err)
 	}
 
-	_, err = db.Exec(ctx, sql, schema, table, totalRows, blockSize, numBlocks, isComposite, hashVersion)
+	_, err = db.Exec(ctx, sql, schema, table, totalRows, blockSize, numBlocks, isComposite, hashVersion, hashEncoding)
 	if err != nil {
 		return fmt.Errorf("query to update metadata for '%s.%s' failed: %w", schema, table, err)
 	}
@@ -1863,9 +2048,23 @@ func GetBlockSizeFromMetadata(ctx context.Context, db DBQuerier, schema, table s
 	return blockSize, nil
 }
 
-// EnsureHashVersionColumn adds the hash_version column to a metadata table
-// made by an older ACE, and makes sure that the column has no default.
+// EnsureHashVersionColumn adds the hash_version and hash_encoding columns to
+// a metadata table made by an older ACE, and makes sure that hash_version
+// has no default. It runs no DDL when the table already has them: the DDL
+// takes an exclusive lock on the table shared by all trees.
 func EnsureHashVersionColumn(ctx context.Context, db DBQuerier) error {
+	check, err := RenderSQL(SQLTemplates.MetadataColumnsCurrent, nil)
+	if err != nil {
+		return fmt.Errorf("failed to render MetadataColumnsCurrent SQL: %w", err)
+	}
+	var current bool
+	if err := db.QueryRow(ctx, check, config.Get().MTree.Schema).Scan(&current); err != nil {
+		return fmt.Errorf("query to check the columns of the metadata table failed: %w", err)
+	}
+	if current {
+		return nil
+	}
+
 	sql, err := RenderSQL(SQLTemplates.EnsureHashVersionColumn, nil)
 	if err != nil {
 		return fmt.Errorf("failed to render EnsureHashVersionColumn SQL: %w", err)
@@ -1917,13 +2116,29 @@ func MarkAllLeavesDirty(ctx context.Context, db DBQuerier, mtreeTable string) (i
 	return tag.RowsAffected(), nil
 }
 
-func UpdateHashVersion(ctx context.Context, db DBQuerier, schema, table string, version int) error {
+// GetHashEncoding returns the basis encoding of the leaf hashes of the tree
+// of schema.table, or "" if the tree does not name one.
+func GetHashEncoding(ctx context.Context, db DBQuerier, schema, table string) (string, error) {
+	sql, err := RenderSQL(SQLTemplates.GetHashEncoding, nil)
+	if err != nil {
+		return "", fmt.Errorf("failed to render GetHashEncoding SQL: %w", err)
+	}
+	var enc string
+	if err := db.QueryRow(ctx, sql, schema, table).Scan(&enc); err != nil {
+		return "", fmt.Errorf("query to get hash encoding for '%s.%s' failed: %w", schema, table, err)
+	}
+	return enc, nil
+}
+
+// UpdateHashVersion sets the hash version and the basis encoding of the leaf
+// hashes of the tree of schema.table.
+func UpdateHashVersion(ctx context.Context, db DBQuerier, schema, table string, version int, encoding string) error {
 	sql, err := RenderSQL(SQLTemplates.UpdateHashVersion, nil)
 	if err != nil {
 		return fmt.Errorf("failed to render UpdateHashVersion SQL: %w", err)
 	}
 
-	_, err = db.Exec(ctx, sql, version, schema, table)
+	_, err = db.Exec(ctx, sql, version, schema, table, encoding)
 	if err != nil {
 		return fmt.Errorf("query to update hash version for '%s.%s' failed: %w", schema, table, err)
 	}

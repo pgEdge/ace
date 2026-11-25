@@ -70,6 +70,9 @@ type Side struct {
 	// CastTypes are the types of the columns on this node without their
 	// type modifiers. The row read casts the key texts to them.
 	CastTypes map[string]string
+	// HashForm is the way this node computes the row hash. It must give
+	// the same hash as the block hash of this node.
+	HashForm queries.HashForm
 	// Rows is the number of rows of the block on this node, from the block
 	// hash. It is used only if RowsKnown is true.
 	Rows      int64
@@ -427,7 +430,7 @@ func openKeySource(ctx context.Context, t Table, b Block, s Side) (*keyRows, err
 	if err != nil {
 		return nil, fmt.Errorf("the key range on node %s: %w", s.Name, err)
 	}
-	query, err := t.keyQuery(where)
+	query, err := t.keyQuery(where, s.HashForm)
 	if err != nil {
 		return nil, err
 	}
@@ -524,7 +527,7 @@ type readRow struct {
 // and the client keeps it as it is. A NULL is nil, which is not the same as
 // an empty string.
 func readRows(ctx context.Context, t Table, filter string, s Side, ids []string) ([][]readRow, error) {
-	query, err := t.ReadQuery(s.CastTypes, filter, len(ids))
+	query, err := t.ReadQuery(s.CastTypes, filter, len(ids), s.HashForm)
 	if err != nil {
 		return nil, err
 	}

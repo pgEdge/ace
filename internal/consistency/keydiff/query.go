@@ -44,30 +44,26 @@ func (t Table) qualifiedName() string {
 	return pgx.Identifier{t.Schema}.Sanitize() + "." + pgx.Identifier{t.Name}.Sanitize()
 }
 
-// rowHashExpr is the first rowHashSize bytes of the row hash of the block
-// hash.
-func (t Table) rowHashExpr() (string, error) {
-	h, err := queries.RowHashExpr("", t.Cols)
-	if err != nil {
-		return "", err
-	}
-	return fmt.Sprintf("substring(%s FROM 1 FOR %d)", h, rowHashSize), nil
+// rowHashExpr is the row hash of the block hash, in the form of the node.
+func (t Table) rowHashExpr(form queries.HashForm) (string, error) {
+	return queries.RowHashExpr("", t.Cols, form)
 }
 
 // keyQuery returns the query that lists, for every row of the block, the text
-// of each key column and the row hash. The query has no ORDER BY: the client
-// does not need any order.
-func (t Table) keyQuery(where string) (string, error) {
+// of each key column (value::text, the text by which ACE matches rows) and
+// the row hash. The query has no ORDER BY: the client does not need any
+// order.
+func (t Table) keyQuery(where string, form queries.HashForm) (string, error) {
 	if len(t.Key) == 0 {
 		return "", fmt.Errorf("table %s has no primary key", t.qualifiedName())
 	}
-	h, err := t.rowHashExpr()
+	h, err := t.rowHashExpr(form)
 	if err != nil {
 		return "", err
 	}
 	exprs := make([]string, 0, len(t.Key)+1)
 	for _, k := range t.Key {
-		exprs = append(exprs, queries.ColExpr("", k))
+		exprs = append(exprs, queries.TextExpr("", k))
 	}
 	exprs = append(exprs, h)
 	if strings.TrimSpace(where) == "" {
@@ -76,9 +72,9 @@ func (t Table) keyQuery(where string) (string, error) {
 	return fmt.Sprintf("SELECT %s FROM %s WHERE %s", strings.Join(exprs, ", "), t.qualifiedName(), where), nil
 }
 
-// keyQueryFormats asks for the key columns in the text format and for the
-// row hash in the binary format. The text format gives the output of the type
-// itself, which the row read gives back to the input function of the type.
+// keyQueryFormats asks for the key texts in the text format and for the row
+// hash in the binary format. The row read gives a key text back to the input
+// function of the type of the key column.
 func (t Table) keyQueryFormats() pgx.QueryResultFormats {
 	f := make(pgx.QueryResultFormats, len(t.Key)+1)
 	for i := range t.Key {
@@ -129,25 +125,24 @@ func (t Table) readFormats() pgx.QueryResultFormats {
 // less. With Table.ScanChildren the keys are joined with the table instead,
 // so that the planner may read a child without the index once for all keys.
 //
-// The lookup also keeps only the rows whose key prints exactly as the key
-// value: format('%s', ...) gives the output of the type, and the "C"
-// collation compares the bytes. Two keys that the server holds as equal but
-// prints in a different way, such as -0 and 0 in a float column, therefore
-// never find the same row: each key finds only the row that prints as it
-// does, and the two rows are reported as rows of one node only. The printed
-// expression must be the same as in the key query, or a key never matches
-// itself. A ::text cast must not replace format(): for bpchar, boolean and
-// inet it is not the output of the type.
+// The lookup also keeps only the rows whose key text is the text of the key
+// value: k::text = (key value)::text, compared byte by byte. Two keys that
+// the server holds as equal but with different texts, such as -0 and 0 in a
+// float column, therefore never find the same row: each key finds only its
+// own row, and the two rows are reported as rows of one node only. Two keys
+// with the same text, such as 'a' and 'a  ' in a bpchar column, are one key.
+// The text must be the same as in the key query, or a key never matches
+// itself.
 //
 // filter, if not empty, is added to the WHERE clause of the lookup as it is.
-func (t Table) ReadQuery(castTypes map[string]string, filter string, nKeys int) (string, error) {
+func (t Table) ReadQuery(castTypes map[string]string, filter string, nKeys int, form queries.HashForm) (string, error) {
 	if len(t.Key) == 0 {
 		return "", fmt.Errorf("table %s has no primary key", t.qualifiedName())
 	}
 	if nKeys < 1 || nKeys > maxReadKeys(len(t.Key)) {
 		return "", fmt.Errorf("row read of %s: %d keys, want 1 to %d", t.qualifiedName(), nKeys, maxReadKeys(len(t.Key)))
 	}
-	h, err := t.rowHashExpr()
+	h, err := t.rowHashExpr(form)
 	if err != nil {
 		return "", err
 	}
@@ -166,8 +161,7 @@ func (t Table) ReadQuery(castTypes map[string]string, filter string, nKeys int) 
 		conds = append(conds, fmt.Sprintf("%s = %s.%s%d", pgx.Identifier{k}.Sanitize(), keysAlias, keyColAlias, i+1))
 	}
 	for i, k := range t.Key {
-		conds = append(conds, fmt.Sprintf(`format('%%s', %s) COLLATE "C" = format('%%s', %s.%s%d)`,
-			queries.ColExpr("", k), keysAlias, keyColAlias, i+1))
+		conds = append(conds, queries.KeyMatchCond("", k, fmt.Sprintf("%s.%s%d", keysAlias, keyColAlias, i+1)))
 	}
 	var keys strings.Builder
 	p := 0

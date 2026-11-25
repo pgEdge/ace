@@ -18,6 +18,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/pgedge/ace/db/queries"
 	"github.com/pgedge/ace/pkg/types"
 )
 
@@ -355,11 +356,11 @@ func TestKeyQuery(t *testing.T) {
 		Key:    []string{"id", "amount"},
 		Cols:   []string{"id", "amount", "note"},
 	}
-	q, err := tbl.keyQuery(`"id" >= $1`)
+	q, err := tbl.keyQuery(`"id" >= $1`, queries.HashFormBytes)
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{`SELECT "id", "amount", substring(`, `FROM 1 FOR 8)`, `FROM "public"."t" WHERE "id" >= $1`} {
+	for _, want := range []string{`SELECT "id"::text, "amount"::text, hashint8extended(`, `FROM "public"."t" WHERE "id" >= $1`} {
 		if !strings.Contains(q, want) {
 			t.Fatalf("key query %q does not contain %q", q, want)
 		}
@@ -387,7 +388,7 @@ func TestReadQuery(t *testing.T) {
 		Cols:   []string{"id", "name", "data"},
 	}
 	castTypes := map[string]string{"id": "integer", "name": "character varying", "data": "jsonb"}
-	q, err := tbl.ReadQuery(castTypes, "", 2)
+	q, err := tbl.ReadQuery(castTypes, "", 2, queries.HashFormBytes)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -399,8 +400,8 @@ func TestReadQuery(t *testing.T) {
 		`"id" = _ace_keys._ace_k1 AND "name" = _ace_keys._ace_k2 AND`,
 		"OFFSET 0",
 		`AS node_origin, "id", "name", "data" FROM`,
-		`format('%s', "id") COLLATE "C" = format('%s', _ace_keys._ace_k1) AND ` +
-			`format('%s', "name") COLLATE "C" = format('%s', _ace_keys._ace_k2)`,
+		`"id"::text COLLATE "C" = (_ace_keys._ace_k1)::text AND ` +
+			`"name"::text COLLATE "C" = (_ace_keys._ace_k2)::text`,
 		"AS _ace_row_hash",
 		`FROM "public"."t" AS _ace_t WHERE`,
 	} {
@@ -416,7 +417,7 @@ func TestReadQuery(t *testing.T) {
 		t.Fatalf("read query %q must not cast a key from text", q)
 	}
 
-	q, err = tbl.ReadQuery(castTypes, `"id" > 0`, 1)
+	q, err = tbl.ReadQuery(castTypes, `"id" > 0`, 1, queries.HashFormBytes)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -425,7 +426,7 @@ func TestReadQuery(t *testing.T) {
 	}
 
 	tbl.ScanChildren = true
-	q, err = tbl.ReadQuery(castTypes, "", 1)
+	q, err = tbl.ReadQuery(castTypes, "", 1, queries.HashFormBytes)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -435,11 +436,11 @@ func TestReadQuery(t *testing.T) {
 	}
 	tbl.ScanChildren = false
 
-	if _, err := tbl.ReadQuery(map[string]string{"id": "integer"}, "", 1); err == nil {
+	if _, err := tbl.ReadQuery(map[string]string{"id": "integer"}, "", 1, queries.HashFormBytes); err == nil {
 		t.Fatal("a key column without a cast type must give an error")
 	}
 	for _, n := range []int{0, maxReadKeys(2) + 1} {
-		if _, err := tbl.ReadQuery(castTypes, "", n); err == nil {
+		if _, err := tbl.ReadQuery(castTypes, "", n, queries.HashFormBytes); err == nil {
 			t.Fatalf("a row read of %d keys must give an error", n)
 		}
 	}

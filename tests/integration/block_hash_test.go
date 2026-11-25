@@ -14,7 +14,6 @@ package integration
 import (
 	"context"
 	"crypto/sha256"
-	"encoding/binary"
 	"encoding/hex"
 	"fmt"
 	"math/big"
@@ -41,10 +40,11 @@ func blockHashes(t *testing.T, ctx context.Context, conn *pgxpool.Conn, name, co
 	}
 
 	allCols := append([]string{"id"}, cols...)
-	leaf, err := queries.ComputeLeafHashes(ctx, conn, "pg_temp", name, []string{"id"}, map[string]string{"id": "integer"}, nil, nil, allCols)
+	form := hashFormOf(t, ctx, conn)
+	leaf, err := queries.ComputeLeafHashes(ctx, conn, "pg_temp", name, []string{"id"}, map[string]string{"id": "integer"}, nil, nil, allCols, form)
 	require.NoError(t, err)
 
-	tdSQL, err := queries.BlockHashSQL("pg_temp", name, "TD_BLOCK_HASH", "TRUE", allCols)
+	tdSQL, err := queries.BlockHashSQL("pg_temp", name, "TD_BLOCK_HASH", "TRUE", allCols, form)
 	require.NoError(t, err)
 	var (
 		td   string
@@ -53,8 +53,19 @@ func blockHashes(t *testing.T, ctx context.Context, conn *pgxpool.Conn, name, co
 	require.NoError(t, conn.QueryRow(ctx, tdSQL).Scan(&td, &rows)) // nosemgrep
 	requireRowCount(t, ctx, conn, name, rows)
 
-	checkBlockHash(t, ctx, conn, name, allCols, leaf, td)
+	checkBlockHash(t, ctx, conn, name, allCols, form, leaf, td)
 	return leaf, td
+}
+
+// hashFormOf returns the hash form of the database of conn when the basis
+// encoding is UTF8, as for a cluster with nodes in different encodings.
+func hashFormOf(t *testing.T, ctx context.Context, conn *pgxpool.Conn) queries.HashForm {
+	t.Helper()
+	enc, err := queries.ServerEncoding(ctx, conn)
+	require.NoError(t, err)
+	form, err := queries.HashFormFor(enc, "UTF8")
+	require.NoError(t, err)
+	return form
 }
 
 // requireRowCount checks that the row count of the table-diff block hash
@@ -68,7 +79,7 @@ func requireRowCount(t *testing.T, ctx context.Context, conn *pgxpool.Conn, name
 
 // checkBlockHash checks the mtree leaf hash and the table-diff block hash of
 // the whole table name against each other and against the row hashes.
-func checkBlockHash(t *testing.T, ctx context.Context, conn *pgxpool.Conn, name string, allCols []string, leaf []byte, td string) {
+func checkBlockHash(t *testing.T, ctx context.Context, conn *pgxpool.Conn, name string, allCols []string, form queries.HashForm, leaf []byte, td string) {
 	t.Helper()
 
 	// The mtree leaf and the table-diff block must be the same hash.
@@ -77,15 +88,14 @@ func checkBlockHash(t *testing.T, ctx context.Context, conn *pgxpool.Conn, name 
 
 	// The leaf must be built from the row hashes that the mtree diff reads.
 	// Otherwise a leaf can differ while every row hash matches.
-	rowExpr, err := queries.RowHashExpr("", allCols)
+	rowExpr, err := queries.RowHashExpr("", allCols, form)
 	require.NoError(t, err)
 	rows, err := conn.Query(ctx, fmt.Sprintf("SELECT %s FROM pg_temp.%s", rowExpr, name)) // nosemgrep
 	require.NoError(t, err)
-	var hashes [][]byte
+	var hashes []int64
 	for rows.Next() {
-		var h []byte
+		var h int64
 		require.NoError(t, rows.Scan(&h))
-		require.Len(t, h, sha256.Size)
 		hashes = append(hashes, h)
 	}
 	rows.Close()
@@ -93,27 +103,19 @@ func checkBlockHash(t *testing.T, ctx context.Context, conn *pgxpool.Conn, name 
 	require.Equal(t, multisetHash(hashes), leaf, "leaf hash of %s does not match its row hashes", name)
 }
 
-// multisetHash is queries.BlockHashAggExpr written in Go: the sha256 of
-// "count,sum1,sum2,sum3,sum4", where sumN is the sum of the N-th 64-bit word
-// of every row hash, read as a signed big-endian integer. An empty block
-// hashes to 32 zero bytes.
-func multisetHash(rowHashes [][]byte) []byte {
+// multisetHash is the block hash written in Go: the sha256 of "count,sum",
+// where sum is the exact sum of the signed 64-bit row hashes. An empty
+// block hashes to 32 zero bytes.
+func multisetHash(rowHashes []int64) []byte {
 	if len(rowHashes) == 0 {
 		return make([]byte, sha256.Size)
 	}
-	var sums [4]big.Int
+	var sum big.Int
 	for _, h := range rowHashes {
-		for i := range sums {
-			w := int64(binary.BigEndian.Uint64(h[8*i : 8*i+8]))
-			sums[i].Add(&sums[i], big.NewInt(w))
-		}
+		sum.Add(&sum, big.NewInt(h))
 	}
-	parts := []string{fmt.Sprint(len(rowHashes))}
-	for i := range sums {
-		parts = append(parts, sums[i].String())
-	}
-	sum := sha256.Sum256([]byte(strings.Join(parts, ",")))
-	return sum[:]
+	out := sha256.Sum256([]byte(fmt.Sprintf("%d,%s", len(rowHashes), sum.String())))
+	return out[:]
 }
 
 // inheritedBlockHashes loads rows into a new temporary parent table and its
@@ -138,9 +140,10 @@ func inheritedBlockHashes(t *testing.T, ctx context.Context, conn *pgxpool.Conn,
 	}
 
 	allCols := []string{"id", "a", "b"}
-	leaf, err := queries.ComputeLeafHashes(ctx, conn, "pg_temp", name, []string{"id"}, map[string]string{"id": "integer"}, nil, nil, allCols)
+	form := hashFormOf(t, ctx, conn)
+	leaf, err := queries.ComputeLeafHashes(ctx, conn, "pg_temp", name, []string{"id"}, map[string]string{"id": "integer"}, nil, nil, allCols, form)
 	require.NoError(t, err)
-	tdSQL, err := queries.BlockHashSQL("pg_temp", name, "TD_BLOCK_HASH", "TRUE", allCols)
+	tdSQL, err := queries.BlockHashSQL("pg_temp", name, "TD_BLOCK_HASH", "TRUE", allCols, form)
 	require.NoError(t, err)
 	var (
 		td   string
@@ -149,7 +152,7 @@ func inheritedBlockHashes(t *testing.T, ctx context.Context, conn *pgxpool.Conn,
 	require.NoError(t, conn.QueryRow(ctx, tdSQL).Scan(&td, &rows)) // nosemgrep
 	requireRowCount(t, ctx, conn, name, rows)
 
-	checkBlockHash(t, ctx, conn, name, allCols, leaf, td)
+	checkBlockHash(t, ctx, conn, name, allCols, form, leaf, td)
 	return leaf
 }
 
@@ -183,6 +186,13 @@ func TestBlockHashEncoding(t *testing.T) {
 		// still differ, because the primary key is part of each row hash.
 		{"rows_swap_values", `(1, 'a', 'x'), (2, 'b', 'y')`, `(1, 'b', 'y'), (2, 'a', 'x')`},
 		{"extra_row", `(1, 'a', 'x')`, `(1, 'a', 'x'), (2, 'a', 'x')`},
+		// The seed of a column makes these differ: with a plain XOR of the
+		// column hashes they would give the same row hash.
+		{"values_swap_columns", `(1, 'a', 'b')`, `(1, 'b', 'a')`},
+		{"equal_values_in_two_columns", `(1, 'a', 'a')`, `(1, 'c', 'c')`},
+		// The last hash of a row makes this differ: the value of one
+		// column moves between two rows.
+		{"one_column_swaps_rows", `(1, 'a', 'x'), (2, 'b', 'y')`, `(1, 'b', 'x'), (2, 'a', 'y')`},
 	}
 	for i, tc := range mustDiffer {
 		t.Run("differ/"+tc.name, func(t *testing.T) {
@@ -206,6 +216,21 @@ func TestBlockHashEncoding(t *testing.T) {
 		left, _ := blockHashes(t, ctx, conn, "bh_num_l", "amt numeric", []string{"amt"}, `(1, 1.50), (2, 7.000)`)
 		right, _ := blockHashes(t, ctx, conn, "bh_num_r", "amt numeric", []string{"amt"}, `(1, 1.5), (2, 7)`)
 		require.NotEqual(t, left, right)
+	})
+
+	t.Run("differ/float_negative_zero", func(t *testing.T) {
+		// -0 = 0 for the type, but their texts differ.
+		left, _ := blockHashes(t, ctx, conn, "bh_fz_l", "f float8", []string{"f"}, `(1, '-0')`)
+		right, _ := blockHashes(t, ctx, conn, "bh_fz_r", "f float8", []string{"f"}, `(1, '0')`)
+		require.NotEqual(t, left, right)
+	})
+
+	t.Run("equal/bpchar_trailing_spaces", func(t *testing.T) {
+		// The cast of bpchar to text removes trailing spaces, so 'a' and
+		// 'a  ' are identical values.
+		left, _ := blockHashes(t, ctx, conn, "bh_bp_l", "c bpchar", []string{"c"}, `(1, 'a  ')`)
+		right, _ := blockHashes(t, ctx, conn, "bh_bp_r", "c bpchar", []string{"c"}, `(1, 'a')`)
+		require.Equal(t, left, right)
 	})
 
 	t.Run("numeric_array", func(t *testing.T) {
@@ -235,29 +260,27 @@ func TestBlockHashEncoding(t *testing.T) {
 	})
 
 	t.Run("single_row_pins_the_formula", func(t *testing.T) {
-		// The row hash is the sha256 of the UTF8 text of ROW(...). The block
-		// hash of one row is the sha256 of the count and of the four 64-bit
-		// words of the row hash. This pins the whole formula, including the
-		// way the bit(256) value is cut into signed words, independently of
-		// multisetHash.
+		// The row hash is computed by hash functions of the server. Its
+		// value for one row is pinned here, so that a server version that
+		// hashes in another way fails this test instead of giving false
+		// differences between nodes. The block hash of one row is the
+		// sha256 of "1,<row hash>".
 		leaf, _ := blockHashes(t, ctx, conn, "bh_one", textDefs, textCols, `(1, 'café', NULL)`)
-		row := sha256.Sum256([]byte("(1,café,)"))
-		parts := []string{"1"}
-		for i := 0; i < 4; i++ {
-			parts = append(parts, fmt.Sprint(int64(binary.BigEndian.Uint64(row[8*i:8*i+8]))))
-		}
-		want := sha256.Sum256([]byte(strings.Join(parts, ",")))
+		const rowHash = int64(6857920088145939538)
+		want := sha256.Sum256([]byte(fmt.Sprintf("1,%d", rowHash)))
 		require.Equal(t, want[:], leaf)
 	})
 
-	t.Run("words_are_signed", func(t *testing.T) {
-		// Cast to bigint, a bit(64) with the top bit set is negative. Find
-		// rows whose row hashes start with a set and with a clear top bit,
-		// and check them against multisetHash, which reads signed words.
+	t.Run("negative_and_positive_row_hashes", func(t *testing.T) {
+		// The sum of the row hashes is exact: rows with negative and with
+		// positive row hashes are checked against multisetHash.
+		rowExpr, err := queries.RowHashExpr("", []string{"id", "a", "b"}, queries.HashFormBytes)
+		require.NoError(t, err)
 		var neg, pos int
-		require.NoError(t, conn.QueryRow(ctx, `
-			SELECT min(i) FILTER (WHERE get_byte(h, 0) >= 128), min(i) FILTER (WHERE get_byte(h, 0) < 128)
-			FROM (SELECT i, sha256(convert_to(ROW(i, 'a', 'b')::text, 'UTF8')) AS h FROM generate_series(1, 64) AS i) s`).Scan(&neg, &pos))
+		require.NoError(t, conn.QueryRow(ctx, fmt.Sprintf(`
+			SELECT min(id) FILTER (WHERE h < 0), min(id) FILTER (WHERE h >= 0)
+			FROM (SELECT id, %s AS h FROM (SELECT i AS id, 'a'::text AS a, 'b'::text AS b
+			      FROM generate_series(1, 64) AS i) r) s`, rowExpr)).Scan(&neg, &pos)) // nosemgrep
 		blockHashes(t, ctx, conn, "bh_sign", textDefs, textCols, fmt.Sprintf(`(%d, 'a', 'b'), (%d, 'a', 'b')`, neg, pos))
 	})
 
@@ -302,46 +325,54 @@ func TestBlockHashEncoding(t *testing.T) {
 		require.Equal(t, left, right)
 	})
 
-	t.Run("equal/database_encoding", func(t *testing.T) {
-		// Logical replication allows nodes with different database
-		// encodings. The same rows must give the same hash in a LATIN1 and in
-		// a UTF8 database: the row text is converted to UTF8 before it is
-		// hashed. The client sends UTF8; the LATIN1 server converts it.
-		const dbName = "ace_block_hash_latin1"
-		_, err := conn.Exec(ctx, "CREATE DATABASE "+dbName+" ENCODING 'LATIN1' LC_COLLATE 'C' LC_CTYPE 'C' TEMPLATE template0") // nosemgrep
-		if err != nil {
-			t.Skipf("cannot create a LATIN1 database: %v", err)
-		}
-		t.Cleanup(func() {
-			execOK(t, context.Background(), pgCluster.Node1Pool, "DROP DATABASE IF EXISTS "+dbName+" WITH (FORCE)") // nosemgrep
+	// Logical replication allows nodes with different database encodings.
+	// The same rows must give the same hash in a UTF8 database (the fast
+	// form) and in a database of another encoding (the form that converts
+	// each value to UTF8). A SQL_ASCII database hashes its bytes as they are,
+	// which are UTF8 bytes here.
+	for _, tc := range []struct {
+		encoding string
+		rows     string
+	}{
+		// Every character exists in LATIN1 and takes two bytes in UTF8.
+		{"LATIN1", `(1, 'café', 'Größe'), (2, 'Ångström', NULL), (3, '', 'ÿ,"ü"')`},
+		// A multibyte encoding other than UTF8.
+		{"EUC_JP", `(1, '日本語', 'カタカナ'), (2, 'ｶﾀｶﾅ', NULL), (3, '', '漢字,"かな"')`},
+		{"SQL_ASCII", `(1, 'café', '日本語'), (2, 'Ångström', NULL), (3, '', 'ÿ,"ü"')`},
+	} {
+		t.Run("equal/database_encoding_"+tc.encoding, func(t *testing.T) {
+			other := encodingConn(t, ctx, conn, tc.encoding)
+			utf8Hash, _ := blockHashes(t, ctx, conn, "bh_enc", textDefs, textCols, tc.rows)
+			otherHash, _ := blockHashes(t, ctx, other, "bh_enc", textDefs, textCols, tc.rows)
+			require.Equal(t, utf8Hash, otherHash, "the block hash must not depend on the database encoding")
 		})
+	}
 
-		cfg := pgCluster.Node1Pool.Config().Copy()
-		cfg.ConnConfig.Database = dbName
-		// pgx sends UTF8 but does not set client_encoding. Without it the
-		// server takes the bytes as LATIN1 and stores other characters.
-		if cfg.ConnConfig.RuntimeParams == nil {
-			cfg.ConnConfig.RuntimeParams = map[string]string{}
+	t.Run("composite_with_null_field", func(t *testing.T) {
+		// IS NOT NULL is false for a composite value with a NULL field, but
+		// the value is not a NULL. The form that converts to UTF8 must hash
+		// its text, as the bytes form does: (1,) and (2,) differ, and (,)
+		// differs from a NULL.
+		other := encodingConn(t, ctx, conn, "LATIN1")
+		for _, c := range []*pgxpool.Conn{conn, other} {
+			execOK(t, ctx, c, "CREATE TYPE pg_temp.bh_pair AS (x int, y int)")
+			t.Cleanup(func() { execOK(t, context.Background(), c, "DROP TYPE IF EXISTS pg_temp.bh_pair") })
 		}
-		cfg.ConnConfig.RuntimeParams["client_encoding"] = "UTF8"
-		latinPool, err := pgxpool.NewWithConfig(ctx, cfg)
-		require.NoError(t, err)
-		t.Cleanup(latinPool.Close)
-		latinConn, err := latinPool.Acquire(ctx)
-		require.NoError(t, err)
-		// Cleanups run in reverse order: blockHashes drops its tables
-		// through this connection before it is released.
-		t.Cleanup(latinConn.Release)
-
-		var enc string
-		require.NoError(t, latinConn.QueryRow(ctx, "SHOW server_encoding").Scan(&enc))
-		require.Equal(t, "LATIN1", enc)
-
-		// Every character here exists in LATIN1 and takes two bytes in UTF8.
-		rows := `(1, 'café', 'Größe'), (2, 'Ångström', NULL), (3, '', 'ÿ,"ü"')`
-		utf8Hash, _ := blockHashes(t, ctx, conn, "bh_enc", textDefs, textCols, rows)
-		latinHash, _ := blockHashes(t, ctx, latinConn, "bh_enc", textDefs, textCols, rows)
+		defs := "a pg_temp.bh_pair, b text"
+		cols := []string{"a", "b"}
+		rows := `(1, '(1,)', 'x'), (2, '(,)', 'y')`
+		utf8Hash, _ := blockHashes(t, ctx, conn, "bh_cmp_l", defs, cols, rows)
+		latinHash, _ := blockHashes(t, ctx, other, "bh_cmp_l", defs, cols, rows)
 		require.Equal(t, utf8Hash, latinHash, "the block hash must not depend on the database encoding")
+		changed, _ := blockHashes(t, ctx, other, "bh_cmp_r", defs, cols, `(1, '(2,)', 'x'), (2, NULL, 'y')`)
+		require.NotEqual(t, latinHash, changed, "composite values with a NULL field must be hashed by their text")
+	})
+
+	t.Run("sql_ascii_bytes_not_utf8", func(t *testing.T) {
+		// A SQL_ASCII database can hold bytes that are not valid UTF8. Its
+		// hash does not convert them, so it does not fail.
+		other := encodingConn(t, ctx, conn, "SQL_ASCII")
+		blockHashes(t, ctx, other, "bh_raw", textDefs, textCols, `(1, convert_from('\xc4'::bytea, 'SQL_ASCII'), 'x')`)
 	})
 
 	t.Run("wide_table", func(t *testing.T) {
@@ -362,4 +393,41 @@ func TestBlockHashEncoding(t *testing.T) {
 		right, _ := blockHashes(t, ctx, conn, "bh_wide_r", strings.Join(defs, ", "), cols, changed)
 		require.NotEqual(t, left, right, "a change in the last column must change the hash")
 	})
+}
+
+// encodingConn creates a database with the server encoding enc on the
+// server of conn and returns a connection to it. The client sends UTF8.
+func encodingConn(t *testing.T, ctx context.Context, conn *pgxpool.Conn, enc string) *pgxpool.Conn {
+	t.Helper()
+	dbName := "ace_block_hash_" + strings.ToLower(enc)
+	_, err := conn.Exec(ctx, "CREATE DATABASE "+dbName+" ENCODING '"+enc+"' LC_COLLATE 'C' LC_CTYPE 'C' TEMPLATE template0") // nosemgrep
+	if err != nil {
+		t.Skipf("cannot create a %s database: %v", enc, err)
+	}
+	t.Cleanup(func() {
+		execOK(t, context.Background(), pgCluster.Node1Pool, "DROP DATABASE IF EXISTS "+dbName+" WITH (FORCE)") // nosemgrep
+	})
+
+	cfg := pgCluster.Node1Pool.Config().Copy()
+	cfg.ConnConfig.Database = dbName
+	// pgx sends UTF8 but does not set client_encoding. Without it the
+	// server takes the bytes in its own encoding and stores other
+	// characters.
+	if cfg.ConnConfig.RuntimeParams == nil {
+		cfg.ConnConfig.RuntimeParams = map[string]string{}
+	}
+	cfg.ConnConfig.RuntimeParams["client_encoding"] = "UTF8"
+	pool, err := pgxpool.NewWithConfig(ctx, cfg)
+	require.NoError(t, err)
+	t.Cleanup(pool.Close)
+	other, err := pool.Acquire(ctx)
+	require.NoError(t, err)
+	// Cleanups run in reverse order: blockHashes drops its tables through
+	// this connection before it is released.
+	t.Cleanup(other.Release)
+
+	got, err := queries.ServerEncoding(ctx, other)
+	require.NoError(t, err)
+	require.Equal(t, enc, got)
+	return other
 }

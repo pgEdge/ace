@@ -131,8 +131,10 @@ type Templates struct {
 	GetReplicationOriginNames        *template.Template
 	GetNativeNodeOriginNames         *template.Template
 	EnsureHashVersionColumn          *template.Template
+	MetadataColumnsCurrent           *template.Template
 	DropHashVersionDefault           *template.Template
 	GetHashVersion                   *template.Template
+	GetHashEncoding                  *template.Template
 	MarkAllLeavesDirty               *template.Template
 	UpdateHashVersion                *template.Template
 	GetReplicationOriginByName       *template.Template
@@ -149,7 +151,8 @@ type Templates struct {
 var SQLTemplates = Templates{
 	// hash_version has no default: UpdateMetadata always sets it to the
 	// version that hashed the leaves. A default would record a wrong version
-	// for a row inserted without it.
+	// for a row inserted without it. hash_encoding is the basis encoding of
+	// the leaf hashes.
 	CreateMetadataTable: template.Must(template.New("createMetadataTable").Funcs(aceTemplateFuncs).Parse(`
 		CREATE TABLE IF NOT EXISTS {{aceSchema}}.ace_mtree_metadata (
 			schema_name text,
@@ -159,6 +162,7 @@ var SQLTemplates = Templates{
 			num_blocks int,
 			is_composite boolean NOT NULL DEFAULT false,
 			hash_version int NOT NULL,
+			hash_encoding text,
 			last_updated timestamptz,
 			PRIMARY KEY (schema_name, table_name)
 		)`),
@@ -380,7 +384,13 @@ var SQLTemplates = Templates{
 	GetColumns: template.Must(template.New("getColumns").Parse(`
 		SELECT
 			a.attname AS column_name,
-			pg_catalog.format_type(a.atttypid, a.atttypmod) AS data_type
+			pg_catalog.format_type(a.atttypid, a.atttypmod) AS data_type,
+			a.attgenerated <> '' AS generated,
+			EXISTS (
+				SELECT 1 FROM pg_catalog.pg_constraint con
+				WHERE con.conrelid = c.oid AND con.contype = 'p'
+					AND a.attnum = ANY (con.conkey)
+			) AS in_key
 		FROM
 			pg_catalog.pg_attribute a
 			JOIN pg_catalog.pg_class c ON a.attrelid = c.oid
@@ -391,9 +401,7 @@ var SQLTemplates = Templates{
 			AND n.nspname = $1
 			AND c.relkind IN ('r', 'p', 'f', 'v')
 			AND a.attnum > 0
-			AND NOT a.attisdropped
-		ORDER BY
-			a.attnum;
+			AND NOT a.attisdropped;
 	`)),
 	// GetCastTypes follows a domain down to its base type, through any
 	// number of domains, and prints the last type with the modifier -1. A
@@ -1290,6 +1298,7 @@ var SQLTemplates = Templates{
 				num_blocks,
 				is_composite,
 				hash_version,
+				hash_encoding,
 				last_updated
 			)
 		VALUES
@@ -1301,6 +1310,7 @@ var SQLTemplates = Templates{
 				$5,
 				$6,
 				$7,
+				$8,
 				current_timestamp
 			)
 		ON CONFLICT (schema_name, table_name) DO
@@ -1311,33 +1321,23 @@ var SQLTemplates = Templates{
 			num_blocks = EXCLUDED.num_blocks,
 			is_composite = EXCLUDED.is_composite,
 			hash_version = EXCLUDED.hash_version,
+			hash_encoding = EXCLUDED.hash_encoding,
 			last_updated = EXCLUDED.last_updated
 	`)),
 	DeleteMetadata: template.Must(template.New("deleteMetadata").Funcs(aceTemplateFuncs).Parse(`
 		DELETE FROM {{aceSchema}}.ace_mtree_metadata WHERE schema_name = $1 AND table_name = $2
 	`)),
-	// The block hash is a multiset hash of the row hashes; see
-	// BlockHashAggExpr. The inner query computes each row hash once, as
-	// bit(256). OFFSET 0 keeps the planner from pulling the subquery up: the
-	// aggregate reads the value four times, and without OFFSET 0 the row hash
-	// would be computed four times.
+	// The block hash is a multiset hash of the row hashes. The aggregate
+	// reads the row hash once for each row.
 	TDBlockHashSQL: template.Must(template.New("tdBlockHashSQL").Parse(`
-        SELECT encode(` + BlockHashAggExpr + `, 'hex'), count(*)
-        FROM (
-            SELECT ('x' || encode({{.RowHashExpr}}, 'hex'))::bit(256) AS ` + rowHashBitsCol + `
-            FROM {{.SchemaIdent}}.{{.TableIdent}} AS {{.TableAlias}}
-            WHERE {{.WhereClause}}
-            OFFSET 0
-        ) AS _rh_
+        SELECT encode({{.BlockHashExpr}}, 'hex'), count(*)
+        FROM {{.SchemaIdent}}.{{.TableIdent}} AS {{.TableAlias}}
+        WHERE {{.WhereClause}}
     `)),
 	MtreeLeafHashSQL: template.Must(template.New("mtreeLeafHashSQL").Parse(`
-        SELECT ` + BlockHashAggExpr + `
-        FROM (
-            SELECT ('x' || encode({{.RowHashExpr}}, 'hex'))::bit(256) AS ` + rowHashBitsCol + `
-            FROM {{.SchemaIdent}}.{{.TableIdent}} AS {{.TableAlias}}
-            WHERE {{.WhereClause}}
-            OFFSET 0
-        ) AS _rh_
+        SELECT {{.BlockHashExpr}}
+        FROM {{.SchemaIdent}}.{{.TableIdent}} AS {{.TableAlias}}
+        WHERE {{.WhereClause}}
     `)),
 	UpdateLeafHashes: template.Must(template.New("updateLeafHashes").Parse(`
 		UPDATE
@@ -1783,9 +1783,28 @@ var SQLTemplates = Templates{
 		LIMIT 1
 	`)),
 	// Rows that exist before the column is added were hashed by version 1.
+	// A row without hash_encoding does not name the basis encoding of its
+	// leaves, so its tree is computed again.
 	EnsureHashVersionColumn: template.Must(template.New("ensureHashVersionColumn").Funcs(aceTemplateFuncs).Parse(`
 		ALTER TABLE {{aceSchema}}.ace_mtree_metadata
-		ADD COLUMN IF NOT EXISTS hash_version int NOT NULL DEFAULT 1
+		ADD COLUMN IF NOT EXISTS hash_version int NOT NULL DEFAULT 1,
+		ADD COLUMN IF NOT EXISTS hash_encoding text
+	`)),
+	// True when the metadata table has the columns of the current ACE and
+	// hash_version has no default, so no DDL on the table is needed. $1 is
+	// the schema of the table.
+	MetadataColumnsCurrent: template.Must(template.New("metadataColumnsCurrent").Parse(`
+		SELECT count(*) = 2
+		FROM
+			pg_catalog.pg_attribute a
+			JOIN pg_catalog.pg_class c ON c.oid = a.attrelid
+			JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+		WHERE
+			n.nspname = $1
+			AND c.relname = 'ace_mtree_metadata'
+			AND NOT a.attisdropped
+			AND ((a.attname = 'hash_version' AND NOT a.atthasdef)
+				OR a.attname = 'hash_encoding')
 	`)),
 	// Run after EnsureHashVersionColumn, as a separate statement: one ALTER
 	// TABLE cannot change a column that it adds. It drops the default of 1
@@ -1802,6 +1821,13 @@ var SQLTemplates = Templates{
 			1
 		)
 	`)),
+	GetHashEncoding: template.Must(template.New("getHashEncoding").Funcs(aceTemplateFuncs).Parse(`
+		SELECT COALESCE(
+			(SELECT hash_encoding FROM {{aceSchema}}.ace_mtree_metadata
+			 WHERE schema_name = $1 AND table_name = $2),
+			''
+		)
+	`)),
 	MarkAllLeavesDirty: template.Must(template.New("markAllLeavesDirty").Parse(`
 		UPDATE {{.MtreeTable}}
 		SET dirty = true
@@ -1809,7 +1835,7 @@ var SQLTemplates = Templates{
 	`)),
 	UpdateHashVersion: template.Must(template.New("updateHashVersion").Funcs(aceTemplateFuncs).Parse(`
 		UPDATE {{aceSchema}}.ace_mtree_metadata
-		SET hash_version = $1, last_updated = current_timestamp
+		SET hash_version = $1, hash_encoding = $4, last_updated = current_timestamp
 		WHERE schema_name = $2 AND table_name = $3
 	`)),
 	GetNativeOriginLSNForNode: template.Must(template.New("getNativeOriginLSNForNode").Parse(`
