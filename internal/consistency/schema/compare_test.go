@@ -12,7 +12,6 @@
 package schema
 
 import (
-	"fmt"
 	"strings"
 	"testing"
 )
@@ -869,19 +868,15 @@ func TestCompare_EnumLabelAddedIsIncompatible(t *testing.T) {
 }
 
 // TestCompare_CompositeAttributeTypeChangedIsReported: a composite type's
-// own attribute changed type on one side. Attribute order is what
-// Property.Name's "attr:%04d:name" index encodes, so two attributes
-// swapping declaration order is itself a real difference for a composite
-// type.
+// own attribute changed type on one side.
 func TestCompare_CompositeAttributeTypeChangedIsReported(t *testing.T) {
 	table := "public.t"
 	// Built through packAttr, the same as collect.go itself does, instead
 	// of a hand-written string: a value that does not come from packAttr
 	// fails unpackAttr and only exercises classifyAttr's "cannot be
 	// unpacked" fallback, never the real int4-vs-int8 narrowing path this
-	// test means to cover. f1 and f2 get distinct ordinals (1 and 2, as
-	// two attributes of one composite type would), even though only f1
-	// changes here.
+	// test means to cover. f2 is the same on both nodes, so only f1 is
+	// reported.
 	aInt4 := packAttr("pg_catalog", "int4", "b", -1, "")
 	bInt8 := packAttr("pg_catalog", "int8", "b", -1, "")
 	text := packAttr("pg_catalog", "text", "b", -1, "")
@@ -889,22 +884,19 @@ func TestCompare_CompositeAttributeTypeChangedIsReported(t *testing.T) {
 		column(table, "thing", userTypeColumnProps("public", "things", "c")...).
 		key(table).constraints(table).
 		composite("public.things",
-			Property{Name: "attr:0001:f1", Value: aInt4},
-			Property{Name: "attr:0002:f2", Value: text}).build()
+			Property{Name: "attr:f1", Value: aInt4},
+			Property{Name: "attr:f2", Value: text}).build()
 	b := newSnapshot("n2").table(table).
 		column(table, "thing", userTypeColumnProps("public", "things", "c")...).
 		key(table).constraints(table).
 		composite("public.things",
-			Property{Name: "attr:0001:f1", Value: bInt8},
-			Property{Name: "attr:0002:f2", Value: text}).build()
+			Property{Name: "attr:f1", Value: bInt8},
+			Property{Name: "attr:f2", Value: text}).build()
 
 	divs := Compare("public", []string{"t"}, a, b)
 
-	// The property is named for the reader — "attribute 1 (f1)", carrying
-	// the attribute's own attnum — while the
-	// index in the underlying "attr:%04d:name" key is what kept the
-	// comparison in declaration order.
-	d := findDivergence(t, divs, "public.things", "attribute 1 (f1)")
+	// The property is named for the reader: "attribute (f1)".
+	d := findDivergence(t, divs, "public.things", "attribute (f1)")
 	// int4 -> int8 narrows exactly as it does for a table column (see
 	// classifyAttr's own doc comment): n1's int4 accepts a strict subset
 	// of what n2's int8 does.
@@ -1035,12 +1027,12 @@ func TestDottedIdentifiersDoNotCollide(t *testing.T) {
 func TestCompositeAttributeRankMatchesColumnRank(t *testing.T) {
 	attr := func(typeName string) Property {
 		return Property{
-			Name:  "attr:0001:x",
+			Name:  "attr:x",
 			Value: packAttr("pg_catalog", typeName, "b", -1, ""),
 		}
 	}
 	text := func(typeText string) Property {
-		return Property{Name: "attrtext:0001:x", Value: typeText}
+		return Property{Name: "attrtext:x", Value: typeText}
 	}
 
 	a := newSnapshot("n1").composite("public.pair", attr("int4"), text("integer")).build()
@@ -1132,7 +1124,7 @@ func TestColumnTypeKindChangeIsIncompatible(t *testing.T) {
 func TestCompositeAttributeTypeKindChangeIsIncompatible(t *testing.T) {
 	attr := func(kind string) Property {
 		return Property{
-			Name:  "attr:0001:status",
+			Name:  "attr:status",
 			Value: packAttr("public", "status", kind, -1, ""),
 		}
 	}
@@ -1313,30 +1305,29 @@ func TestDatabaseLocaleMatchingIsSilent(t *testing.T) {
 	}
 }
 
-// TestCompositeAttributeOrdinalsSurviveADrop checks that dropping one
-// attribute does not make the attributes after it look changed too. The
-// property key carries each attribute's own attnum, so a gap stays a gap
-// instead of renumbering everything below it.
-func TestCompositeAttributeOrdinalsSurviveADrop(t *testing.T) {
-	attr := func(attnum int, name, typeName string) []Property {
-		return []Property{
-			{Name: fmt.Sprintf("attr:%04d:%s", attnum, name),
-				Value: packAttr("pg_catalog", typeName, "b", -1, "")},
-			{Name: fmt.Sprintf("attrtext:%04d:%s", attnum, name), Value: typeName},
-		}
+// compositeAttr builds the two properties that a snapshot holds for one
+// composite attribute.
+func compositeAttr(name, typeName string) []Property {
+	return []Property{
+		{Name: "attr:" + name, Value: packAttr("pg_catalog", typeName, "b", -1, "")},
+		{Name: "attrtext:" + name, Value: typeName},
 	}
-	compose := func(node string, attrs ...[]Property) Snapshot {
-		var props []Property
-		for _, a := range attrs {
-			props = append(props, a...)
-		}
-		return newSnapshot(node).composite("public.addr", props...).build()
-	}
+}
 
-	// n2 dropped attribute 2 ("zip"). The attributes that follow keep their
-	// attnums, so only the drop should be reported.
-	a := compose("n1", attr(1, "street", "text"), attr(2, "zip", "int4"), attr(3, "city", "text"))
-	b := compose("n2", attr(1, "street", "text"), attr(3, "city", "text"))
+func compositeSnapshot(node string, attrs ...[]Property) Snapshot {
+	var props []Property
+	for _, a := range attrs {
+		props = append(props, a...)
+	}
+	return newSnapshot(node).composite("public.addr", props...).build()
+}
+
+// TestCompositeAttributeDropIsOneFinding checks that dropping one attribute
+// does not make the attributes after it look changed too, and does not make
+// the order differ.
+func TestCompositeAttributeDropIsOneFinding(t *testing.T) {
+	a := compositeSnapshot("n1", compositeAttr("street", "text"), compositeAttr("zip", "int4"), compositeAttr("city", "text"))
+	b := compositeSnapshot("n2", compositeAttr("street", "text"), compositeAttr("city", "text"))
 
 	divs := Compare("public", nil, a, b)
 	if len(divs) != 1 {
@@ -1345,14 +1336,43 @@ func TestCompositeAttributeOrdinalsSurviveADrop(t *testing.T) {
 	if divs[0].Rank != RankAbsent {
 		t.Fatalf("want absent for the dropped attribute, got %q", divs[0].Rank)
 	}
-	if !strings.Contains(divs[0].Property, "zip") {
+	if divs[0].Property != "attribute (zip)" {
 		t.Fatalf("want the finding to name the dropped attribute, got %q", divs[0].Property)
 	}
-	// The ordinal printed is the attribute's own attnum, so a reader can
-	// line the finding up against \d+ on the type.
-	if !strings.Contains(divs[0].Property, "2") {
-		t.Fatalf("want the finding to carry attnum 2, got %q", divs[0].Property)
+}
+
+// TestCompositeAttributeOrderIsReported checks that the same attributes in
+// another order are one finding on the order, not one per attribute.
+func TestCompositeAttributeOrderIsReported(t *testing.T) {
+	a := compositeSnapshot("n1", compositeAttr("city", "text"), compositeAttr("zip", "text"))
+	b := compositeSnapshot("n2", compositeAttr("zip", "text"), compositeAttr("city", "text"))
+
+	divs := Compare("public", nil, a, b)
+	if len(divs) != 1 {
+		t.Fatalf("want one finding on the order, got %d: %+v", len(divs), divs)
 	}
+	d := divs[0]
+	if d.Property != "attribute order" || d.Rank != RankIncompatible {
+		t.Fatalf("want an incompatible attribute order, got %q %q", d.Property, d.Rank)
+	}
+	if d.ValueOnA != "(city, zip)" || d.ValueOnB != "(zip, city)" {
+		t.Fatalf("want both orders shown, got %q vs %q", d.ValueOnA, d.ValueOnB)
+	}
+}
+
+// TestCompositeAttributeOrderWithDropIsReported checks that a drop on one
+// node does not hide a change of order of the attributes that both nodes
+// have.
+func TestCompositeAttributeOrderWithDropIsReported(t *testing.T) {
+	a := compositeSnapshot("n1", compositeAttr("street", "text"), compositeAttr("zip", "int4"), compositeAttr("city", "text"))
+	b := compositeSnapshot("n2", compositeAttr("city", "text"), compositeAttr("street", "text"))
+
+	divs := Compare("public", nil, a, b)
+	if len(divs) != 2 {
+		t.Fatalf("want the dropped attribute and the order, got %d: %+v", len(divs), divs)
+	}
+	findDivergence(t, divs, "public.addr", "attribute (zip)")
+	findDivergence(t, divs, "public.addr", "attribute order")
 }
 
 // TestCompare_TableMissingFromSnapshotIsOneAbsentFinding pins what

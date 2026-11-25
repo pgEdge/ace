@@ -300,6 +300,36 @@ All notable changes to ACE will be captured in this document. This project follo
   key.
 
 ### Fixed
+- **`schema-diff --compare=structure` reported a difference in the
+  options of every column on current PostgreSQL releases.** The server
+  stores a version of each column in `attoptions` under the key
+  `pg_attver`. Its value comes from the WAL position of the node, so two
+  nodes with the same schema almost always have different values. Now
+  the structure comparison leaves this key out. Other column options,
+  such as `n_distinct`, are still compared.
+- **`schema-diff --compare=structure` reported the same composite type as
+  different when one node had dropped an attribute.** `DROP ATTRIBUTE`
+  leaves a gap in the attribute numbers, and a dump and restore of the
+  type, as in the structure sync of Spock, has no gap. The comparison used
+  these numbers, so it reported each attribute after the gap as absent on
+  one node and present on the other. Now the attributes are matched by
+  name, and their order is compared on its own: the same attributes in
+  another order are one finding, `attribute order`. A finding on an
+  attribute is now named `attribute (name)`, without a number.
+- **`schema-diff --compare=structure` reported an array column as
+  incompatible when the array type had another name on a node.** The
+  server names an array type by itself and adds underscores when the name
+  is taken, and `pg_dump` does not dump array types, so the same array
+  type can have another name on each node. The report showed the same
+  type, for example `mood[]`, on both sides. Now an array type is named by
+  its element type, for a column, a composite attribute, the base type of
+  a domain and the subtype of a range.
+- **`schema-diff --compare=structure` reported the default of a `serial`
+  column when its sequence had another name on a node.** `serial` adds a
+  number to the name of the sequence when the name is taken, and a renamed
+  table keeps the old name of its sequence. Now a sequence that the column
+  owns is shown as `<owned sequence>` in the default. A default that uses a
+  sequence the column does not own still shows and compares its name.
 - **`table-diff` and `mtree` converted the bounds of the blocks to Go
   values.** A key type that the driver did not know, or could not decode,
   stopped the run with an error, and a value that the Go type could not

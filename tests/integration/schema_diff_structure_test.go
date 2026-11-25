@@ -215,7 +215,7 @@ func TestSchemaDiffStructure_ColumnAndTypeDriftIsReported(t *testing.T) {
 	// The composite attribute is named for a reader, with its value shown
 	// as PostgreSQL prints the type. int4 -> int8 is a narrowing here too,
 	// the same as it is for a table column (see colType above).
-	addr := findDivergenceFor(t, divs, structureSchema+".addr", "attribute 2 (zip)")
+	addr := findDivergenceFor(t, divs, structureSchema+".addr", "attribute (zip)")
 	require.Equal(t, schema.RankNarrowed, addr.Rank)
 	require.Equal(t, serviceN1, addr.NarrowSide, "int4 is the narrow side")
 	require.Equal(t, "integer", addr.ValueOnA)
@@ -519,6 +519,189 @@ func TestSchemaDiffStructure_ColumnOptionValueDriftIsStillReported(t *testing.T)
 	d := findDivergenceFor(t, divs, fmt.Sprintf("%s.%s.n", structureSchema, structureTable), "options")
 	require.Contains(t, d.ValueOnA, "-0.5")
 	require.Contains(t, d.ValueOnB, "-0.9")
+	require.NotContains(t, d.ValueOnA, "pg_attver")
+	require.NotContains(t, d.ValueOnB, "pg_attver")
+}
+
+// requireColumnVersionsDiffer pins the premise of the test below: the server
+// stores a pg_attver key for the column, and its value is not the same on
+// the two nodes. A server that does not store the key skips the test.
+func requireColumnVersionsDiffer(t *testing.T, column string) {
+	t.Helper()
+	ctx := context.Background()
+	const q = `SELECT COALESCE((
+	               SELECT opt FROM pg_catalog.unnest(a.attoptions) AS opt
+	               WHERE pg_catalog.starts_with(opt, 'pg_attver=')), '')
+	           FROM pg_attribute a
+	           JOIN pg_class c ON c.oid = a.attrelid
+	           JOIN pg_namespace ns ON ns.oid = c.relnamespace
+	           WHERE ns.nspname = $1 AND c.relname = $2 AND a.attname = $3`
+
+	var v1, v2 string
+	require.NoError(t, pgCluster.Node1Pool.QueryRow(ctx, q, structureSchema, structureTable, column).Scan(&v1))
+	require.NoError(t, pgCluster.Node2Pool.QueryRow(ctx, q, structureSchema, structureTable, column).Scan(&v2))
+	if v1 == "" || v2 == "" {
+		t.Skip("the server does not store pg_attver in attoptions")
+	}
+	require.NotEqual(t, v1, v2,
+		"this test needs the two nodes to hold different pg_attver values")
+}
+
+// TestSchemaDiffStructure_ColumnVersionIsNotADifference: the server keeps a
+// pg_attver key in attoptions, and its value depends on the WAL position of
+// each node. Two nodes with the same column and the same user options must
+// not report a difference.
+func TestSchemaDiffStructure_ColumnVersionIsNotADifference(t *testing.T) {
+	setupStructureSchema(t)
+	ctx := context.Background()
+
+	stmt := fmt.Sprintf(`ALTER TABLE %s.%s ALTER COLUMN n SET (n_distinct = -0.5)`,
+		structureSchema, structureTable)
+	for _, pool := range []*pgxpool.Pool{pgCluster.Node1Pool, pgCluster.Node2Pool} {
+		_, err := pool.Exec(ctx, stmt)
+		require.NoError(t, err)
+	}
+
+	requireColumnVersionsDiffer(t, "n")
+
+	divs := compareStructureForTest(t)
+	require.Empty(t, divs,
+		"a different pg_attver value is not a difference: %+v", divs)
+}
+
+// TestSchemaDiffStructure_CompositeAttributeNumberIsNotADifference: DROP
+// ATTRIBUTE leaves a gap in the attnum values of a composite type, and a
+// dump and restore of the same type has no gap. Two nodes with the same
+// attributes in the same order must not report a difference.
+func TestSchemaDiffStructure_CompositeAttributeNumberIsNotADifference(t *testing.T) {
+	setupStructureSchema(t)
+	ctx := context.Background()
+
+	node1 := []string{
+		fmt.Sprintf(`CREATE TYPE %s.gap AS (x int, dropped int, y text)`, structureSchema),
+		fmt.Sprintf(`ALTER TYPE %s.gap DROP ATTRIBUTE dropped`, structureSchema),
+	}
+	node2 := []string{
+		fmt.Sprintf(`CREATE TYPE %s.gap AS (x int, y text)`, structureSchema),
+	}
+	addColumn := fmt.Sprintf(`ALTER TABLE %s.%s ADD COLUMN g %s.gap`,
+		structureSchema, structureTable, structureSchema)
+	for _, stmt := range append(node1, addColumn) {
+		_, err := pgCluster.Node1Pool.Exec(ctx, stmt)
+		require.NoError(t, err, "node1: %s", stmt)
+	}
+	for _, stmt := range append(node2, addColumn) {
+		_, err := pgCluster.Node2Pool.Exec(ctx, stmt)
+		require.NoError(t, err, "node2: %s", stmt)
+	}
+
+	// The premise: attribute y has another attnum on each node.
+	const q = `SELECT a.attnum FROM pg_attribute a
+	           JOIN pg_type t ON t.typrelid = a.attrelid
+	           JOIN pg_namespace n ON n.oid = t.typnamespace
+	           WHERE n.nspname = $1 AND t.typname = 'gap' AND a.attname = 'y'`
+	var num1, num2 int
+	require.NoError(t, pgCluster.Node1Pool.QueryRow(ctx, q, structureSchema).Scan(&num1))
+	require.NoError(t, pgCluster.Node2Pool.QueryRow(ctx, q, structureSchema).Scan(&num2))
+	require.NotEqual(t, num1, num2,
+		"this test needs the two nodes to give attribute y different attnums")
+
+	divs := compareStructureForTest(t)
+	require.Empty(t, divs,
+		"a different attnum of the same attribute is not a difference: %+v", divs)
+}
+
+// TestSchemaDiffStructure_ArrayTypeNameIsNotADifference: the server names an
+// array type by itself and adds underscores when the name is taken. Two
+// nodes with the same enum and the same array column must not report a
+// difference when the array type got another name on one of them.
+func TestSchemaDiffStructure_ArrayTypeNameIsNotADifference(t *testing.T) {
+	setupStructureSchema(t)
+	ctx := context.Background()
+
+	node1 := []string{
+		// Takes the name "_mood2" while mood2 is created, then frees it.
+		fmt.Sprintf(`CREATE TYPE %s._mood2 AS (x int)`, structureSchema),
+		fmt.Sprintf(`CREATE TYPE %s.mood2 AS ENUM ('a', 'b')`, structureSchema),
+		fmt.Sprintf(`DROP TYPE %s._mood2`, structureSchema),
+	}
+	node2 := []string{
+		fmt.Sprintf(`CREATE TYPE %s.mood2 AS ENUM ('a', 'b')`, structureSchema),
+	}
+	addColumn := fmt.Sprintf(`ALTER TABLE %s.%s ADD COLUMN ma %s.mood2[]`,
+		structureSchema, structureTable, structureSchema)
+	for _, stmt := range append(node1, addColumn) {
+		_, err := pgCluster.Node1Pool.Exec(ctx, stmt)
+		require.NoError(t, err, "node1: %s", stmt)
+	}
+	for _, stmt := range append(node2, addColumn) {
+		_, err := pgCluster.Node2Pool.Exec(ctx, stmt)
+		require.NoError(t, err, "node2: %s", stmt)
+	}
+
+	// The premise: the array type has another name on each node.
+	const q = `SELECT t.typname FROM pg_attribute a
+	           JOIN pg_type t ON t.oid = a.atttypid
+	           JOIN pg_class c ON c.oid = a.attrelid
+	           JOIN pg_namespace n ON n.oid = c.relnamespace
+	           WHERE n.nspname = $1 AND c.relname = $2 AND a.attname = 'ma'`
+	var name1, name2 string
+	require.NoError(t, pgCluster.Node1Pool.QueryRow(ctx, q, structureSchema, structureTable).Scan(&name1))
+	require.NoError(t, pgCluster.Node2Pool.QueryRow(ctx, q, structureSchema, structureTable).Scan(&name2))
+	require.NotEqual(t, name1, name2,
+		"this test needs the array type to have another name on each node")
+
+	divs := compareStructureForTest(t)
+	require.Empty(t, divs,
+		"another name of the same array type is not a difference: %+v", divs)
+}
+
+// TestSchemaDiffStructure_OwnedSequenceNameIsNotADifference: serial adds a
+// number to the name of its sequence when the name is taken. The default of
+// a column that owns its sequence must compare equal on two nodes whatever
+// the sequence is called. A default that uses a sequence the column does not
+// own keeps the name of the sequence, so another name there is still found.
+func TestSchemaDiffStructure_OwnedSequenceNameIsNotADifference(t *testing.T) {
+	setupStructureSchema(t)
+	ctx := context.Background()
+
+	node1 := []string{
+		// Takes the name "t_sid_seq" while the serial column is added.
+		fmt.Sprintf(`CREATE TABLE %s.t_sid_seq (i int)`, structureSchema),
+		fmt.Sprintf(`ALTER TABLE %s.%s ADD COLUMN sid serial`, structureSchema, structureTable),
+		fmt.Sprintf(`DROP TABLE %s.t_sid_seq`, structureSchema),
+		fmt.Sprintf(`CREATE SEQUENCE %s.shared_one`, structureSchema),
+		fmt.Sprintf(`ALTER TABLE %s.%s ADD COLUMN other bigint DEFAULT nextval('%s.shared_one')`,
+			structureSchema, structureTable, structureSchema),
+	}
+	node2 := []string{
+		fmt.Sprintf(`ALTER TABLE %s.%s ADD COLUMN sid serial`, structureSchema, structureTable),
+		fmt.Sprintf(`CREATE SEQUENCE %s.shared_two`, structureSchema),
+		fmt.Sprintf(`ALTER TABLE %s.%s ADD COLUMN other bigint DEFAULT nextval('%s.shared_two')`,
+			structureSchema, structureTable, structureSchema),
+	}
+	for _, stmt := range node1 {
+		_, err := pgCluster.Node1Pool.Exec(ctx, stmt)
+		require.NoError(t, err, "node1: %s", stmt)
+	}
+	for _, stmt := range node2 {
+		_, err := pgCluster.Node2Pool.Exec(ctx, stmt)
+		require.NoError(t, err, "node2: %s", stmt)
+	}
+
+	// The premise: the serial column uses another sequence name on each node.
+	q := fmt.Sprintf(`SELECT pg_get_serial_sequence('%s.%s', 'sid')`, structureSchema, structureTable)
+	var seq1, seq2 string
+	require.NoError(t, pgCluster.Node1Pool.QueryRow(ctx, q).Scan(&seq1))
+	require.NoError(t, pgCluster.Node2Pool.QueryRow(ctx, q).Scan(&seq2))
+	require.NotEqual(t, seq1, seq2,
+		"this test needs the serial sequence to have another name on each node")
+
+	divs := compareStructureForTest(t)
+	require.Len(t, divs, 1, "only the default with a sequence the column does not own: %+v", divs)
+	d := findDivergenceFor(t, divs, fmt.Sprintf("%s.%s.other", structureSchema, structureTable), "default")
+	require.Contains(t, d.ValueOnA, "shared_one")
+	require.Contains(t, d.ValueOnB, "shared_two")
 }
 
 // TestSchemaDiffStructure_TableDroppedBeforeCollectionIsOneFinding: a table

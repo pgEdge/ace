@@ -1049,7 +1049,7 @@ type ColumnDescriptor struct {
 	NotNull       bool
 	Identity      string // '' | 'a' (always) | 'd' (by default)
 	Generated     string // '' | 's' (stored)
-	Options       string // attoptions, sorted and comma-joined so apply order cannot differ; opaque to this layer
+	Options       string // attoptions without pg_attver, sorted and comma-joined so apply order cannot differ; opaque to this layer
 	CollNamespace string
 	CollName      string
 	CollProvider  string
@@ -1345,11 +1345,6 @@ func GetRangeDescriptors(ctx context.Context, db DBQuerier, oids []uint32) (map[
 // 'c'), in attnum order: attribute order is part of a composite type's
 // structural identity (see GetCompositeAttributes).
 type CompositeAttribute struct {
-	// AttNum is the attribute's own pg_attribute.attnum, not its position
-	// in Attributes: DROP ATTRIBUTE leaves the surviving attributes'
-	// attnums alone, so this is the ordinal that stays comparable across
-	// nodes. See GetCompositeAttributes.
-	AttNum        int16
 	Name          string
 	TypeNamespace string
 	TypeName      string
@@ -1396,7 +1391,7 @@ func GetCompositeAttributes(ctx context.Context, db DBQuerier, oids []uint32) (m
 		var oid uint32
 		var namespace, name string
 		var a CompositeAttribute
-		if err := rows.Scan(&oid, &namespace, &name, &a.AttNum, &a.Name,
+		if err := rows.Scan(&oid, &namespace, &name, &a.Name,
 			&a.TypeNamespace, &a.TypeName, &a.TypeKind, &a.TypeMod, &a.TypeText,
 			&a.Collation); err != nil {
 			return nil, fmt.Errorf("failed to scan composite attribute: %w", err)
