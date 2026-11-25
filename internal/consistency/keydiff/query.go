@@ -44,25 +44,20 @@ func (t Table) qualifiedName() string {
 	return pgx.Identifier{t.Schema}.Sanitize() + "." + pgx.Identifier{t.Name}.Sanitize()
 }
 
-// rowHashExpr is the first rowHashSize bytes of the row hash of the block
-// hash.
-func (t Table) rowHashExpr() (string, error) {
-	h, err := queries.RowHashExpr("", t.Cols)
-	if err != nil {
-		return "", err
-	}
-	return fmt.Sprintf("substring(%s FROM 1 FOR %d)", h, rowHashSize), nil
+// rowHashExpr is the row hash of the block hash, in the form of the node.
+func (t Table) rowHashExpr(form queries.HashForm) (string, error) {
+	return queries.RowHashExpr("", t.Cols, form)
 }
 
 // keyQuery returns the query that lists, for every row of the block, the text
 // of each key column (value::text, the text by which ACE matches rows) and
 // the row hash. The query has no ORDER BY: the client does not need any
 // order.
-func (t Table) keyQuery(where string) (string, error) {
+func (t Table) keyQuery(where string, form queries.HashForm) (string, error) {
 	if len(t.Key) == 0 {
 		return "", fmt.Errorf("table %s has no primary key", t.qualifiedName())
 	}
-	h, err := t.rowHashExpr()
+	h, err := t.rowHashExpr(form)
 	if err != nil {
 		return "", err
 	}
@@ -140,14 +135,14 @@ func (t Table) readFormats() pgx.QueryResultFormats {
 // itself.
 //
 // filter, if not empty, is added to the WHERE clause of the lookup as it is.
-func (t Table) ReadQuery(castTypes map[string]string, filter string, nKeys int) (string, error) {
+func (t Table) ReadQuery(castTypes map[string]string, filter string, nKeys int, form queries.HashForm) (string, error) {
 	if len(t.Key) == 0 {
 		return "", fmt.Errorf("table %s has no primary key", t.qualifiedName())
 	}
 	if nKeys < 1 || nKeys > maxReadKeys(len(t.Key)) {
 		return "", fmt.Errorf("row read of %s: %d keys, want 1 to %d", t.qualifiedName(), nKeys, maxReadKeys(len(t.Key)))
 	}
-	h, err := t.rowHashExpr()
+	h, err := t.rowHashExpr(form)
 	if err != nil {
 		return "", err
 	}

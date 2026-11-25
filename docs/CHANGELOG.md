@@ -5,6 +5,32 @@ All notable changes to ACE will be captured in this document. This project follo
 ## [Unreleased]
 
 ### ⚠️ Breaking Change
+- **Values are compared by their `value::text`.** Two values are
+  identical when `value::text` is identical. For most types this is the
+  output of the type, as before; for a type with its own cast to `text`
+  it is that cast. So `'a'` and `'a  '` of a `bpchar` column or key are
+  now identical. Keys are matched by the same text. A diff result of an
+  earlier ACE is refused by `table-repair` and `table-rerun`: run the diff
+  again.
+- **Generated columns are not compared.** They are left out of the hash,
+  of the report and of the writes of `table-repair`; the target node
+  computes them.
+- **Hash version 6.** Each column is hashed by the bytes of its
+  `value::text` with `hashtextextended`, the row hash has 64 bits, and the
+  block hash is the sha256 of the row count and the exact sum of the row
+  hashes. `mtree update` computes every leaf of an older
+  tree again. The tree and the diff result record the basis encoding of
+  the hashes. `SQL_ASCII` nodes are not counted when ACE selects it: the
+  basis is the encoding of the other nodes if they all have the same one,
+  UTF8 if they have different ones, and `SQL_ASCII` if every node has it.
+  A node whose encoding is not the basis converts its values to UTF8
+  before it hashes them, which is slower, and ACE writes a warning for
+  it. A `SQL_ASCII` node never
+  converts: it hashes its stored bytes as they are, without a warning, so
+  its text hashes equal to the same text of the other nodes only if its
+  bytes are already in their encoding. All nodes of a run must have the
+  same byte order: the hash functions of the server give different
+  values on a big-endian and on a little-endian server.
 - **ACE needs PostgreSQL 15 or later on every node.** The documentation
   now gives this minimum. On PostgreSQL 14, the database has no locale
   provider, so the new check of the key collation sees a different

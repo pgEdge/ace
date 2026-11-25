@@ -83,12 +83,15 @@ type DiffResultManifest struct {
 	RowFormatVersion int `json:"row_format_version"`
 	// HashVersion is the version of the row hash that gave the row hashes
 	// of the entries.
-	HashVersion int                `json:"hash_version"`
-	Schema      string             `json:"schema"`
-	Table       string             `json:"table"`
-	PrimaryKey  []string           `json:"primary_key"`
-	Columns     []DiffResultColumn `json:"columns"`
-	Nodes       []string           `json:"nodes"`
+	HashVersion int `json:"hash_version"`
+	// HashEncoding is the basis encoding of the row hashes: the encoding
+	// of the bytes of value::text that the row hash uses.
+	HashEncoding string             `json:"hash_encoding"`
+	Schema       string             `json:"schema"`
+	Table        string             `json:"table"`
+	PrimaryKey   []string           `json:"primary_key"`
+	Columns      []DiffResultColumn `json:"columns"`
+	Nodes        []string           `json:"nodes"`
 	// Pairs lists the pairs that have entries, sorted by name.
 	Pairs []DiffResultPair `json:"pairs"`
 	// IntegerKey is true when the primary key is one column of an integer

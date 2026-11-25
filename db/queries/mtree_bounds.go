@@ -444,13 +444,14 @@ func GetBulkSplitPoints(ctx context.Context, db DBQuerier, schema, table string,
 }
 
 // ComputeLeafHashes returns the hash of the rows in [start, end) as an mtree
-// leaf stores it. nil is an open side.
-func ComputeLeafHashes(ctx context.Context, db DBQuerier, schema, table string, key []string, castTypes map[string]string, start, end []string, allCols []string) ([]byte, error) {
+// leaf stores it, computed in the hash form of the node. nil is an open
+// side.
+func ComputeLeafHashes(ctx context.Context, db DBQuerier, schema, table string, key []string, castTypes map[string]string, start, end []string, allCols []string, form HashForm) ([]byte, error) {
 	where, args, err := BlockWhere(key, castTypes, KeyRange{Lower: start, Upper: end}, "")
 	if err != nil {
 		return nil, err
 	}
-	sql, err := BlockHashSQL(schema, table, "MTREE_LEAF_HASH", where, allCols)
+	sql, err := BlockHashSQL(schema, table, "MTREE_LEAF_HASH", where, allCols, form)
 	if err != nil {
 		return nil, err
 	}

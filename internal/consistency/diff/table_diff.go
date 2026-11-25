@@ -175,6 +175,12 @@ type TableDiffTask struct {
 	// be two databases of one server.
 	castTypes map[string]map[string]string
 
+	// hashBasis is the basis encoding of the row hash for the nodes of the
+	// run, and hashForms holds, by node name, the way each node computes the
+	// row hash. All forms give the same hash for the same row.
+	hashBasis string
+	hashForms map[string]queries.HashForm
+
 	resolvedAgainstOrigin string
 	untilTime             *time.Time
 
@@ -444,23 +450,41 @@ func (t *TableDiffTask) ensureFilterHasRows(pool *pgxpool.Pool, nodeName string)
 type RangeResults map[string]HashResult
 
 // getBlockHashSQL returns the block hash query for the block condition
-// where: the condition on the key range and the filter.
-func (t *TableDiffTask) getBlockHashSQL(where string) (string, error) {
+// where, the condition on the key range and the filter, in the hash form of
+// the node that runs it.
+func (t *TableDiffTask) getBlockHashSQL(where string, form queries.HashForm) (string, error) {
 	t.blockHashSQLMu.Lock()
 	defer t.blockHashSQLMu.Unlock()
 
 	if t.blockHashSQLCache == nil {
 		t.blockHashSQLCache = make(map[string]string)
 	}
-	if sql, ok := t.blockHashSQLCache[where]; ok {
+	cacheKey := fmt.Sprintf("%d|%s", form, where)
+	if sql, ok := t.blockHashSQLCache[cacheKey]; ok {
 		return sql, nil
 	}
-	query, err := queries.BlockHashSQL(t.Schema, t.Table, "TD_BLOCK_HASH" /* mode */, where, t.Cols)
+	query, err := queries.BlockHashSQL(t.Schema, t.Table, "TD_BLOCK_HASH" /* mode */, where, t.Cols, form)
 	if err != nil {
 		return "", err
 	}
-	t.blockHashSQLCache[where] = query
+	t.blockHashSQLCache[cacheKey] = query
 	return query, nil
+}
+
+// setHashForms sets the basis encoding of the row hash from the server
+// encodings of the nodes of the run, by node name, and the hash form of each
+// node. A node that has to convert its values to UTF8 gets a warning, once
+// for the run.
+func (t *TableDiffTask) setHashForms(encodings map[string]string) error {
+	basis, forms, warnings, err := queries.HashForms(encodings)
+	if err != nil {
+		return err
+	}
+	for _, w := range warnings {
+		logger.Warn("%s", w)
+	}
+	t.hashBasis, t.hashForms = basis, forms
+	return nil
 }
 
 func NewTableDiffTask() *TableDiffTask {
@@ -707,6 +731,7 @@ func (t *TableDiffTask) RunChecks(skipValidation bool) (err error) {
 	var refNodeInfo map[string]any
 	hostMap := make(map[string]string)
 	var nodeCollations []namedCollations
+	encodings := make(map[string]string)
 
 	schema := t.Schema
 	table := t.Table
@@ -787,6 +812,11 @@ func (t *TableDiffTask) RunChecks(skipValidation bool) (err error) {
 				return fmt.Errorf("failed to get collations for table %s.%s on node %s: %w", schema, table, hostname, err)
 			}
 			nodeCollations = append(nodeCollations, namedCollations{node: hostname, colls: collations})
+			enc, err := queries.ServerEncoding(t.Ctx, conn)
+			if err != nil {
+				return fmt.Errorf("failed to get the server encoding on node %s: %w", hostname, err)
+			}
+			encodings[hostname] = enc
 
 			currKey, err := queries.GetPrimaryKey(t.Ctx, conn, schema, table)
 			if err != nil {
@@ -832,6 +862,9 @@ func (t *TableDiffTask) RunChecks(skipValidation bool) (err error) {
 
 	logger.Info("Connections successful to nodes in cluster")
 	warnKeyCollations(t.QualifiedTableName, key, nodeCollations)
+	if err := t.setHashForms(encodings); err != nil {
+		return err
+	}
 
 	t.HostMap = hostMap
 	t.Cols = cols
@@ -1284,7 +1317,7 @@ func (t *TableDiffTask) ExecuteTask() (err error) {
 	t.EffectiveFilter = effectiveFilter
 	t.DiffSummary["effective_filter"] = effectiveFilter
 
-	if _, err = t.getBlockHashSQL(""); err != nil {
+	if _, err = t.getBlockHashSQL("", queries.HashFormBytes); err != nil {
 		return fmt.Errorf("failed to build block-hash SQL: %w", err)
 	}
 
@@ -1667,13 +1700,14 @@ func (t *TableDiffTask) resultManifest() utils.DiffResultManifest {
 		cols = append(cols, utils.DiffResultColumn{Name: c, Type: colTypes[c]})
 	}
 	return utils.DiffResultManifest{
-		HashVersion: queries.CurrentHashVersion,
-		Schema:      t.Schema,
-		Table:       t.BaseTable,
-		PrimaryKey:  t.Key,
-		Columns:     cols,
-		Nodes:       t.NodeList,
-		Summary:     t.DiffResult.Summary,
+		HashVersion:  queries.CurrentHashVersion,
+		HashEncoding: t.hashBasis,
+		Schema:       t.Schema,
+		Table:        t.BaseTable,
+		PrimaryKey:   t.Key,
+		Columns:      cols,
+		Nodes:        t.NodeList,
+		Summary:      t.DiffResult.Summary,
 	}
 }
 
@@ -1766,7 +1800,7 @@ func (t *TableDiffTask) hashRangeOn(
 	if err != nil {
 		return "", 0, err
 	}
-	query, err := t.getBlockHashSQL(where)
+	query, err := t.getBlockHashSQL(where, t.hashForms[node])
 	if err != nil {
 		return "", 0, fmt.Errorf("failed to build block-hash SQL: %w", err)
 	}
@@ -1912,7 +1946,7 @@ func (t *TableDiffTask) compareMismatch(ctx context.Context, task mismatchTask) 
 		// Every query of the comparison is one operation on the block, so
 		// the block timeout limits each of them.
 		conn := &blockQuerier{t: t, pool: pool}
-		return keydiff.Side{Name: node, Conn: conn, CastTypes: castTypes, Rows: rows, RowsKnown: true}, nil
+		return keydiff.Side{Name: node, Conn: conn, CastTypes: castTypes, HashForm: t.hashForms[node], Rows: rows, RowsKnown: true}, nil
 	}
 	s1, err := side(task.node1, task.rows1)
 	if err != nil {

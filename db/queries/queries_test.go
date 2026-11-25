@@ -175,7 +175,7 @@ func blockHashSQL(schema, table string, key []string, mode string, lower, upper 
 	if err != nil {
 		return "", err
 	}
-	return BlockHashSQL(schema, table, mode, where, cols)
+	return BlockHashSQL(schema, table, mode, where, cols, HashFormBytes)
 }
 
 func TestBlockHashSQL(t *testing.T) {
@@ -192,7 +192,6 @@ func TestBlockHashSQL(t *testing.T) {
 		wantErr           bool
 	}{
 		{
-			// The whole-row value would be a second row encoding.
 			name:           "nil cols is an error",
 			schema:         "public",
 			table:          "events",
@@ -200,26 +199,25 @@ func TestBlockHashSQL(t *testing.T) {
 			allCols:        nil,
 			includeLower:   true,
 			includeUpper:   true,
-			filter:         "",
 			wantErr:        true,
 		},
 		{
-			name:           "with columns - row constructor",
+			name:           "with columns",
 			schema:         "public",
 			table:          "events",
 			primaryKeyCols: []string{"event_id"},
 			allCols:        []string{"event_id", "name", "amount"},
 			includeLower:   true,
 			includeUpper:   true,
-			filter:         "",
 			wantQueryContains: []string{
 				`FROM "public"."events" AS _tbl_`,
 				`WHERE "event_id" >= $1::bigint AND "event_id" < $2::bigint`,
-				`SELECT encode(` + BlockHashAggExpr + `, 'hex')`,
-				`SELECT ('x' || encode(sha256(convert_to(ROW(_tbl_."event_id", _tbl_."name", _tbl_."amount")::text, 'UTF8')), 'hex'))::bit(256) AS _rh`,
-				`OFFSET 0`,
+				`SELECT encode(CASE WHEN count(*) = 0 THEN decode(repeat('00', 32), 'hex') ELSE sha256(convert_to(count(*)::text || ',' || sum(hashint8extended(`,
+				`hashtextextended(_tbl_."amount"::text COLLATE "C", 1)`,
+				`hashtextextended(_tbl_."event_id"::text COLLATE "C", 2)`,
+				`hashtextextended(_tbl_."name"::text COLLATE "C", 3)`,
+				`, 'hex'), count(*)`,
 			},
-			wantErr: false,
 		},
 		{
 			name:           "composite primary key with columns",
@@ -229,20 +227,17 @@ func TestBlockHashSQL(t *testing.T) {
 			allCols:        []string{"order_id", "item_seq", "price"},
 			includeLower:   true,
 			includeUpper:   true,
-			filter:         "",
 			wantQueryContains: []string{
 				`FROM "commerce"."line_items" AS _tbl_`,
 				`WHERE ROW("order_id", "item_seq") >= ROW($1::bigint, $2::bigint) AND ROW("order_id", "item_seq") < ROW($3::bigint, $4::bigint)`,
-				`('x' || encode(sha256(convert_to(ROW(_tbl_."order_id", _tbl_."item_seq", _tbl_."price")::text, 'UTF8')), 'hex'))::bit(256)`,
+				`hashtextextended(_tbl_."item_seq"::text COLLATE "C", 1)`,
 			},
-			wantErr: false,
 		},
 		{
 			name:           "invalid schema identifier",
 			schema:         "bad-schema!",
 			table:          "events",
 			primaryKeyCols: []string{"event_id"},
-			filter:         "",
 			wantErr:        true,
 		},
 		{
@@ -250,7 +245,6 @@ func TestBlockHashSQL(t *testing.T) {
 			schema:         "public",
 			table:          "events 123",
 			primaryKeyCols: []string{"event_id"},
-			filter:         "",
 			wantErr:        true,
 		},
 		{
@@ -258,8 +252,7 @@ func TestBlockHashSQL(t *testing.T) {
 			schema:         "public",
 			table:          "events",
 			primaryKeyCols: []string{},
-			filter:         "",
-			wantErr:        true, // We need this to error out here
+			wantErr:        true,
 		},
 		{
 			name:           "valid inputs - with filter",
@@ -267,13 +260,10 @@ func TestBlockHashSQL(t *testing.T) {
 			table:          "events",
 			primaryKeyCols: []string{"event_id"},
 			allCols:        []string{"event_id", "status"},
-			includeLower:   false,
-			includeUpper:   false,
 			filter:         "status = 'live'",
 			wantQueryContains: []string{
 				`WHERE (status = 'live')`,
 			},
-			wantErr: false,
 		},
 	}
 
@@ -286,9 +276,6 @@ func TestBlockHashSQL(t *testing.T) {
 				return
 			}
 			if !tt.wantErr {
-				if query == "" {
-					t.Errorf("BlockHashSQL() returned an empty query string, expected a query")
-				}
 				for _, substr := range tt.wantQueryContains {
 					if !strings.Contains(query, substr) {
 						t.Errorf("BlockHashSQL() query = %q, want to contain %q", query, substr)
@@ -311,27 +298,18 @@ func TestBlockHashSQLLeafMode(t *testing.T) {
 		t.Fatalf("BlockHashSQL() error = %v", err)
 	}
 	// The leaf hash is stored as raw bytes, so it is not hex-encoded.
-	for _, want := range []string{
-		`SELECT ` + BlockHashAggExpr + "\n",
-		`SELECT ('x' || encode(sha256(convert_to(ROW(_tbl_."event_id", _tbl_."name")::text, 'UTF8')), 'hex'))::bit(256) AS _rh`,
-	} {
-		if !strings.Contains(query, want) {
-			t.Errorf("query = %q, want to contain %q", query, want)
-		}
-	}
-	if strings.HasPrefix(strings.TrimSpace(query), "SELECT encode(") {
-		t.Errorf("leaf hash must not be hex-encoded: %q", query)
+	if !strings.HasPrefix(strings.TrimSpace(query), "SELECT CASE WHEN count(*) = 0") {
+		t.Errorf("leaf hash must be the raw aggregate: %q", query)
 	}
 	if !strings.Contains(query, `WHERE "event_id" >= $1::bigint`) || strings.Contains(query, "<") {
 		t.Errorf("expected only a lower bound: %q", query)
 	}
 }
 
-// TestBlockHashSQLHasNoWholeBlockString guards the fix for "out of memory"
-// (SQLSTATE 54000) on large blocks: the block hash must not build one value
-// out of all rows of the block. string_agg did that, and its result is
-// limited to 1 GB. The aggregate state of the block hash is one count and
-// four sums, and it needs no row order.
+// TestBlockHashSQLHasNoWholeBlockString: the block hash must not build one
+// value out of all rows of the block, because one value is limited to 1 GB.
+// The aggregate state is one count and one sum, and it needs no row order.
+// The sum is not cast back to bigint, so it does not overflow.
 func TestBlockHashSQLHasNoWholeBlockString(t *testing.T) {
 	cols := []string{"id", "name", "amount"}
 	for _, mode := range []string{"TD_BLOCK_HASH", "MTREE_LEAF_HASH"} {
@@ -343,13 +321,13 @@ func TestBlockHashSQLHasNoWholeBlockString(t *testing.T) {
 					if err != nil {
 						t.Fatalf("BlockHashSQL() error = %v", err)
 					}
-					for _, bad := range []string{"string_agg", "array_agg", "ORDER BY", "digest(", "EMPTY_BLOCK"} {
+					for _, bad := range []string{"string_agg", "array_agg", "ORDER BY", "digest(", "bit(256)", "bit_xor", ")::bigint)"} {
 						if strings.Contains(query, bad) {
 							t.Errorf("query must not contain %q: %q", bad, query)
 						}
 					}
-					if !strings.Contains(query, BlockHashAggExpr) {
-						t.Errorf("query = %q, want the aggregate BlockHashAggExpr", query)
+					if !strings.Contains(query, "sum(hashint8extended(") {
+						t.Errorf("query = %q, want the sum of the row hashes", query)
 					}
 				})
 			}
@@ -357,82 +335,119 @@ func TestBlockHashSQLHasNoWholeBlockString(t *testing.T) {
 	}
 }
 
+func TestNullMark(t *testing.T) {
+	// The constants are a part of the hash version: they must not change.
+	if got := nullMark(1); got != -2152535657050944081 {
+		t.Errorf("nullMark(1) = %d", got)
+	}
+	if got := nullMark(2); got != 7960286522194355700 {
+		t.Errorf("nullMark(2) = %d", got)
+	}
+}
+
 func TestRowHashExpr(t *testing.T) {
-	mustExpr := func(t *testing.T, alias string, cols []string) string {
+	mustExpr := func(t *testing.T, alias string, cols []string, form HashForm) string {
 		t.Helper()
-		got, err := RowHashExpr(alias, cols)
+		got, err := RowHashExpr(alias, cols, form)
 		if err != nil {
 			t.Fatalf("RowHashExpr() error = %v", err)
 		}
 		return got
 	}
 
-	t.Run("qualified columns, numeric as it is", func(t *testing.T) {
-		got := mustExpr(t, "_tbl_", []string{"id", "Name", "price"})
-		want := `sha256(convert_to(ROW(_tbl_."id", _tbl_."Name", _tbl_."price")::text, 'UTF8'))`
+	t.Run("bytes form, columns by name", func(t *testing.T) {
+		got := mustExpr(t, "", []string{"id", "debit"}, HashFormBytes)
+		want := fmt.Sprintf(`hashint8extended(%d, COALESCE(hashtextextended("debit"::text COLLATE "C", 1), %d) # `+
+			`COALESCE(hashtextextended("id"::text COLLATE "C", 2), %d))`, CurrentHashVersion, nullMark(1), nullMark(2))
 		if got != want {
 			t.Errorf("RowHashExpr() = %q, want %q", got, want)
 		}
 	})
 
-	t.Run("empty alias gives unqualified columns", func(t *testing.T) {
-		got := mustExpr(t, "", []string{"id", "debit"})
-		want := `sha256(convert_to(ROW("id", "debit")::text, 'UTF8'))`
+	t.Run("UTF8 form", func(t *testing.T) {
+		got := mustExpr(t, "_tbl_", []string{"a"}, HashFormUTF8)
+		want := fmt.Sprintf(`hashint8extended(%d, COALESCE(CASE WHEN _tbl_."a"::text IS NOT NULL THEN `+
+			`hash_record_extended(ROW(convert_to(_tbl_."a"::text, 'UTF8')), 1) END, %d))`, CurrentHashVersion, nullMark(1))
 		if got != want {
 			t.Errorf("RowHashExpr() = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("column order does not matter", func(t *testing.T) {
+		a := mustExpr(t, "_tbl_", []string{"x", "b", "Name"}, HashFormBytes)
+		b := mustExpr(t, "_tbl_", []string{"Name", "x", "b"}, HashFormBytes)
+		if a != b {
+			t.Errorf("RowHashExpr() depends on the column order: %q vs %q", a, b)
 		}
 	})
 
 	t.Run("no columns is an error", func(t *testing.T) {
-		// The whole-row value would list the columns in the physical order
-		// instead of the order of the column list.
-		if got, err := RowHashExpr("_tbl_", nil); err == nil {
+		if got, err := RowHashExpr("_tbl_", nil, HashFormBytes); err == nil {
 			t.Errorf("RowHashExpr() = %q, want an error", got)
 		}
 	})
 
-	t.Run("hash does not depend on encoding or byte order", func(t *testing.T) {
-		// convert_to makes the bytes UTF8 on every node; sha256 is defined
-		// on bytes, not on machine words.
-		got := mustExpr(t, "_tbl_", []string{"a"})
-		for _, need := range []string{"convert_to(", "'UTF8'", "sha256("} {
-			if !strings.Contains(got, need) {
-				t.Errorf("RowHashExpr() = %q, want to contain %q", got, need)
-			}
-		}
-		if strings.Contains(got, "hashtext") {
-			t.Errorf("RowHashExpr() = %q, must not use a byte-order dependent hash", got)
+	t.Run("unknown form is an error", func(t *testing.T) {
+		if got, err := RowHashExpr("_tbl_", []string{"a"}, HashForm(7)); err == nil {
+			t.Errorf("RowHashExpr() = %q, want an error", got)
 		}
 	})
 
-	t.Run("no NULL or separator handling in the encoding", func(t *testing.T) {
-		// ROW()::text keeps NULL and '' apart and quotes delimiters itself.
-		// COALESCE or a hand-made separator would bring the collisions back.
-		got := mustExpr(t, "_tbl_", []string{"a", "b"})
-		for _, bad := range []string{"COALESCE", "concat_ws", "'|'"} {
-			if strings.Contains(got, bad) {
-				t.Errorf("RowHashExpr() = %q, must not contain %q", got, bad)
-			}
-		}
-	})
-
-	t.Run("wide table is one row constructor", func(t *testing.T) {
-		// ROW() is not a function call, so the limit of 100 arguments does
-		// not apply to it.
+	t.Run("wide table", func(t *testing.T) {
+		// The columns are joined by an operator, not by function
+		// arguments, so the limit of 100 arguments does not apply.
 		cols := make([]string, 250)
 		for i := range cols {
-			cols[i] = fmt.Sprintf("col%d", i)
+			cols[i] = fmt.Sprintf("col%03d", i)
 		}
-		got := mustExpr(t, "_tbl_", cols)
-		if strings.Count(got, "ROW(") != 1 {
-			t.Errorf("expected one ROW() for 250 columns, got: %s", got)
-		}
-		for _, c := range cols {
-			if !strings.Contains(got, `_tbl_."`+c+`"`) {
-				t.Errorf("missing column %s in %s", c, got)
-			}
+		got := mustExpr(t, "_tbl_", cols, HashFormBytes)
+		if strings.Count(got, "hashtextextended(") != 250 {
+			t.Errorf("expected 250 column hashes, got: %s", got)
 		}
 	})
+}
+
+func TestHashBasis(t *testing.T) {
+	tests := []struct {
+		encodings []string
+		want      string
+	}{
+		{[]string{"UTF8", "UTF8"}, "UTF8"},
+		{[]string{"LATIN1", "LATIN1"}, "LATIN1"},
+		{[]string{"LATIN1", "UTF8"}, "UTF8"},
+		{[]string{"EUC_JP", "LATIN1"}, "UTF8"},
+		{[]string{"SQL_ASCII", "SQL_ASCII"}, "SQL_ASCII"},
+		{[]string{"SQL_ASCII", "LATIN1"}, "LATIN1"},
+		{[]string{"SQL_ASCII", "UTF8", "LATIN1"}, "UTF8"},
+		{[]string{"utf8"}, "UTF8"},
+	}
+	for _, tt := range tests {
+		if got := HashBasis(tt.encodings); got != tt.want {
+			t.Errorf("HashBasis(%v) = %q, want %q", tt.encodings, got, tt.want)
+		}
+	}
+}
+
+func TestHashForms(t *testing.T) {
+	basis, forms, warnings, err := HashForms(map[string]string{"n1": "UTF8", "n2": "EUC_JP", "n3": "SQL_ASCII"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if basis != "UTF8" {
+		t.Errorf("basis = %q", basis)
+	}
+	want := map[string]HashForm{"n1": HashFormBytes, "n2": HashFormUTF8, "n3": HashFormBytes}
+	for n, f := range want {
+		if got, ok := forms[n]; !ok || got != f {
+			t.Errorf("form of %s = %d (present %v), want %d", n, got, ok, f)
+		}
+	}
+	if len(warnings) != 1 || !strings.Contains(warnings[0], "node n2") || !strings.Contains(warnings[0], "EUC_JP") {
+		t.Errorf("warnings = %q", warnings)
+	}
+	if _, err := HashFormFor("UTF8", "LATIN1"); err == nil {
+		t.Error("HashFormFor(UTF8, LATIN1) must fail")
+	}
 }
 
 func TestColExpr(t *testing.T) {
@@ -444,8 +459,6 @@ func TestColExpr(t *testing.T) {
 		{"_tbl_", "id", `_tbl_."id"`},
 		{"", "Name", `"Name"`},
 		{"", `we"ird`, `"we""ird"`},
-		// A numeric column is not wrapped in trim_scale(): 1.5 and 1.50
-		// are different values.
 		{"", "price", `"price"`},
 	}
 	for _, tt := range tests {
@@ -457,19 +470,26 @@ func TestColExpr(t *testing.T) {
 	}
 }
 
-// The row hash must take each column in the same form as the row fetch.
-func TestRowHashExprUsesColExpr(t *testing.T) {
+func TestTextExprAndKeyMatchCond(t *testing.T) {
+	if got := TextExpr("t", "id"); got != `t."id"::text` {
+		t.Errorf("TextExpr() = %q", got)
+	}
+	if got := KeyMatchCond("", "id", "$1::integer"); got != `"id"::text COLLATE "C" = ($1::integer)::text` {
+		t.Errorf("KeyMatchCond() = %q", got)
+	}
+}
+
+// The row hash takes each column as its value::text, the text by which
+// rows are compared and matched.
+func TestRowHashExprUsesTextExpr(t *testing.T) {
 	cols := []string{"id", "price", "prices", "Name"}
-	got, err := RowHashExpr("_tbl_", cols)
+	got, err := RowHashExpr("_tbl_", cols, HashFormBytes)
 	if err != nil {
 		t.Fatalf("RowHashExpr() error = %v", err)
 	}
-	exprs := make([]string, len(cols))
-	for i, c := range cols {
-		exprs[i] = ColExpr("_tbl_", c)
-	}
-	want := "sha256(convert_to(ROW(" + strings.Join(exprs, ", ") + ")::text, 'UTF8'))"
-	if got != want {
-		t.Errorf("RowHashExpr() = %q, want %q", got, want)
+	for _, c := range cols {
+		if !strings.Contains(got, TextExpr("_tbl_", c)+` COLLATE "C"`) {
+			t.Errorf("RowHashExpr() = %q, want %s", got, TextExpr("_tbl_", c))
+		}
 	}
 }

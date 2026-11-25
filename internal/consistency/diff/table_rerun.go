@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/pgedge/ace/db/queries"
 	"github.com/pgedge/ace/internal/consistency/keydiff"
 	auth "github.com/pgedge/ace/internal/infra/db"
 	utils "github.com/pgedge/ace/pkg/common"
@@ -67,6 +68,12 @@ func (t *TableDiffTask) ExecuteRerunTask() error {
 	if !slices.Equal(t.Key, keyOfDiff) {
 		return fmt.Errorf("diff result %s was made with the primary key (%s), but %s has the primary key (%s)",
 			stored.Dir, strings.Join(keyOfDiff, ", "), t.QualifiedTableName, strings.Join(t.Key, ", "))
+	}
+	// The row hashes of the entries must be comparable with the row hashes
+	// that the rerun reads.
+	if m := stored.Manifest; m.HashVersion != queries.CurrentHashVersion || m.HashEncoding != t.hashBasis {
+		return fmt.Errorf("diff result %s was made with hash version %d and basis encoding %q, but this run uses hash version %d and basis encoding %q; run the diff again",
+			stored.Dir, m.HashVersion, m.HashEncoding, queries.CurrentHashVersion, t.hashBasis)
 	}
 
 	ctx := t.Ctx
@@ -168,7 +175,7 @@ func (t *TableDiffTask) rerunPair(ctx context.Context, tbl keydiff.Table, stored
 		if err != nil {
 			return keydiff.Side{}, err
 		}
-		return keydiff.Side{Name: node, Conn: pool, CastTypes: castTypes}, nil
+		return keydiff.Side{Name: node, Conn: pool, CastTypes: castTypes, HashForm: t.hashForms[node]}, nil
 	}
 	s1, err := side(mp.Node1)
 	if err != nil {

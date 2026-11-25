@@ -39,12 +39,13 @@ func setupSlowHashTable(t *testing.T, tableName string) (string, string) {
 	qualified := fmt.Sprintf("%s.%s", testSchema, tableName)
 	funcName := fmt.Sprintf("%s.%s_slow", testSchema, tableName)
 
-	// The block hash query is the only ACE query with the alias _rh_.
+	// The block hash query is the only ACE query that prints the row count
+	// as text, for the sha256 of the block.
 	funcSQL := fmt.Sprintf(`
 CREATE OR REPLACE FUNCTION %s() RETURNS boolean
 LANGUAGE plpgsql VOLATILE AS $f$
 BEGIN
-    IF position('_rh_' in current_query()) > 0 THEN
+    IF position('count(*)::text' in current_query()) > 0 THEN
         PERFORM pg_sleep(%s);
     END IF;
     RETURN true;

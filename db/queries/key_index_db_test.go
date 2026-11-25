@@ -215,7 +215,7 @@ func TestKeyRangeUsesPrimaryKeyIndex(t *testing.T) {
 				"count": fmt.Sprintf("SELECT count(*) FROM ace_ranges_test.%s WHERE %s", tc.table, where),
 			}
 			for _, mode := range []string{"TD_BLOCK_HASH", "MTREE_LEAF_HASH"} {
-				sql, err := BlockHashSQL("ace_ranges_test", tc.table, mode, where, append(append([]string{}, tc.key...), "v"))
+				sql, err := BlockHashSQL("ace_ranges_test", tc.table, mode, where, append(append([]string{}, tc.key...), "v"), HashFormBytes)
 				if err != nil {
 					t.Fatal(err)
 				}
