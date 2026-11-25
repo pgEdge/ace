@@ -207,7 +207,7 @@ func (s *repairSets) empty() bool {
 // modifier when it gets the value, as for any assigned value: a text too
 // long for varchar(n) is an error, not a text cut to fit. A key is found by
 // the same rule as in the diff: the key of the row must be equal to the key
-// value, and both must print the same, byte for byte.
+// value, and both must have the same text, value::text.
 func (t *TableRepairTask) rowStatement(op string, row map[string]any, castTypes map[string]string) (string, []any, error) {
 	table := pgx.Identifier{t.Schema, t.Table}.Sanitize()
 	isKey := make(map[string]bool, len(t.Key))
@@ -269,7 +269,7 @@ func (t *TableRepairTask) rowStatement(op string, row map[string]any, castTypes 
 		}
 		ident := pgx.Identifier{k}.Sanitize()
 		where = append(where, fmt.Sprintf("%s = %s", ident, params[i]),
-			fmt.Sprintf(`format('%%s', %s) COLLATE "C" = format('%%s', %s)`, queries.ColExpr("", k), params[i]))
+			queries.KeyMatchCond("", k, params[i]))
 	}
 	if op == opDelete {
 		return fmt.Sprintf("DELETE FROM %s WHERE %s", table, strings.Join(where, " AND ")), args, nil

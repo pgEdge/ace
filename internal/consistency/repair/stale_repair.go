@@ -132,9 +132,9 @@ func (t *TableRepairTask) filterStaleRepairs(ctx context.Context, tx pgx.Tx, nod
 
 // fetchCommitTimestamps reads the current commit timestamp of the rows on a
 // node, by row key. A row is found by its key, as in the diff: the key of the
-// row must be equal to the key value and both must print the same, byte for
-// byte. A row that is gone, or whose commit timestamp is not known, has no
-// entry in the result.
+// row must be equal to the key value and both must have the same text,
+// value::text. A row that is gone, or whose commit timestamp is not known,
+// has no entry in the result.
 //
 // The keys are a VALUES list. Each key column of each key is the key text in
 // a parameter written as $n::type, which the server reads with the input
@@ -160,7 +160,7 @@ func fetchCommitTimestamps(ctx context.Context, tx pgx.Tx, task *TableRepairTask
 		ident := pgx.Identifier{col}.Sanitize()
 		conds = append(conds,
 			fmt.Sprintf("t.%s = k.k%d", ident, i+1),
-			fmt.Sprintf(`format('%%s', %s) COLLATE "C" = format('%%s', k.k%d)`, queries.ColExpr("t", col), i+1))
+			queries.KeyMatchCond("t", col, fmt.Sprintf("k.k%d", i+1)))
 	}
 
 	pks := make([]string, 0, len(rows))

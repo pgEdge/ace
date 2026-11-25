@@ -103,7 +103,9 @@ type DerivedFields struct {
 //	3: every value of a column of the table is the text that the output
 //	   function of its type gives, as a JSON string, or null for NULL. The
 //	   client does not convert a value to a Go type and back.
-const DiffFormatVersion = 3
+//	4: rows are matched by the value::text of their key columns, not by
+//	   the output of the type, and generated columns are left out.
+const DiffFormatVersion = 4
 
 // DiffOutput holds the structured diff data.
 type DiffOutput struct {

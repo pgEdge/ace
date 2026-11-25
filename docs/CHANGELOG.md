@@ -63,7 +63,7 @@ All notable changes to ACE will be captured in this document. This project follo
   type. Every value of the table in the JSON report and in the block
   files is a JSON string, or `null` for a NULL; a NULL and an empty
   string stay different. Scripts that read numbers or booleans from the
-  report must parse the strings. The report format version is 3.
+  report must parse the strings. The report format version is 4.
   `table-repair` sends each value as this text and the server reads it
   with the type of the column, without the type modifier, so a value is
   never converted to a Go type and back: `numeric` `NaN` and

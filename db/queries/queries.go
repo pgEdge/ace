@@ -304,9 +304,6 @@ func CreateCompositeMtreeTable(ctx context.Context, db DBQuerier, mtreeTable, co
 
 // ColExpr returns the SQL expression that stands for one column wherever ACE
 // reads its value: in the row hash, in the key text and in the row fetch.
-// The column is taken as it is, so its text is the output of its type, and
-// two values are equal only if the server prints them in the same way: 1.5
-// and 1.50 are different values of a numeric column.
 //
 // col is the column name, not quoted. tableAlias may be empty; the column is
 // then not qualified.
@@ -316,6 +313,26 @@ func ColExpr(tableAlias, col string) string {
 		ref = tableAlias + "." + ref
 	}
 	return ref
+}
+
+// TextExpr returns the text of a column as ACE compares values: value::text.
+// Two values are identical when their texts are identical, under the output
+// settings that every connection pins. For a type without a cast to text,
+// the text is the output of the type. For a type with a cast to text, it is
+// that cast, as the author of the type defined it: bpchar 'a' and 'a  ' give
+// the same text and are identical, while numeric 1.5 and 1.50 give different
+// texts and are different.
+func TextExpr(tableAlias, col string) string {
+	return ColExpr(tableAlias, col) + "::text"
+}
+
+// KeyMatchCond returns the condition that the key column col of a row is
+// identical to value, an expression of the type of the column, such as a
+// parameter $n::type. Together with an equality on the column, which lets
+// the server read the primary key index, it finds the row whose key text is
+// the text of value. The "C" collation compares the bytes.
+func KeyMatchCond(tableAlias, col, value string) string {
+	return fmt.Sprintf(`%s COLLATE "C" = (%s)::text`, TextExpr(tableAlias, col), value)
 }
 
 // RowHashExpr returns a SQL expression for the sha256 hash of one row, as a

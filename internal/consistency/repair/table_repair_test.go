@@ -37,7 +37,7 @@ func TestRowStatement(t *testing.T) {
 		"n":      "numeric",
 	}
 	row := map[string]any{"id": "1", "a": "x", "ts_col": "2024-06-15 10:30:00", "n": nil}
-	key := `"id" = $1::integer AND format('%s', "id") COLLATE "C" = format('%s', $1::integer)`
+	key := `"id" = $1::integer AND "id"::text COLLATE "C" = ($1::integer)::text`
 
 	sql, args, err := task.rowStatement(opInsert, row, castTypes)
 	require.NoError(t, err)

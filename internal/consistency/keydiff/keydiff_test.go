@@ -359,7 +359,7 @@ func TestKeyQuery(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{`SELECT "id", "amount", substring(`, `FROM 1 FOR 8)`, `FROM "public"."t" WHERE "id" >= $1`} {
+	for _, want := range []string{`SELECT "id"::text, "amount"::text, substring(`, `FROM 1 FOR 8)`, `FROM "public"."t" WHERE "id" >= $1`} {
 		if !strings.Contains(q, want) {
 			t.Fatalf("key query %q does not contain %q", q, want)
 		}
@@ -399,8 +399,8 @@ func TestReadQuery(t *testing.T) {
 		`"id" = _ace_keys._ace_k1 AND "name" = _ace_keys._ace_k2 AND`,
 		"OFFSET 0",
 		`AS node_origin, "id", "name", "data" FROM`,
-		`format('%s', "id") COLLATE "C" = format('%s', _ace_keys._ace_k1) AND ` +
-			`format('%s', "name") COLLATE "C" = format('%s', _ace_keys._ace_k2)`,
+		`"id"::text COLLATE "C" = (_ace_keys._ace_k1)::text AND ` +
+			`"name"::text COLLATE "C" = (_ace_keys._ace_k2)::text`,
 		"AS _ace_row_hash",
 		`FROM "public"."t" AS _ace_t WHERE`,
 	} {
