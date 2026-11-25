@@ -156,7 +156,8 @@ trap 'exit 129' HUP
 prompt_file="$work/prompt"
 snapshot="$work/tree"
 cwd="$work/cwd"
-if ! mkdir -p "$snapshot" "$cwd"; then
+before="$work/before"
+if ! mkdir -p "$snapshot" "$cwd" "$before"; then
     echo "$SKILL_NAME: cannot create the snapshot directories; commit refused" >&2
     exit 1
 fi
@@ -181,11 +182,12 @@ fi
 # tools follow it, so a link to a path outside the snapshot would let text
 # in the commit have a local file quoted into the report.  Every link is
 # taken out of the snapshot and listed in the prompt with its target, which
-# is all the index holds for it.  One that cannot be removed refuses the
-# commit.
-find "$snapshot" -type l -exec rm -f {} + 2>/dev/null
-if [ -n "$(find "$snapshot" -type l -print 2>/dev/null | head -n 1)" ]; then
-    echo "$SKILL_NAME: a symbolic link could not be removed from the snapshot; commit refused" >&2
+# is all the index holds for it.  A link that cannot be removed, or a scan
+# that fails, refuses the commit, so the reviewer never starts on a snapshot
+# that may still hold one.
+if ! find "$snapshot" -type l -exec rm -f {} + \
+        || ! left="$(find "$snapshot" -type l -print)" || [ -n "$left" ]; then
+    echo "$SKILL_NAME: the symbolic links could not be removed from the snapshot; commit refused" >&2
     exit 1
 fi
 links="$(git -c core.quotepath=off ls-files -s | awk '$1 == "120000"' | while IFS= read -r entry; do
@@ -229,13 +231,10 @@ if [ "$entries" -ne "$lines" ]; then
     echo "$SKILL_NAME: a staged path contains a newline; commit refused" >&2
     exit 1
 fi
-# The paths being deleted.  The snapshot is written from the index, which no
-# longer holds a deleted file, so its pre-image is kept separately for the
-# reviewer where a deletion's diff cannot be included below.  --no-renames
-# means every name-status record is a status then a path; NUL is turned into
-# a newline, as above, since no staged path holds one (checked just now), and
-# BSD awk cannot split on NUL.
-removed="$work/removed"
+# The paths being deleted, to label them below.  --no-renames means every
+# name-status record is a status then a path; NUL is turned into a newline,
+# as above, since no staged path holds one (checked just now), and BSD awk
+# cannot split on NUL.
 git diff --cached --no-renames --name-status -z \
     | LC_ALL=C tr '\0' '\n' \
     | awk 'NR%2==1{s=$0;next} s=="D"{print}' > "$work/deleted"
@@ -262,38 +261,40 @@ LC_ALL=C tr '\0' '\n' < "$work/names" | while IFS= read -r f; do
         used=$((used + n))
         continue
     fi
-    # Diff left out: binary, or past the byte budget.  The snapshot holds the
-    # staged version of a file that still exists, so the reviewer can read it
-    # there; a deleted file is gone from the snapshot, so its pre-image is
-    # written under removed/ so what the commit drops can still be inspected,
-    # and a deletion whose pre-image cannot be written refuses the commit
-    # rather than passing it unreviewed.
-    if grep -Fxq -e "$f" "$work/deleted"; then
-        if ! mkdir -p "$removed/$(dirname "$f")" 2>/dev/null \
-                || ! git cat-file blob "HEAD:$f" > "$removed/$f" 2>/dev/null; then
-            printf '%s\n' "$f" >> "$prompt_file.unsupplied"
-            continue
-        fi
-        if [ "$binary" -eq 1 ]; then
-            printf '%s (deleted, binary; pre-image under removed/)\n' "$f" >> "$prompt_file.omitted"
-        else
-            printf '%s (deleted; removed content under removed/)\n' "$f" >> "$prompt_file.omitted"
-        fi
-    elif [ "$binary" -eq 1 ]; then
-        printf '%s (binary)\n' "$f" >> "$prompt_file.omitted"
-    else
-        printf '%s\n' "$f" >> "$prompt_file.omitted"
-    fi
+    # Diff left out: binary, or past the byte budget.  The snapshot holds
+    # only the staged version, and nothing at all for a deleted file or for
+    # one that became a symbolic link, so what the commit drops or replaces
+    # could not be inspected.  The version in HEAD, when there is one, is
+    # written under before/ for that; an added file has none and is read
+    # from the snapshot alone.  A submodule has no content here to keep.  A
+    # pre-image that cannot be written refuses the commit rather than
+    # passing the change unreviewed.
+    kind=""
+    grep -Fxq -e "$f" "$work/deleted" && kind="deleted"
+    [ "$binary" -eq 1 ] && kind="${kind:+$kind, }binary"
+    mode="$(git --literal-pathspecs ls-tree HEAD -- "$f" 2>/dev/null | awk '{print $1}')"
+    case "$mode" in
+        '') ;;
+        160000) kind="${kind:+$kind, }submodule" ;;
+        *)
+            if ! mkdir -p "$before/$(dirname "$f")" 2>/dev/null \
+                    || ! git cat-file blob "HEAD:$f" > "$before/$f" 2>/dev/null; then
+                printf '%s\n' "$f" >> "$prompt_file.unsupplied"
+                continue
+            fi
+            kind="${kind:+$kind; }pre-image under before/" ;;
+    esac
+    printf '%s%s\n' "$f" "${kind:+ ($kind)}" >> "$prompt_file.omitted"
 done
 if [ -f "$prompt_file.unsupplied" ]; then
-    echo "$SKILL_NAME: a staged change could not be supplied to the reviewer (a path with a newline, or a deleted file whose pre-image could not be read); commit refused" >&2
+    echo "$SKILL_NAME: a staged change could not be supplied to the reviewer (a path with a newline, or a file whose pre-image could not be read); commit refused" >&2
     sed 's/^/  /' "$prompt_file.unsupplied" >&2
     exit 1
 fi
 if [ -f "$prompt_file.omitted" ]; then
     {
         printf '## Files whose diff is not included (too large or binary)\n\n'
-        printf 'Read a file that still exists from the snapshot.  A line marked "under removed/" is a deletion: read its pre-image from the removed/ tree beside the snapshot (%s) to see what the commit drops.\n\n```\n' "$removed"
+        printf 'Read the staged version of a file from the snapshot.  A line marked "pre-image under before/" has the version the commit replaces or deletes at the same path under %s; compare the two to see what the commit drops.\n\n```\n' "$before"
         cat "$prompt_file.omitted"
         printf '```\n'
     } >> "$prompt_file"
@@ -338,7 +339,7 @@ review="$(cd "$cwd" && perl -e '
     my $t = shift; alarm $t; exec @ARGV or die "exec: $!";
 ' "$TIMEOUT_SECS" env -u CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD \
       "$CLAUDE" -p --model "$MODEL" --no-session-persistence \
-      --output-format text --add-dir "$snapshot" --setting-sources user \
+      --output-format text --add-dir "$snapshot" --add-dir "$before" --setting-sources user \
       --permission-mode default --strict-mcp-config $tools_opt \
       --allowedTools Read Grep Glob \
       --disallowedTools Bash Edit Write MultiEdit NotebookEdit Agent Task Skill WebFetch WebSearch \
