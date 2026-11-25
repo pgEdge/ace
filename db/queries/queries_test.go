@@ -493,3 +493,18 @@ func TestRowHashExprUsesTextExpr(t *testing.T) {
 		}
 	}
 }
+
+// TestSortColumns: the order of columns is the byte order of the UTF8
+// names, the same on every node whatever its collation, and the input is
+// not changed.
+func TestSortColumns(t *testing.T) {
+	in := []string{"id", "Zeta", "é", "a b", "_x", "b"}
+	got := SortColumns(in)
+	want := []string{"Zeta", "_x", "a b", "b", "id", "é"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("SortColumns(%q) = %q, want %q", in, got, want)
+	}
+	if in[0] != "id" {
+		t.Fatalf("SortColumns changed its input: %q", in)
+	}
+}

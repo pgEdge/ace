@@ -12,6 +12,13 @@ All notable changes to ACE will be captured in this document. This project follo
   now identical. Keys are matched by the same text. A diff result of an
   earlier ACE is refused by `table-repair` and `table-rerun`: run the diff
   again.
+- **Columns are matched by name.** `table-diff`, `mtree` and
+  `table-repair` compare a table when the nodes have the same columns in
+  another order, for example after `pg_dump` of a table that inherits
+  columns; before, such a table was refused with "schema differs between
+  nodes". The columns are used in the order of their names everywhere,
+  so the report lists them in this order and not in the order of the
+  table. The key columns keep the order of the primary key.
 - **Generated columns are not compared.** They are left out of the hash,
   of the report and of the writes of `table-repair`; the target node
   computes them.

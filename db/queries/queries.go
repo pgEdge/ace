@@ -481,8 +481,7 @@ func RowHashExpr(tableAlias string, cols []string, form HashForm) (string, error
 	if len(cols) == 0 {
 		return "", fmt.Errorf("row hash needs at least one column")
 	}
-	sorted := append([]string(nil), cols...)
-	sort.Strings(sorted)
+	sorted := SortColumns(cols)
 	parts := make([]string, len(sorted))
 	for i, col := range sorted {
 		text := TextExpr(tableAlias, col)
@@ -607,8 +606,25 @@ func GetSimplePrimaryKey(ctx context.Context, db DBQuerier, schema, table string
 	return len(keys) == 1, nil
 }
 
-// GetColumns returns the column names of a table in column order, and the
-// type of each column. A missing table returns no columns and no error.
+// SortColumns returns a copy of cols in the order that ACE uses for the
+// columns of a table on every node: by name, in byte order of the UTF8
+// names. The position of a column in the table is not part of the data:
+// nodes may have the same columns in another order, for example after
+// pg_dump of a table that inherits columns, and logical replication
+// matches columns by name. The sort is done here and not by the server,
+// so it does not depend on the server encoding or collation.
+func SortColumns(cols []string) []string {
+	sorted := append([]string(nil), cols...)
+	sort.Strings(sorted)
+	return sorted
+}
+
+// GetColumns returns the column names of a table sorted by name, and the
+// type of each column. All nodes with the same set of columns return the
+// same list, whatever the position of the columns in the table, so the
+// lists of two nodes are compared with plain equality, and rows are read,
+// hashed, reported and written in one column order on all nodes. A
+// missing table returns no columns and no error.
 //
 // Generated columns are left out. Their values are computed from the other
 // columns, so they are not compared, not hashed and not written by a repair:
@@ -654,7 +670,7 @@ func GetColumns(ctx context.Context, db DBQuerier, schema, table string) ([]stri
 		return nil, nil, nil
 	}
 
-	return columns, types, nil
+	return SortColumns(columns), types, nil
 }
 
 func GetColumnTypes(ctx context.Context, db DBQuerier, schema, table string) (map[string]string, error) {

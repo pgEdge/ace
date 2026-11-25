@@ -323,13 +323,15 @@ Two values are identical for ACE when their `value::text` is identical, under th
 
 Generated columns are not compared: their values are computed from the other columns.
 
+Columns are matched by name. A table is compared when all nodes have the same set of column names and the same primary key. The position of a column in the table is not part of the data: after `pg_dump` and restore, a table that inherits columns from a parent table can have its columns in another order, and logical replication matches columns by name too. ACE sorts the column names in the byte order of their UTF8 text, so the order does not depend on the encoding or the collation of a node, and uses this order everywhere: to compare the column lists of the nodes, to read and hash the rows, in the report and in the writes of `table-repair`. The key columns keep the order of the primary key: blocks are ranges in this order, and the primary key index serves them. A primary key with the same columns in another order is another key, and the table is refused.
+
 ACE does not rely on the OID of a function, a type, an operator or any other object: SQL is built from names, and an OID read from a catalog is used only in the same session of the same node. Columns of type `oid` and of the `reg*` types identify objects of one node, so their comparison between nodes has no meaning.
 
 ### Row and Block Hash
 
 The block hash of `table-diff`, the leaf hash of `mtree` and the row hashes of the key query use one row hash, computed on the server:
 
-1. The columns of the table, without generated columns, are taken in the order of their names, so the physical order of the columns on a node does not matter. `i` is the position of a column in this order, from 1.
+1. The columns of the table, without generated columns, are taken in the order of their names (see the rule of equality above), so the physical order of the columns on a node does not matter. `i` is the position of a column in this order, from 1.
 2. Each value is hashed by the bytes of its `value::text` with the seed `i`: `hashtextextended(c::text COLLATE "C", i)`. The `"C"` collation makes a column with a nondeterministic collation hash its bytes too. A NULL gives a fixed 64-bit constant of its position.
 3. The hashes of the columns are combined with XOR, and the result is hashed once more: `hashint8extended(version, xor)`, with the XOR as the seed and the hash version as the value. `hashint8extended` folds its value to 32 bits but mixes all 64 bits of its seed, so the row hash keeps 64 bits. The row hash is a `bigint`.
 4. The block hash is the `sha256` of the text `count,sum`, where `count` is the number of rows and `sum` is the exact sum of the row hashes (`sum(bigint)` gives a `numeric`, so it does not overflow). An empty block hashes to 32 zero bytes.

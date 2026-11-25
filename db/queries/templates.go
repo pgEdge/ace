@@ -401,9 +401,7 @@ var SQLTemplates = Templates{
 			AND n.nspname = $1
 			AND c.relkind IN ('r', 'p', 'f', 'v')
 			AND a.attnum > 0
-			AND NOT a.attisdropped
-		ORDER BY
-			a.attnum;
+			AND NOT a.attisdropped;
 	`)),
 	// GetCastTypes follows a domain down to its base type, through any
 	// number of domains, and prints the last type with the modifier -1. A
