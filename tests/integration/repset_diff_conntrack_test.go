@@ -26,11 +26,15 @@ import (
 )
 
 // connSnapshot holds a point-in-time reading of ACE connections on a node.
+// Pooled counts client backends (the pools), Walsenders the CDC replication
+// connections. ACEConns is every ACE backend, pooled or not.
 type connSnapshot struct {
-	Time      time.Time
-	Node      string
-	ACEConns  int
-	TotalConn int
+	Time       time.Time
+	Node       string
+	ACEConns   int
+	Pooled     int
+	Walsenders int
+	TotalConn  int
 }
 
 // monitorConnections polls pg_stat_activity on the given pools at the specified
@@ -58,23 +62,27 @@ func monitorConnections(
 
 		sample := func() {
 			for name, pool := range pools {
-				var aceCount, totalCount int
+				var aceCount, pooled, walsenders, totalCount int
 				err := pool.QueryRow(monCtx, `
 					SELECT
 						count(*) FILTER (WHERE application_name = 'ACE') AS ace_conns,
+						count(*) FILTER (WHERE application_name = 'ACE' AND backend_type = 'client backend') AS pooled,
+						count(*) FILTER (WHERE application_name = 'ACE' AND backend_type = 'walsender') AS walsenders,
 						count(*) AS total_conns
 					FROM pg_stat_activity
 					WHERE pid <> pg_backend_pid()
-				`).Scan(&aceCount, &totalCount)
+				`).Scan(&aceCount, &pooled, &walsenders, &totalCount)
 				if err != nil {
 					continue // context cancelled or transient error
 				}
 				mu.Lock()
 				snaps = append(snaps, connSnapshot{
-					Time:      time.Now(),
-					Node:      name,
-					ACEConns:  aceCount,
-					TotalConn: totalCount,
+					Time:       time.Now(),
+					Node:       name,
+					ACEConns:   aceCount,
+					Pooled:     pooled,
+					Walsenders: walsenders,
+					TotalConn:  totalCount,
 				})
 				mu.Unlock()
 			}
