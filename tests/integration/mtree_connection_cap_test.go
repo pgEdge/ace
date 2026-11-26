@@ -13,14 +13,11 @@ package integration
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"math"
 	"os"
 	"path/filepath"
 	"runtime"
-	"sort"
-	"sync"
 	"testing"
 	"time"
 
@@ -36,113 +33,48 @@ import (
 // numbers that mtree computes. These tests check what the database sees:
 // the ACE connections on every node while mtree build, update and
 // table-diff run with several workers.
+//
+// They sample pg_stat_activity with monitorConnections (see
+// repset_diff_conntrack_test.go) and measure the rise above a per-node
+// baseline, so a backend that a slower node has not yet dropped does not
+// count against the phase.
 
 const (
 	connCapRows     = 300000
 	connCapInterval = 10 * time.Millisecond
 	// connCap is the max_connections of TestMtreeMaxConnectionsCapHolds.
 	connCap = 3
+	// connCapSettle lets pg_stat_activity catch up after a phase ends.
+	connCapSettle = 200 * time.Millisecond
 )
 
-// aceConnPeaks is the most ACE connections seen on each node during one
-// phase. Pooled are client backends; walsenders are the replication
-// connections of the CDC drain, which are not part of any pool. Combined is
-// the most of both seen in one sample. Samples counts the successful samples
-// of each node, and errs holds the last error of a sample that failed while
-// the phase was still running.
-type aceConnPeaks struct {
+// connCapPeaks is the most ACE connections a phase added on each node, above
+// the baseline taken before it. pooled are client backends, walsenders the
+// replication connections of the CDC drain. samples counts the readings taken
+// of each node.
+type connCapPeaks struct {
 	pooled     map[string]int
 	walsenders map[string]int
-	combined   map[string]int
 	samples    map[string]int
-	errs       map[string]error
 }
 
-// watchACEConnections samples pg_stat_activity on every node until stop is
-// called, and returns the peaks.
-func watchACEConnections(ctx context.Context, pools map[string]*pgxpool.Pool) (stop func() aceConnPeaks) {
-	peaks := aceConnPeaks{
-		pooled:     map[string]int{},
-		walsenders: map[string]int{},
-		combined:   map[string]int{},
-		samples:    map[string]int{},
-		errs:       map[string]error{},
-	}
-	var mu sync.Mutex
-	watchCtx, cancel := context.WithCancel(ctx)
-	done := make(chan struct{})
-	sample := func() {
-		for name, pool := range pools {
-			var pooled, walsenders int
-			err := pool.QueryRow(watchCtx, `
-				SELECT count(*) FILTER (WHERE backend_type = 'client backend'),
-				       count(*) FILTER (WHERE backend_type = 'walsender')
-				FROM pg_stat_activity
-				WHERE application_name = 'ACE' AND pid <> pg_backend_pid()`).Scan(&pooled, &walsenders)
-			mu.Lock()
-			switch {
-			case err != nil && watchCtx.Err() == nil:
-				peaks.errs[name] = err
-			case err == nil:
-				peaks.pooled[name] = max(peaks.pooled[name], pooled)
-				peaks.walsenders[name] = max(peaks.walsenders[name], walsenders)
-				peaks.combined[name] = max(peaks.combined[name], pooled+walsenders)
-				peaks.samples[name]++
-			}
-			// An error after stop is the cancelled context, not a failure.
-			mu.Unlock()
-		}
-	}
-	go func() {
-		defer close(done)
-		ticker := time.NewTicker(connCapInterval)
-		defer ticker.Stop()
-		for {
-			sample()
-			select {
-			case <-watchCtx.Done():
-				return
-			case <-ticker.C:
-			}
-		}
-	}()
-	return func() aceConnPeaks {
-		cancel()
-		<-done
-		mu.Lock()
-		defer mu.Unlock()
-		return peaks
-	}
-}
-
-// threeNodeCluster writes an ACE cluster file with n1, n2 and n3 and returns
-// its cluster name. The cluster file of the other tests has n1 and n2 only.
-// The cap needs a third node: a node in two node pairs is where the diff used
-// to open more pools than the cap allowed. With two nodes, W compare workers
-// and the traversal use exactly W + 1 connections, so the old code also held.
-func threeNodeCluster(t *testing.T) string {
-	t.Helper()
-	const name = "test_cluster_3n"
-	data, err := os.ReadFile(pgCluster.ClusterName + ".json")
-	require.NoError(t, err)
-	var cluster types.ClusterConfig
-	require.NoError(t, json.Unmarshal(data, &cluster))
-	require.Len(t, cluster.NodeGroups, 2)
-	n3 := cluster.NodeGroups[1]
-	n3.Name = serviceN3
-	n3.PublicIP = pgCluster.Node3Host
-	n3.Port = pgCluster.Node3Port
-	cluster.NodeGroups = append(cluster.NodeGroups, n3)
-	cluster.ClusterName = name
-	data, err = json.MarshalIndent(cluster, "", "  ")
-	require.NoError(t, err)
-	require.NoError(t, os.WriteFile(name+".json", data, 0o600))
-	t.Cleanup(func() { os.Remove(name + ".json") })
-	return name
+// aceConnBreakdown reads the ACE connections on one node, split into pooled
+// client backends and the walsenders of the CDC drain.
+func aceConnBreakdown(ctx context.Context, pool *pgxpool.Pool) (pooled, walsenders int, err error) {
+	err = pool.QueryRow(ctx, `
+		SELECT count(*) FILTER (WHERE backend_type = 'client backend'),
+		       count(*) FILTER (WHERE backend_type = 'walsender')
+		FROM pg_stat_activity
+		WHERE application_name = 'ACE' AND pid <> pg_backend_pid()`).Scan(&pooled, &walsenders)
+	return pooled, walsenders, err
 }
 
 // connCapEnv sets up a table on all three nodes and a Merkle tree task with
 // max_cpu_ratio 1.0, so that without a cap mtree runs one worker per CPU.
+// The cap tests need a third node. A node in two node pairs (n1/n2 and n2/n3)
+// is where the diff used to open more pools than the cap allowed. With two
+// nodes the diff stays at one connection per worker plus one, which the old
+// code also held.
 type connCapEnv struct {
 	env       *testEnv
 	pools     map[string]*pgxpool.Pool
@@ -150,13 +82,18 @@ type connCapEnv struct {
 	table     string
 	qualified string
 	task      *mtree.MerkleTreeTask
+	// Baseline ACE connections per node, taken after init. Each phase
+	// measures the rise above this.
+	basePooled     map[string]int
+	baseWalsenders map[string]int
+	baseTotal      map[string]int
 }
 
 // newConnCapEnv creates table with connCapRows equal rows on n1, n2 and n3,
 // and a Merkle tree task for it on the three-node cluster with
 // max_cpu_ratio 1.0 and the given max_connections (0 means no cap). It runs
-// the checks and mtree init, and tears the tree and the table down when the
-// test ends.
+// the checks and mtree init, records the baseline connections, and tears the
+// tree and the table down when the test ends.
 func newConnCapEnv(t *testing.T, ctx context.Context, table string, maxConnections int) *connCapEnv {
 	t.Helper()
 	env := newSpockEnv()
@@ -177,6 +114,7 @@ func newConnCapEnv(t *testing.T, ctx context.Context, table string, maxConnectio
 		for _, f := range files {
 			os.Remove(f)
 		}
+		removeDiffResults(t, c.qualified)
 	})
 	for _, pool := range c.pools {
 		_, err := pool.Exec(ctx, "CREATE TABLE IF NOT EXISTS "+ident+" (id int PRIMARY KEY, payload text)") // nosemgrep
@@ -192,7 +130,7 @@ func newConnCapEnv(t *testing.T, ctx context.Context, table string, maxConnectio
 	}
 
 	c.task = env.newMerkleTreeTask(t, c.qualified, c.nodes)
-	c.task.ClusterName = threeNodeCluster(t)
+	c.task.ClusterName = writeThreeNodeClusterConfig(t, env)
 	c.task.MaxCpuRatio = 1.0
 	c.task.MaxConnections = maxConnections
 	c.task.Ctx = ctx
@@ -203,25 +141,46 @@ func newConnCapEnv(t *testing.T, ctx context.Context, table string, maxConnectio
 			t.Logf("MtreeTeardown cleanup: %v", err)
 		}
 	})
+
+	c.basePooled = map[string]int{}
+	c.baseWalsenders = map[string]int{}
+	c.baseTotal = map[string]int{}
+	for node, pool := range c.pools {
+		pooled, walsenders, err := aceConnBreakdown(ctx, pool)
+		require.NoError(t, err)
+		c.basePooled[node] = pooled
+		c.baseWalsenders[node] = walsenders
+		c.baseTotal[node] = pooled + walsenders
+	}
 	return c
 }
 
-// run runs one mtree phase while it watches the connections on every node.
-func (c *connCapEnv) run(t *testing.T, ctx context.Context, phase string, fn func() error) aceConnPeaks {
+// run runs one mtree phase while it watches the connections on every node,
+// and returns the peak rise above the baseline.
+func (c *connCapEnv) run(t *testing.T, ctx context.Context, phase string, fn func() error) connCapPeaks {
 	t.Helper()
-	stop := watchACEConnections(ctx, c.pools)
+	// Wait for the previous phase to drain back to the baseline first, so a
+	// backend it has not dropped yet does not count against this phase.
+	waitForACEConns(t, ctx, c.pools, c.baseTotal)
+
+	snapshots, stop := monitorConnections(ctx, c.pools, connCapInterval)
 	err := fn()
-	peaks := stop()
+	stop()
+	time.Sleep(connCapSettle)
 	require.NoError(t, err, phase)
-	// A node without a sample would be left out of requireAtMost, so the
-	// cap would go unchecked on it.
+
+	peaks := connCapPeaks{pooled: map[string]int{}, walsenders: map[string]int{}, samples: map[string]int{}}
+	for _, s := range *snapshots {
+		peaks.pooled[s.Node] = max(peaks.pooled[s.Node], s.Pooled-c.basePooled[s.Node])
+		peaks.walsenders[s.Node] = max(peaks.walsenders[s.Node], s.Walsenders-c.baseWalsenders[s.Node])
+		peaks.samples[s.Node]++
+	}
+	// A node without a sample would be left out of requireAtMost, so the cap
+	// would go unchecked on it.
 	for node := range c.pools {
-		require.NotZero(t, peaks.samples[node], "%s: no pg_stat_activity sample from %s (last error: %v)", phase, node, peaks.errs[node])
+		require.NotZero(t, peaks.samples[node], "%s: no pg_stat_activity sample from %s", phase, node)
 	}
-	t.Logf("%s: peak pooled ACE connections per node %v, walsenders %v, both at once %v, samples %v", phase, peaks.pooled, peaks.walsenders, peaks.combined, peaks.samples)
-	if len(peaks.errs) > 0 {
-		t.Logf("%s: some pg_stat_activity samples failed: %v", phase, peaks.errs)
-	}
+	t.Logf("%s: peak pooled ACE connections above baseline per node %v, walsenders %v, samples %v", phase, peaks.pooled, peaks.walsenders, peaks.samples)
 	return peaks
 }
 
@@ -243,33 +202,39 @@ func (c *connCapEnv) diverge(t *testing.T, ctx context.Context) (changed []int) 
 
 // requireDiffFound checks that the diff reported every changed row in both
 // pairs with n2 and nothing for n1/n3, so that the capped and the uncapped
-// runs are both still correct.
+// runs are both still correct. The diff writes its rows to a report, so the
+// result is read back with diffPairs, not from memory. Pair keys follow the
+// cluster-node order, so a pair is looked up under either ordering.
 func (c *connCapEnv) requireDiffFound(t *testing.T, changed []int) {
 	t.Helper()
-	pairKey := func(a, b string) string {
-		pair := []string{a, b}
-		sort.Strings(pair)
-		return pair[0] + "/" + pair[1]
+	pairs := diffPairs(t, c.task)
+	findPair := func(a, b string) (types.DiffByNodePair, bool) {
+		if d, ok := pairs[a+"/"+b]; ok {
+			return d, true
+		}
+		d, ok := pairs[b+"/"+a]
+		return d, ok
 	}
 	n1, n2, n3 := c.env.ServiceN1, c.env.ServiceN2, c.env.ServiceN3
 	for _, other := range []string{n1, n3} {
-		pair, ok := c.task.DiffResult.NodeDiffs[pairKey(n2, other)]
-		require.True(t, ok, "no diff for %s", pairKey(n2, other))
-		require.Equal(t, changed, extractDiffIDs(pair.Rows[n2]), "rows of n2 in %s", pairKey(n2, other))
-		require.Equal(t, changed, extractDiffIDs(pair.Rows[other]), "rows of %s in %s", other, pairKey(n2, other))
+		pair, ok := findPair(n2, other)
+		require.True(t, ok, "no diff for n2/%s; result: %+v", other, pairs)
+		require.Equal(t, changed, extractDiffIDs(pair.Rows[n2]), "rows of n2 vs %s", other)
+		require.Equal(t, changed, extractDiffIDs(pair.Rows[other]), "rows of %s vs n2", other)
 	}
-	if pair, ok := c.task.DiffResult.NodeDiffs[pairKey(n1, n3)]; ok {
+	if pair, ok := findPair(n1, n3); ok {
 		require.Empty(t, pair.Rows[n1], "n1 and n3 hold the same rows")
 		require.Empty(t, pair.Rows[n3], "n1 and n3 hold the same rows")
 	}
 }
 
-// requireAtMost checks the pooled connections of every node against limit.
-// The walsenders are checked separately: they are not pooled.
-func requireAtMost(t *testing.T, phase string, peaks aceConnPeaks, limit int) {
+// requireAtMost checks the pooled connections a phase added against limit.
+// The walsenders are checked separately: they are not pooled, and the CDC
+// drain needs one per node.
+func requireAtMost(t *testing.T, phase string, peaks connCapPeaks, limit int) {
 	t.Helper()
 	for node, n := range peaks.pooled {
-		require.LessOrEqual(t, n, limit, "%s: %d pooled ACE connections on %s, limit %d", phase, n, node, limit)
+		require.LessOrEqual(t, n, limit, "%s: %d pooled ACE connections above baseline on %s, limit %d", phase, n, node, limit)
 	}
 	for node, n := range peaks.walsenders {
 		require.LessOrEqual(t, n, 1, "%s: %d ACE walsenders on %s; the CDC drain needs one per node", phase, n, node)
@@ -278,7 +243,7 @@ func requireAtMost(t *testing.T, phase string, peaks aceConnPeaks, limit int) {
 
 // TestMtreeMaxConnectionsCapHolds runs mtree build, update and table-diff on
 // three nodes with one worker per CPU but max_connections = 3. No node may
-// see more than 3 pooled ACE connections in any phase, and the diff must
+// add more than 3 pooled ACE connections in any phase, and the diff must
 // still find every changed row.
 func TestMtreeMaxConnectionsCapHolds(t *testing.T) {
 	ctx := context.Background()
