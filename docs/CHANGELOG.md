@@ -147,6 +147,11 @@ All notable changes to ACE will be captured in this document. This project follo
   `table-rerun` do not read a diff report of an earlier ACE. A table with
   a `numeric` column can show new differences: values that differ only in
   their trailing zeros.
+- **Check `postgres.max_parallel_workers_per_gather` in `ace.yaml`.** A
+  settings file made by `ace config init` of an earlier version has
+  `max_parallel_workers_per_gather: 0`, and ACE keeps sending this value.
+  Remove the line to let the server and the planner decide on parallel
+  workers.
 - `compare_unit_size` (`--compare-unit-size` / `-u`, the HTTP API field,
   the scheduler job argument and `table_diff.compare_unit_size` in the
   settings file) is no longer used. ACE still accepts it, ignores it and
@@ -226,6 +231,22 @@ All notable changes to ACE will be captured in this document. This project follo
   `mtree table-diff`.
 
 ### Changed
+- **ACE connections no longer set `max_parallel_workers_per_gather = 0`
+  by default.** The server setting and the planner decide on parallel
+  workers, so a hash query can use the cores that the workers of ACE
+  leave idle. These workers come from `max_parallel_workers` of the
+  server. `postgres.max_parallel_workers_per_gather` in `ace.yaml` still
+  sends a value of `0` or more; with no value or a negative one ACE sends
+  nothing.
+- **ACE connections set `enable_seqscan = off`.** On a table with no
+  planner statistics, the first and the last block of `table-diff` and of
+  `mtree build` have one bound, and the planner could read each of them
+  with a sequential scan of the whole table. ACE now sends
+  `enable_seqscan = off` on every connection, unless the new option
+  `postgres.enable_seqscan` in `ace.yaml` is `true`. Every query of ACE on
+  a user table selects rows by the primary key, and the setting
+  discourages the planner from using a sequential scan when an index scan
+  of the key is available; it does not forbid one.
 - **mtree commands stop when a primary key column has another collation
   on a node, and table-diff warns.** The collation decides the order of the
   key, and the blocks are key ranges. mtree builds its leaves and the

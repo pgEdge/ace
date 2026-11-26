@@ -578,6 +578,10 @@ func setClientCheckInterval(cfg *pgconn.Config, ms int) {
 	}
 }
 
+// applyRuntimeParams adds to params the session settings of pgCfg that ACE
+// sends in the startup packet of every connection. A value sent this way
+// has priority over ALTER ROLE and ALTER DATABASE settings and needs no
+// extra round trip.
 func applyRuntimeParams(params map[string]string, pgCfg config.PostgresConfig) {
 	params["statement_timeout"] = strconv.Itoa(pgCfg.StatementTimeout)
 	if pgCfg.ApplicationName != "" {
@@ -593,15 +597,20 @@ func applyRuntimeParams(params map[string]string, pgCfg config.PostgresConfig) {
 		params["tcp_keepalives_count"] = strconv.Itoa(*pgCfg.TCPKeepalivesCount)
 	}
 
-	// ACE parallelises its hash queries on the client side, so by default it
-	// keeps Postgres from adding parallel workers to each one as well. Without
-	// this, every ACE worker could occupy several server cores.
-	parallelWorkers := 0
-	if pgCfg.MaxParallelWorkersPerGather != nil {
-		parallelWorkers = *pgCfg.MaxParallelWorkersPerGather
+	// By default the server setting and the cost model decide on parallel
+	// workers: they use the cores that the client-side workers of ACE leave
+	// idle.
+	if w := pgCfg.MaxParallelWorkersPerGather; w != nil && *w >= 0 {
+		params["max_parallel_workers_per_gather"] = strconv.Itoa(*w)
 	}
-	if parallelWorkers >= 0 {
-		params["max_parallel_workers_per_gather"] = strconv.Itoa(parallelWorkers)
+
+	// Every query of ACE on a user table selects rows by the primary key.
+	// With no statistics, a range with one bound is estimated as a third of
+	// the table, and the planner can read the whole table with a sequential
+	// scan to return one block. An index or bitmap scan reads only the rows
+	// of the range, whatever the estimate.
+	if !pgCfg.EnableSeqscan {
+		params["enable_seqscan"] = "off"
 	}
 
 	// Suppress Spock's DDL replication and auto-repset-add behaviour on

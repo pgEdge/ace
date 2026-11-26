@@ -169,21 +169,38 @@ func TestConfigsGetValidateHook(t *testing.T) {
 
 func intPtr(v int) *int { return &v }
 
-// ACE already runs its hash queries from several client-side workers, so by
-// default it stops Postgres from adding parallel workers on top of that.
-func TestRuntimeParamsDisableParallelQueryByDefault(t *testing.T) {
-	params := map[string]string{}
-	applyRuntimeParams(params, config.PostgresConfig{})
-	if got := params["max_parallel_workers_per_gather"]; got != "0" {
-		t.Fatalf("max_parallel_workers_per_gather = %q, want \"0\"", got)
+// TestRuntimeParamsPlannerSettings checks the planner settings in the
+// startup packet: enable_seqscan is off unless the config asks for the
+// server setting, and max_parallel_workers_per_gather is sent only when the
+// config sets it to 0 or more.
+func TestRuntimeParamsPlannerSettings(t *testing.T) {
+	cases := []struct {
+		name         string
+		cfg          config.PostgresConfig
+		wantSeqscan  string // "" means not sent
+		wantParallel string // "" means not sent
+	}{
+		{"defaults", config.PostgresConfig{}, "off", ""},
+		{"server seqscan setting", config.PostgresConfig{EnableSeqscan: true}, "", ""},
+		{"parallel workers 0", config.PostgresConfig{MaxParallelWorkersPerGather: intPtr(0)}, "off", "0"},
+		{"parallel workers 2", config.PostgresConfig{MaxParallelWorkersPerGather: intPtr(2)}, "off", "2"},
+		{"negative parallel workers", config.PostgresConfig{MaxParallelWorkersPerGather: intPtr(-1)}, "off", ""},
 	}
-}
-
-func TestRuntimeParamsHonourConfiguredParallelWorkers(t *testing.T) {
-	params := map[string]string{}
-	applyRuntimeParams(params, config.PostgresConfig{MaxParallelWorkersPerGather: intPtr(2)})
-	if got := params["max_parallel_workers_per_gather"]; got != "2" {
-		t.Fatalf("max_parallel_workers_per_gather = %q, want \"2\"", got)
+	for _, tc := range cases {
+		params := map[string]string{}
+		applyRuntimeParams(params, tc.cfg)
+		for _, c := range []struct{ name, want string }{
+			{"enable_seqscan", tc.wantSeqscan},
+			{"max_parallel_workers_per_gather", tc.wantParallel},
+		} {
+			got, ok := params[c.name]
+			switch {
+			case c.want == "" && ok:
+				t.Errorf("%s: %s = %q, want it not sent", tc.name, c.name, got)
+			case c.want != "" && got != c.want:
+				t.Errorf("%s: %s = %q, want %q", tc.name, c.name, got, c.want)
+			}
+		}
 	}
 }
 
@@ -250,15 +267,6 @@ func TestSetClientCheckIntervalKeepsPreviousHook(t *testing.T) {
 	setClientCheckInterval(cfg, 5000)
 	if err := cfg.AfterConnect(context.Background(), nil); !errors.Is(err, prevErr) {
 		t.Fatalf("got %v, want the error of the previous hook", err)
-	}
-}
-
-// A negative value means "leave the server's own setting alone".
-func TestRuntimeParamsNegativeLeavesServerDefault(t *testing.T) {
-	params := map[string]string{}
-	applyRuntimeParams(params, config.PostgresConfig{MaxParallelWorkersPerGather: intPtr(-1)})
-	if _, ok := params["max_parallel_workers_per_gather"]; ok {
-		t.Fatalf("expected max_parallel_workers_per_gather to be unset, got %q", params["max_parallel_workers_per_gather"])
 	}
 }
 

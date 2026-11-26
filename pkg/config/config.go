@@ -47,11 +47,16 @@ type PostgresConfig struct {
 	TCPKeepalivesIdle     *int   `yaml:"tcp_keepalives_idle"`     // s
 	TCPKeepalivesInterval *int   `yaml:"tcp_keepalives_interval"` // s
 	TCPKeepalivesCount    *int   `yaml:"tcp_keepalives_count"`
-	// MaxParallelWorkersPerGather is sent as a session setting on every ACE
-	// connection. ACE already runs its hash queries from several client-side
-	// workers, so unset (or 0) stops Postgres from adding parallel workers
-	// on top of that. A negative value leaves the server's setting alone.
+	// MaxParallelWorkersPerGather, if set to 0 or more, is sent as a session
+	// setting on every ACE connection. Unset or negative leaves the server's
+	// setting in place, and the planner decides on parallel workers.
 	MaxParallelWorkersPerGather *int `yaml:"max_parallel_workers_per_gather"`
+	// EnableSeqscan false (the default) sends enable_seqscan = off on every
+	// ACE connection. ACE reads user tables by ranges of the primary key, and
+	// with poor statistics the planner can choose a sequential scan of the
+	// whole table for a small range. True leaves the server's setting in
+	// place.
+	EnableSeqscan bool `yaml:"enable_seqscan"`
 	// ClientConnectionCheckInterval is set as client_connection_check_interval
 	// (ms) on every ACE connection. Unset means 5000. A negative value leaves
 	// the server's setting alone.

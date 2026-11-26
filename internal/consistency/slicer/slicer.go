@@ -712,10 +712,11 @@ func (c *cutter) send(ctx context.Context, b Block) error {
 	return nil
 }
 
-// chunkPlanGuard makes the planner read the primary-key index in order.
-// Without it, a selective filter can make it choose a sequential scan and a
-// sort, and then every jump of a chunk reads the whole table.
-const chunkPlanGuard = "SET LOCAL enable_seqscan = off; SET LOCAL enable_sort = off"
+// chunkPlanGuard discourages the planner from reading a chunk with a scan
+// and a sort. With a selective filter it can choose such a plan, and then
+// every jump of a chunk reads the whole table. The guard also works when
+// the session allows a sequential scan.
+const chunkPlanGuard = "SET LOCAL enable_sort = off"
 
 // beginCut starts the transaction of one cutting worker on q: read-only,
 // REPEATABLE READ, with the plan guard. All queries of the worker see the
