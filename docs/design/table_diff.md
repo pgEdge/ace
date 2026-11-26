@@ -129,9 +129,10 @@ the number and the size of blocks do not depend on it. The code is in
    can make any block larger.
 
    Every cutting worker has its own connection and cuts all its parts in
-   one read-only `REPEATABLE READ` transaction, with `enable_seqscan` and
-   `enable_sort` off; otherwise, with a selective filter, the planner can
-   choose a sequential scan and a sort for every jump. The first chunk of a
+   one read-only `REPEATABLE READ` transaction, with `enable_sort` off;
+   otherwise, with a selective filter, the planner can choose a scan and a
+   sort for every jump. Turning the sort off discourages such a plan,
+   whatever the value of `postgres.enable_seqscan`. The first chunk of a
    part cuts one block; each next chunk cuts twice as many, up to about one
    million rows, so the first block is ready at once. While a worker runs,
    the anchor node cannot vacuum rows that became dead after its

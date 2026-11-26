@@ -18,11 +18,16 @@ postgres:
   tcp_keepalives_idle: 30        # seconds
   tcp_keepalives_interval: 10    # seconds
   tcp_keepalives_count: 5
-  # Sent as a session setting on every ACE connection. ACE already runs its
-  # hash queries from several client-side workers, so 0 (the default) stops
-  # Postgres from adding parallel workers to each of them. Set to -1 to leave
-  # the server's own setting in place.
-  max_parallel_workers_per_gather: 0
+  # Not sent by default: the server setting and the planner decide on
+  # parallel workers for each query. Set to 0 or more to send this value on
+  # every ACE connection, for example 0 to make the load of ACE depend on
+  # max_connections only.
+  # max_parallel_workers_per_gather: 0
+  # false (the default) sends enable_seqscan = off on every ACE connection.
+  # The setting discourages the planner from reading the whole table with a
+  # sequential scan for a range of the primary key; it does not forbid one.
+  # Set to true to leave the server's own setting in place.
+  enable_seqscan: false
   # Set on every ACE connection (ms). If ACE stops without closing its
   # connections, a backend in a long query finds the lost client within
   # this time and stops the query. Set to -1 to leave the server's own

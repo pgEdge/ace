@@ -488,7 +488,9 @@ func TestPartitionedWithoutStatistics(t *testing.T) {
 
 // TestCutPlanUsesIndex checks that with the plan guard a cutting query with
 // a selective filter reads the primary-key index. Without the guard the
-// planner may prefer a sequential scan and a sort for every jump.
+// planner may prefer a sequential scan and a sort for every jump. The
+// session allows a sequential scan, as with enable_seqscan: true in
+// ace.yaml.
 func TestCutPlanUsesIndex(t *testing.T) {
 	pool := testPool(t)
 	ctx := context.Background()
@@ -509,6 +511,9 @@ func TestCutPlanUsesIndex(t *testing.T) {
 			t.Errorf("rollback: %v", err)
 		}
 	}()
+	if _, err := tx.Exec(ctx, "SET LOCAL enable_seqscan = on"); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := tx.Exec(ctx, chunkPlanGuard); err != nil {
 		t.Fatal(err)
 	}
