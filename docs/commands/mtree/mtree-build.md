@@ -25,7 +25,7 @@ Builds a Merkle tree for a table on all nodes (after `mtree init`).
 | `--analyse` | `-a` | Run `ANALYZE` before build | `false` |
 | `--recreate-objects` | `-R` | Drop & recreate Merkle objects | `false` |
 | `--write-ranges` | `-w` | Write computed ranges JSON | `false` |
-| `--ranges-file` | `-k` | Use pre-computed block ranges |  |
+| `--ranges-file` | `-k` | Use pre-computed block ranges. Each block must start where the block before it ends and not after its own end, and only the last block may have no end, as `--write-ranges` writes them |  |
 | `--quiet` | `-q` | Suppress output | `false` |
 | `--debug` | `-v` | Debug logging | `false` |
 

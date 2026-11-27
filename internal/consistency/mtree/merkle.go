@@ -620,6 +620,18 @@ func renumberBlockRanges(ranges []types.BlockRange) bool {
 	return changed
 }
 
+// leafOutOfOrderError reports a leaf of a new tree that does not follow the
+// leaf before it.
+func (m *MerkleTreeTask) leafOutOfOrderError(pos int64) error {
+	src := ""
+	if m.RangesFile != "" {
+		src = fmt.Sprintf(" (the ranges come from %s)", m.RangesFile)
+	}
+	return fmt.Errorf("leaf %d of the new tree does not follow the leaf before it%s: "+
+		"each leaf must start where the leaf before it ends and not after its own end, "+
+		"and only the last leaf may have no end", pos, src)
+}
+
 func (m *MerkleTreeTask) MtreeInit() (err error) {
 	recorder, start := m.startLifecycle(taskstore.TaskTypeMtreeInit, nil)
 	defer func() {
@@ -2928,10 +2940,27 @@ func (m *MerkleTreeTask) hashBlocksOnNodes(ctx context.Context, pools map[string
 }
 
 // insertBlockRanges adds the ranges of the leaves on a node with the cast
-// types castTypes.
+// types castTypes, and checks that the leaves follow each other. CDC takes
+// the leaf of a key as the leaf with the largest start that is not greater
+// than the key, which is the leaf that holds the key only when the leaves
+// follow each other. Ranges from a file are not checked anywhere else.
 func (m *MerkleTreeTask) insertBlockRanges(conn queries.DBQuerier, castTypes map[string]string, ranges []types.BlockRange) error {
 	mtreeTable := pgx.Identifier{m.aceSchema(), fmt.Sprintf("ace_mtree_%s_%s", m.Schema, m.Table)}.Sanitize()
-	return queries.InsertBlockRanges(m.Ctx, conn, mtreeTable, m.Key, castTypes, ranges)
+	if err := queries.InsertBlockRanges(m.Ctx, conn, mtreeTable, m.Key, castTypes, ranges); err != nil {
+		return err
+	}
+	collations, err := queries.GetCollations(m.Ctx, conn, m.Schema, m.Table)
+	if err != nil {
+		return fmt.Errorf("failed to get the collations of the key: %w", err)
+	}
+	pos, found, err := queries.FindLeafOutOfOrder(m.Ctx, conn, mtreeTable, m.Key, !m.SimplePrimaryKey, collations)
+	if err != nil {
+		return err
+	}
+	if found {
+		return m.leafOutOfOrderError(pos)
+	}
+	return nil
 }
 
 // dropLegacyXOROperators drops the # operator earlier ACE versions built on

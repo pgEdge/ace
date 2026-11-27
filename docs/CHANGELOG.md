@@ -237,6 +237,11 @@ All notable changes to ACE will be captured in this document. This project follo
   small transactions `mtree update` and `mtree listen` could fall behind
   the slot. A tree built by an earlier ACE gets the index on the next CDC
   drain that has changes to apply, for every tree of the node.
+- `mtree build` checks that the leaves of the new tree follow each other:
+  each leaf must start where the leaf before it ends and not after its own
+  end, and only the last leaf may have no end. The bounds are compared as
+  values of the key type. A `--ranges-file` with gaps, overlaps or
+  decreasing bounds now stops the build with an error.
 - **mtree commands stop when a primary key column has another collation
   on a node, and table-diff warns.** The collation decides the order of the
   key, and the blocks are key ranges. mtree builds its leaves and the

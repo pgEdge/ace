@@ -86,6 +86,7 @@ type Templates struct {
 	MtreeLeafIndexState       *template.Template
 	LockMtreeTableForIndex    *template.Template
 	ListTreesWithoutLeafIndex *template.Template
+	FindLeafOutOfOrder        *template.Template
 	CreateCompositeType       *template.Template
 	DropCompositeType         *template.Template
 	CreateCompositeMtreeTable *template.Template
@@ -1248,6 +1249,33 @@ var SQLTemplates = Templates{
 	// sessions cannot both find the index missing and both create it.
 	LockMtreeTableForIndex: template.Must(template.New("lockMtreeTableForIndex").Parse(`
 		LOCK TABLE {{.MtreeTable}} IN SHARE ROW EXCLUSIVE MODE
+	`)),
+	// Returns the position of the first leaf that does not follow the leaf
+	// before it, in the order of node_position: each leaf must start where
+	// the leaf before it ends and not after its own end, and only the last
+	// leaf may have no end. The comparisons use the type of the key, so 1.0
+	// and 1.00 of a numeric key are the same bound. StartKey, EndKey and
+	// PrevKey (the end of the leaf before) are the bounds with the collation
+	// of each key column, because the columns of the tree table do not have
+	// it. With a nondeterministic collation, two bounds that differ only in
+	// bytes are the same bound.
+	FindLeafOutOfOrder: template.Must(template.New("findLeafOutOfOrder").Parse(`
+		SELECT node_position
+		FROM (
+			SELECT node_position, range_start, range_end,
+				lag(range_end) OVER w AS prev_end,
+				lag(node_position) OVER w IS NULL AS is_first,
+				lead(node_position) OVER w IS NULL AS is_last
+			FROM {{.MtreeTable}}
+			WHERE node_level = 0
+			WINDOW w AS (ORDER BY node_position)
+		) s
+		WHERE (NOT is_first AND
+				(prev_end IS NULL OR {{.StartKey}} IS DISTINCT FROM {{.PrevKey}}))
+			OR (is_last AND range_end IS NOT NULL)
+			OR {{.StartKey}} > {{.EndKey}}
+		ORDER BY node_position
+		LIMIT 1
 	`)),
 	// $1 is the quoted name of the schema of the trees. Returns the tables
 	// whose tree table exists and has no leaf index.
