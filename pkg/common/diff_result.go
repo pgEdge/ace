@@ -493,8 +493,7 @@ func (w *DiffResultWriter) Finish(ctx context.Context, m DiffResultManifest, o D
 	for _, p := range m.Pairs {
 		logger.Warn("Found %d differences between %s", p.Total(), p.Pair)
 	}
-	logger.Info("Diff result written to %s", paths.Dir)
-	logger.Info("Diff report written to %s", paths.JSON)
+	logger.Info("Diff written to %s (JSON report: %s)", paths.Dir, paths.JSON)
 
 	if strings.EqualFold(o.Format, "html") {
 		r := &StoredDiff{Dir: paths.Dir, Manifest: m}
