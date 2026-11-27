@@ -60,7 +60,7 @@ Analysing mismatches: 2 / 2 [===================================================
 2025/07/22 12:03:53 WARN ✘ TABLES DO NOT MATCH
 2025/07/22 12:03:53 WARN Found 99 differences between n1/n2
 2025/07/22 12:03:53 WARN Found 99 differences between n2/n3
-2025/07/22 12:03:53 INFO Diff report written to public_customers_large_diffs-20250722120353.json
+2025/07/22 12:03:53 INFO Diff written to public_customers_large_diffs-20250722120353 (JSON report: public_customers_large_diffs-20250722120353.json)
 ```
 
 ## Sample Output (no differences)
