@@ -23,6 +23,9 @@ import (
 // rows or changed keys to leaves must follow the same rule. Otherwise a key
 // on the bound goes to two leaves: CDC marks both dirty and counts the
 // change twice, and the row counts used for merges count the row twice.
+// The CDC lookup is not listed: it does not read range_end, and it takes the
+// leaf with the largest range_start that is not greater than the key, which
+// for a key equal to a range_end is the next leaf.
 func TestLeafTemplatesExcludeRangeEnd(t *testing.T) {
 	simpleKey := []string{`"id"`}
 	compositeKey := []string{`"a"`, `"b"`}
@@ -49,10 +52,6 @@ func TestLeafTemplatesExcludeRangeEnd(t *testing.T) {
 		tmpl *template.Template
 		data map[string]any
 	}{
-		{"UpdateMtreeCounters/simple", SQLTemplates.UpdateMtreeCounters,
-			data(map[string]any{"IsComposite": false})},
-		{"UpdateMtreeCounters/composite", SQLTemplates.UpdateMtreeCounters,
-			data(map[string]any{"IsComposite": true})},
 		{"FindBlocksToMerge/simple", SQLTemplates.FindBlocksToMerge,
 			data(map[string]any{"SimplePrimaryKey": true, "Key": simpleKey})},
 		{"FindBlocksToMerge/composite", SQLTemplates.FindBlocksToMerge,

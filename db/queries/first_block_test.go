@@ -60,9 +60,9 @@ func TestFirstBlockTemplatesHaveNoLowerBound(t *testing.T) {
 		want string
 	}{
 		{"UpdateMtreeCounters/simple", SQLTemplates.UpdateMtreeCounters,
-			base(map[string]any{"IsComposite": false}), "mt.node_position = 0 OR"},
+			base(map[string]any{"IsComposite": false}), "LIMIT 1), 0) AS node_position"},
 		{"UpdateMtreeCounters/composite", SQLTemplates.UpdateMtreeCounters,
-			base(map[string]any{"IsComposite": true}), "mt.node_position = 0 OR"},
+			base(map[string]any{"IsComposite": true}), "LIMIT 1), 0) AS node_position"},
 		{"FindBlocksToMerge/simple", SQLTemplates.FindBlocksToMerge,
 			base(map[string]any{"SimplePrimaryKey": true, "Key": simpleKey}), "WHEN t1.node_position = 0"},
 		{"FindBlocksToMerge/composite", SQLTemplates.FindBlocksToMerge,

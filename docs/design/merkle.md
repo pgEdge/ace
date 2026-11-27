@@ -219,6 +219,7 @@ flowchart TB
 
 - **Block bounds**  
   - The `range_end` of a leaf is the `range_start` of the next leaf, so `range_end` is exclusive: a key equal to it belongs to the next leaf only. Leaf hashes, CDC counters and leaf row counts all use this rule, so each row is in one leaf and is counted once.
+  - CDC finds the leaf of a changed key with one probe of the leaf index on `(range_start, node_position) WHERE node_level = 0`: the leaf with the largest `range_start` that is not greater than the key, without empty leaves, or the first leaf if there is none. `mtree build` creates the index. A tree built by an older version gets it on the next CDC drain that has changes to apply (`mtree update`, `mtree table-diff` or `mtree listen`), which checks every tree of the node; when a tree table is in use, a running `mtree listen` tries again later. Only the owner of the tree table can create it; for another role ACE logs a warning with the command, and CDC stays correct but reads all leaves of the tree for each applied transaction.
 
 - **Open-ended last block handling**  
   - The trailing block often has `range_end = NULL` so new inserts beyond the current max PK land there. When splitting an unbounded block, ACE temporarily discovers a max PK to create a split point, then ensures the final leaf is unbounded again so future inserts keep hitting a single tail block. This prevents new rows from “falling off” the tree after a split.
