@@ -24,6 +24,28 @@ var aceTemplateFuncs = template.FuncMap{
 	"aceSchema": func() string { return pgx.Identifier{config.Get().MTree.Schema}.Sanitize() },
 }
 
+// leafIndexExists is true when the relation c.oid has a valid leaf index of a
+// tree table. The index has no fixed name, so it is found by the end of its
+// definition as pg_get_indexdef prints it. An index with other columns, an
+// INCLUDE list, another order, collation or operator class, or another
+// predicate prints another text, so it is not taken for the leaf index. The
+// expected end is built with format %I, which quotes a name by the same
+// rules as pg_get_indexdef, so a setting such as quote_all_identifiers
+// changes both texts in the same way. quote_ident would not do: it is
+// immutable, so a cached plan keeps the text of the first run.
+const leafIndexExists = `EXISTS (
+	SELECT 1
+	FROM pg_catalog.pg_index i
+	CROSS JOIN LATERAL (
+		SELECT pg_catalog.pg_get_indexdef(i.indexrelid) AS def,
+			pg_catalog.format(' USING %I (%I, %I) WHERE (%I = 0)',
+				'btree', 'range_start', 'node_position', 'node_level') AS tail
+	) d
+	WHERE i.indrelid = c.oid
+		AND i.indisvalid
+		AND pg_catalog.right(d.def, pg_catalog.length(d.tail)) = d.tail
+)`
+
 type Templates struct {
 	EstimateRowCount     *template.Template
 	GetPrimaryKey        *template.Template
@@ -60,7 +82,10 @@ type Templates struct {
 
 	CreateMetadataTable       *template.Template
 	CreateSimpleMtreeTable    *template.Template
-	CreateIndex               *template.Template
+	CreateMtreeLeafIndex      *template.Template
+	MtreeLeafIndexState       *template.Template
+	LockMtreeTableForIndex    *template.Template
+	ListTreesWithoutLeafIndex *template.Template
 	CreateCompositeType       *template.Template
 	DropCompositeType         *template.Template
 	CreateCompositeMtreeTable *template.Template
@@ -297,10 +322,16 @@ var SQLTemplates = Templates{
 			m.publication_name = $1
 	`)),
 
-	// The first leaf (node_position = 0) has no lower bound, see
-	// FirstBlockPosition. A key below its range_start belongs to it.
-	// range_end is exclusive, as in BlockHashSQL: it is the range_start of the
-	// next leaf, so a key equal to it belongs to the next leaf only.
+	// The leaf of a key is the leaf with the largest range_start that is not
+	// greater than the key. The leaves cover the key space without gaps, and
+	// range_end is the range_start of the next leaf, so a key equal to the
+	// range_end of a leaf belongs to the next leaf only. The first leaf
+	// (node_position = 0) has no lower bound: a key below every range_start
+	// belongs to it. An empty leaf, whose range_end equals its range_start,
+	// owns no key and is skipped: it can have the same range_start as the
+	// leaf that owns the keys. The leaf index on (range_start, node_position)
+	// has the order of this lookup, so each key costs one index probe and not
+	// a scan of the leaves.
 	UpdateMtreeCounters: template.Must(template.New("updateMtreeCounters").Parse(`
 		WITH pkeys_to_update AS (
 			SELECT unnest(@inserts::text[]) AS pkey, 'insert' AS op
@@ -311,24 +342,23 @@ var SQLTemplates = Templates{
 		),
 		blocks_to_update AS (
 			SELECT
-				mt.node_position,
+				l.node_position,
 				SUM(CASE WHEN p.op = 'insert' THEN 1 ELSE 0 END) AS insert_count,
 				SUM(CASE WHEN p.op = 'delete' THEN 1 ELSE 0 END) AS delete_count
 			FROM
-				{{.MtreeTable}} mt
-			JOIN
-				pkeys_to_update p ON
-					{{if .IsComposite}}
-						(mt.node_position = 0 OR p.pkey::{{.CompositeTypeName}} >= mt.range_start)
-						AND (mt.range_end IS NULL OR p.pkey::{{.CompositeTypeName}} < mt.range_end)
-					{{else}}
-						(mt.node_position = 0 OR p.pkey::{{.PkeyType}} >= mt.range_start)
-						AND (mt.range_end IS NULL OR p.pkey::{{.PkeyType}} < mt.range_end)
-					{{end}}
-			WHERE
-				mt.node_level = 0
+				pkeys_to_update p
+				CROSS JOIN LATERAL (
+					SELECT coalesce((
+						SELECT mt.node_position
+						FROM {{.MtreeTable}} mt
+						WHERE mt.node_level = 0
+							AND mt.range_start <= p.pkey::{{if .IsComposite}}{{.CompositeTypeName}}{{else}}{{.PkeyType}}{{end}}
+							AND (mt.range_end IS NULL OR mt.range_end > mt.range_start)
+						ORDER BY mt.range_start DESC, mt.node_position DESC
+						LIMIT 1), 0) AS node_position
+				) l
 			GROUP BY
-				mt.node_position
+				l.node_position
 		)
 		UPDATE
 			{{.MtreeTable}} mt
@@ -1202,11 +1232,34 @@ var SQLTemplates = Templates{
 			PRIMARY KEY (node_level, node_position)
 		)`),
 	),
-	CreateIndex: template.Must(template.New("createIndex").Parse(`
-		CREATE INDEX IF NOT EXISTS {{.IndexName}}
-		ON {{.MtreeTable}} (range_start, range_end)
-		WHERE
-			node_level = 0;
+	// The leaf index lets CDC find the leaf of a key with one probe. It has
+	// no name of its own: the server picks a free one, so a long tree table
+	// name cannot make it too long or collide with another object.
+	CreateMtreeLeafIndex: template.Must(template.New("createMtreeLeafIndex").Parse(`
+		CREATE INDEX ON {{.MtreeTable}} (range_start, node_position) WHERE node_level = 0
+	`)),
+	// $1 is the quoted name of a tree table. Returns whether the table exists
+	// and whether it has the leaf index.
+	MtreeLeafIndexState: template.Must(template.New("mtreeLeafIndexState").Parse(`
+		SELECT c.oid IS NOT NULL, ` + leafIndexExists + `
+		FROM (SELECT pg_catalog.to_regclass($1) AS oid) c
+	`)),
+	// The lock conflicts with itself and with writes to the tree, so two
+	// sessions cannot both find the index missing and both create it.
+	LockMtreeTableForIndex: template.Must(template.New("lockMtreeTableForIndex").Parse(`
+		LOCK TABLE {{.MtreeTable}} IN SHARE ROW EXCLUSIVE MODE
+	`)),
+	// $1 is the quoted name of the schema of the trees. Returns the tables
+	// whose tree table exists and has no leaf index.
+	ListTreesWithoutLeafIndex: template.Must(template.New("listTreesWithoutLeafIndex").Funcs(aceTemplateFuncs).Parse(`
+		SELECT m.schema_name, m.table_name
+		FROM {{aceSchema}}.ace_mtree_metadata m
+		CROSS JOIN LATERAL (
+			SELECT pg_catalog.to_regclass($1 || '.' ||
+				pg_catalog.quote_ident('ace_mtree_' || m.schema_name || '_' || m.table_name)) AS oid
+		) c
+		WHERE c.oid IS NOT NULL AND NOT ` + leafIndexExists + `
+		ORDER BY m.schema_name, m.table_name
 	`)),
 	CreateCompositeType: template.Must(template.New("createCompositeType").Parse(`
 		CREATE TYPE {{.CompositeTypeName}} AS (

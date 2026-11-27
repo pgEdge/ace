@@ -131,6 +131,10 @@ All notable changes to ACE will be captured in this document. This project follo
   the repair with an error.
 
 ### Upgrading
+- **Merkle trees built by an earlier ACE get a new index** on the next CDC
+  drain. Only the owner of the tree table can create it. If ACE runs as
+  another role, it writes a warning with the `CREATE INDEX` command; run
+  that command as the owner, or CDC on that tree stays slow.
 - **Check `table_diff.max_connections` in `ace.yaml`.** It is now the old
   name of `max_connections.default`, so its value has a new meaning. It
   was an upper bound: the pool opened a connection only when a worker
@@ -226,6 +230,13 @@ All notable changes to ACE will be captured in this document. This project follo
   `mtree table-diff`.
 
 ### Changed
+- **CDC finds the leaf of a changed key with one index probe.** The tree
+  table of a Merkle tree has a new index on `(range_start, node_position)`
+  of its leaves, which `mtree build` creates. Before, each transaction that
+  CDC applied read all leaves of the tree, so on a large tree with many
+  small transactions `mtree update` and `mtree listen` could fall behind
+  the slot. A tree built by an earlier ACE gets the index on the next CDC
+  drain that has changes to apply, for every tree of the node.
 - **mtree commands stop when a primary key column has another collation
   on a node, and table-diff warns.** The collation decides the order of the
   key, and the blocks are key ranges. mtree builds its leaves and the

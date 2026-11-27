@@ -282,6 +282,10 @@ func processReplicationStream(ctx context.Context, nodeInfo map[string]any, cont
 		}
 	}
 
+	// The background tries use the pool, so this defer must stay after the
+	// one that closes the pool: defers run in reverse order.
+	defer startLeafIndexes(ctx, pool, mtreeSchema, continuous, flushInterval)()
+
 	conn, err = connect()
 	if err != nil {
 		logger.Error("initial connection failed: %v", err)

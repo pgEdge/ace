@@ -3051,6 +3051,9 @@ func (m *MerkleTreeTask) createMtreeObjects(tx pgx.Tx, totalRows int64, numBlock
 			return fmt.Errorf("failed to render create composite mtree table sql: %w", err)
 		}
 	}
+	if err := queries.CreateMtreeLeafIndex(m.Ctx, tx, mtreeTableName); err != nil {
+		return err
+	}
 	err = m.buildParentNodes(tx)
 	if err != nil {
 		return err
