@@ -120,6 +120,8 @@ func TestSlicerBoundTypesCutterAndSample(t *testing.T) {
 				diffs, summary := slicingDiffWith(t, qualified, method)
 				t.Logf("%s/%s: method actually run = %s (%s), blocks diffed = %d",
 					tc.name, method, summary.Slicer.Method, summary.Slicer.Reason, diffs)
+				require.Equal(t, method, summary.Slicer.Method,
+					"the forced method must be the one that ran, so the key really is cut this way")
 				require.Equal(t, 9, diffs,
 					"forced %s on a %s key must find exactly the nine changed rows", method, tc.name)
 			})
