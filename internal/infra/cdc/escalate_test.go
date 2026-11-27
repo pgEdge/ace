@@ -71,25 +71,23 @@ func TestEscalatorTablesAreIndependent(t *testing.T) {
 	assert.False(t, e.noteChange("public", "b"), "table b count must start fresh")
 }
 
-func TestPurgeTableChanges(t *testing.T) {
-	txChanges := map[uint32][]cdcMsg{
-		1: {
-			{operation: "INSERT", schema: "public", table: "flood"},
-			{operation: "INSERT", schema: "public", table: "keep"},
-			{operation: "UPDATE", schema: "public", table: "flood"},
-		},
-		2: {
-			{operation: "DELETE", schema: "public", table: "flood"},
-			{operation: "UPDATE", schema: "public", table: "flood"},
-		},
+func TestDropTableUpdates(t *testing.T) {
+	msgs := []cdcMsg{
+		{operation: "INSERT", schema: "public", table: "flood"},
+		{operation: "INSERT", schema: "public", table: "keep"},
+		{operation: "UPDATE", schema: "public", table: "flood"},
+		{operation: "DELETE", schema: "public", table: "flood"},
+		{operation: "UPDATE", schema: "public", table: "keep"},
+		{operation: "UPDATE", schema: "public", table: "flood"},
 	}
-	purgeTableChanges(txChanges, "public", "flood")
+	kept := dropTableUpdates(msgs, "public", "flood")
 	// Only flood's UPDATEs are dropped; its INSERT/DELETE survive (they feed
 	// block split/merge counters), and other tables are untouched.
-	assert.Len(t, txChanges[1], 2)
-	assert.Equal(t, "INSERT", txChanges[1][0].operation)
-	assert.Equal(t, "flood", txChanges[1][0].table)
-	assert.Equal(t, "keep", txChanges[1][1].table)
-	assert.Len(t, txChanges[2], 1)
-	assert.Equal(t, "DELETE", txChanges[2][0].operation)
+	assert.Len(t, kept, 4)
+	assert.Equal(t, "INSERT", kept[0].operation)
+	assert.Equal(t, "flood", kept[0].table)
+	assert.Equal(t, "keep", kept[1].table)
+	assert.Equal(t, "DELETE", kept[2].operation)
+	assert.Equal(t, "UPDATE", kept[3].operation)
+	assert.Equal(t, "keep", kept[3].table)
 }

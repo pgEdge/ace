@@ -18,13 +18,11 @@ import (
 	"slices"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/jackc/pglogrepl"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
-	"github.com/jackc/pgx/v5/pgproto3"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/pgedge/ace/db/queries"
 	"github.com/pgedge/ace/internal/infra/db"
@@ -100,25 +98,24 @@ func UpdateFromCDC(ctx context.Context, nodeInfo map[string]any) error {
 	return processReplicationStream(ctx, nodeInfo, false)
 }
 
-// FlushBatchSize bounds how many un-committed CDC changes a bounded
-// (non-continuous) drain accumulates before applying them to the Merkle tree
-// and freeing them, rather than holding a whole transaction's worth until its
-// commit is decoded (proto_version '1' streams nothing until commit). Flushing
-// sub-batches lets a single very large transaction drain with bounded memory.
-// Only primary keys are buffered, so per-change memory scales with the key
-// size, not the row width; this knob mainly trades flush round-trips against
-// per-flush array size. The cdc_flush_batch_size config key overrides this
-// default. It is a package var so tests can adjust it.
+// FlushBatchSize is the largest number of changes that the stream passes to
+// the applier in one batch. A transaction with more changes is applied in
+// several batches before its commit message comes, so memory stays bounded
+// however large the transaction is (proto_version '1' sends a transaction
+// only after its commit). Only primary keys are buffered, so per-change
+// memory scales with the key size, not the row width; this knob mainly
+// trades apply round-trips against per-apply array size. The
+// cdc_flush_batch_size config key overrides this default. It is a package
+// var so tests can adjust it.
 var FlushBatchSize = 10_000
 
 // processReplicationStream drains a node's logical-replication slot and applies
 // the decoded changes to its Merkle tree. With continuous=true it streams
-// indefinitely, dispatching apply work to worker goroutines. With
-// continuous=false it performs a bounded catch-up: it must reach the call-time
-// snapshot (drainTargetLSN) before reporting success, applies changes
-// synchronously, and flushes them in memory-bounded sub-batches so a single
-// large transaction drains without buffering the whole transaction.
-func processReplicationStream(ctx context.Context, nodeInfo map[string]any, continuous bool) error { //nolint:gocyclo // CDC drain protocol state machine; interleaved keepalive/XLogData branching is inherent and splitting it would obscure the LSN/stop bookkeeping
+// until ctx is cancelled. With continuous=false it performs a bounded
+// catch-up: it must reach the call-time snapshot (drainTargetLSN) and apply
+// everything up to it before reporting success. In both modes one goroutine
+// reads the stream and one applier applies the changes in stream order.
+func processReplicationStream(ctx context.Context, nodeInfo map[string]any, continuous bool) error {
 	pool, err := auth.GetClusterNodeConnection(ctx, nodeInfo, auth.ConnectionOptions{})
 	if err != nil {
 		logger.Error("failed to get connection pool: %v", err)
@@ -211,15 +208,9 @@ func processReplicationStream(ctx context.Context, nodeInfo map[string]any, cont
 		}
 	}
 
-	lastLSN := startLSN
-	var lastFlushedLSN pglogrepl.LSN = lastLSN
-	var lastLSNVal atomic.Uint64
-	lastLSNVal.Store(uint64(lastLSN))
-	// Bounded-drain (non-continuous) safety state. ACE-190: a bounded drain must
-	// actually reach the call-time snapshot (drainTargetLSN) before it may report
-	// success; otherwise UpdateMtree/DiffMtree would compare a stale tree and
-	// silently miss real divergence. reachedTarget records whether we got there.
-	reachedTarget := false
+	// A bounded drain must reach the call-time snapshot (drainTargetLSN)
+	// before it may report success; otherwise UpdateMtree/DiffMtree would
+	// compare a stale tree and silently miss real divergence.
 	flushInterval := 10 * time.Second
 	if cfg.CDCMetadataFlushSec > 0 {
 		flushInterval = time.Duration(cfg.CDCMetadataFlushSec) * time.Second
@@ -257,8 +248,6 @@ func processReplicationStream(ctx context.Context, nodeInfo map[string]any, cont
 			return rows
 		})
 	}
-	lastFlushTime := time.Now()
-	var conn *pgconn.PgConn
 
 	opts := pglogrepl.StartReplicationOptions{
 		PluginArgs: []string{
@@ -267,24 +256,25 @@ func processReplicationStream(ctx context.Context, nodeInfo map[string]any, cont
 		},
 	}
 
-	connect := func() (*pgconn.PgConn, error) {
+	connect := func(ctx context.Context, start pglogrepl.LSN) (replConn, time.Duration, error) {
 		c, err := auth.GetReplModeConnection(nodeInfo)
 		if err != nil {
-			return nil, fmt.Errorf("failed to get replication connection: %w", err)
+			return nil, 0, fmt.Errorf("failed to get replication connection: %w", err)
 		}
+		interval := readStatusInterval(ctx, c)
 
-		if err := pglogrepl.StartReplication(ctx, c, slotName, lastLSN, opts); err != nil {
+		if err := pglogrepl.StartReplication(ctx, c, slotName, start, opts); err != nil {
 			c.Close(context.Background())
 			// If listen acquired the slot in the race window after the up-front
 			// check, surface it as ErrSlotBusy so a bounded caller skips rather
 			// than fails. (Continuous mode just retries via its reconnect loop.)
 			if isSlotBusyErr(err) {
-				return nil, fmt.Errorf("%w: %v", ErrSlotBusy, err)
+				return nil, 0, fmt.Errorf("%w: %v", ErrSlotBusy, err)
 			}
-			return nil, fmt.Errorf("StartReplication failed: %w", err)
+			return nil, 0, fmt.Errorf("StartReplication failed: %w", err)
 		}
-		logger.Info("Logical replication started on slot %s from LSN %s", slotName, lastLSN)
-		return c, nil
+		logger.Info("Logical replication started on slot %s from LSN %s", slotName, start)
+		return pgReplConn{conn: c}, interval, nil
 	}
 
 	// Best-effort cooperation with a running `mtree listen`: a bounded drain
@@ -300,200 +290,29 @@ func processReplicationStream(ctx context.Context, nodeInfo map[string]any, cont
 		}
 	}
 
-	conn, err = connect()
-	if err != nil {
-		logger.Error("initial connection failed: %v", err)
+	s := &stream{
+		continuous: continuous,
+		target:     drainTargetLSN,
+		batchSize:  flushBatchSize,
+		quiet:      time.Second,
+		retryDelay: 5 * time.Second,
+		esc:        esc,
+		connect:    connect,
+		loadKey: func(rel *pglogrepl.RelationMessage) (*tableKey, error) {
+			return loadTableKey(processingCtx, pool, rel)
+		},
+		// processingCtx so that an apply in progress is not cancelled with
+		// ctx: the drain waits for it to finish.
+		apply: func(item applyItem) error {
+			return applyItemToTrees(processingCtx, pool, mtreeSchema, item)
+		},
 	}
 
-	relations := make(map[uint32]*pglogrepl.RelationMessage)
-	// tableKeys holds the primary key of each relation in relations. It is
-	// read from the catalog when the relation message comes, before any
-	// change of the relation, so a table whose replica identity is not its
-	// primary key stops the stream also on a change that needs no key, such
-	// as a TRUNCATE or an UPDATE after the adaptive drain marks all leaves.
-	// pgoutput sends a new relation message after a change of the table, so
-	// the key is read again for it.
-	tableKeys := make(map[uint32]*tableKey)
-	nextStandbyMessageDeadline := time.Now().Add(10 * time.Second)
-
-	txChanges := make(map[uint32][]cdcMsg)
-	var currentXID uint32
-	// inTx is true between a BeginMessage and its CommitMessage. A bounded
-	// drain must never stop inside that window: the transaction's changes sit
-	// unapplied in txChanges, and stopping would discard them while the final
-	// standby update may confirm past the commit -- permanently skipping the
-	// transaction and leaving the Merkle tree stale.
-	inTx := false
-
-	// markTableTruncated reacts to a decoded TRUNCATE for one relation.
-	// pgoutput publishes a truncate as a single message carrying only relation
-	// OIDs -- no per-row DELETEs -- so per-PK tracking is impossible and the
-	// only sound reaction is the adaptive drain's bulk path: mark every leaf
-	// dirty so the next tree update rehashes the table from live (now empty)
-	// data. Dropping the message instead would leave the tree at its
-	// pre-truncate state and table-diff would report a truncated node as in
-	// sync. Buffered UPDATEs for the table are purged as at escalation time
-	// (redundant once every leaf is dirty); INSERT/DELETE tracking continues
-	// for split/merge counter maintenance. Block merges from the truncate
-	// itself lag until the next build, which costs rehash work, never
-	// correctness. A failure to mark is terminal for the same reason as in
-	// bufferChange: proceeding would silently miss the divergence.
-	markTableTruncated := func(rel *pglogrepl.RelationMessage) error {
-		// Keepalive before the blocking write, like the escalation path, so a
-		// slow mark-all cannot trip wal_sender_timeout.
-		if conn != nil {
-			if err := pglogrepl.SendStandbyStatusUpdate(ctx, conn, pglogrepl.StandbyStatusUpdate{WALWritePosition: lastLSN}); err != nil {
-				logger.Warn("standby status update before truncate mark-all failed: %v", err)
-			} else {
-				nextStandbyMessageDeadline = time.Now().Add(10 * time.Second)
-			}
-		}
-		// Sanitized: the mtree table is created quoted/case-preserved.
-		mtreeTable := pgx.Identifier{mtreeSchema, fmt.Sprintf("ace_mtree_%s_%s", rel.Namespace, rel.RelationName)}.Sanitize()
-		// processingCtx so the write survives the drain deadline, like every
-		// other apply here.
-		marked, err := queries.MarkAllLeavesDirty(processingCtx, pool, mtreeTable)
-		if err != nil {
-			return fmt.Errorf("failed to mark all leaves dirty for truncated table %s.%s: %w", rel.Namespace, rel.RelationName, err)
-		}
-		purgeTableChanges(txChanges, rel.Namespace, rel.RelationName)
-		// All leaves are now dirty, which is the escalated state, so record it:
-		// later UPDATEs on a re-populated table skip per-PK tracking rather than
-		// re-running the threshold count and a redundant mark-all.
-		if esc != nil {
-			esc.markEscalated(rel.Namespace, rel.RelationName)
-		}
-		logger.Info("TRUNCATE decoded for %s.%s: marked all %d blocks dirty for rehash on next tree update", rel.Namespace, rel.RelationName, marked)
-		return nil
-	}
-
-	// bufferChange records one decoded change for the bounded drain.
-	// Escalation applies to UPDATEs ONLY: an update never changes a row's
-	// block membership, so mark-all-dirty fully covers its effect on leaf
-	// hashes, and skipping its per-PK tracking is pure savings. INSERTs and
-	// DELETEs are always tracked per-PK regardless of escalation -- their
-	// per-block counters drive block split/merge maintenance, and discarding
-	// them would leave the tree structurally unbalanced until a full rebuild
-	// (regression: the MerkleTree Split* suites fail if inserts are dropped).
-	// Returns a terminal error only if the escalation's mark-all-dirty write
-	// fails: proceeding without either per-PK marks or the bulk mark would
-	// silently miss divergence.
-	bufferChange := func(op string, rel *pglogrepl.RelationMessage, tup *pglogrepl.TupleData) error {
-		if rel == nil {
-			return fmt.Errorf("%s of a relation with no relation message", op)
-		}
-		pkey := tableKeys[rel.RelationID]
-		if esc != nil && op == "UPDATE" {
-			if esc.isEscalated(rel.Namespace, rel.RelationName) {
-				return nil
-			}
-			if esc.noteChange(rel.Namespace, rel.RelationName) {
-				// Keepalive before the blocking write, like the sub-batch
-				// flush below, so a slow mark-all cannot trip wal_sender_timeout.
-				if conn != nil {
-					if err := pglogrepl.SendStandbyStatusUpdate(ctx, conn, pglogrepl.StandbyStatusUpdate{WALWritePosition: lastLSN}); err != nil {
-						logger.Warn("standby status update before adaptive-drain escalation failed: %v", err)
-					} else {
-						nextStandbyMessageDeadline = time.Now().Add(10 * time.Second)
-					}
-				}
-				// Sanitized: the mtree table is created quoted/case-preserved.
-				mtreeTable := pgx.Identifier{mtreeSchema, fmt.Sprintf("ace_mtree_%s_%s", rel.Namespace, rel.RelationName)}.Sanitize()
-				// processingCtx so the write survives the drain deadline,
-				// like every other apply here.
-				marked, err := queries.MarkAllLeavesDirty(processingCtx, pool, mtreeTable)
-				if err != nil {
-					return fmt.Errorf("adaptive drain: failed to mark all leaves dirty for %s: %w", mtreeTable, err)
-				}
-				esc.markEscalated(rel.Namespace, rel.RelationName)
-				purgeTableChanges(txChanges, rel.Namespace, rel.RelationName)
-				logger.Info("adaptive drain: %s.%s crossed %d buffered UPDATE changes; marked all %d blocks dirty and skipping its per-update tracking for the rest of this drain (inserts/deletes still tracked for block splits/merges)",
-					rel.Namespace, rel.RelationName, esc.threshold(rel.Namespace, rel.RelationName), marked)
-				return nil
-			}
-		}
-		key, err := keyOfChange(rel, pkey, tup)
-		if err != nil {
-			return fmt.Errorf("%s on %s.%s: %w", op, rel.Namespace, rel.RelationName, err)
-		}
-		txChanges[currentXID] = append(txChanges[currentXID], cdcMsg{
-			operation: op,
-			schema:    rel.Namespace,
-			table:     rel.RelationName,
-			pkey:      pkey,
-			key:       key,
-		})
-		return nil
-	}
-
-	var wg sync.WaitGroup
-	errCh := make(chan error, 1)
-	stopStreaming := false
-	var processingErr error
-	maxWorkers := int(pool.Config().MaxConns)
-	if maxWorkers <= 0 {
-		maxWorkers = 4
-	}
-	workerSem := make(chan struct{}, maxWorkers)
-
-	// applyChanges applies a batch of buffered changes to the Merkle tree. In
-	// continuous mode it dispatches to a worker goroutine for throughput. In a
-	// bounded drain it applies synchronously, so lastLSN -- which drives the
-	// slot's confirmed_flush_lsn (via the standby status updates) and the
-	// metadata checkpoint -- never advances ahead of durably-applied work. That
-	// ordering is what makes a crash safe: the slot is only ever confirmed past
-	// a transaction once that transaction has been applied, so a crash mid-drain
-	// causes the server to resend the in-flight transaction and we recover it on
-	// the next run (see flushActiveTx for the counter-drift caveat).
-	applyChanges := func(c []cdcMsg) {
-		if len(c) == 0 {
-			return
-		}
-		if continuous {
-			wg.Add(1)
-			go func(c []cdcMsg) {
-				defer wg.Done()
-				workerSem <- struct{}{}
-				defer func() { <-workerSem }()
-				if err := processChanges(processingCtx, pool, c, mtreeSchema); err != nil {
-					select {
-					case errCh <- err:
-					default:
-					}
-				}
-			}(c)
-			return
-		}
-		if err := processChanges(processingCtx, pool, c, mtreeSchema); err != nil {
-			processingErr = err
-			stopStreaming = true
-		}
-	}
-
-	// flushActiveTx applies and frees the changes buffered so far for the
-	// in-flight transaction without waiting for its commit, bounding memory for
-	// a single very large transaction (proto_version '1' streams a whole
-	// transaction at once). Bounded drain only. It is safe because under v1 the
-	// upstream transaction has already committed before the walsender streams
-	// any of it, so there is no in-progress transaction that could still abort.
-	// Caveat: on a crash the server resends the whole transaction and we
-	// re-apply these already-flushed sub-batches, which over-counts the
-	// per-block insert/delete counters. That drift only affects block-split
-	// heuristics, never a leaf hash (recomputed from the live table), and resets
-	// on the next tree update -- a change is never missed.
-	flushActiveTx := func() {
-		c := txChanges[currentXID]
-		if len(c) == 0 {
-			return
-		}
-		applyChanges(c)
-		txChanges[currentXID] = c[:0]
-	}
-
-	// The metadata flusher and its write in progress stop when the receive
-	// loop ends, not only when ctx is cancelled: on an error the loop ends
-	// while ctx is still alive, and the wait for the flusher must not block
-	// the return of the error.
+	// The metadata flusher of a continuous stream writes the applied
+	// position. It stops when the stream ends, not only when ctx is
+	// cancelled: on an error the stream ends while ctx is still alive, and
+	// the wait for the flusher must not block the return of the error.
+	lastFlushedLSN := startLSN
 	metaCtx, stopMeta := context.WithCancel(ctx)
 	defer stopMeta()
 	var metaWg sync.WaitGroup
@@ -508,13 +327,12 @@ func processReplicationStream(ctx context.Context, nodeInfo map[string]any, cont
 				case <-metaCtx.Done():
 					return
 				case <-ticker.C:
-					current := pglogrepl.LSN(lastLSNVal.Load())
+					current := s.appliedLSN()
 					if current > lastFlushedLSN {
 						if err := flushMetadata(metaCtx, pool, publication, slotName, current, tables); err != nil {
 							logger.Warn("failed to periodically flush CDC metadata: %v", err)
 						} else {
 							lastFlushedLSN = current
-							lastFlushTime = time.Now()
 						}
 					}
 				}
@@ -522,374 +340,73 @@ func processReplicationStream(ctx context.Context, nodeInfo map[string]any, cont
 		}()
 	}
 
-	for {
-		if stopStreaming {
-			break
-		}
-		if err := ctx.Err(); err != nil {
-			logger.Info("CDC listener stopping due to context error: %v", err)
-			if conn != nil {
-				conn.Close(ctx)
-			}
-			return err
-		}
-		if conn == nil {
-			logger.Info("No connection, trying to reconnect...")
-			conn, err = connect()
-			if err != nil {
-				logger.Error("reconnect failed: %v", err)
-				if !continuous {
-					return err
-				}
-				time.Sleep(5 * time.Second)
-			}
-			nextStandbyMessageDeadline = time.Now().Add(10 * time.Second)
-
-			if !continuous {
-				if conn == nil {
-					return nil
-				}
-			}
-			continue
-		}
-
-		if time.Now().After(nextStandbyMessageDeadline) {
-			if err := pglogrepl.SendStandbyStatusUpdate(ctx, conn, pglogrepl.StandbyStatusUpdate{WALWritePosition: lastLSN}); err != nil {
-				conn.Close(ctx)
-				conn = nil
-				logger.Error("SendStandbyStatusUpdate failed: %v", err)
-				continue
-			}
-			logger.Debug("Sent Standby status update with LSN %s", lastLSN)
-			nextStandbyMessageDeadline = time.Now().Add(10 * time.Second)
-		}
-
-		var timeout time.Duration
-		if continuous {
-			timeout = time.Until(nextStandbyMessageDeadline)
-			if timeout < 0 {
-				timeout = 0
-			}
-		} else {
-			timeout = 1 * time.Second
-		}
-
-		rCtx, cancel := context.WithTimeout(ctx, timeout)
-		msg, err := conn.ReceiveMessage(rCtx)
-		cancel()
-
-		if err != nil {
-			if ctx.Err() != nil {
-				conn.Close(ctx)
-				if continuous {
-					logger.Info("Replication stopping due to context cancellation")
-					return nil
-				}
-				if lastLSN < drainTargetLSN {
-					return fmt.Errorf("CDC drain reached LSN %s of target %s on slot %s but did not "+
-						"catch up within cdc_processing_timeout. Progress is durable: re-run "+
-						"'ace mtree update' to continue draining, or raise cdc_processing_timeout to "+
-						"drain in one pass (required when a single transaction is larger than the "+
-						"timeout window): %w", lastLSN, drainTargetLSN, slotName, ctx.Err())
-				}
-				return ctx.Err()
-			}
-			if pgconn.Timeout(err) {
-				if !continuous {
-					if lastLSN >= drainTargetLSN && !inTx {
-						// Received every change up to the call-time snapshot.
-						logger.Info("Replication stream drained to target LSN %s.", drainTargetLSN)
-						reachedTarget = true
-						stopStreaming = true
-					}
-					// Otherwise this is a quiet interval while the server decodes
-					// a large transaction: proto_version '1' streams nothing until
-					// the commit is decoded, so silence here does NOT mean the
-					// stream is drained (ACE-190). Keep waiting; the parent
-					// context's cdc_processing_timeout bounds the wait and turns
-					// an unreachable target into the error above.
-				}
-				continue
-			}
-			conn.Close(ctx)
-			conn = nil
-			logger.Error("ReceiveMessage failed: %v", err)
-			continue
-		}
-
-		switch msg := msg.(type) {
-		case *pgproto3.CopyData:
-			switch msg.Data[0] {
-			case pglogrepl.PrimaryKeepaliveMessageByteID:
-				pkm, err := pglogrepl.ParsePrimaryKeepaliveMessage(msg.Data[1:])
-				if err != nil {
-					logger.Error("ParsePrimaryKeepaliveMessage failed: %v", err)
-					continue
-				}
-				logger.Debug("Primary Keepalive Message => ServerWALEnd: %s, ServerTime: %s, ReplyRequested: %t", pkm.ServerWALEnd, pkm.ServerTime, pkm.ReplyRequested)
-
-				if pkm.ReplyRequested {
-					if err := pglogrepl.SendStandbyStatusUpdate(ctx, conn, pglogrepl.StandbyStatusUpdate{WALWritePosition: lastLSN}); err != nil {
-						conn.Close(ctx)
-						conn = nil
-						logger.Error("SendStandbyStatusUpdate failed on keepalive: %v", err)
-					} else {
-						logger.Debug("Sent Standby status update with LSN %s", lastLSN)
-						nextStandbyMessageDeadline = time.Now().Add(10 * time.Second)
-					}
-				}
-
-				// ServerWALEnd on a logical keepalive is the walsender's decode
-				// position (how far it has read this slot's WAL). When it reaches
-				// drainTargetLSN the decoder has processed every commit at or
-				// before the target, and those commits' changes were streamed --
-				// and received, in LSN order -- ahead of this keepalive. So the
-				// gap between lastLSN and the target holds no further tracked-table
-				// changes and the drain is complete. This is the common case where
-				// the tracked table did not change but other tables did, so no
-				// data message ever advances lastLSN to the target. (Note: this
-				// fires only after the decoder reaches the target; while it is
-				// still decoding a large in-progress transaction, ServerWALEnd
-				// stays below the target and we keep waiting -- see ACE-190.)
-				// The !inTx guard: a keepalive can interleave between a
-				// transaction's data messages and its commit message. Stopping
-				// there would discard the buffered changes yet checkpoint at the
-				// target, permanently skipping the transaction.
-				if !continuous && drainTargetLSN != 0 && pkm.ServerWALEnd >= drainTargetLSN && !inTx {
-					logger.Info("Server caught up to drain target LSN %s via keepalive; stopping replication stream", drainTargetLSN)
-					// Advance the checkpoint to the target. We stopped on a keepalive
-					// (not a data message), so lastLSN still sits at the start when no
-					// tracked change reached the target; per the reasoning above the
-					// gap holds no tracked changes, so it is safe to checkpoint at the
-					// target. Without this the final standby status update and metadata
-					// write below would persist the stale start LSN, the slot would
-					// never advance, and every subsequent drain would re-scan the same
-					// span (and the server would retain that WAL indefinitely).
-					if lastLSN < drainTargetLSN {
-						lastLSN = drainTargetLSN
-						lastLSNVal.Store(uint64(lastLSN))
-					}
-					reachedTarget = true
-					stopStreaming = true
-				}
-
-			case pglogrepl.XLogDataByteID:
-				xld, err := pglogrepl.ParseXLogData(msg.Data[1:])
-				if err != nil {
-					logger.Error("ParseXLogData failed: %v", err)
-					continue
-				}
-
-				logicalMsg, err := pglogrepl.Parse(xld.WALData)
-				if err != nil {
-					logger.Error("Parse logical replication message failed: %v", err)
-					continue
-				}
-
-				switch logicalMsg := logicalMsg.(type) {
-				case *pglogrepl.BeginMessage:
-					currentXID = logicalMsg.Xid
-					txChanges[currentXID] = []cdcMsg{}
-					inTx = true
-				case *pglogrepl.CommitMessage:
-					if changes, ok := txChanges[currentXID]; ok {
-						if len(changes) > 0 {
-							applyChanges(changes)
-							logger.Info("Processed %d changes for XID %d", len(changes), currentXID)
-						}
-						delete(txChanges, currentXID)
-					}
-					inTx = false
-				case *pglogrepl.RelationMessage:
-					pkey, err := loadTableKey(processingCtx, pool, logicalMsg)
-					if err != nil {
-						processingErr = err
-						stopStreaming = true
-						break
-					}
-					relations[logicalMsg.RelationID] = logicalMsg
-					tableKeys[logicalMsg.RelationID] = pkey
-				case *pglogrepl.InsertMessage:
-					rel := relations[logicalMsg.RelationID]
-					if err := bufferChange("INSERT", rel, logicalMsg.Tuple); err != nil {
-						processingErr = err
-						stopStreaming = true
-					}
-				case *pglogrepl.UpdateMessage:
-					rel := relations[logicalMsg.RelationID]
-					if err := bufferChange("UPDATE", rel, logicalMsg.NewTuple); err != nil {
-						processingErr = err
-						stopStreaming = true
-					}
-				case *pglogrepl.DeleteMessage:
-					rel := relations[logicalMsg.RelationID]
-					if err := bufferChange("DELETE", rel, logicalMsg.OldTuple); err != nil {
-						processingErr = err
-						stopStreaming = true
-					}
-				case *pglogrepl.TruncateMessage:
-					// The publication is created with the default publish list,
-					// which includes truncate, so the server does send these. A
-					// cascaded truncate lists every affected published relation
-					// here. pgoutput sends the RelationMessages ahead of this
-					// message, so the lookups should always hit; treat a miss as
-					// terminal rather than skipping a table whose tree would then
-					// silently go stale.
-					for _, relID := range logicalMsg.RelationIDs {
-						rel, ok := relations[relID]
-						if !ok {
-							processingErr = fmt.Errorf("TRUNCATE references unknown relation OID %d; cannot mark its Merkle tree dirty", relID)
-							stopStreaming = true
-							break
-						}
-						if err := markTableTruncated(rel); err != nil {
-							processingErr = err
-							stopStreaming = true
-							break
-						}
-					}
-				}
-
-				// Flush sub-batches of the in-flight transaction so memory stays
-				// bounded regardless of transaction size. proto_version '1' buffers a
-				// whole transaction until its commit is decoded, so without this a
-				// multi-million-row transaction would grow unboundedly here.
-				if !continuous && len(txChanges[currentXID]) >= flushBatchSize {
-					// Refresh the server's keepalive clock before the synchronous
-					// apply. processChanges blocks the receive loop while it does DB
-					// work; on a busy node a slow flush could otherwise let
-					// wal_sender_timeout elapse with no standby update and the server
-					// would drop the replication connection. Reporting lastLSN here is
-					// the same conservative position the periodic update sends.
-					if conn != nil {
-						if err := pglogrepl.SendStandbyStatusUpdate(ctx, conn, pglogrepl.StandbyStatusUpdate{WALWritePosition: lastLSN}); err != nil {
-							logger.Warn("standby status update before CDC flush failed: %v", err)
-						} else {
-							nextStandbyMessageDeadline = time.Now().Add(10 * time.Second)
-						}
-					}
-					flushActiveTx()
-				}
-
-				lastLSN = xld.WALStart + pglogrepl.LSN(len(xld.WALData))
-				lastLSNVal.Store(uint64(lastLSN))
-				if continuous && time.Since(lastFlushTime) >= flushInterval {
-					if err := flushMetadata(ctx, pool, publication, slotName, lastLSN, tables); err != nil {
-						logger.Warn("failed to flush CDC metadata during streaming: %v", err)
-					} else {
-						lastFlushedLSN = lastLSN
-						lastFlushTime = time.Now()
-					}
-				}
-				// The !inTx guard: lastLSN advances on every data message, so it
-				// can cross the target between a transaction's changes and its
-				// commit. Keep reading until the commit lands -- it was already
-				// decoded and sent, so it is at most a few messages away.
-				if !continuous && drainTargetLSN != 0 && lastLSN >= drainTargetLSN && !inTx {
-					logger.Info("Reached drain target LSN %s; stopping replication stream", drainTargetLSN)
-					reachedTarget = true
-					stopStreaming = true
-				}
-			}
-		case *pgproto3.ErrorResponse:
-			logger.Error("replication stream aborted by server: severity=%s code=%s message=%q detail=%q hint=%q where=%q routine=%q",
-				msg.Severity, msg.Code, msg.Message, msg.Detail, msg.Hint, msg.Where, msg.Routine)
-			processingErr = fmt.Errorf("server aborted replication: %s (SQLSTATE %s)", msg.Message, msg.Code)
-			stopStreaming = true
-		default:
-			logger.Info("Received unexpected message: %T", msg)
-		}
-
-		if !stopStreaming {
-			select {
-			case err := <-errCh:
-				if err != nil {
-					logger.Error("Error processing CDC changes: %v", err)
-					processingErr = err
-					stopStreaming = true
-				}
-			default:
-			}
-		}
-	}
-
-	wg.Wait()
+	reachedTarget, err := s.run(ctx, startLSN)
 	stopMeta()
 	metaWg.Wait()
+	appliedLSN := s.appliedLSN()
 
-	if processingErr == nil {
-		select {
-		case err := <-errCh:
-			processingErr = err
-		default:
+	if continuous {
+		// The applied position is safe to write after any end of the
+		// stream. ctx may be cancelled here, so the write does not use it.
+		if appliedLSN > lastFlushedLSN {
+			flushCtx, cancel := context.WithTimeout(processingCtx, 10*time.Second)
+			if ferr := flushMetadata(flushCtx, pool, publication, slotName, appliedLSN, tables); ferr != nil {
+				logger.Warn("failed to flush CDC metadata on shutdown: %v", ferr)
+			}
+			cancel()
 		}
-	}
-
-	// Data-safety backstop (ACE-190): a bounded drain must not report success
-	// unless it actually reached the call-time snapshot. Every legitimate
-	// completion above sets reachedTarget; if the loop exited any other way
-	// without an error, fail loud rather than checkpoint a stale position and
-	// let UpdateMtree/DiffMtree compare a tree that never saw the backlog.
-	if !continuous && processingErr == nil && !reachedTarget {
-		processingErr = fmt.Errorf("CDC drain ended at LSN %s without reaching target %s on slot %s; "+
-			"refusing to report a possibly-stale Merkle tree as current", lastLSN, drainTargetLSN, slotName)
-	}
-
-	if processingErr != nil {
-		if conn != nil {
-			conn.Close(ctx)
+		if err != nil && ctx.Err() != nil {
+			logger.Info("Replication stopping due to context cancellation")
 		}
-		return processingErr
+		return err
 	}
 
-	if conn != nil {
-		if err := pglogrepl.SendStandbyStatusUpdate(processingCtx, conn, pglogrepl.StandbyStatusUpdate{WALWritePosition: lastLSN}); err != nil {
-			conn.Close(ctx)
-			return fmt.Errorf("failed to send final standby status update: %w", err)
+	if err != nil {
+		if ctx.Err() != nil && appliedLSN < drainTargetLSN {
+			return fmt.Errorf("CDC drain reached LSN %s of target %s on slot %s but did not "+
+				"catch up within cdc_processing_timeout. Progress is durable: re-run "+
+				"'ace mtree update' to continue draining, or raise cdc_processing_timeout to "+
+				"drain in one pass (required when a single transaction is larger than the "+
+				"timeout window): %w", appliedLSN, drainTargetLSN, slotName, ctx.Err())
 		}
+		return err
 	}
 
-	if !continuous {
-		tx, err := pool.Begin(processingCtx)
+	// Data-safety backstop: a bounded drain must not report success unless it
+	// actually reached the call-time snapshot. If the stream ended any other
+	// way without an error, fail loud rather than checkpoint a stale position
+	// and let UpdateMtree/DiffMtree compare a tree that never saw the backlog.
+	if !reachedTarget {
+		return fmt.Errorf("CDC drain ended at LSN %s without reaching target %s on slot %s; "+
+			"refusing to report a possibly-stale Merkle tree as current", appliedLSN, drainTargetLSN, slotName)
+	}
+
+	if err := flushMetadata(processingCtx, pool, publication, slotName, appliedLSN, tables); err != nil {
+		return err
+	}
+	return nil
+}
+
+// applyItemToTrees does the work of one item of the stream on the Merkle
+// trees: it marks all leaves of each table of item.markAll dirty, and then
+// applies item.changes in one transaction.
+func applyItemToTrees(ctx context.Context, pool *pgxpool.Pool, mtreeSchema string, item applyItem) error {
+	for _, t := range item.markAll {
+		// Sanitized: the mtree table is created quoted/case-preserved.
+		mtreeTable := pgx.Identifier{mtreeSchema, fmt.Sprintf("ace_mtree_%s_%s", t.schema, t.table)}.Sanitize()
+		marked, err := queries.MarkAllLeavesDirty(ctx, pool, mtreeTable)
 		if err != nil {
-			if conn != nil {
-				conn.Close(ctx)
-			}
-			return fmt.Errorf("failed to begin metadata update transaction: %w", err)
+			return fmt.Errorf("failed to mark all leaves dirty for %s.%s: %w", t.schema, t.table, err)
 		}
-		defer tx.Rollback(processingCtx)
-
-		if tables == nil {
-			tables = []string{}
-		}
-
-		if err := queries.UpdateCDCMetadata(processingCtx, tx, publication, slotName, lastLSN.String(), tables); err != nil {
-			if conn != nil {
-				conn.Close(ctx)
-			}
-			return fmt.Errorf("failed to update cdc metadata: %w", err)
-		}
-
-		if err := tx.Commit(processingCtx); err != nil {
-			if conn != nil {
-				conn.Close(ctx)
-			}
-			return fmt.Errorf("failed to commit cdc metadata update: %w", err)
-		}
+		logger.Info("marked all %d blocks of %s.%s dirty for rehash on next tree update", marked, t.schema, t.table)
 	}
-
-	if conn != nil {
-		conn.Close(ctx)
+	if len(item.changes) == 0 {
+		return nil
 	}
-
-	if continuous && lastLSN > lastFlushedLSN {
-		if err := flushMetadata(ctx, pool, publication, slotName, lastLSN, tables); err != nil {
-			logger.Warn("failed to flush CDC metadata on shutdown: %v", err)
-		} else {
-			lastFlushedLSN = lastLSN
-		}
+	if err := processChanges(ctx, pool, item.changes, mtreeSchema); err != nil {
+		return err
 	}
-
+	logger.Debug("Processed %d changes for XID %d", len(item.changes), item.xid)
 	return nil
 }
 

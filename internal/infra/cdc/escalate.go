@@ -85,20 +85,17 @@ func (e *escalator) threshold(schema, table string) int64 {
 	return e.thresholds[escKey(schema, table)]
 }
 
-// purgeTableChanges drops every buffered UPDATE for schema.table across all
-// in-flight transactions. Called at escalation time: the table's tree is
-// about to be fully marked dirty, so buffered per-PK UPDATE work is redundant
-// -- dropping it both skips the expensive containment-join applies and frees
-// buffer memory. INSERTs and DELETEs are kept: their per-block counters drive
-// block split/merge maintenance, which mark-all-dirty does not cover.
-func purgeTableChanges(txChanges map[uint32][]cdcMsg, schema, table string) {
-	for xid, msgs := range txChanges {
-		kept := msgs[:0]
-		for _, m := range msgs {
-			if m.schema != schema || m.table != table || m.operation != "UPDATE" {
-				kept = append(kept, m)
-			}
+// dropTableUpdates returns msgs without the UPDATEs of schema.table. All
+// leaves of the table are about to be marked dirty, so applying its UPDATEs
+// one by one is redundant work. INSERTs and DELETEs are kept: their
+// per-block counters drive block split/merge maintenance, which marking all
+// leaves dirty does not cover. The result uses the memory of msgs.
+func dropTableUpdates(msgs []cdcMsg, schema, table string) []cdcMsg {
+	kept := msgs[:0]
+	for _, m := range msgs {
+		if m.schema != schema || m.table != table || m.operation != "UPDATE" {
+			kept = append(kept, m)
 		}
-		txChanges[xid] = kept
 	}
+	return kept
 }
